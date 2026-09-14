@@ -11,9 +11,9 @@ and fires handlers) or by calling `Poll()` from your own loop.
 ## Layout
 
 ```
-csharp/
+bindings/csharp/
   Ramble.cs               the wrapper (the one source; compiled by the package + examples)
-  Ramble.csproj           NuGet package: Ramble.cs + ../dist/native/<rid>/  ->  .nupkg
+  Ramble.csproj           NuGet package: Ramble.cs + ../../dist/native/<rid>/  ->  .nupkg
   test/ publisher/ subscriber/    console examples (compile ../Ramble.cs)
   unity/                Unity package (see unity/README.md)
 ```
@@ -25,7 +25,7 @@ csharp/
 cmake -S . -B build
 cmake --build build --config Release --target ramble_shared   # -> dist/native/<rid>/
 # 2. pack the NuGet
-dotnet pack csharp/Ramble.csproj -c Release -o dist
+dotnet pack bindings/csharp/Ramble.csproj -c Release -o dist
 ```
 
 The binaries are **not committed** to git. The CMake target (or the release workflow)

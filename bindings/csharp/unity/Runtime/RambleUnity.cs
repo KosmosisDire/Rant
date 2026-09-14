@@ -1,5 +1,5 @@
 // Ramble for Unity: shared, name keyed topics handed out by the scene's RambleNodeUnity
-// component, which lives in its own file. csharp/unity/README.md explains the model.
+// component, which lives in its own file. bindings/csharp/unity/README.md explains the model.
 #if UNITY_5_3_OR_NEWER
 using System;
 using System.Collections.Generic;

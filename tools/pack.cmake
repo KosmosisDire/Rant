@@ -252,7 +252,7 @@ endfunction()
 # ramble.hpp: the C++ wrapper with dist/ramble.h spliced in at its @RAMBLE_EMBED@ marker, so the
 # shipped header is one self contained file serving both the C++ and the C side.
 function(build_cpp f ramble_h)
-  set(tmpl "${CMAKE_CURRENT_LIST_DIR}/../cpp/ramble.hpp")
+  set(tmpl "${CMAKE_CURRENT_LIST_DIR}/../bindings/cpp/ramble.hpp")
   file(READ "${tmpl}" hpp)
   string(REGEX REPLACE "\r" "" hpp "${hpp}")   # normalize CRLF -> LF, deterministic output
   file(READ "${ramble_h}" dh)

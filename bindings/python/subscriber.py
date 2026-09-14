@@ -1,5 +1,5 @@
-"""A 'tick' subscriber reporting the received rate, the pair of python/publisher.py or
-csharp/publisher. Args: [seconds] [interface]."""
+"""A 'tick' subscriber reporting the received rate, the pair of bindings/python/publisher.py or
+bindings/csharp/publisher. Args: [seconds] [interface]."""
 import os
 import sys
 import time

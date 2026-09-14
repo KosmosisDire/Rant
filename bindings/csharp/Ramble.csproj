@@ -2,7 +2,7 @@
 
   <!-- The NuGet package: the P/Invoke wrapper plus the native library per platform under
        runtimes/<rid>/native/, so .NET loads the right one. The CMake target ramble_shared
-       builds the library into dist/native/<rid>/, then: dotnet pack csharp/Ramble.csproj -->
+       builds the library into dist/native/<rid>/, then: dotnet pack bindings/csharp/Ramble.csproj -->
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
     <Nullable>disable</Nullable>
@@ -15,7 +15,7 @@
     <Authors>Nathan George</Authors>
     <RepositoryUrl>https://github.com/KosmosisDire/Ramble</RepositoryUrl>
     <PackageProjectUrl>https://github.com/KosmosisDire/Ramble</PackageProjectUrl>
-    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../VERSION').Trim())</Version>
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../VERSION').Trim())</Version>
     <Description>Ramble: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed (schema) messages. Thin P/Invoke wrapper over a prebuilt native library (win-x64, linux-x64, linux-arm64, osx).</Description>
     <PackageTags>networking;pubsub;udp;discovery;realtime;middleware;ramble;rant</PackageTags>
     <IncludeSymbols>false</IncludeSymbols>
@@ -30,7 +30,7 @@
 
   <!-- Globbed, so a platform that was not built is left out rather than failing the pack. -->
   <ItemGroup>
-    <None Include="../dist/native/**" Pack="true" PackagePath="runtimes/%(RecursiveDir)native/%(Filename)%(Extension)" />
+    <None Include="../../dist/native/**" Pack="true" PackagePath="runtimes/%(RecursiveDir)native/%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

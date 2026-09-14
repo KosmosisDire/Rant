@@ -24,8 +24,8 @@ CPMAddPackage(NAME ramble
 target_link_libraries(app PRIVATE ramble::ramble_host)
 ```
 `ramble::ramble_host` is built for you, so nothing in your project defines
-`RAMBLE_IMPLEMENTATION`: include `ramble.h` and link. Only the library is configured: no tools,
-no explorer, no bridge, nothing fetched.
+`RAMBLE_IMPLEMENTATION`: include `ramble.h` and link. Only the library and its generated
+headers are configured: no tools, no tests, nothing fetched.
 `ramble::ramble` is the header only core for a target that links its own platform libraries.
 An installed Ramble is `find_package(ramble CONFIG REQUIRED)`, same targets. See
 [docs/building.md](docs/building.md).
@@ -58,15 +58,15 @@ https://github.com/KosmosisDire/Ramble.git#upm
 Or download `ramble-<version>.unitypackage` from the release and use `Assets > Import Package
 > Custom Package` (it imports into `Assets/Ramble/`, native plugins included).
 
-### Explorer, bridge and tools
-`ramble-<version>-<platform>.zip` on the release holds the explorer, the WebSocket bridge and
-the command line tools for Windows, Linux and macOS. Unzip and run, nothing installs. The
-JS client for the bridge is `ramble.mjs`, `ramble.js` and `ramble.d.ts` on the same page.
+### Tools
+`ramble-<version>-<platform>.zip` on the release holds the command line tools for Windows,
+Linux and macOS. Unzip and run, nothing installs.
 
 ## Building from source
 
 Needs CMake 3.15+ and a C99 compiler. This packs `src/` into the `dist/` single-headers
-and builds the tools, tests and examples into the repo root:
+(not committed, so a checkout between releases generates them) and builds the tools and
+tests into `bin/`:
 
 ```sh
 cmake -S . -B build

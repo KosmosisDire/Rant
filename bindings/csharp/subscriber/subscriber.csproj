@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- Subscribes to 'tick' and reports the received message rate (Hz). Pair with
-       csharp/publisher (or python/publisher.py) to see end-to-end throughput. -->
+       bindings/csharp/publisher (or bindings/python/publisher.py) to see end-to-end throughput. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
@@ -13,7 +13,7 @@
 
   <ItemGroup>
     <Compile Include="../Ramble.cs" />
-    <None Include="../../dist/native/**/*" Link="%(Filename)%(Extension)">
+    <None Include="../../../dist/native/**/*" Link="%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

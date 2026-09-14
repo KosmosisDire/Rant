@@ -12,7 +12,7 @@
 
   <ItemGroup>
     <Compile Include="../Ramble.cs" />
-    <None Include="../../dist/native/**/*" Link="%(Filename)%(Extension)">
+    <None Include="../../../dist/native/**/*" Link="%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

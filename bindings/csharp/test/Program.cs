@@ -418,7 +418,7 @@ static class Program
     // same hash from C, C++, C# and Python (pinned in C by ramble_test's stdtypes phase).
     const ulong HashFloat3 = 0x04aa9469cd08b1ddUL;
 
-    // The video family, same golden vectors (pinned in cpp/test.cpp too). A mirror whose
+    // The video family, same golden vectors (pinned in bindings/cpp/test.cpp too). A mirror whose
     // enum member names, values or order drifted would hash differently, so this catches it.
     const ulong HashImage = 0x489841f99f392b85UL;
     const ulong HashVideoFrame = 0xf677bd147b513fbcUL;

@@ -261,12 +261,12 @@ process base picked from the clock so concurrent runs never join each other.
 
 ## Binding tests
 
-`cpp/test.cpp` runs two nodes in one process on loopback and exits 0 on pass. Legs 1 and
+`bindings/cpp/test.cpp` runs two nodes in one process on loopback and exits 0 on pass. Legs 1 and
 2 cover the dynamic schema API direct and over service threads, leg 3 the patterns layer
 with the memcpy, loop and rebase codec paths plus entity reflection, leg 4 bare type roots
 and the cross language hashes, leg 5 the standard types including the video family, leg 6
 variable members as tail frames, and leg 7 tasks with defer, progress, cancel, no_cancel
-and a retire mid run. `csharp/test` and `python/test.py` mirror the same ground, and the
+and a retire mid run. `bindings/csharp/test` and `bindings/python/test.py` mirror the same ground, and the
 golden hash vectors are shared by every binding and pinned in C by the schema root phase.
 
 ## Measurement traps

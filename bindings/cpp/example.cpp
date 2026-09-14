@@ -1,4 +1,4 @@
-/* A minimal chat node over ramble.hpp, the C++ twin of examples/example.c. Run two copies
+/* A minimal chat node over ramble.hpp. Run two copies
  * with a name each and type lines. docs/cpp.md has the build lines. */
 #include "ramble.hpp"
 

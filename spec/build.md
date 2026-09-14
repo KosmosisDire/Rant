@@ -1,7 +1,7 @@
 # Build system
 
-The root `CMakeLists.txt` amalgamates `src/` into `dist/` and builds the host tools, tests
-and examples. Four targets: `ramble` is the header only core, `ramble_platform` the OS
+The root `CMakeLists.txt` amalgamates `src/` into `dist/` and builds the host tools and
+tests. Four targets: `ramble` is the header only core, `ramble_platform` the OS
 libraries (Windows: ws2_32, bcrypt, winmm. Linux: rt) plus Threads, `ramble_host` the built
 static library a consumer links, and `ramble_shared` the shared library the bindings load.
 Each carries a `ramble::` alias, and that is what another project links, whether it adds
@@ -9,7 +9,11 @@ Ramble as a subproject or finds the installed package.
 
 - `tools/pack.cmake` runs through an `add_custom_command` whose OUTPUT is the three dist
   headers, so it re packs only when a `src/` file or pack.cmake changes. It also splices
-  `ramble.h` into `dist/ramble.hpp` and writes the two anchors.
+  `ramble.h` into `dist/ramble.hpp` and writes the two anchors. `dist/` is not committed,
+  so configure also runs the packer once when any output is missing: a header only
+  consumer depends on no build step, and cmake before 3.19 takes no dependency on an
+  INTERFACE target. The target is `ramble_dist`, not `dist`, since a consumer may own that
+  name.
 - `pyproject.toml` builds the Python wheel through scikit-build-core, which runs this same
   CMake with `SKBUILD` set. The one rule keyed on it installs `ramble_shared` next to the
   package. The wheel is tagged `py3-none`, since ctypes needs no Python ABI, so one wheel
@@ -17,7 +21,7 @@ Ramble as a subproject or finds the installed package.
   is what gives the shipped Linux library its glibc 2.28 floor.
 - CMake `file(WRITE)` turns `\n` into CRLF on Windows while `file(READ)` strips CR. The
   packer strips `\r` after read so its logic is deterministic, and `.gitattributes` pins
-  every text file to LF so the committed headers do not churn between machines.
+  every committed text file to LF.
 - The packer strips local `#include "..."` lines with a newline anchored regex, so an
   include inside a comment or string is never touched. Each source file is wrapped in
   `#pragma region` markers so editors fold it, with `-Wunknown-pragmas` silenced on GCC.
@@ -30,8 +34,8 @@ Ramble as a subproject or finds the installed package.
   full `-static`, other GNU toolchains static libgcc and libstdc++ with glibc shared. Every
   variable it sets is a plain one in Ramble's own directory scope, so a project that adds
   Ramble as a subproject keeps the runtime it picked and only Ramble's targets go static.
-- `CMakePresets.json` has `windows` and `linux` configure presets, both with the explorer
-  on and `binaryDir` `build`. The Windows preset pins no generator and no architecture so
+- `CMakePresets.json` has `windows` and `linux` configure presets, both with `binaryDir`
+  `build`. The Windows preset pins no generator and no architecture so
   it works with any installed Visual Studio. Build presets `windows` and `linux` pin
   Release, `windows-debug` and `linux-debug` pin Debug.
 - Multi config generators append a per config subdirectory to the output dir, so the root
@@ -54,13 +58,12 @@ Ramble as a subproject or finds the installed package.
 - `dist/ramble.c` and `dist/ramble.cpp` are the generated anchors, two lines each. They are
   what `ramble_host`, the native plugin builds and the bridge compile, so the define lives
   in one generated place instead of a hand written file per consumer.
-- Everything but the library is top level only: the packer target, the programs, the
-  explorer, the bridge, the `bin/` output dir and the multi config defaults. The test is
+- Everything but the library and its packer is top level only: the programs, the `bin/`
+  output dir and the multi config defaults. The test is
   `CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR`, since `PROJECT_IS_TOP_LEVEL` wants
-  cmake 3.21 and the root asks for 3.15. Two of those really did reach a consumer: the
-  config type list is a FORCEd cache entry so it overwrote the consumer's own, and the
-  explorer and bridge defaults had it fetch SDL3, IXWebSocket and libdatachannel. `dist/`
-  is committed, so a consumer never runs the packer and never reads `src/`.
+  cmake 3.21 and the root asks for 3.15. The config type list really did reach a
+  consumer once: it is a FORCEd cache entry, so it overwrote the consumer's own. `dist/` is
+  not committed, so a consumer runs the packer and reads `src/`.
 - `install()` copies the four `dist/` headers into `include/` and writes an export set plus
   `ramble-config.cmake` (from `tools/ramble-config.cmake.in`) into `share/cmake/ramble`, so
   `find_package(ramble CONFIG)` hands over the same two targets. The config finds Threads
@@ -91,27 +94,25 @@ Ramble as a subproject or finds the installed package.
 - Bindings: `ramble_shared` is the one native library every binding loads. The top level
   build copies it to `dist/native/<rid>/`, named by .NET runtime identifier, so the NuGet,
   Unity and Python packages read one place. macOS builds it universal under the portable
-  `osx` identifier. `tools/unity.cmake` assembles the Unity package and
-  `node bridge/client/build.mjs` regenerates the JS client dist. Nothing binary is
-  committed.
+  `osx` identifier. `tools/unity.cmake` assembles the Unity package. Nothing under `dist/`
+  is committed.
 - The `packages` target builds whichever of `unity_package`, `nuget_package` (needs
   dotnet) and `python_wheel` (needs Python) this machine can, into `dist/`, each over the
   libraries in `dist/native/`. The release workflow runs the same three after merging the
   libraries of every platform.
 - CI is two workflows. `build.yml` runs on every push to main and every pull request, on
-  linux, windows and macos: configure and build the library and its programs, regenerate
-  `dist/` and refuse a diff, build `tools/consumer` from the source tree and from an
-  install, pack the NuGet and build the wheel of that platform. The explorer and the
-  bridge are off there, since they fetch SDL3 and libdatachannel and are moving out of
-  this repo. No test suite runs yet: that waits on the test rework, so a red build means
+  linux, windows and macos: configure and build the library and its programs, build
+  `tools/consumer` from the source tree and from an install, pack the NuGet and build the
+  wheel of that platform. No test suite runs yet: that waits on the test rework, so a red build means
   a build broke.
 - `release.yml` runs on a tag `v*` and refuses one that differs from `VERSION`. Two jobs
   per platform, then one release job. `native` runs cibuildwheel, which builds the wheel
   and, inside it, the library the NuGet and Unity packages bundle, so the Linux libraries
   come out of the manylinux container, aarch64 under QEMU since no arm runner is free on
-  a private repo. `programs` builds the explorer, the bridge and the tools into one zip
-  per platform, Linux on ubuntu-22.04 for a glibc 2.35 floor. `release` merges the
-  libraries, packs the NuGet, assembles the Unity package and the sdist, attaches
+  a private repo. `programs` builds the tools into one zip per platform, Linux on
+  ubuntu-22.04 for a glibc 2.35 floor. `release` builds the sdist from the clean checkout,
+  packs the `dist/` headers, merges the libraries, packs the NuGet, assembles the Unity
+  package, attaches
   everything to a GitHub Release, pushes the upm branch, and publishes to nuget.org and
   PyPI when the `NUGET_API_KEY` and `PYPI_API_TOKEN` secrets exist.
 - `tools/consumer` is a throwaway project that consumes Ramble the way a user does, from the

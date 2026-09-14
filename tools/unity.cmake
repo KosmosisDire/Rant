@@ -1,6 +1,6 @@
 # The Unity package. Assembles dist/com.rant.ramble/, which Unity adds from disk and the
 # release pushes to the upm branch, and dist/ramble-<version>.unitypackage, from
-# csharp/Ramble.cs, csharp/unity/Runtime/ and the libraries in dist/native/. Unity's
+# bindings/csharp/Ramble.cs, bindings/csharp/unity/Runtime/ and the libraries in dist/native/. Unity's
 # immutable package cache synthesizes no .meta files, so every entry gets one here, with a
 # GUID that is the md5 of its path so an upgrade keeps references (spec/bindings.md).
 #   cmake -P tools/unity.cmake        (or the unity_package target)
@@ -11,7 +11,7 @@ get_filename_component(ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 file(STRINGS "${ROOT}/VERSION" VERSION LIMIT_COUNT 1)
 set(PKG com.rant.ramble)
 set(OUT "${ROOT}/dist/${PKG}")
-set(SRC "${ROOT}/csharp/unity")
+set(SRC "${ROOT}/bindings/csharp/unity")
 
 # LF whatever the host, so the upm branch is identical from every machine.
 function(write_lf f text)
@@ -150,7 +150,7 @@ write_lf("${OUT}/package.json" "{
 ")
 file(COPY "${SRC}/README.md" DESTINATION "${OUT}")
 file(GLOB runtime_files "${SRC}/Runtime/*")
-file(COPY "${ROOT}/csharp/Ramble.cs" ${runtime_files} DESTINATION "${OUT}/Runtime")
+file(COPY "${ROOT}/bindings/csharp/Ramble.cs" ${runtime_files} DESTINATION "${OUT}/Runtime")
 
 # Unity targets these three desktops. win-arm64 and linux-arm64 would collide on the
 # library name, and no standalone player exists for them.

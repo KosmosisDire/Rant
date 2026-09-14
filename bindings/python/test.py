@@ -160,7 +160,7 @@ def std_types():
 
 
 # The video family: golden wire shared with the C, C++ and C# bindings (pinned in
-# cpp/test.cpp and by ramble_test's stdtypes phase).
+# bindings/cpp/test.cpp and by ramble_test's stdtypes phase).
 HASH_IMAGE = 0x489841F99F392B85
 HASH_VIDEO_FRAME = 0xF677BD147B513FBC
 HASH_EXT_STREAM = 0xAAE502077016AC13

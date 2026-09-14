@@ -1,5 +1,5 @@
-// A 'tick' subscriber reporting the received rate, the pair of csharp/publisher or
-// python/publisher.py, driven by a manual poll. Args: [seconds] [interface].
+// A 'tick' subscriber reporting the received rate, the pair of bindings/csharp/publisher or
+// bindings/python/publisher.py, driven by a manual poll. Args: [seconds] [interface].
 
 using System;
 using System.Diagnostics;

@@ -28,7 +28,7 @@ def library_path():
         rid = "osx"
     else:
         rid = ("win-" if sys.platform == "win32" else "linux-") + arch
-    in_tree = os.path.join(here, "..", "..", "dist", "native", rid, name)
+    in_tree = os.path.join(here, "..", "..", "..", "dist", "native", rid, name)
     if os.path.exists(in_tree):
         return in_tree
     raise RuntimeError("ramble: no native library found. Install the wheel (pip install "

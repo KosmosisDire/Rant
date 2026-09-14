@@ -3,7 +3,7 @@
 Ramble in Unity: peer discovery + reliable realtime UDP
 pub/sub with typed messages. Desktop standalone (Windows, Linux x86_64, macOS) and the Editor.
 
-This is the **same `Ramble.cs`** as the NuGet wrapper (one source, in `csharp/Ramble.cs`) plus
+This is the **same `Ramble.cs`** as the NuGet wrapper (one source, in `bindings/csharp/Ramble.cs`) plus
 a **prebuilt native plugin** per platform. Unity cannot compile the C at build time, so a
 native library is required. The package is assembled into `dist/` by a script, so git
 keeps one copy of the code and no binaries.
@@ -21,7 +21,7 @@ the release and import it via `Assets > Import Package > Custom Package`.
 ## Building the package locally (maintainers)
 
 `tools/unity.cmake` assembles `dist/com.rant.ramble/` and `dist/ramble-<version>.unitypackage`
-from `csharp/Ramble.cs`, this folder's `Runtime/` and the libraries in `dist/native/`. It
+from `bindings/csharp/Ramble.cs`, this folder's `Runtime/` and the libraries in `dist/native/`. It
 writes `package.json` with the version from `VERSION` and a `.meta` for every entry, each
 plugin enabled for exactly its platform. Nothing generated lives in this folder.
 

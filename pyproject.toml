@@ -1,4 +1,4 @@
-# The Python package: the wrapper in python/ramble plus the shared library the CMake target
+# The Python package: the wrapper in bindings/python/ramble plus the shared library the CMake target
 # ramble_shared builds. scikit-build-core runs that CMake, so pip install . works from a
 # checkout and the release workflow builds one wheel per platform (spec/build.md).
 [build-system]
@@ -9,7 +9,7 @@ build-backend = "scikit_build_core.build"
 name = "ramble-middleware"
 dynamic = ["version"]
 description = "Ramble: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages."
-readme = "python/README.md"
+readme = "bindings/python/README.md"
 requires-python = ">=3.8"
 keywords = ["networking", "pubsub", "udp", "discovery", "realtime", "middleware", "ramble", "rant"]
 authors = [{ name = "Nathan George" }]
@@ -21,16 +21,14 @@ Homepage = "https://github.com/KosmosisDire/Ramble"
 metadata.version.provider = "scikit_build_core.metadata.regex"
 metadata.version.input = "VERSION"
 metadata.version.regex = "(?P<value>[0-9.]+)"
-wheel.packages = ["python/ramble"]
+wheel.packages = ["bindings/python/ramble"]
 # ctypes needs no Python ABI, so the wheel is py3-none-<platform>: one per platform.
 wheel.py-api = "py3"
 cmake.build-type = "Release"
-sdist.exclude = [".github", "artifacts", "bin", "bridge", "csharp", "examples", "explore", "release", "tests", "wheelhouse", "Logo.ai", "Logo.svg"]
+sdist.exclude = [".github", "artifacts", "bin", "bindings/csharp", "release", "tests", "wheelhouse", "Logo.ai", "Logo.svg"]
 
 [tool.scikit-build.cmake.define]
 RAMBLE_BUILD_TOOLS = "OFF"
-RAMBLE_BUILD_EXPLORER = "OFF"
-RAMBLE_BUILD_BRIDGE = "OFF"
 RAMBLE_INSTALL = "OFF"
 
 # The release workflow runs cibuildwheel. One interpreter per platform is enough since the

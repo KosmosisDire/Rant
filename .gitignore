@@ -19,22 +19,16 @@ old
 /_ref/
 /explore/build/
 *.pdb
-# C# / .NET wrapper build output (csharp/*/{bin,obj}); the wrapper source is csharp/Ramble.cs
+# C# / .NET wrapper build output (bindings/csharp/*/{bin,obj}); the wrapper source is bindings/csharp/Ramble.cs
 [Bb]in/
 [Oo]bj/
 # The release workflow's staging folders
 /artifacts/
 /wheelhouse/
 /release/
-# The shared library the CMake target ramble_shared builds, one folder per platform. The
-# packages bundle it. Never committed.
-/dist/native/
-# Packages built into dist/ by dotnet pack, pip wheel and tools/unity.cmake. Never committed.
-/dist/*.nupkg
-/dist/*.whl
-/dist/*.tar.gz
-/dist/*.unitypackage
-/dist/com.rant.ramble/
+# dist/ is all build output: the single headers packed from src/, the shared library per
+# platform and the packages. Releases attach them. Never committed.
+/dist/
 # Python build/cache artifacts (pip build, bytecode)
 __pycache__/
 *.egg-info/

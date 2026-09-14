@@ -1,5 +1,5 @@
 # Ramble build: amalgamate src/ -> dist/ single-headers, then build the host
-# tools/tests/examples against dist/. Quick start: cmake -S . -B build && cmake
+# tools and tests against dist/. Quick start: cmake -S . -B build && cmake
 # --build build (or use the OS presets in CMakePresets.json). Embedded targets just
 # link the header-only `ramble` target and set -DRAMBLE_BUILD_TOOLS=OFF (auto-off cross).
 
@@ -13,8 +13,8 @@ project(ramble VERSION ${RAMBLE_VERSION} LANGUAGES C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# Another project consuming Ramble gets the library targets and nothing else: no packer, no
-# tools, no explorer, no bridge. PROJECT_IS_TOP_LEVEL wants cmake 3.21, this is its test.
+# Another project consuming Ramble gets the library targets and the packer that makes their
+# headers, nothing else: no tools and no tests. PROJECT_IS_TOP_LEVEL wants cmake 3.21, this is its test.
 if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   set(RAMBLE_IS_TOP_LEVEL ON)
 else()
@@ -48,35 +48,48 @@ if(RAMBLE_IS_TOP_LEVEL)
     string(TOUPPER "${_cfg}" _CFG)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_CFG} "${CMAKE_CURRENT_SOURCE_DIR}/bin")
   endforeach()
-
-  # 1. Amalgamate src/ -> dist/. Re-runs only when a src file or the packer changes.
-  #    dist/ is committed, so a consumer never packs and never needs src/.
-  file(GLOB_RECURSE RAMBLE_SRC CONFIGURE_DEPENDS
-       "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
-       "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h")
-
-  set(RAMBLE_DIST
-      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble_discovery.h"
-      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble_transport.h"
-      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble.h"
-      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble.hpp"     # C++ wrapper with ramble.h embedded
-      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble.c"       # the C implementation anchor
-      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble.cpp")    # the C++ implementation anchor
-      # (the C# wrapper csharp/Ramble.cs is hand-written over the prebuilt native lib, not generated)
-
-  add_custom_command(
-    OUTPUT  ${RAMBLE_DIST}
-    COMMAND "${CMAKE_COMMAND}"
-            -D "SRC=${CMAKE_CURRENT_SOURCE_DIR}/src"
-            -D "OUT=${CMAKE_CURRENT_SOURCE_DIR}/dist"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/pack.cmake"
-    DEPENDS ${RAMBLE_SRC} "${CMAKE_CURRENT_SOURCE_DIR}/tools/pack.cmake"
-            "${CMAKE_CURRENT_SOURCE_DIR}/cpp/ramble.hpp"
-    COMMENT "Ramble: amalgamating src/ -> dist/ single-headers"
-    VERBATIM)
-
-  add_custom_target(dist ALL DEPENDS ${RAMBLE_DIST})
 endif()
+
+# 1. Amalgamate src/ -> dist/, for a consumer too since dist/ is not committed. Configure
+#    packs once if an output is missing, the build re packs when a src file changes.
+file(GLOB_RECURSE RAMBLE_SRC CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h")
+
+set(RAMBLE_DIST
+    "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble_discovery.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble_transport.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble.hpp"     # C++ wrapper with ramble.h embedded
+    "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble.c"       # the C implementation anchor
+    "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble.cpp")    # the C++ implementation anchor
+    # (the C# wrapper bindings/csharp/Ramble.cs is hand-written over the prebuilt native lib, not generated)
+
+set(RAMBLE_PACK "${CMAKE_COMMAND}"
+    -D "SRC=${CMAKE_CURRENT_SOURCE_DIR}/src"
+    -D "OUT=${CMAKE_CURRENT_SOURCE_DIR}/dist"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/pack.cmake")
+
+foreach(_ramble_out IN LISTS RAMBLE_DIST)
+  if(NOT EXISTS "${_ramble_out}")
+    execute_process(COMMAND ${RAMBLE_PACK} RESULT_VARIABLE _ramble_pack)
+    if(NOT _ramble_pack EQUAL 0)
+      message(FATAL_ERROR "Ramble: packing src/ into dist/ failed")
+    endif()
+    break()
+  endif()
+endforeach()
+
+add_custom_command(
+  OUTPUT  ${RAMBLE_DIST}
+  COMMAND ${RAMBLE_PACK}
+  DEPENDS ${RAMBLE_SRC} "${CMAKE_CURRENT_SOURCE_DIR}/tools/pack.cmake"
+          "${CMAKE_CURRENT_SOURCE_DIR}/bindings/cpp/ramble.hpp"
+  COMMENT "Ramble: amalgamating src/ -> dist/ single-headers"
+  VERBATIM)
+
+# Not plain "dist", which a consumer project may well have already.
+add_custom_target(ramble_dist ALL DEPENDS ${RAMBLE_DIST})
 
 # 2. The portable core: header-only (just the dist/ include dir). The one target a
 #    cross/embedded build consumes; platform libs are the consumer's own.
@@ -85,17 +98,18 @@ add_library(ramble::ramble ALIAS ramble)
 target_include_directories(ramble INTERFACE
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/dist>"
   "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
-if(TARGET dist)
-  add_dependencies(ramble dist)
+# cmake before 3.19 takes no dependency on an INTERFACE target, the configure pack covers it.
+if(NOT CMAKE_VERSION VERSION_LESS 3.19)
+  add_dependencies(ramble ramble_dist)
 endif()
 
-# 3. Host tools, tests and examples (sockets/threads/timers, so desktop-only).
+# 3. Host tools and tests (sockets/threads/timers, so desktop-only).
 if(CMAKE_CROSSCOMPILING OR NOT RAMBLE_IS_TOP_LEVEL)
   set(_ramble_tools_default OFF)
 else()
   set(_ramble_tools_default ON)
 endif()
-option(RAMBLE_BUILD_TOOLS "Build the Ramble host tools, tests and examples" ${_ramble_tools_default})
+option(RAMBLE_BUILD_TOOLS "Build the Ramble host tools and tests" ${_ramble_tools_default})
 
 # A cross build links its own platform, so it gets neither of these.
 if(RAMBLE_BUILD_TOOLS OR NOT CMAKE_CROSSCOMPILING)
@@ -106,9 +120,7 @@ if(RAMBLE_BUILD_TOOLS OR NOT CMAKE_CROSSCOMPILING)
   add_library(ramble_host STATIC "${CMAKE_CURRENT_SOURCE_DIR}/dist/ramble.c")
   add_library(ramble::ramble_host ALIAS ramble_host)
   target_link_libraries(ramble_host PUBLIC ramble ramble_platform)
-  if(TARGET dist)
-    add_dependencies(ramble_host dist)
-  endif()
+  add_dependencies(ramble_host ramble_dist)
 
   # The shared library the bindings load. RAMBLE_BUILD_SHARED exports exactly the public
   # entry points and hidden visibility keeps the internals in (spec/build.md).
@@ -118,9 +130,7 @@ if(RAMBLE_BUILD_TOOLS OR NOT CMAKE_CROSSCOMPILING)
   target_compile_definitions(ramble_shared PRIVATE RAMBLE_BUILD_SHARED INTERFACE RAMBLE_LINK_SHARED)
   set_target_properties(ramble_shared PROPERTIES OUTPUT_NAME ramble C_VISIBILITY_PRESET hidden
                         OSX_ARCHITECTURES "arm64;x86_64")
-  if(TARGET dist)
-    add_dependencies(ramble_shared dist)
-  endif()
+  add_dependencies(ramble_shared ramble_dist)
 
   # Filed by .NET runtime identifier under dist/native/, where every package build picks
   # it up. macOS is one universal binary, so its identifier is the portable osx.
@@ -161,46 +171,16 @@ if(RAMBLE_BUILD_TOOLS)
   function(ramble_program name src)
     add_executable(${name} "${src}")
     target_link_libraries(${name} PRIVATE ramble ramble_platform)
-    if(TARGET dist)
-      add_dependencies(${name} dist)
-    endif()
+    add_dependencies(${name} ramble_dist)
   endfunction()
 
   ramble_program(ramble_test    tests/ramble_test.c)
-  ramble_program(example        examples/example.c)
-  ramble_program(pattern_demo   examples/pattern_demo.c)
   ramble_program(pubsub         tools/pubsub.c)
   ramble_program(if_probe_check tools/if_probe_check.c)
 
   # SHM-disabled test build (matches the ramble_test_noshm in the tree).
   ramble_program(ramble_test_noshm tests/ramble_test.c)
   target_compile_definitions(ramble_test_noshm PRIVATE RAMBLE_NO_SHM)
-endif()
-
-# The Ramble Explorer GUI (explore/). It fetches/builds SDL3 + SDL3_ttf
-option(RAMBLE_BUILD_EXPLORER "Build the Ramble Explorer GUI (fetches SDL3)" ${RAMBLE_IS_TOP_LEVEL})
-if(RAMBLE_BUILD_EXPLORER)
-  add_subdirectory(explore)
-endif()
-
-# The Ramble WebSocket bridge (bridge/): one WS connection = one node on the mesh.
-# It fetches IXWebSocket + nlohmann/json and needs a C++17 compiler.
-option(RAMBLE_BUILD_BRIDGE "Build the Ramble WebSocket bridge (fetches IXWebSocket)" ${RAMBLE_IS_TOP_LEVEL})
-if(RAMBLE_BUILD_BRIDGE)
-  add_subdirectory(bridge)
-endif()
-
-# The bridge's JS/TS client distributables (dist/ramble.mjs + ramble.d.ts + ramble.js),
-# compiled from bridge/client/ramble.ts by tsc 5.5 (hermetic via npx). Off by default
-# (needs Node); the outputs are committed. Also runs standalone:
-#   node bridge/client/build.mjs
-option(RAMBLE_BUILD_JS_CLIENT "Build the bridge JS client distributables (needs Node)" OFF)
-if(RAMBLE_BUILD_JS_CLIENT)
-  find_program(NODE_EXECUTABLE node REQUIRED)
-  add_custom_target(js_client ALL
-    COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/bridge/client/build.mjs"
-    COMMENT "Building bridge JS client (ramble.ts -> dist/ramble.mjs + ramble.d.ts + ramble.js)"
-    VERBATIM)
 endif()
 
 # 4. The packages, into dist/. unity_package needs nothing installed, nuget_package needs
@@ -215,7 +195,7 @@ if(RAMBLE_IS_TOP_LEVEL AND TARGET ramble_shared)
   find_program(DOTNET_EXECUTABLE dotnet)
   if(DOTNET_EXECUTABLE)
     add_custom_target(nuget_package
-      COMMAND "${DOTNET_EXECUTABLE}" pack "${CMAKE_CURRENT_SOURCE_DIR}/csharp/Ramble.csproj"
+      COMMAND "${DOTNET_EXECUTABLE}" pack "${CMAKE_CURRENT_SOURCE_DIR}/bindings/csharp/Ramble.csproj"
               -c Release --nologo -o "${CMAKE_CURRENT_SOURCE_DIR}/dist" VERBATIM)
     add_dependencies(nuget_package ramble_shared)
     add_dependencies(packages nuget_package)

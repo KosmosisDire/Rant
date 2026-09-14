@@ -1,5 +1,5 @@
 // A typed 'tick' publisher at 1000 Hz on the default interface and domain, sharing its
-// schema with python/publisher.py. The [RambleField] overrides give the lowercase wire names.
+// schema with bindings/python/publisher.py. The [RambleField] overrides give the lowercase wire names.
 
 using System;
 using System.Diagnostics;

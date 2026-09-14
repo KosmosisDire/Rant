@@ -1,5 +1,5 @@
 """A typed 'tick' publisher at 1000 Hz on the default interface and domain, driven by a
-manual poll. It shares its schema with csharp/publisher. Args: [seconds] [interface]."""
+manual poll. It shares its schema with bindings/csharp/publisher. Args: [seconds] [interface]."""
 import math
 import os
 import sys

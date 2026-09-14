@@ -1,9 +1,9 @@
 # Python
 
-`pip install ramble-middleware` installs the `ramble` package: the wrapper in `python/ramble`
+`pip install ramble-middleware` installs the `ramble` package: the wrapper in `bindings/python/ramble`
 plus the shared library for your platform, bound through ctypes, so nothing compiles on
 your machine. In a source checkout, build the CMake target `ramble_shared` and put
-`python/` on `sys.path`. `RAMBLE_LIBRARY` points the wrapper at any other copy of the
+`bindings/python/` on `sys.path`. `RAMBLE_LIBRARY` points the wrapper at any other copy of the
 library. The semantics are the C ones, so docs/node.md, docs/topics.md, docs/patterns.md
 and docs/tasks.md apply. This page says what is different in Python.
 

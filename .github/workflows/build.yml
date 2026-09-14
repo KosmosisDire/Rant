@@ -1,7 +1,7 @@
 # Build Ramble on every push and pull request, on the three desktop platforms.
 #
 # The test suites are deliberately not run here yet. The test rework lands first and the
-# suites (bin/ramble_test selftest, cpp/test.cpp, csharp/test, python/test.py) get wired in
+# suites (bin/ramble_test selftest, bindings/cpp/test.cpp, bindings/csharp/test, bindings/python/test.py) get wired in
 # after it, so a red build here means a build broke, never a flaky network leg.
 name: build
 
@@ -25,19 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The explorer and the bridge fetch SDL3, IXWebSocket and libdatachannel, and both
-      # are moving out of this repo, so CI covers the library and its own programs.
       - name: Configure and build
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DRAMBLE_BUILD_EXPLORER=OFF -DRAMBLE_BUILD_BRIDGE=OFF
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release --parallel 4
-
-      # A hand edited dist/ header is the one thing the amalgamator cannot catch itself.
-      # .gitattributes pins the committed form to LF, so this is clean on every platform.
-      - name: dist matches src
-        run: |
-          cmake -P tools/pack.cmake
-          git diff --exit-code -- dist/
 
       # The CPM and FetchContent path: a consumer writes no anchor and defines nothing.
       - name: A consumer builds from source
@@ -60,7 +51,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: NuGet package
-        run: dotnet pack csharp/Ramble.csproj -c Release -o dist
+        run: dotnet pack bindings/csharp/Ramble.csproj -c Release -o dist
 
       - uses: actions/setup-python@v7
         with:

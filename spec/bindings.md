@@ -1,7 +1,7 @@
 # Bindings
 
-Five API surfaces share one C core: C, C++ (`cpp/ramble.hpp`), C# (`csharp/Ramble.cs` plus
-the Unity copy), Python (`python/ramble/__init__.py`) and JS through the bridge. The cross
+Five API surfaces share one C core: C, C++ (`bindings/cpp/ramble.hpp`), C# (`bindings/csharp/Ramble.cs` plus
+the Unity copy), Python (`bindings/python/ramble/__init__.py`) and JS through the bridge. The cross
 language rules below were argued once and apply everywhere. Where anything else disagrees
 about a wrapper API, this file wins.
 
@@ -63,12 +63,12 @@ struct gains a field and the mirror does not, every node open crashes with an ac
 violation. `RambleEvent` is returned by value by `ramble_last_error`, so a missing trailing
 field is an out of bounds read by the C formatter. After any layout change to a public
 struct: update the C#, Unity and Python mirrors, rebuild the prebuilt native library, and
-run `csharp/test` and `python/test.py`. Import alone succeeds silently with a wrong
+run `bindings/csharp/test` and `bindings/python/test.py`. Import alone succeeds silently with a wrong
 struct. C++ is immune because it embeds the real header.
 
 ## C++
 
-`cpp/ramble.hpp` is a header only C++17 wrapper. The packer splices `ramble.h` in, so
+`bindings/cpp/ramble.hpp` is a header only C++17 wrapper. The packer splices `ramble.h` in, so
 `dist/ramble.hpp` is the one file a consumer needs. Regenerate after any edit. Verified on
 MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtti`.
 
@@ -104,7 +104,7 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
 
 ## C#
 
-`csharp/Ramble.cs` is a hand written P/Invoke layer over a prebuilt native library named
+`bindings/csharp/Ramble.cs` is a hand written P/Invoke layer over a prebuilt native library named
 `ramble`, resolved from a NuGet package's `runtimes/<rid>/native/` or Unity's
 `Assets/Plugins/`. Nothing is generated.
 
@@ -129,8 +129,8 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   `dist/native/<rid>/`, which the `ramble_shared` target overwrites on every build.
 - Task handlers are async delegates with a real `CancellationToken`. They run on the poll
   thread until their first await, so CPU work belongs in `Task.Run`.
-- Unity (`csharp/unity/`) is a subset. `tools/unity.cmake` assembles the package into
-  `dist/com.rant.ramble/`: `csharp/Ramble.cs`, `csharp/unity/Runtime/`, the `dist/native/`
+- Unity (`bindings/csharp/unity/`) is a subset. `tools/unity.cmake` assembles the package into
+  `dist/com.rant.ramble/`: `bindings/csharp/Ramble.cs`, `bindings/csharp/unity/Runtime/`, the `dist/native/`
   libraries for win-x64, linux-x64 and osx, a `package.json` stamped from `VERSION`, and
   a `.meta` per entry whose GUID is the md5 of its path so an upgrade keeps references.
   Each plugin `.meta` enables exactly its own platform, since the three libraries share
@@ -143,7 +143,7 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
 
 ## Python
 
-`python/ramble/__init__.py` is the package and `python/ramble/_native.py` the private ctypes
+`bindings/python/ramble/__init__.py` is the package and `bindings/python/ramble/_native.py` the private ctypes
 side: the struct mirrors, the callback types and the loader, referenced from the package
 as `_c.*` so none of it shows up on `ramble.`. The loader finds the library `ramble_shared`
 builds: `RAMBLE_LIBRARY`, else the copy the wheel carries next to it, else
@@ -163,10 +163,10 @@ platform serves every interpreter.
   `ramble.f64`, `ramble.string(cap)`, `ramble.<t>[N]`, a nested class, plain int, float and
   bool, `str` (VSTR), `list[...]` (VARR), `dict` (MAP), or a bare `IntEnum`.
   `__ramble_name__` overrides the type name. `ramble.dsl(cls)` computes DSL with no library
-  load. The standard types are tagged dataclasses in `python/ramble/types.py`, reached as
+  load. The standard types are tagged dataclasses in `bindings/python/ramble/types.py`, reached as
   `ramble.types.*`.
 - `__init__.pyi` and `types.pyi` are the checker's view, hand maintained beside the runtime
-  and checked by running pyright over `python/test.py`. Handles are `Generic[T]` there
+  and checked by running pyright over `bindings/python/test.py`. Handles are `Generic[T]` there
   while the runtime subscripts through `__class_getitem__`. The scalars are `int` and
   `float` aliases in the stub, so a capped string or array field is spelled
   `Annotated[T, "<dsl>"]`, which `_resolve` reads at runtime.

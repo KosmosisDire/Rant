@@ -2,7 +2,7 @@
 
 Ramble in Unity is the C# wrapper of docs/csharp.md plus one component that owns the node for
 the whole scene. Every script talks to that component instead of opening its own node.
-csharp/unity/README.md covers installing the package. This page is what the component adds,
+bindings/csharp/unity/README.md covers installing the package. This page is what the component adds,
 and everything it does not mention behaves as docs/csharp.md describes.
 
 ## Set it up

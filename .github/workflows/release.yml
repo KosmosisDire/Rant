@@ -71,8 +71,8 @@ jobs:
           name: native-${{ matrix.name }}
           path: dist/native/
 
-  # The explorer, the bridge and the command line tools, one zip per platform. Linux
-  # builds on ubuntu-22.04 so the binaries run on glibc 2.35 and newer.
+  # The command line tools, one zip per platform. Linux builds on ubuntu-22.04 so the
+  # binaries run on glibc 2.35 and newer.
   programs:
     name: programs ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -86,12 +86,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: SDL3 build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libwayland-dev libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libdrm-dev libgbm-dev libdbus-1-dev libudev-dev
-
       - name: Build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -101,7 +95,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p out/ramble
-          for p in ramble_explorer ramble_bridge demo_scene ramble_test ramble_test_noshm pubsub example pattern_demo if_probe_check; do
+          for p in ramble_test ramble_test_noshm pubsub if_probe_check; do
             cp "bin/$p" out/ramble/ 2>/dev/null || cp "bin/$p.exe" out/ramble/
           done
           ls out/ramble
@@ -134,6 +128,10 @@ jobs:
           python -m pip install build
           python -m build --sdist -o wheelhouse
 
+      # dist/ is not committed, so the single headers the release attaches are packed here.
+      - name: Single headers
+        run: cmake -P tools/pack.cmake
+
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -146,7 +144,7 @@ jobs:
           ls -R dist/native wheelhouse
 
       - name: NuGet package
-        run: dotnet pack csharp/Ramble.csproj -c Release -o dist
+        run: dotnet pack bindings/csharp/Ramble.csproj -c Release -o dist
 
       - name: Unity package
         run: cmake -P tools/unity.cmake
@@ -156,7 +154,6 @@ jobs:
           VERSION="$(cat VERSION)"
           mkdir -p release
           cp dist/ramble.h dist/ramble_discovery.h dist/ramble_transport.h dist/ramble.c dist/ramble.hpp dist/ramble.cpp release/
-          cp dist/ramble.mjs dist/ramble.js dist/ramble.d.ts release/
           cp dist/Ramble.*.nupkg dist/ramble-*.unitypackage wheelhouse/* artifacts/programs-*/*.zip release/
           (cd dist && cmake -E tar cf "../release/ramble-$VERSION-native.zip" --format=zip native)
           ls -la release

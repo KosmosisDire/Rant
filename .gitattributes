@@ -1,6 +1,4 @@
 # Normalize line endings in the repo, independent of each contributor's local
 # core.autocrlf (that is a per-machine Git setting, not a repo guarantee). Store
-# everything LF; auto-detected binaries are left untouched. This also keeps the
-# CMake amalgamator's generated dist/ headers stable: it writes the host OS's
-# native newline, and this pins the committed form to LF on Windows and Linux.
+# everything LF; auto-detected binaries are left untouched.
 * text=auto eol=lf
