@@ -144,7 +144,7 @@ write_lf("${OUT}/package.json" "{
   \"displayName\": \"Rant\",
   \"description\": \"Peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages. Desktop standalone (Windows, macOS, Linux) and the Editor.\",
   \"unity\": \"2021.3\",
-  \"keywords\": [\"networking\", \"pubsub\", \"udp\", \"discovery\", \"realtime\", \"middleware\", \"rant\", \"rant\"],
+  \"keywords\": [\"networking\", \"pubsub\", \"udp\", \"discovery\", \"realtime\", \"middleware\", \"rant\"],
   \"author\": { \"name\": \"Nathan George\" }
 }
 ")

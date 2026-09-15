@@ -11,7 +11,7 @@ dynamic = ["version"]
 description = "Rant: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages."
 readme = "bindings/python/README.md"
 requires-python = ">=3.8"
-keywords = ["networking", "pubsub", "udp", "discovery", "realtime", "middleware", "rant", "rant"]
+keywords = ["networking", "pubsub", "udp", "discovery", "realtime", "middleware", "rant"]
 authors = [{ name = "Nathan George" }]
 
 [project.urls]

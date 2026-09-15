@@ -17,7 +17,7 @@
     <PackageProjectUrl>https://github.com/KosmosisDire/Rant</PackageProjectUrl>
     <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../VERSION').Trim())</Version>
     <Description>Rant: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed (schema) messages. Thin P/Invoke wrapper over a prebuilt native library (win-x64, linux-x64, linux-arm64, osx).</Description>
-    <PackageTags>networking;pubsub;udp;discovery;realtime;middleware;rant;rant</PackageTags>
+    <PackageTags>networking;pubsub;udp;discovery;realtime;middleware;rant</PackageTags>
     <IncludeSymbols>false</IncludeSymbols>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>

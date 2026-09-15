@@ -4,7 +4,7 @@
 through `rant_bridge` over a WebSocket. It has no runtime dependencies and runs in
 browsers, Node 22 and later, Deno and Bun off the global WebSocket. `dist/rant.d.ts`
 carries the types and `dist/rant.js` is the classic script twin exposing one global,
-`RantNode`. The wire is bridge/PROTOCOL.md and the design is spec/bridge.md. The
+`RantNode`. The wire is RANT/Rant Web/PROTOCOL.md and the design is spec/bridge.md. The
 semantics are the C ones, so docs/topics.md, docs/patterns.md and docs/tasks.md apply.
 
 ## A node
