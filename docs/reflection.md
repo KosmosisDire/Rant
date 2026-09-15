@@ -57,4 +57,5 @@ index, peers re verify, outstanding calls answered CANCELLED first. It is never
 automatic, because a retire is visible to peers, so the app picks the moment.
 `rant_schema_copy` gives an owned copy of any node owned schema.
 
-The same walks are in every binding: C++ `Peer` and `Entity`, and the bridge's `peers` op.
+The same walks are in every binding: C++ `Peer` and `Entity`, C# `RantPeer` and `RantEntity`
+(docs/csharp.md), and the bridge's `peers` op.

@@ -72,6 +72,11 @@ namespace Rant
     [Flags]
     public enum MetaSection : uint { Node = 0x1, Proc = 0x2, Topics = 0x4, Peers = 0x8, All = 0 }
 
+    // Reflection: a peer's liveness and an entity's kind, mirrors RantPeerLiveness and
+    // RantEntityKind. A dropped peer is still listed, gate on Active.
+    public enum PeerLiveness { Active = 0, Dropped = 1 }
+    public enum EntityKind { Topic = 0, Function = 1, Variable = 2, Task = 3 }
+
     // ---- native struct layouts (mirror the C exactly) ---------------------------
 
     [StructLayout(LayoutKind.Sequential)]
@@ -248,6 +253,49 @@ namespace Rant
         public ushort str_cap;
         public RantValueUnion v;
         public RantBytes bytes;
+    }
+
+    // the reflection mirrors of src/node/core.h, field order and types exact
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RantIter { public uint a, b; public ushort c, d; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RantPeerInfoNative
+    {
+        public uint id;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)] public byte[] uuid;
+        public RantStringView name;
+        public RantStringView address;
+        public int liveness;
+        public ulong last_heard_us;
+        public uint epoch;
+        public byte catching_up;
+        public ushort fragment_size;
+        public uint rtt_us;
+        public uint rtt_jitter_us;
+        public uint rtt_min_us;
+        public uint rtt_samples;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RantEntityInfoNative
+    {
+        public int kind;
+        public RantStringView name;
+        public uint hash;
+        public byte provides, consumes, reliable, writable, forceable, cancellable, exclusive, multi,
+                    incomplete, conflict;
+        public ushort providers;
+        public ushort consumers;
+        public uint provider;
+        public RantStringView from;
+        public IntPtr schema;
+        public ulong schema_hash;
+        public IntPtr rsp_schema;
+        public ulong rsp_schema_hash;
+        public IntPtr progress_schema;
+        public ulong progress_schema_hash;
+        public ulong generation;
     }
 
     // the pattern struct mirrors of src/patterns/core.h, field order and types exact
@@ -509,6 +557,17 @@ namespace Rant
         internal static extern void rant_node_lock(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern void rant_node_unlock(IntPtr node);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_node_peers_next(IntPtr node, ref RantIter it, out RantPeerInfoNative info);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_node_entities_next(IntPtr node, uint peer, ref RantIter it,
+            out RantEntityInfoNative info);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_node_mesh_next(IntPtr node, ref RantIter it, out RantEntityInfoNative info);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_node_mesh_find(IntPtr node, int kind, byte[] name, out RantEntityInfoNative info);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern uint rant_node_mesh_epoch(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_node_settle(IntPtr node, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
@@ -859,6 +918,15 @@ namespace Rant
         /// publisher's. Freeing it is this object's job from here on.</summary>
         internal Schema(IntPtr owned) { Handle = owned; }
 
+        // The schema a typed handle uses: the given one bound to T, else T reflected.
+        internal static Schema For(Type t, Schema given)
+        {
+            if (given == null) return new Schema(t);
+            IntPtr h = Native.rant_schema_copy(given.Handle, Codec.SchemaAlloc, IntPtr.Zero);
+            if (h == IntPtr.Zero) throw new SchemaException("schema copy failed");
+            return new Schema(h) { ClrType = t };
+        }
+
         public string Name => Codec.Str(Native.rant_schema_name(Handle));
         public uint Size => Native.rant_schema_size(Handle);
         public ulong Hash => Native.rant_schema_hash(Handle);
@@ -885,6 +953,49 @@ namespace Rant
         /// names narrow: an anonymous type reads a named one, never the reverse.</summary>
         public bool CanRead(Schema pub) => Native.rant_schema_subset(Handle, pub.Handle) != 0;
 
+        /// <summary>The flat depth first field table (spec/schema.md). A struct's members
+        /// follow it one level deeper, a struct array's element template likewise with
+        /// ArrayParent pointing back. A bare root is one field named "".</summary>
+        public SchemaField[] Fields
+        {
+            get
+            {
+                ushort n = FieldCount;
+                var fields = new SchemaField[n];
+                for (ushort i = 0; i < n; i++)
+                {
+                    RantSchemaFieldInfo info;
+                    if (Native.rant_schema_field_at(Handle, i, out info) == 0)
+                        throw new SchemaException("field " + i + " unreadable");
+                    fields[i] = new SchemaField
+                    {
+                        Index = i, Name = Codec.Str(info.name), TypeName = Codec.Str(info.type_name),
+                        ElemName = Codec.Str(info.elem_name), Kind = (FieldType)info.kind,
+                        Elem = (FieldType)info.elem, Count = info.count, Depth = info.depth,
+                        StrCap = info.str_cap,
+                        ArrayParent = info.arr_parent == 0xFFFF ? -1 : info.arr_parent,
+                        Offset = info.offset, Size = info.size, ElemSize = info.elem_size,
+                    };
+                }
+                return fields;
+            }
+        }
+
+        /// <summary>An enum field's options by flat index, empty for any other field.</summary>
+        public SchemaEnumVariant[] EnumVariants(int field)
+        {
+            ushort n = Native.rant_schema_enum_count(Handle, (ushort)field);
+            var list = new SchemaEnumVariant[n];
+            for (ushort i = 0; i < n; i++)
+            {
+                long value; RantStringView name;
+                if (Native.rant_schema_enum_variant(Handle, (ushort)field, i, out value, out name) == 0)
+                    throw new SchemaException("enum variant " + i + " unreadable");
+                list[i] = new SchemaEnumVariant { Name = Codec.Str(name), Value = value };
+            }
+            return list;
+        }
+
         public byte[] Encode(object value) => Codec.Encode(Handle, value);
         /// <summary>The decoded fields by name. A bare type schema yields its one value under
         /// the empty name.</summary>
@@ -908,6 +1019,24 @@ namespace Rant
     }
 
     // ---- delivered message / event ----------------------------------------------
+
+    /// <summary>One row of a schema's flat field table, mirrors RantSchemaFieldInfo.</summary>
+    public sealed class SchemaField
+    {
+        public int Index;
+        public string Name;
+        public string TypeName;     // the field type's name, "" when anonymous
+        public string ElemName;     // an array element type's name, "" when anonymous
+        public FieldType Kind;
+        public FieldType Elem;      // an array's element kind, or an enum's backing scalar
+        public int Count;           // a fixed array's element count
+        public int Depth;
+        public int StrCap;          // a capped string's byte capacity
+        public int ArrayParent;     // the enclosing struct array's flat index, -1 for none
+        public uint Offset, Size, ElemSize;
+    }
+
+    public sealed class SchemaEnumVariant { public string Name; public long Value; }
 
     /// <summary>A delivered message. The payload is copied out so it outlives the callback,
     /// but the decode happens on the first read of Fields or Value and never if neither is
@@ -1117,6 +1246,80 @@ namespace Rant
     // reading freed memory.
     internal interface INodeHandle { void Invalidate(); }
 
+    // ---- reflection snapshots (docs/reflection.md) ----------------------------
+
+    /// <summary>A discovered peer, copied out of the node so it outlives the walk. A dropped
+    /// peer is still listed since the same uuid may return: gate on Active.</summary>
+    public sealed class RantPeer
+    {
+        public uint Id;
+        public byte[] Uuid;
+        public string Name;
+        public string Address;
+        public PeerLiveness Liveness;
+        public bool Active => Liveness == PeerLiveness.Active;
+        public ulong LastHeardUs;
+        public uint Epoch;
+        public bool CatchingUp;
+        public ushort FragmentSize;
+        public uint RttUs, RttJitterUs, RttMinUs, RttSamples;
+
+        internal static RantPeer Read(ref RantPeerInfoNative p) => new RantPeer
+        {
+            Id = p.id, Uuid = p.uuid, Name = Codec.Str(p.name), Address = Codec.Str(p.address),
+            Liveness = (PeerLiveness)p.liveness, LastHeardUs = p.last_heard_us, Epoch = p.epoch,
+            CatchingUp = p.catching_up != 0, FragmentSize = p.fragment_size, RttUs = p.rtt_us,
+            RttJitterUs = p.rtt_jitter_us, RttMinUs = p.rtt_min_us, RttSamples = p.rtt_samples,
+        };
+    }
+
+    /// <summary>One entity of the mesh: a topic, a function, a variable or a task, never a
+    /// channel. The schemas are owned copies, null when untyped or not fetched yet.</summary>
+    public sealed class RantEntity
+    {
+        public EntityKind Kind;
+        public string Name;
+        public uint Hash;
+        public bool Provides, Consumes, Reliable;
+        public bool Writable, Forceable;
+        public bool Cancellable, Exclusive;
+        public bool Multi, Incomplete, Conflict;
+        public ushort Providers, Consumers;
+        public uint Provider;
+        public string From;
+        public Schema Schema;
+        public ulong SchemaHash;
+        public Schema ResponseSchema;
+        public ulong ResponseSchemaHash;
+        public Schema ProgressSchema;
+        public ulong ProgressSchemaHash;
+        public ulong Generation;
+
+        internal static RantEntity Read(ref RantEntityInfoNative e) => new RantEntity
+        {
+            Kind = (EntityKind)e.kind,
+            Name = e.name.data != IntPtr.Zero ? Codec.Str(e.name) : "0x" + e.hash.ToString("x8"),
+            Hash = e.hash, Provides = e.provides != 0, Consumes = e.consumes != 0,
+            Reliable = e.reliable != 0, Writable = e.writable != 0, Forceable = e.forceable != 0,
+            Cancellable = e.cancellable != 0, Exclusive = e.exclusive != 0, Multi = e.multi != 0,
+            Incomplete = e.incomplete != 0, Conflict = e.conflict != 0,
+            Providers = e.providers, Consumers = e.consumers, Provider = e.provider,
+            From = Codec.Str(e.from),
+            Schema = Own(e.schema), SchemaHash = e.schema_hash,
+            ResponseSchema = Own(e.rsp_schema), ResponseSchemaHash = e.rsp_schema_hash,
+            ProgressSchema = Own(e.progress_schema), ProgressSchemaHash = e.progress_schema_hash,
+            Generation = e.generation,
+        };
+
+        // the node's view is good only until the next poll, so every schema is copied out
+        private static Schema Own(IntPtr view)
+        {
+            if (view == IntPtr.Zero) return null;
+            IntPtr h = Native.rant_schema_copy(view, Codec.SchemaAlloc, IntPtr.Zero);
+            return h == IntPtr.Zero ? null : new Schema(h);
+        }
+    }
+
     // ---- topic ----------------------------------------------------------------
 
     public class Topic : INodeHandle
@@ -1261,8 +1464,8 @@ namespace Rant
     /// itself and Send and TryTake carry the plain value (docs/csharp.md).</summary>
     public sealed class Topic<T> : Topic
     {
-        public Topic(RantNode node, string name, Role role = Role.PubSub, Qos qos = null)
-            : base(node, name, new Schema(typeof(T)), role, qos) { }
+        public Topic(RantNode node, string name, Role role = Role.PubSub, Qos qos = null, Schema schema = null)
+            : base(node, name, Schema.For(typeof(T), schema), role, qos) { }
 
         public SendStatus Send(T value, long captureUs = 0) => Send((object)value, captureUs);
 
@@ -1675,6 +1878,75 @@ namespace Rant
             RantResponse r = await fn.CallAsync(req, peer).ConfigureAwait(false);
             return RantMetaSnapshot.FromResponse(r);
         }
+
+        // ---- reflection walks (docs/reflection.md) -----------------------------------
+
+        /// <summary>Every discovered peer as a copied snapshot, dropped ones included.</summary>
+        public List<RantPeer> Peers()
+        {
+            var list = new List<RantPeer>();
+            Native.rant_node_lock(_handle);
+            try
+            {
+                var it = new RantIter();
+                RantPeerInfoNative p;
+                while (Native.rant_node_peers_next(_handle, ref it, out p) != 0) list.Add(RantPeer.Read(ref p));
+            }
+            finally { Native.rant_node_unlock(_handle); }
+            return list;
+        }
+
+        /// <summary>What one node offers, Self for this one. A dropped peer's last known view
+        /// is served as a ghost. Schemas need fetchDetails on the node.</summary>
+        public List<RantEntity> Entities(uint peer = Self)
+        {
+            var list = new List<RantEntity>();
+            Native.rant_node_lock(_handle);
+            try
+            {
+                var it = new RantIter();
+                RantEntityInfoNative e;
+                while (Native.rant_node_entities_next(_handle, peer, ref it, out e) != 0)
+                    list.Add(RantEntity.Read(ref e));
+            }
+            finally { Native.rant_node_unlock(_handle); }
+            return list;
+        }
+
+        /// <summary>The whole mesh folded: one entity per kind and name across every active
+        /// peer and this node. Schemas need fetchDetails on the node.</summary>
+        public List<RantEntity> Mesh()
+        {
+            var list = new List<RantEntity>();
+            Native.rant_node_lock(_handle);
+            try
+            {
+                var it = new RantIter();
+                RantEntityInfoNative e;
+                while (Native.rant_node_mesh_next(_handle, ref it, out e) != 0) list.Add(RantEntity.Read(ref e));
+            }
+            finally { Native.rant_node_unlock(_handle); }
+            return list;
+        }
+
+        /// <summary>One folded entity by kind and name, null when the mesh has none.</summary>
+        public RantEntity MeshFind(EntityKind kind, string name)
+        {
+            Native.rant_node_lock(_handle);
+            try
+            {
+                RantEntityInfoNative e;
+                if (Native.rant_node_mesh_find(_handle, (int)kind, Codec.CStr(name), out e) == 0) return null;
+                return RantEntity.Read(ref e);
+            }
+            finally { Native.rant_node_unlock(_handle); }
+        }
+
+        /// <summary>Bumps whenever the folded mesh view changed, so a tool knows when to walk again.</summary>
+        public uint MeshEpoch => Native.rant_node_mesh_epoch(_handle);
+
+        /// <summary>The peer id that means this node in Entities.</summary>
+        public const uint Self = 0;
 
         internal Type ClrTypeOf(ushort index)
         {
@@ -2999,10 +3271,11 @@ namespace Rant
 
         public FunctionDefinition(RantNode node, string name, Func<TReq, TRsp> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0,
-                                  bool reflectFromMesh = false)
+                                  bool reflectFromMesh = false,
+                                  Schema requestSchema = null, Schema responseSchema = null)
         {
-            _req = new Schema(typeof(TReq));
-            _rsp = new Schema(typeof(TRsp));
+            _req = Schema.For(typeof(TReq), requestSchema);
+            _rsp = Schema.For(typeof(TRsp), responseSchema);
             Action<RantRequest> h = null;
             if (handler != null)
             {
@@ -3023,10 +3296,11 @@ namespace Rant
         /// Ok and an exception AppError. On the polling thread until the first await.</summary>
         public FunctionDefinition(RantNode node, string name, Func<TReq, Task<TRsp>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0,
-                                  bool reflectFromMesh = false)
+                                  bool reflectFromMesh = false,
+                                  Schema requestSchema = null, Schema responseSchema = null)
         {
-            _req = new Schema(typeof(TReq));
-            _rsp = new Schema(typeof(TRsp));
+            _req = Schema.For(typeof(TReq), requestSchema);
+            _rsp = Schema.For(typeof(TRsp), responseSchema);
             Func<RantRequest, Task<byte[]>> h = null;
             if (handler != null)
             {
@@ -3046,10 +3320,11 @@ namespace Rant
 
         public FunctionDefinition(RantNode node, string name, Action<TReq, RantRequest<TRsp>> handler,
                                   int backpressureWaitMs = 0, int timeoutMs = 0,
-                                  bool reflectFromMesh = false)
+                                  bool reflectFromMesh = false,
+                                  Schema requestSchema = null, Schema responseSchema = null)
         {
-            _req = new Schema(typeof(TReq));
-            _rsp = new Schema(typeof(TRsp));
+            _req = Schema.For(typeof(TReq), requestSchema);
+            _rsp = Schema.For(typeof(TRsp), responseSchema);
             Action<RantRequest> h = null;
             if (handler != null)
             {
@@ -3110,10 +3385,11 @@ namespace Rant
         private readonly Schema _req, _rsp;
 
         public RemoteFunction(RantNode node, string name, int backpressureWaitMs = 0, int timeoutMs = 0,
-                              bool reflectFromMesh = false)
+                              bool reflectFromMesh = false,
+                              Schema requestSchema = null, Schema responseSchema = null)
         {
-            _req = new Schema(typeof(TReq));
-            _rsp = new Schema(typeof(TRsp));
+            _req = Schema.For(typeof(TReq), requestSchema);
+            _rsp = Schema.For(typeof(TRsp), responseSchema);
             _core = new RemoteFunction(node, name, _req, _rsp, backpressureWaitMs, timeoutMs,
                                        reflectFromMesh: reflectFromMesh);
         }
@@ -3167,11 +3443,12 @@ namespace Rant
                               bool progressBestEffort = false, int progressKeepLast = 0,
                               bool noCancel = false, bool exclusive = false, bool multi = false,
                               int backpressureWaitMs = 0, int timeoutMs = 0,
-                              bool reflectFromMesh = false)
+                              bool reflectFromMesh = false,
+                              Schema requestSchema = null, Schema progressSchema = null, Schema responseSchema = null)
         {
-            _req = new Schema(typeof(TReq));
-            _prg = new Schema(typeof(TPrg));
-            _rsp = new Schema(typeof(TRsp));
+            _req = Schema.For(typeof(TReq), requestSchema);
+            _prg = Schema.For(typeof(TPrg), progressSchema);
+            _rsp = Schema.For(typeof(TRsp), responseSchema);
             Func<RantRequest, TaskContext, Task<byte[]>> h = null;
             if (handler != null)
             {
@@ -3206,11 +3483,12 @@ namespace Rant
 
         public RemoteTask(RantNode node, string name, bool progressBestEffort = false,
                           int progressKeepLast = 0, int backpressureWaitMs = 0, int timeoutMs = 0,
-                          bool reflectFromMesh = false)
+                          bool reflectFromMesh = false,
+                          Schema requestSchema = null, Schema progressSchema = null, Schema responseSchema = null)
         {
-            _req = new Schema(typeof(TReq));
-            _prg = new Schema(typeof(TPrg));
-            _rsp = new Schema(typeof(TRsp));
+            _req = Schema.For(typeof(TReq), requestSchema);
+            _prg = Schema.For(typeof(TPrg), progressSchema);
+            _rsp = Schema.For(typeof(TRsp), responseSchema);
             _core = new RemoteTask(node, name, _req, _prg, _rsp, progressBestEffort,
                                    progressKeepLast, backpressureWaitMs, timeoutMs,
                                    reflectFromMesh: reflectFromMesh);
@@ -3272,9 +3550,10 @@ namespace Rant
 
         public VariableDefinition(RantNode node, string name, bool readOnly = false,
                                   bool allowForce = false, int catchUp = 0, int keepLast = 0,
-                                  int backpressureWaitMs = 0, bool reflectFromMesh = false)
+                                  int backpressureWaitMs = 0, bool reflectFromMesh = false,
+                                  Schema schema = null)
         {
-            _schema = new Schema(typeof(T));
+            _schema = Schema.For(typeof(T), schema);
             _core = new VariableDefinition(node, name, _schema, null, readOnly, allowForce,
                                            catchUp, keepLast, backpressureWaitMs, reflectFromMesh);
         }
@@ -3282,9 +3561,10 @@ namespace Rant
         /// <summary>Overload with an initial value (the value before any set).</summary>
         public VariableDefinition(RantNode node, string name, T initial, bool readOnly = false,
                                   bool allowForce = false, int catchUp = 0, int keepLast = 0,
-                                  int backpressureWaitMs = 0, bool reflectFromMesh = false)
+                                  int backpressureWaitMs = 0, bool reflectFromMesh = false,
+                                  Schema schema = null)
         {
-            _schema = new Schema(typeof(T));
+            _schema = Schema.For(typeof(T), schema);
             _core = new VariableDefinition(node, name, _schema, _schema.Encode(initial),
                                            readOnly, allowForce, catchUp, keepLast,
                                            backpressureWaitMs, reflectFromMesh);
@@ -3355,9 +3635,10 @@ namespace Rant
     public sealed class RemoteVariable<T> : VariableDefinition<T>
     {
         public RemoteVariable(RantNode node, string name, int catchUp = 0, int keepLast = 0,
-                              int backpressureWaitMs = 0, bool reflectFromMesh = false)
+                              int backpressureWaitMs = 0, bool reflectFromMesh = false,
+                              Schema schema = null)
         {
-            _schema = new Schema(typeof(T));
+            _schema = Schema.For(typeof(T), schema);
             _core = new RemoteVariable(node, name, _schema, catchUp, keepLast, backpressureWaitMs,
                                        reflectFromMesh);
         }
@@ -3373,9 +3654,9 @@ namespace Rant
         private readonly Publisher _core;
         private readonly Schema _schema;
 
-        public Publisher(RantNode node, string name, Qos qos = null)
+        public Publisher(RantNode node, string name, Qos qos = null, Schema schema = null)
         {
-            _schema = new Schema(typeof(T));
+            _schema = Schema.For(typeof(T), schema);
             _core = new Publisher(node, name, _schema, qos);
         }
 
@@ -3393,18 +3674,19 @@ namespace Rant
     {
         private readonly Subscriber _core;
 
-        public Subscriber(RantNode node, string name, Action<T> handler = null, Qos qos = null)
+        public Subscriber(RantNode node, string name, Action<T> handler = null, Qos qos = null,
+                          Schema schema = null)
         {
-            _core = new Subscriber(node, name, new Schema(typeof(T)),
+            _core = new Subscriber(node, name, Schema.For(typeof(T), schema),
                 handler == null ? (Action<RantMessage>)null : m => { if (m.Value is T v) handler(v); },
                 qos);
         }
 
         public Subscriber(RantNode node, string name, Action<T, RantMessage> handler,
-                          Qos qos = null)
+                          Qos qos = null, Schema schema = null)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
-            _core = new Subscriber(node, name, new Schema(typeof(T)),
+            _core = new Subscriber(node, name, Schema.For(typeof(T), schema),
                 m => { if (m.Value is T v) handler(v, m); }, qos);
         }
 

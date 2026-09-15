@@ -44,6 +44,13 @@ A bare type used as a handle's type is the whole schema: `Topic<bool>`, `Topic<f
 so it is the same bytes and hash in every language. A `Dictionary<string, object>` also
 encodes against any compiled schema by field name, nested structs as nested dictionaries.
 
+Every typed handle also takes its schema as an optional `Schema` argument (`schema:` on a
+topic or variable, `requestSchema:`, `responseSchema:` and `progressSchema:` on a function
+or task), usually compiled from DSL text. The type argument is then only the C# shape the
+values pass through and the wire type is exactly the given schema: `Subscriber<string[]>`
+with `new Schema("string<128>[]")` reads a bare capped string array, and a struct sent
+under a schema with a user named type carries that name.
+
 The standard types of docs/stdtypes.md ship as mirror structs with lowercase wire names,
 `RantTimestamp.Now()` is the Timestamp clock, and the video enums carry the wire values.
 
@@ -120,6 +127,20 @@ Variables: `TryGet` reads the copied out value, `Set` returns the status, `Force
 no value exists and the setter throws `RantException` on a non Ok status. `OnChange`
 replays the current value at registration and fires on every state change, `OnWrite` on
 every applied write, both inline on the applying thread.
+
+## Reflection
+
+The walks of docs/reflection.md return copied snapshots, so they outlive the poll and need
+no lock. `Peers()` lists every discovered peer as a `RantPeer`, dropped ones included, so
+gate on `Active`. `Entities(peer)` lists what one node offers, `RantNode.Self` for this one,
+and `Mesh()` folds the whole mesh into one `RantEntity` per kind and name. `MeshFind(kind,
+name)` returns one or null, and `MeshEpoch` bumps whenever the folded view changed. The
+schemas on a `RantEntity` are owned copies, null when untyped or not fetched, and
+`fetchDetails` on the node is what makes them arrive.
+
+`Schema.Fields` is the flat depth first field table as `SchemaField` rows, and
+`Schema.EnumVariants(field)` the options of an enum field, for a tool that renders a schema
+it has never seen.
 
 ## Logs and meta
 
