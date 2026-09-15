@@ -1,20 +1,24 @@
 # Explorer
 
-`explore/` is the debugger UI: a real Rant node, not a passive sniffer, with a Nodes tab
-and a Topics tab, greyscale plus one teal accent, dark and light. Clay (v0.14) does the
-layout, since the design is CSS flexbox and Clay is a flexbox engine. SDL3 with SDL3_ttf
-renders through FreeType, whose hinting keeps text crisp. FetchContent builds SDL3 and
+`RANT/Rant Explorer` is the debugger UI: a real Rant node, not a passive sniffer, with a
+Nodes tab and a Topics tab, greyscale plus one teal accent, dark and light. Clay (v0.14)
+does the layout, since the design is CSS flexbox and Clay is a flexbox engine. SDL3 with
+SDL3_ttf renders through FreeType, whose hinting keeps text crisp. CPM builds SDL3 and
 SDL3_ttf static, clay.h and nanosvg are downloaded.
 
 ## Build
 
-`explore/CMakeLists.txt` is dual mode, detected by `if(NOT TARGET rant)`: standalone, or
-from the root with `-DRANT_BUILD_EXPLORER=ON` (what the presets do), where it links the
-root `rant` target and depends on `dist`. Build it from the root, since the root build is
-MSVC and MSVC has no VLAs. The SDL3_ttf release tarball omits vendored freetype, so it is
-fetched by git with `GIT_SUBMODULES external/freetype` and `SDLTTF_VENDORED ON`. We own
-`main()`: `SDL_MAIN_HANDLED`, `<SDL3/SDL_main.h>`, `SDL_SetMainReady()` before `SDL_Init`.
-Rebuild the explorer after any announce overlay version bump or it cannot see nodes.
+`Rant Explorer/CMakeLists.txt` takes Rant through CPM at the release version it pins, so it
+never reaches into this checkout. Its `windows-local` and `linux-local` presets set
+`CPM_rant_SOURCE` to `../Rant` to build against the working tree. It links `rant::rant` and
+`rant::rant_platform`, never `rant_host`, since `net_capture.c` compiles its own transport
+only amalgamation with `RANT_NO_SHM`. It includes `tools/static_runtime.cmake` from the
+fetched source before SDL3, so SDL3 and vendored freetype share the static runtime. The
+SDL3_ttf release tarball omits vendored freetype, so it is fetched by git with
+`GIT_SUBMODULES external/freetype` and `SDLTTF_VENDORED ON`. We own `main()`:
+`SDL_MAIN_HANDLED`, `<SDL3/SDL_main.h>`, `SDL_SetMainReady()` before `SDL_Init`. After an
+announce overlay version bump the explorer cannot see nodes until its pin moves to a
+release that carries the bump.
 
 ## Architecture
 

@@ -148,7 +148,7 @@ side: the struct mirrors, the callback types and the loader, referenced from the
 as `_c.*` so none of it shows up on `rant.`. The loader finds the library `rant_shared`
 builds: `RANT_LIBRARY`, else the copy the wheel carries next to it, else
 `dist/native/<rid>/` in a source checkout. scikit-build-core drives the wheel from
-`pyproject.toml`, so `pip install .` runs this same CMake with the tools, explorer, bridge
+`pyproject.toml`, so `pip install .` runs this same CMake with the tools
 and install off and the one `SKBUILD` rule copies the library next to the package. The
 wheel is `py3-none-<platform>`, since ctypes needs no Python ABI, so one wheel per
 platform serves every interpreter.

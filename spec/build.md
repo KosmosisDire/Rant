@@ -48,7 +48,7 @@ Rant as a subproject or finds the installed package.
   library without the tests. A cross build gets `rant` alone: the platform is its own.
 - Four targets, one job each. `rant` is the `dist/` include directory and nothing else.
   `rant_platform` is the OS libraries, in `tools/rant_platform.cmake` so the root build and
-  a standalone `explore/` or `bridge/` configure share one list. `rant_host` is a static library over
+  a standalone `Rant Web` configure share one list. `rant_host` is a static library over
   `dist/rant.c`, so a consumer defines no `RANT_IMPLEMENTATION` and writes no anchor.
   The in tree programs link `rant` and `rant_platform` instead, never `rant_host`: each
   compiles its own flavour of the amalgamation, some with `RANT_NO_SHM` or transport only,

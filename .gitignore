@@ -13,11 +13,6 @@ old
 /pubsub
 *.png
 *.jpg
-# explorer UI: handoff package + fetched reference docs + standalone build tree
-/Rant Network Debugging Interface.zip
-/_unzipped/
-/_ref/
-/explore/build/
 *.pdb
 # C# / .NET wrapper build output (bindings/csharp/*/{bin,obj}); the wrapper source is bindings/csharp/Rant.cs
 [Bb]in/

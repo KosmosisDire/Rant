@@ -1,5 +1,5 @@
 # The OS libraries a desktop Rant build links, written once. The root build includes this,
-# and so does a standalone explore/ or bridge/ configure, which has no root to inherit.
+# and so does a standalone Rant Web configure, which has no root to inherit.
 
 if(TARGET rant_platform)
   return()
