@@ -47,7 +47,8 @@ Keep it small, since a deep catch up bursts at startup.
 
 `rant_topic_send(t, rant_bytes(data, len))` commits the message to history and sends it
 point to point to every matched subscriber. Data is always unicast. Only discovery uses
-multicast.
+multicast. On a topic with a schema the bytes must be a message of that schema, else the
+send returns `RANT_ERR_SCHEMA` and commits nothing.
 
 A message larger than the fragment size is split into fragments. To a same host
 subscriber it goes through shared memory instead, unless `opts.disable_shm` is set or the
@@ -84,8 +85,10 @@ The slot is parked and the next create reuses it, so retire and create churn nev
 the topic table or the announce. Re creating with the same name, kind and schema relinks
 silently. Re creating with a different schema, kind or name makes peers re verify before
 any data crosses. This is the retype flow: retire, then create with the new schema.
-Creating a second topic with the same name and a different schema while the first lives
-is refused.
+Creating a second topic with the same name while the first lives is refused, whatever
+its schema: the create returns `NULL` and `rant_last_error` says `RANT_E_NAME_COLLISION`.
+A twin created `RANT_INACTIVE` is allowed, so a node can hold two QoS variants of one name
+and switch which is live by role.
 
 ## Loss
 

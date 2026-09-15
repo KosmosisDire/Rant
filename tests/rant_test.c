@@ -2801,13 +2801,13 @@ static void schema_bind_checks(void){
         ST_CHECK(sb_y==-2.25 && sb_stamp==0x1122334455667788ULL,
                  "schema-bind: reader indices read the writer's offsets (y=%.2f)", sb_y);
     }
-    {   /* a message that does not fit the sender's schema is dropped + surfaced */
+    {   /* a message that does not fit the sender's schema is refused at the sender */
         unsigned long before = sb_mismatch_n;
         uint8_t junk[3] = {1,2,3};
-        rant_topic_send(pc, rant_bytes(junk, sizeof junk), NULL);
-        for (t=0;t<200 && sb_mismatch_n==before;t++){ rant_node_poll(P,1); rant_node_poll(S,2); }
-        ST_CHECK(sb_recv==1 && sb_mismatch_n>before,
-                 "schema-bind: wrong-size message dropped + surfaced (recv=%d)", sb_recv);
+        int rc = rant_topic_send(pc, rant_bytes(junk, sizeof junk), NULL);
+        for (t=0;t<50;t++){ rant_node_poll(P,1); rant_node_poll(S,2); }
+        ST_CHECK(rc==RANT_ERR_SCHEMA && sb_recv==1 && sb_mismatch_n==before,
+                 "schema-bind: wrong-size message refused at the sender (rc=%d recv=%d)", rc, sb_recv);
     }
     rant_node_close(P,1); rant_node_close(S,1);
     rant_allocator_reset(&ma);
@@ -4727,13 +4727,13 @@ static void patterns_checks(void){
       ST_CHECK(pf_reply_msg_len==10 && memcmp(pf_reply_msg,"no handler",10)==0,
                "patterns: empty wire message defaults to status text (\"%s\")", pf_reply_msg); }
 
-    /* timeout: no provider for "ghost", a client synthesized TIMEOUT */
+    /* no provider for "ghost": the deadline synthesizes NO_PROVIDER, never TIMEOUT */
     { pf_reply_done=0;
       rant_function_call_async(ghost, rant_bytes(NULL,0), pf_on_reply, NULL, NULL);
       for (t=0;t<400 && !pf_reply_done;t++) pf_pump(P,C,2);
-      ST_CHECK(pf_reply_done && pf_reply_status==RANT_CALL_TIMEOUT,
-               "patterns: no-provider -> TIMEOUT (done=%d st=%d)", pf_reply_done, pf_reply_status);
-      ST_CHECK(pf_reply_msg_len==7 && memcmp(pf_reply_msg,"timeout",7)==0,
+      ST_CHECK(pf_reply_done && pf_reply_status==RANT_CALL_NO_PROVIDER,
+               "patterns: no-provider -> NO_PROVIDER (done=%d st=%d)", pf_reply_done, pf_reply_status);
+      ST_CHECK(pf_reply_msg_len==11 && memcmp(pf_reply_msg,"no provider",11)==0,
                "patterns: synthesized outcome carries status text (\"%s\")", pf_reply_msg); }
 
     /* call before the match forms: a fresh function pair called immediately. The request
@@ -5425,8 +5425,8 @@ static void taskx_checks(void){
     rsp_s = rant_schema_compile(rant_allocator_alloc, &ma, "TmRsp { tag: u32, v: u32, note: u32 }", NULL);
     ST_CHECK(req_s && prg_s && rsp_s, "taskx: schemas compiled");
 
-    /* X's raw wire, the explorer's recipe. The tap is created before X's normal remote
-       handle, since the per peer demux binds a name to the oldest local topic. */
+    /* X's raw wire, the explorer's recipe. A normal remote handle on top of it is refused,
+       since a live same name twin would only be shadowed. */
     { RantTopicOpts topt; memset(&topt,0,sizeof topt);
       topt.qos.reliability = RANT_RELIABLE; topt.qos.keep_last = 4;
       txm_tap_n=0; txm_tap_bad_hdr=0; txm_tap_nlo=0;
@@ -5435,7 +5435,9 @@ static void taskx_checks(void){
       xreq = i_rant_node_create_pattern_topic(X, "mix@req", RANT_PUB_ONLY, req_s, &topt,
                           RANT_KIND_TASK_REQ, 5, 0, 0, NULL, NULL);
       xmix = rant_node_create_remote_task(X, "mix", req_s, prg_s, rsp_s, NULL);
-      ST_CHECK(xtap && xmix && xreq, "taskx: raw tap + raw req + inert remote created"); }
+      ST_CHECK(xtap && xreq && xmix==NULL && rant_last_error(X).error==RANT_E_NAME_COLLISION,
+               "taskx: raw tap + raw req created, a same name remote refused (%d)",
+               (int)rant_last_error(X).error); }
 
     pmix  = rant_node_create_task_definition(P, "mix", req_s, prg_s, rsp_s, txm_mix_handler, NULL, NULL);
     pnoc  = rant_node_create_task_definition(P, "noc", NULL, NULL, NULL, NULL, NULL,
@@ -5985,6 +5987,150 @@ static void retire_checks(void){
                "retire: successor remote calls (done=%d st=%d val=%u)",
                pf_reply_done, pf_reply_status, pf_reply_val); }
 
+    rant_node_close(A,0); rant_node_close(B,0);
+    rant_allocator_reset(&aa); rant_allocator_reset(&ba);
+}
+
+static volatile int loud_reply_n;
+static volatile int loud_reply_status;
+static void loud_on_reply(const RantResponse *r){ loud_reply_status = (int)r->status; loud_reply_n++; }
+static int loud_active_peers(RantNode *n){
+    RantIter it; RantPeerInfo p; int c = 0;
+    memset(&it, 0, sizeof it);
+    while (rant_node_peers_next(n, &it, &p)) if (p.liveness == RANT_PEER_ACTIVE) c++;
+    return c;
+}
+
+/* Loud refusals (19e9): a refused create says why and keeps its strings, a live same name
+ * twin is refused, a typed topic refuses bytes its schema cannot read, an accessor's
+ * force against an owner without allow_force is refused with nothing sent, and the
+ * blocking call and the variable wait work under a service thread. */
+static void loud_checks(void){
+    RantAllocator aa = rant_allocator_heap(0);
+    RantAllocator ba = rant_allocator_heap(0);
+    RantNodeOpts ao, bo; RantNode *A, *B; RantDiscoveryAddr seed; RantEvent le;
+    RantSchema *pose; char txt[192]; int t;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+23; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    ao.match_wait_ms = -1;      /* the sends below reach nobody on purpose: no wait */
+    bo=ao;
+    A = rant_node_open(&aa, "loud-a", NULL, NULL, &ao);
+    B = rant_node_open(&ba, "loud-b", NULL, NULL, &bo);
+    ST_CHECK(A && B, "loud: nodes open");
+    if (!(A && B)){ if(A)rant_node_close(A,0); if(B)rant_node_close(B,0); return; }
+
+    le = rant_last_error(A);
+    rant_event_str(&le, txt, sizeof txt);
+    ST_CHECK(le.kind==RANT_ERROR && le.error==RANT_E_NONE && strcmp(txt,"no error")==0,
+             "loud: a fresh node's last error reads \"no error\" (%s)", txt);
+    ST_CHECK(rant_node_create_topic(A, "a@b", RANT_PUBSUB, NULL, NULL)==NULL
+             && rant_last_error(A).error==RANT_E_BAD_NAME,
+             "loud: '@' in a plain topic name refused as BAD_NAME (%d)", (int)rant_last_error(A).error);
+    le = rant_last_error(A);
+    ST_CHECK(le.topic_name && strcmp(le.topic_name,"a@b")==0,
+             "loud: the last error keeps the name (%s)", le.topic_name ? le.topic_name : "null");
+
+    pose = rant_schema_compile(rant_heap_realloc, NULL, "LoudPose { x: f32, y: f32 }", NULL);
+    ST_CHECK(pose != NULL, "loud: schema compiled");
+    {   RantTopic *tp = rant_node_create_topic(A, "loud/pose", RANT_PUB_ONLY, pose, NULL);
+        RantTopic *twin = rant_node_create_topic(A, "loud/pose", RANT_SUB_ONLY, pose, NULL);
+        RantTopic *parked;
+        uint8_t junk[3] = {1,2,3}, good[8] = {0};
+        int rc_junk, rc_good;
+        ST_CHECK(tp && twin==NULL && rant_last_error(A).error==RANT_E_NAME_COLLISION,
+                 "loud: a live same name topic is refused as NAME_COLLISION (%d)", (int)rant_last_error(A).error);
+        parked = rant_node_create_topic(A, "loud/pose", RANT_INACTIVE, pose, NULL);
+        ST_CHECK(parked != NULL, "loud: an INACTIVE twin is still accepted (the QoS switch)");
+        le = rant_last_error(A);
+        rant_event_str(&le, txt, sizeof txt);
+        ST_CHECK(le.peer==0 && strstr(txt,"already created")!=NULL,
+                 "loud: the collision text names this node (%s)", txt);
+        rc_junk = tp ? rant_topic_send(tp, rant_bytes(junk,3), NULL) : 0;
+        rc_good = tp ? rant_topic_send(tp, rant_bytes(good,8), NULL) : 0;
+        ST_CHECK(rc_junk==RANT_ERR_SCHEMA, "loud: bytes the schema cannot read refused with RANT_ERR_SCHEMA (%d)", rc_junk);
+        ST_CHECK(rc_good==RANT_OK, "loud: a well formed message still sends (%d)", rc_good);
+    }
+    {   /* pattern twins and the accessor force gate */
+        RantVariable *v1, *v2, *acc, *knob, *kacc; RantBytes gv; uint8_t b[4]; int rc;
+        i_rant_le_w32(b, 20);
+        v1 = rant_node_create_variable_definition(A, "loud/dial", NULL,
+                 &(RantVariableOpts){ .initial = rant_bytes(b,4) });
+        v2 = rant_node_create_variable_definition(A, "loud/dial", NULL, NULL);
+        ST_CHECK(v1 && v2==NULL && rant_last_error(A).error==RANT_E_NAME_COLLISION,
+                 "loud: a live same name variable definition is refused (%d)", (int)rant_last_error(A).error);
+        knob = rant_node_create_variable_definition(A, "loud/knob", NULL,
+                 &(RantVariableOpts){ .initial = rant_bytes(b,4), .allow_force = 1 });
+        acc  = rant_node_create_remote_variable(B, "loud/dial", NULL, NULL);
+        kacc = rant_node_create_remote_variable(B, "loud/knob", NULL, NULL);
+        ST_CHECK(knob && acc && kacc, "loud: variable pairs created");
+        for (t=0;t<2000 && !(rant_variable_get(acc,&gv) && rant_variable_get(kacc,&gv));t++) pf_pump(A,B,2);
+        ST_CHECK(rant_variable_get(acc,&gv) && rant_variable_get(kacc,&gv), "loud: accessors got the values");
+        i_rant_le_w32(b, 99);
+        rc = rant_variable_force(acc, rant_bytes(b,4));
+        ST_CHECK(rc==RANT_ERR_ROLE, "loud: force against an owner without allow_force refused ROLE (%d)", rc);
+        rc = rant_variable_unforce(acc);
+        ST_CHECK(rc==RANT_ERR_ROLE, "loud: unforce likewise (%d)", rc);
+        for (t=0;t<200;t++) pf_pump(A,B,2);
+        ST_CHECK(v1 && !rant_variable_forced(v1), "loud: nothing reached the owner");
+        rc = rant_variable_force(kacc, rant_bytes(b,4));
+        ST_CHECK(rc==RANT_OK, "loud: force against a forceable owner sends (%d)", rc);
+        for (t=0;t<2000 && !(knob && rant_variable_forced(knob));t++) pf_pump(A,B,2);
+        ST_CHECK(knob && rant_variable_forced(knob), "loud: the forceable owner is forced");
+    }
+    {   /* a queued call: an unrelated peer leaving is not its loss, its deadline ends it
+           NO_PROVIDER, and the blocking form reports that outcome */
+        RantAllocator ca = rant_allocator_heap(0); RantNodeOpts co = ao; RantNode *C;
+        RantFunction *nobody; RantResponse rep; int rc;
+        C = rant_node_open(&ca, "loud-c", NULL, NULL, &co);
+        nobody = rant_node_create_remote_function(B, "loud/nobody", NULL, NULL,
+                     &(RantFunctionOpts){ .timeout_us = 1500000u });
+        ST_CHECK(C && nobody, "loud: third node and never served remote created");
+        for (t=0;t<3000 && loud_active_peers(B) < 2;t++){ pf_pump(A,B,1); if (C) rant_node_poll(C,1); }
+        ST_CHECK(loud_active_peers(B) >= 2, "loud: B sees both peers (%d)", loud_active_peers(B));
+        loud_reply_n = 0; loud_reply_status = -1;
+        rc = nobody ? rant_function_call_async(nobody, rant_bytes(NULL,0), loud_on_reply, NULL, NULL) : -99;
+        ST_CHECK(rc==RANT_OK, "loud: call queued with no provider (%d)", rc);
+        if (C){ rant_node_close(C,1); C = NULL; }
+        for (t=0;t<300;t++) pf_pump(A,B,1);
+        ST_CHECK(loud_active_peers(B) == 1 && loud_reply_n == 0,
+                 "loud: the unrelated peer left and the queued call still waits (peers=%d n=%d)",
+                 loud_active_peers(B), loud_reply_n);
+        for (t=0;t<4000 && loud_reply_n == 0;t++) pf_pump(A,B,1);
+        ST_CHECK(loud_reply_n == 1 && loud_reply_status == (int)RANT_CALL_NO_PROVIDER,
+                 "loud: the queued call ended NO_PROVIDER at its deadline (n=%d st=%d)",
+                 loud_reply_n, loud_reply_status);
+        memset(&rep, 0, sizeof rep);
+        rc = nobody ? rant_function_call(nobody, rant_bytes(NULL,0), &rep, -1, NULL) : -99;
+        ST_CHECK(rc==1 && rep.status==RANT_CALL_NO_PROVIDER && rep.message.len==11
+                 && memcmp(rep.message.data, "no provider", 11)==0,
+                 "loud: the blocking call reports NO_PROVIDER (rc=%d st=%d)", rc, (int)rep.status);
+        rant_allocator_reset(&ca);
+    }
+#ifdef RANT_THREADS
+    {   /* the blocking forms under a service thread: sleep on its progress, no refusal */
+        RantFunction *fdef, *rem; RantVariable *late, *lacc; RantResponse rep;
+        uint8_t req[4], b[4]; int rc, s1, s2;
+        fdef = rant_node_create_function_definition(A, "loud/add", NULL, NULL, pf_add_handler, NULL, NULL);
+        rem  = rant_node_create_remote_function(B, "loud/add", NULL, NULL, NULL);
+        lacc = rant_node_create_remote_variable(B, "loud/late", NULL, NULL);
+        ST_CHECK(fdef && rem && lacc, "loud: threaded pairs created");
+        s1 = rant_node_start(A); s2 = rant_node_start(B);
+        ST_CHECK(s1==RANT_OK && s2==RANT_OK, "loud: service threads start");
+        i_rant_le_w32(req, 41);
+        memset(&rep, 0, sizeof rep);
+        rc = rem ? rant_function_call(rem, rant_bytes(req,4), &rep, 5000, NULL) : -99;
+        ST_CHECK(rc==1 && rep.status==RANT_CALL_OK && rep.data.len==4 && i_rant_le_r32(rep.data.data)==42,
+                 "loud: blocking call answers under a service thread (rc=%d st=%d)", rc, (int)rep.status);
+        i_rant_le_w32(b, 5);
+        late = rant_node_create_variable_definition(A, "loud/late", NULL,
+                   &(RantVariableOpts){ .initial = rant_bytes(b,4) });
+        rc = (late && lacc) ? rant_variable_wait(lacc, 5000) : -99;
+        ST_CHECK(rc==1, "loud: variable wait returns under a service thread (%d)", rc);
+        rant_node_stop(A); rant_node_stop(B);
+    }
+#endif
+    if (pose) rant_schema_free(pose, rant_heap_realloc, NULL);
     rant_node_close(A,0); rant_node_close(B,0);
     rant_allocator_reset(&aa); rant_allocator_reset(&ba);
 }
@@ -7642,6 +7788,7 @@ static int selftest_main(void){
     churn_checks();               /* 19e6. retire/reuse churn soak: slots reuse, nothing balloons */
     task_checks();                /* 19e7. tasks: progress, cancel, no_cancel, bare return */
     taskx_checks();               /* 19e8. task matrix: demux, providers, loss, retire, churn */
+    loud_checks();                /* 19e9. refused creates say why, twins, typed sends, force gate */
     matchwait_checks();           /* 19f. send-path match wait + writer-authoritative repair */
     relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
     nat_checks();                 /* 19f2b. a unicast only node behind an outbound only NAT */

@@ -325,6 +325,12 @@ uint64_t i_rant_node_wall_us    (RantNode *n);
 int      i_rant_node_sys_lock    (RantNode *n);
 void     i_rant_node_sys_unlock(RantNode *n, int acquired);
 int      i_rant_node_sys_poll    (RantNode *n, int timeout_ms);
+/* Blocks until done says so or its deadline passes, under the node lock, on the service
+ * thread's progress when one runs and by pumping the loop otherwise. done runs under the
+ * lock and states this iteration's deadline, (uint64_t)-1 = none. 1 done, 0 timed out,
+ * -1 refused from a callback. */
+typedef int (*i_RantSysWaitFn)(RantNode *n, void *ctx, uint64_t now_us, uint64_t *deadline_us);
+int      i_rant_node_sys_wait    (RantNode *n, i_RantSysWaitFn done, void *ctx);
 /* Fires a topic scoped RANT_ERROR through the node's normal event path. Under the node lock. */
 void     i_rant_node_sys_error (RantNode *n, RantErrorKind error, RantTopic *topic, uint32_t peer);
 /* Matched subscribers excluding dormant peers, the provider liveness query. */

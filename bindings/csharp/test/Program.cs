@@ -260,10 +260,9 @@ static class Program
         cli.Start();
         var t = addR.CallAsync(new AddReq { A = 10, B = 5 });
         Check("await CallAsync", t.Wait(5000) && t.Result.Ok && t.Result.Value.Sum == 15);
-        // a blocking call is refused while the service thread owns the loop, loudly
-        var rr = addR.Call(new AddReq { A = 1, B = 2 }, 100);
-        Check("blocking call refused under service thread",
-              rr.Status == CallStatus.Timeout && rr.SendStatus == SendStatus.State);
+        // a blocking call under the service thread sleeps on its progress and answers
+        var rr = addR.Call(new AddReq { A = 1, B = 2 }, 2000);
+        Check("blocking call answers under service thread", rr.Ok && rr.Value.Sum == 3);
         cli.Stop();
 
         // a call still pending at Close settles its Task with Cancelled, never hangs

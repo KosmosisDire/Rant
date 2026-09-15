@@ -31,7 +31,8 @@ namespace Rant
     {
         Ok = 0, NoTopic = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
         State = -5,   // wrong state: Poll while started, or a call a handler may not make
-        NoSys = -6    // not compiled in (Start under RANT_NO_THREADS)
+        NoSys = -6,   // not compiled in (Start under RANT_NO_THREADS)
+        Schema = -7   // the payload is not a message of the topic's schema
     }
 
     public enum EventKind
@@ -46,7 +47,8 @@ namespace Rant
         NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
         MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
         PeerRefused, EvictedUnsent, UnmatchedSend, DuplicateAuthority,
-        Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress
+        Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress,
+        BadName, State, BadSchema   // a create refused: the name, the moment, the schema
     }
 
     // Schema field kinds for reflection, the value is the wire kind byte. Named is a nominal
@@ -57,12 +59,13 @@ namespace Rant
         VString, VArray, Map, Enum, Named
     }
 
-    // A call's outcome, mirrors RantCallStatus. Timeout and PeerLost are synthesized on the
-    // caller, and Cancelled also for calls still pending when the node closes.
+    // A call's outcome, mirrors RantCallStatus. Timeout, PeerLost and NoProvider are
+    // synthesized on the caller, and Cancelled also for calls still pending when the node closes.
     public enum CallStatus
     {
         Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4, Cancelled = 5,
-        Running = 6   // task, the one NON-terminal status: accepted and running
+        Running = 6,  // task, the one NON-terminal status: accepted and running
+        NoProvider = 7   // the timeout passed with no definition ever matched
     }
 
     // Severity of a built-in @rant/log line. Mirrors RantLogLevel.
@@ -1955,8 +1958,8 @@ namespace Rant
             return t;
         }
 
-        /// <summary>The most recent error this node reported (also delivered via OnEvent).
-        /// RantEvent.Kind is PeerUp with Error == None if none has occurred yet.</summary>
+        /// <summary>The most recent error this node reported (also delivered via OnEvent), or
+        /// an Error event whose Error is None, printing "no error", before any.</summary>
         public RantEvent LastError => RantEvent.FromValue(Native.rant_last_error(_handle));
 
         /// <summary>Why the most recent node open failed, from the process global slot. The
@@ -2594,8 +2597,9 @@ namespace Rant
             return g;
         }
 
-        /// <summary>Blocking call: drives the loop until the response or timeoutMs, negative =
-        /// the default. Refused from a callback or under a service thread. Never throws.</summary>
+        /// <summary>Blocking call: waits for the response or timeoutMs, negative = the default,
+        /// on the service thread's progress under Start() and driving the loop otherwise.
+        /// Refused from a callback. Never throws.</summary>
         public RantResponse Call(byte[] request, int timeoutMs = -1, uint provider = 0)
         {
             var r = new RantResponse();
@@ -3056,7 +3060,8 @@ namespace Rant
         }
 
         /// <summary>Force the value: writes are absorbed into the shadow source until Unforce
-        /// restores the latest absorbed set. Needs allowForce on the definition.</summary>
+        /// restores the latest absorbed set. Needs allowForce on the definition: State on the
+        /// owner without it, BadRole on a remote whose owner advertises none.</summary>
         public SendStatus Force(byte[] value)
         {
             using (var p = new PinnedBytes(value)) return (SendStatus)Native.rant_variable_force(Var, p.B);
@@ -3068,8 +3073,8 @@ namespace Rant
         /// matched, 0 = no owner present).</summary>
         public int RemoteCount => Native.rant_variable_match_count(Var);
 
-        /// <summary>Block driving the loop until a value exists or timeoutMs elapses. Refused
-        /// from a callback or under a service thread.</summary>
+        /// <summary>Block until a value exists or timeoutMs elapses, on the service thread's
+        /// progress under Start() and driving the loop otherwise. Refused from a callback.</summary>
         public bool Wait(int timeoutMs) => Native.rant_variable_wait(Var, timeoutMs) == 1;
 
         /// <summary>Observe changes: fires on every state change and replays the current value

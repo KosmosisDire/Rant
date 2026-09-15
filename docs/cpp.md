@@ -163,8 +163,9 @@ handler with no reply, fail or defer answers AppError, since an instant empty OK
 operation would read as success. Complete or drop a `PendingTask` before retiring its
 definition.
 
-A blocking `call()` drives the node loop and is refused with `SendStatus::State` from a
-callback or while a service thread owns the loop, so use `call_async()` there. A
+A blocking `call()` waits on the service thread's progress under `start()` and drives
+the node loop otherwise. From a callback it is refused with `SendStatus::State`, so use
+`call_async()` there. A
 `Response<>` owns its payload, and `message()` is the provider's text or the default
 status text on any non OK outcome. On a task, the timeout bounds only the wait for the
 first response, `CallOptions::id_out` receives the call id at commit so another thread

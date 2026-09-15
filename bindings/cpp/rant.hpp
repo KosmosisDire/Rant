@@ -64,7 +64,7 @@ enum class Role        { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 };
 
 /* rant_topic_send and create result. Ok is 0, the rest mirror RantResult. */
 enum class SendStatus    { Ok = 0, NoTopic = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
-                         State = -5, NoSys = -6 };
+                         State = -5, NoSys = -6, Schema = -7 };
 
 enum class EventKind {
     PeerUp = 0, PeerDown, PeerInterest, MessageLost, Error
@@ -76,7 +76,8 @@ enum class ErrorKind {
     NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
     MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
     PeerRefused, EvictedUnsent, UnmatchedSend, DuplicateAuthority,
-    Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress
+    Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress,
+    BadName, State, BadSchema   /* a create refused: the name, the moment, the schema */
 };
 
 /* Schema field kinds for reflection, the C wire values. Array and String are fixed,
@@ -86,10 +87,11 @@ enum class FieldType : uint8_t {
     VString, VArray, Map, Enum, Named
 };
 
-/* A call's outcome, mirrors RantCallStatus. Timeout and PeerLost are synthesized on the
- * caller. Running is task only and the one non terminal status (docs/tasks.md). */
+/* A call's outcome, mirrors RantCallStatus. Timeout, PeerLost and NoProvider are
+ * synthesized on the caller. Running is task only and the one non terminal status
+ * (docs/tasks.md). */
 enum class CallStatus { Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4,
-                        Cancelled = 5, Running = 6 };
+                        Cancelled = 5, Running = 6, NoProvider = 7 };
 
 /* What a network entity is, mirrors RantEntityKind. Observers see folded entities, never
  * raw channels (docs/reflection.md). */
@@ -101,9 +103,11 @@ enum class LogLevel { Error = 0, Warn = 1, Info = 2 };
 static_assert((int)Reliability::Reliable == detail::RANT_RELIABLE, "reliability enum drift");
 static_assert((int)Role::Inactive == detail::RANT_INACTIVE, "role enum drift");
 static_assert((int)SendStatus::NoSys == detail::RANT_ERR_NOSYS, "result enum drift");
+static_assert((int)SendStatus::Schema == detail::RANT_ERR_SCHEMA, "result enum drift");
 static_assert((int)EventKind::Error == detail::RANT_ERROR, "event enum drift");
 static_assert((int)ErrorKind::Waker == detail::RANT_E_WAKER, "error enum drift");
 static_assert((int)ErrorKind::BadAddress == detail::RANT_E_BAD_ADDRESS, "error enum drift");
+static_assert((int)ErrorKind::BadSchema == detail::RANT_E_BAD_SCHEMA, "error enum drift");
 static_assert((int)FieldType::Struct == detail::RANT_STRUCT, "field-type enum drift");
 static_assert((int)FieldType::String == detail::RANT_STR, "field-type enum drift");
 static_assert((int)FieldType::Map == detail::RANT_MAP, "field-type enum drift");
@@ -112,6 +116,7 @@ static_assert((int)FieldType::Named == detail::RANT_NAMED, "field-type enum drif
 #ifndef RANT_NO_PATTERNS
 static_assert((int)CallStatus::Ok == detail::RANT_CALL_OK, "call-status enum drift");
 static_assert((int)CallStatus::PeerLost == detail::RANT_CALL_PEER_LOST, "call-status enum drift");
+static_assert((int)CallStatus::NoProvider == detail::RANT_CALL_NO_PROVIDER, "call-status enum drift");
 static_assert((int)CallStatus::Cancelled == detail::RANT_CALL_CANCELLED, "call-status enum drift");
 static_assert((int)CallStatus::Running == detail::RANT_CALL_RUNNING, "call-status enum drift");
 static_assert((int)EntityKind::Topic == detail::RANT_ENTITY_TOPIC, "entity enum drift");
@@ -2811,8 +2816,9 @@ public:
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* Blocking call: drives the node loop until the response or timeout_ms, negative = the
-     * default. Refused with State from a callback or under a service thread, use call_async. */
+    /* Blocking call: waits for the response or timeout_ms, negative = the default, on the
+     * service thread's progress under start() and driving the loop otherwise. Refused with
+     * State from a callback, use call_async there. */
     Response<> call(Bytes req, int timeout_ms = -1, const CallOptions& opts = {}) {
         Response<> r;
         if (!fn_) { r.ss_ = SendStatus::NoTopic; return r; }
@@ -3087,8 +3093,9 @@ public:
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* Blocking call: drives the loop until the terminal outcome, with on_progress on this
-     * thread. Refused from a callback or under a service thread. id_out allows a cancel(). */
+    /* Blocking call: waits for the terminal outcome, with on_progress on this thread, on
+     * the service thread's progress under start() and driving the loop otherwise. Refused
+     * from a callback. id_out allows a cancel(). */
     Response<> call(Bytes req, ProgressHandler on_progress = {}, int timeout_ms = -1,
                     const CallOptions& opts = {}) {
         Response<> r;
@@ -3270,7 +3277,8 @@ public:
         return static_cast<SendStatus>(detail::rant_variable_set(var_, priv::to_c(value)));
     }
     /* Force the value: writes are absorbed into the shadow source until unforce, which
-     * restores the latest absorbed set. Requires VariableOptions::allow_force. */
+     * restores the latest absorbed set. Requires VariableOptions::allow_force: State on the
+     * owner without it, BadRole on a remote whose owner advertises none. */
     SendStatus force(Bytes value) {
         if (!var_) return SendStatus::NoTopic;
         return static_cast<SendStatus>(detail::rant_variable_force(var_, priv::to_c(value)));

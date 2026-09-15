@@ -24,7 +24,7 @@ extern "C" {
 /* functions */
 
 /* A call's outcome. OK, APP_ERROR, NO_HANDLER, CANCELLED and RUNNING travel on the wire,
- * TIMEOUT and PEER_LOST are synthesized at the caller. See spec/patterns.md. */
+ * TIMEOUT, PEER_LOST and NO_PROVIDER are synthesized at the caller. See spec/patterns.md. */
 typedef enum {
     RANT_CALL_OK          = 0,
     RANT_CALL_APP_ERROR = 1,     /* the handler replied with rant_request_fail */
@@ -33,8 +33,10 @@ typedef enum {
     RANT_CALL_PEER_LOST = 4,     /* the handler node dropped mid call */
     RANT_CALL_CANCELLED = 5,     /* a provider honored a cancel or retired mid run, or the node
                                   closed or the handle retired with the call still pending */
-    RANT_CALL_RUNNING     = 6    /* task, the one non terminal status: the request runs, the
+    RANT_CALL_RUNNING     = 6,   /* task, the one non terminal status: the request runs, the
                                   timeout is dropped, on_progress fires once with no data */
+    RANT_CALL_NO_PROVIDER = 7    /* the timeout passed with no definition ever matched, so the
+                                  request never left this node */
 } RantCallStatus;
 
 typedef struct RantFunction RantFunction;       /* an opaque handle */
@@ -114,8 +116,10 @@ RANT_API RantFunction *rant_node_create_remote_function(RantNode *n, const char 
                              const RantSchema *req_schema, const RantSchema *rsp_schema,
                              const RantFunctionOpts *opts);
 
-/* Calls and blocks driving the node loop. timeout_ms negative = the function's default.
- * out->data is valid until the next blocking call. docs/patterns.md has the returns. */
+/* Calls and blocks: on the service thread's progress when one runs, else driving the loop
+ * itself. timeout_ms negative = the function's default. out->data is valid until the next
+ * blocking call. 1 = an outcome in *out (NO_PROVIDER and PEER_LOST included), 0 = the local
+ * timeout, RANT_ERR_STATE from a callback. docs/patterns.md has the returns. */
 RANT_API int    rant_function_call(RantFunction *fn, RantBytes req, RantResponse *out, int timeout_ms,
                                  const RantCallOpts *opts);
 /* Returns as soon as the request is committed, then on_response fires once with the
@@ -219,7 +223,8 @@ RANT_API int    rant_variable_get(RantVariable *var, RantBytes *out);
  * RANT_ERR_NO_TOPIC = no owner matched, RANT_ERR_ROLE = a read only owner. docs/patterns.md. */
 RANT_API int    rant_variable_set(RantVariable *var, RantBytes value);
 /* Force overrides the value until unforce restores the latest absorbed set. A definition
- * needs .allow_force (RANT_ERR_STATE without), a remote's force is ignored by one without. */
+ * needs .allow_force (RANT_ERR_STATE without), and a remote's force against an owner that
+ * advertises none is refused with RANT_ERR_ROLE, nothing sent. */
 RANT_API int    rant_variable_force(RantVariable *var, RantBytes value);
 RANT_API int    rant_variable_unforce(RantVariable *var);
 RANT_API int    rant_variable_forced(RantVariable *var);
@@ -243,8 +248,9 @@ typedef void (*RantVariableUpdateFn)(const RantVariableUpdate *update, void *use
 
 RANT_API int    rant_variable_on_change(RantVariable *var, RantVariableUpdateFn on_change, void *user);
 RANT_API int    rant_variable_on_write (RantVariable *var, RantVariableUpdateFn on_write,        void *user);
-/* Blocks driving the node loop until a value exists or timeout_ms elapses (negative =
- * forever). 1 = a value, 0 = timeout, or from a callback or under a service thread. */
+/* Blocks until a value exists or timeout_ms elapses (negative = forever), on the service
+ * thread's progress when one runs, else driving the loop. 1 = a value, 0 = timeout or
+ * from a callback. */
 RANT_API int    rant_variable_wait(RantVariable *var, int timeout_ms);
 /* Remote: owners matched. Definition: remotes matched. */
 RANT_API int    rant_variable_match_count(RantVariable *var);

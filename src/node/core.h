@@ -27,7 +27,8 @@ typedef enum {
 typedef enum {
     RANT_E_NONE = 0,
     /* a match was refused, or advertised data cannot flow */
-    RANT_E_NAME_COLLISION,     /* a peer's topic name hashes to ours but differs: .identity, .topic */
+    RANT_E_NAME_COLLISION,     /* a peer's topic name hashes to ours but differs: .identity, .topic.
+                                  Or, with .peer 0, a create found a live same name topic on this node */
     RANT_E_QOS_INCOMPATIBLE, /* a reliable subscriber met a best effort publisher: .topic, .peer */
     RANT_E_KIND_MISMATCH,      /* the name is another entity kind at a peer: .topic, .peer */
     RANT_E_SCHEMA_MISMATCH,    /* a refused match or an ill fitting message: .topic, .peer */
@@ -50,7 +51,10 @@ typedef enum {
     RANT_E_RECV,               /* a receive hard failed */
     RANT_E_POLL,               /* the socket wait failed */
     RANT_E_WAKER,              /* no cross thread waker, wakes come at the next tick */
-    RANT_E_BAD_ADDRESS         /* a configured address could not be parsed, refused at open */
+    RANT_E_BAD_ADDRESS,        /* a configured address could not be parsed, refused at open */
+    RANT_E_BAD_NAME,           /* a create's name is empty, too long or carries '@': .topic_name */
+    RANT_E_STATE,              /* a create refused in this state: from a callback, or the reserve is full */
+    RANT_E_BAD_SCHEMA          /* a create's schema failed to parse: .topic_name */
 } RantErrorKind;
 
 typedef struct {

@@ -191,6 +191,15 @@ buffer, never manager memory, so nothing the wait releases the lock around can m
 the send. The exceptions publish under the held lock with no wait: replies built inside a
 delivery callback, and the owner's force and unforce republish from the shadow.
 
+## Provider loss and no provider
+
+A call is on the wire once a provider matched, else it is queued in the pending entry
+(`queued_req`) for the first match. That bit is the whole history a peer drop needs: on
+`RANT_PEER_DOWN` a remote with no live provider left reaps the calls it already sent as
+PEER_LOST and leaves the queued ones alone, since a peer that never provided cannot be
+their loss. A call still queued when its deadline passes ends NO_PROVIDER instead of
+TIMEOUT, and a call directed at the dropped peer fails PEER_LOST regardless.
+
 ## Retire and shadowing
 
 Retire parks the channels (`RANT_INACTIVE`, re advertised), answers every outstanding
@@ -207,13 +216,14 @@ route deliveries into the handle: the half is parked INACTIVE and the handle sta
 allocated until close.
 
 The per peer index maps bind a name to one local topic, preferring the oldest active one,
-so a second same name handle created while the first lives is silently SHADOWED: it
-receives nothing and its writes collide with the twin's shared reader cursor. Retire parks
-the predecessor, peers re pend its verdicts and re verify the name against the successor.
-The channel slots are released through the topic retire and reuse machinery
-(spec/interest.md), so a re created entity takes its old slots back. The same rule means a
-tool must go fully raw or fully through handles, never both. The `retire:` selftests pin
-it.
+so a second same name handle created while the first lives would only be SHADOWED: it
+would receive nothing and its writes would collide with the twin's shared reader cursor.
+The transport therefore refuses the define (spec/interest.md) and the create returns NULL
+with `RANT_E_NAME_COLLISION` recorded, `.peer` 0. Retire parks the predecessor, peers re
+pend its verdicts and re verify the name against the successor. The channel slots are
+released through the topic retire and reuse machinery, so a re created entity takes its
+old slots back. The same rule means a tool must go fully raw or fully through handles,
+never both. The `retire:` and `loud:` selftests pin it.
 
 ## Progress reliability
 
@@ -233,7 +243,5 @@ the provider samples the round trip. See spec/node.md for the snapshot.
 Variable external storage (owner get and set hooks, with `on_force` and `on_unforce`),
 the owner side `on_set` transform, `exclusive_write`, publish side on change dedup, the
 dispatch collapsed consumer thread delivery mode and rising or falling edge triggers (one
-slot per event kind, the same `RantVariableUpdate` payload). `rant_variable_wait` cannot
-wait under a service thread because the wait seam was part of that deferred design. Name
-directed calls, a `call_all` keyed response list and a fast reboot challenge supersede
+slot per event kind, the same `RantVariableUpdate` payload). Name directed calls, a `call_all` keyed response list and a fast reboot challenge supersede
 (which needs the host id unconditionally in the announce) were argued through and parked.

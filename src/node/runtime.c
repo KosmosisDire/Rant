@@ -143,6 +143,10 @@ struct RantNode {
     uint32_t         match_epoch;     /* bumps on peer or interest change, create and set_role */
     void            *patterns;        /* the patterns layer's per node manager, opaque here */
     RantEvent       last_error;  /* the most recent RANT_ERROR, RANT_E_NONE until one fires */
+    /* last_error's strings, copied so the by value event outlives a retire or a peer drop */
+    char            last_error_topic[RANT_TOPIC_NAME_MAX + 1];
+    char            last_error_peer[RANT_NODE_NAME_MAX + 1];
+    char            last_error_detail[160];
     /* the built in @rant/log topics and the error mirror ring */
     RantTopic      *log_topics[3];       /* by RantLogLevel, all NULL under opts.disable_logs */
     RantSchema     *log_schema;          /* RantLog { wall_us, mono_us, text }, node owned */
@@ -269,13 +273,27 @@ static int i_rant_node_is_log_topic(RantNode *n, uint16_t topic_index){
     return h && (h == n->log_topics[0] || h == n->log_topics[1] || h == n->log_topics[2]);
 }
 
+/* copies src into buf and points *field at it, or clears the field when there is none */
+static void i_rant_node_keep_str(char *buf, size_t cap, const char *src, const char **field){
+    size_t len = src ? strlen(src) : 0;
+    if (!len){ *field = NULL; return; }
+    if (len >= cap) len = cap - 1;
+    memcpy(buf, src, len); buf[len] = '\0';
+    *field = buf;
+}
+
 static void i_rant_node_emit(RantNode *n, RantEvent *e){
     e->user = n->user_data;
     if (e->peer){    /* resolve the peer's name once so every event message prints a label */
         RantString nm = i_rant_node_core_peer_name(n->core, e->peer);
         e->peer_name = nm.data;   /* a NUL terminated view into discovery state, NULL if unknown */
     }
-    if (e->kind == RANT_ERROR) n->last_error = *e;
+    if (e->kind == RANT_ERROR){
+        n->last_error = *e;
+        i_rant_node_keep_str(n->last_error_topic, sizeof n->last_error_topic, e->topic_name, &n->last_error.topic_name);
+        i_rant_node_keep_str(n->last_error_peer, sizeof n->last_error_peer, e->peer_name, &n->last_error.peer_name);
+        i_rant_node_keep_str(n->last_error_detail, sizeof n->last_error_detail, e->schema_detail, &n->last_error.schema_detail);
+    }
     /* the error to log mirror records only, the poll pass publishes. Errors on a log
        topic itself are excluded, and nothing is recorded during a flush */
     if (e->kind == RANT_ERROR && n->log_errors && !n->log_flushing
@@ -511,7 +529,7 @@ static void i_rant_node_queue_release(RantNode *n, RantTopic *h, i_RantMsgQueue 
 
 /* The process global last error slot for failures during open, before the node exists.
  * A plain global, meaningful right after a failed open on the calling thread. */
-static RantEvent g_last_error;
+static RantEvent g_last_error = { RANT_ERROR };   /* kind RANT_ERROR with .error NONE = "no error" */
 
 /* Reports an open time failure into the global slot and the caller's on_event. Returns NULL. */
 static RantNode *i_rant_node_open_fail(RantEventFn on_event, void *user, RantErrorKind err,
@@ -989,6 +1007,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     /* the post open gather anchor: discovery solicits on startup, so every peer already
        out there answers within an RTT of the first poll */
     n->open_us = i_rant_plat_now_us();
+    n->last_error.kind = RANT_ERROR;     /* .error NONE until one fires: reads as "no error" */
 
     /* the builtins last, since they create topics. A failed creation degrades and never
        fails the open */
@@ -1119,6 +1138,21 @@ static void i_rant_node_readvertise(RantNode *n){
 
 /* The shared topic create: the public create and the patterns layer's both funnel here.
  * kind, prefix_bytes and directed stamp the entity, allow_at permits the reserved '@'. */
+/* Records why a create refused: the last error slot, and the RANT_ERROR event when the
+ * lock is held. From a callback only the slot is written, since an event must not nest
+ * inside the handler that is running. */
+static void i_rant_node_create_fail(RantNode *n, RantErrorKind err, const char *name,
+                                    uint64_t need, int emit){
+    RantEvent e; memset(&e, 0, sizeof e);
+    e.kind = RANT_ERROR; e.error = err; e.topic_name = name; e.too_big_bytes = need;
+    if (err == RANT_E_NAME_COLLISION) e.identity = rant_topic_id(name);
+    if (emit){ i_rant_node_emit(n, &e); return; }
+    e.user = n->user_data;
+    n->last_error = e;
+    i_rant_node_keep_str(n->last_error_topic, sizeof n->last_error_topic, name, &n->last_error.topic_name);
+    n->last_error.peer_name = NULL; n->last_error.schema_detail = NULL;
+}
+
 static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRole role,
                               const RantSchema *schema, const RantTopicOpts *opts,
                               uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
@@ -1126,16 +1160,32 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
     RantTopicDef def; RantTopic *h; uint16_t idx; int acquired;
     int reuse = 0;
     if (!n || !name) return NULL;
+    acquired = i_rant_node_lock(n);
+    if (!acquired){   /* from a callback: a grow would move the arena mid delivery */
+        i_rant_node_create_fail(n, RANT_E_STATE, name, 0, 0);
+        return NULL;
+    }
+    if (!name[0] || strlen(name) > RANT_TOPIC_NAME_MAX){
+        i_rant_node_create_fail(n, RANT_E_BAD_NAME, name, 0, 1);
+        i_rant_node_unlock(n, acquired); return NULL;
+    }
     if (!allow_at){   /* '@' is reserved for pattern channels */
         const char *s = name;
-        while (*s){ if (*s=='@') return NULL; s++; }
+        while (*s){
+            if (*s=='@'){
+                i_rant_node_create_fail(n, RANT_E_BAD_NAME, name, 0, 1);
+                i_rant_node_unlock(n, acquired); return NULL;
+            }
+            s++;
+        }
     }
-    acquired = i_rant_node_lock(n);
-    if (!acquired) return NULL;   /* from a callback: a grow would move the arena mid delivery */
     if (n->creating_builtin){
         /* open time builtins fill their block. A full block degrades to no builtin, never a grow */
         idx = (uint16_t)(n->builtin_lo + n->n_builtin);
-        if (idx >= n->max_topics){ i_rant_node_unlock(n, acquired); return NULL; }
+        if (idx >= n->max_topics){
+            i_rant_node_create_fail(n, RANT_E_STATE, name, 0, 1);
+            i_rant_node_unlock(n, acquired); return NULL;
+        }
     } else if ((reuse = rant_transport_topic_reuse_find(n->transport, name, kind, &idx)) != 0){
         /* a retired slot takes this create so churn never grows the table. Same identity,
            kind and schema (find = 2) relinks silently, anything else rebinds. See spec/interest.md */
@@ -1146,13 +1196,17 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
         if (idx >= n->max_topics){       /* the reserve is full: grow or refuse (static) */
             uint16_t want = n->max_topics < 0x8000u ? (uint16_t)(n->max_topics*2u) : 0xFFFFu;
             if (want <= n->max_topics || !i_rant_node_grow(n, n->max_peers, want, 0)){
+                i_rant_node_create_fail(n, RANT_E_STATE, name, 0, 1);
                 i_rant_node_unlock(n, acquired);
                 return NULL;
             }
         }
     }
     h = (RantTopic*)i_rant_node_alloc(n, NULL, sizeof *h);       /* stable: outlives any arena grow */
-    if (!h){ i_rant_node_unlock(n, acquired); return NULL; }
+    if (!h){
+        i_rant_node_create_fail(n, RANT_E_OOM, name, sizeof *h, 1);
+        i_rant_node_unlock(n, acquired); return NULL;
+    }
     memset(h, 0, sizeof *h);
     if (opts) h->qos = opts->qos;
     if (opts && opts->reflect_from_mesh && kind == RANT_KIND_TOPIC){
@@ -1168,7 +1222,10 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
     if (schema){   /* copied into node memory so the caller's schema need not outlive the topic */
         RantBytes w = rant_schema_wire(schema);
         h->schema = rant_schema_parse(w.data, w.len, i_rant_node_alloc, n);
-        if (!h->schema){ i_rant_node_alloc(n, h, 0); i_rant_node_unlock(n, acquired); return NULL; }
+        if (!h->schema){
+            i_rant_node_create_fail(n, RANT_E_BAD_SCHEMA, name, 0, 1);
+            i_rant_node_alloc(n, h, 0); i_rant_node_unlock(n, acquired); return NULL;
+        }
     }
     memset(&def, 0, sizeof def);
     def.name = name; def.role = (uint8_t)role;
@@ -1190,6 +1247,9 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
             rc = rant_transport_topic_define(n->transport, idx, &def);
         }
         if (rc != 0){
+            /* the transport's verdict: -2 a live same name slot, -3 the name, -4 OOM */
+            i_rant_node_create_fail(n, rc == -2 ? RANT_E_NAME_COLLISION : rc == -3 ? RANT_E_BAD_NAME
+                                     : rc == -4 ? RANT_E_OOM : RANT_E_STATE, name, 0, 1);
             if (h->schema) rant_schema_free(h->schema, i_rant_node_alloc, n);
             i_rant_node_alloc(n, h, 0);
             i_rant_node_unlock(n, acquired);
@@ -1767,7 +1827,14 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
                                   uint64_t capture_us, int directed, uint32_t to_peer,
                                   int may_wait){
     /* one O(1) count gates the per send fast paths: an unsubscribed topic skips them all */
-    int matched = rant_transport_publisher_match_count(n->transport, topic_index);
+    int matched;
+    {   /* a typed plain topic refuses a payload its schema cannot read, so the fault lands
+           on the sender instead of as a schema mismatch at every reader */
+        RantTopic *th = topic_index < n->max_topics ? n->handles[topic_index] : NULL;
+        if (th && th->schema && th->kind == RANT_KIND_TOPIC && !rant_schema_validate(th->schema, data))
+            return RANT_ERR_SCHEMA;
+    }
+    matched = rant_transport_publisher_match_count(n->transport, topic_index);
     const RantQos *q = rant_transport_topic_qos(n->transport, topic_index);
     /* the source stamp is ordinary payload, so every size rule here counts it. qos is
        immutable, so this stays valid across the waits that may re fetch q */
@@ -2002,6 +2069,21 @@ uint64_t i_rant_node_wall_us(RantNode *n){ (void)n; return i_rant_plat_wall_us()
 int  i_rant_node_sys_lock    (RantNode *n){ return i_rant_node_lock(n); }
 void i_rant_node_sys_unlock(RantNode *n, int acquired){ i_rant_node_unlock(n, acquired); }
 int  i_rant_node_sys_poll    (RantNode *n, int timeout_ms){ return rant_node_poll(n, timeout_ms); }
+
+/* The patterns layer's blocking wait: the node's wait skeleton, so it sleeps on the
+ * service thread's progress when one runs and pumps the loop itself otherwise. */
+int i_rant_node_sys_wait(RantNode *n, i_RantSysWaitFn done, void *ctx){
+    i_RantWait w = { 0 }; int acquired, r;
+    if (!n) return -1;
+    acquired = i_rant_node_lock(n);
+    if (!acquired) return -1;       /* from a callback: can neither pump nor sleep */
+    w.done = done; w.ctx = ctx;
+    w.pump_ms = 5;                  /* the manual mode tick, as the callers pumped before */
+    w.pump_after_svc = 1;           /* a service thread stopping under us finishes with the pump */
+    r = i_rant_node_wait_until(n, &w);
+    i_rant_node_unlock(n, acquired);
+    return r == RANT__WAIT_DONE ? 1 : 0;
+}
 
 /* A topic scoped RANT_ERROR from the patterns layer, through the node's one event path. */
 void i_rant_node_sys_error(RantNode *n, RantErrorKind error, RantTopic *topic, uint32_t peer){

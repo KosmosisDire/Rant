@@ -35,7 +35,8 @@ One invocation is one call, identified by the function layer's u32 call id. Many
 can be in flight at once, from many callers. Every call gets exactly one TERMINAL response
 at every exit: normal completion, provider retire and node close (the definition answers
 its live deferred calls CANCELLED on the wire before teardown), a severed lane
-(synthesized CANCELLED), or a provider crash (the PEER_LOST reap). `RANT_CALL_RUNNING` is
+(synthesized CANCELLED), a provider crash (the PEER_LOST reap of the calls it was sent),
+or no provider ever matching (NO_PROVIDER at the timeout). `RANT_CALL_RUNNING` is
 the one non terminal status. `CANCELLED` is wire carried when a provider honors a cancel
 and may still carry a payload (a stopped recording's partial file), which a function
 cannot express.

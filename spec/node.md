@@ -76,11 +76,12 @@ strict prefix of it.
   unsent wait breaks early after one completed work pass only when a datagram is held in
   `tx_hold` (socket bound, so evict). With no hold another sender refilled the ring, so it
   re arms and keeps waiting. `RANT_E_EVICTED_UNSENT` fires only after the send commits.
-- The five blocking waits (match wait, send backpressure, topic drain, node settle, queue
+- The blocking waits (match wait, send backpressure, topic drain, node settle, queue
   wait) share one `i_rant_node_wait_until` skeleton: predicate, periodic hook, outer flag.
   Invariants it carries: waiter accounting, re derive arena pointers after any wait, exit
-  when the service thread stops, kick before sleep. The patterns layer's waits stay
-  separate.
+  when the service thread stops, kick before sleep. The patterns layer's blocking call and
+  variable wait ride it through `i_rant_node_sys_wait`, so they sleep on the service
+  thread's progress when one runs and pump the loop otherwise.
 - `rant_node_stop` elects one joiner, broadcasts, kicks, unlocks, joins without the lock,
   then clears the running flag and broadcasts a second time for waiters that re slept.
 - `RANT_NO_THREADS` keeps the single threaded contract and `rant_node_start` returns

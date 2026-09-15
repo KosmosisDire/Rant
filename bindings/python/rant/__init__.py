@@ -42,11 +42,13 @@ class SendStatus(_pyenum.IntEnum):
     OUT_OF_MEMORY = -4
     STATE = -5       # wrong state: poll while started, or a call a callback may not make
     NOSYS = -6       # not compiled in (start() under RANT_NO_THREADS)
+    SCHEMA = -7      # the payload is not a message of the topic's schema
 
 
 class CallStatus(_pyenum.IntEnum):
-    """A call's outcome, mirrors RantCallStatus. TIMEOUT and PEER_LOST are synthesized on the
-        caller, RUNNING is task only and the one non terminal status (docs/tasks.md)."""
+    """A call's outcome, mirrors RantCallStatus. TIMEOUT, PEER_LOST and NO_PROVIDER are
+        synthesized on the caller, RUNNING is task only and the one non terminal status
+        (docs/tasks.md)."""
     OK = 0
     APP_ERROR = 1
     NO_HANDLER = 2
@@ -54,6 +56,7 @@ class CallStatus(_pyenum.IntEnum):
     PEER_LOST = 4
     CANCELLED = 5
     RUNNING = 6
+    NO_PROVIDER = 7      # the timeout passed with no definition ever matched
 
 
 class LogLevel(_pyenum.IntEnum):
@@ -106,6 +109,9 @@ class ErrorKind(_pyenum.IntEnum):
     POLL = 21
     WAKER = 22
     BAD_ADDRESS = 23
+    BAD_NAME = 24        # a create refused: the name is empty, too long or carries '@'
+    STATE = 25           # a create refused from a callback, or the topic reserve is full
+    BAD_SCHEMA = 26      # a create refused: the schema failed to parse
 
 
 # raw kind bytes (== Schema.FieldType, kept short for the codec below)
@@ -2315,8 +2321,9 @@ class RemoteFunction:
         return self
 
     def call(self, req=None, timeout=None, provider=0):
-        """Blocking call: drives the loop until the response or timeout seconds, None = the
-                default. Refused from a callback or under a service thread. Never raises."""
+        """Blocking call: waits for the response or timeout seconds, None = the default, on
+                the service thread's progress under start() and driving the loop otherwise.
+                Refused from a callback. Never raises."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
         out = _c.RantResponse()
         co = _c.RantCallOpts(int(provider)) if provider else None
@@ -2488,8 +2495,9 @@ class RemoteTask:
         return _typed_pattern(cls, item, ("req_schema", "prg_schema", "rsp_schema"))
 
     def call(self, req=None, on_progress=None, timeout=None, provider=0):
-        """Blocking call: drives the loop until the terminal outcome, with on_progress on this
-                thread. Refused from a callback or under a service thread. Never raises."""
+        """Blocking call: waits for the terminal outcome, with on_progress on this thread, on
+                the service thread's progress under start() and driving the loop otherwise.
+                Refused from a callback. Never raises."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
         out = _c.RantResponse()
         co = _c.RantCallOpts()
@@ -2631,7 +2639,8 @@ class VariableDefinition:
 
     def force(self, value):
         """Force the value: sets are absorbed into the shadow source until unforce restores the
-                latest absorbed set. Needs allow_force on the definition, else STATE."""
+                latest absorbed set. Needs allow_force on the definition: STATE on the owner
+                without it, BAD_ROLE on a remote whose owner advertises none."""
         b, buf = _c_view(_payload_bytes(self._schema, value))
         r = self._node._lib.rant_variable_force(self._ptr(), b)
         del buf
@@ -2646,8 +2655,8 @@ class VariableDefinition:
         return self._node._lib.rant_variable_forced(self._ptr()) == 1
 
     def wait(self, timeout):
-        """Block driving the loop until a value exists or timeout seconds elapse. Refused from a
-                callback or under a service thread."""
+        """Block until a value exists or timeout seconds elapse, on the service thread's
+                progress under start() and driving the loop otherwise. Refused from a callback."""
         return self._node._lib.rant_variable_wait(self._ptr(), _ms(timeout)) == 1
 
     def match_count(self):

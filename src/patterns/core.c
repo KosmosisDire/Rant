@@ -31,6 +31,10 @@ static void     i_rant_patterns_on_event(void *user, const RantEvent *ev);
 static uint64_t i_rant_patterns_tick(void *user, uint64_t now_us);
 static void     i_rant_patterns_on_close(void *user);
 /* the pending call reaper, retire cancels through it */
+/* i_rant_func_reap's selector: which pending calls to fail */
+#define RANT__REAP_EXPIRED 0
+#define RANT__REAP_ALL     1
+#define RANT__REAP_SENT    2
 static uint64_t i_rant_func_reap(struct RantFunction *fn, uint64_t now,
                                  RantCallStatus fail_status, int all, uint32_t dest);
 /* the duplicate authority sweep for a just created provider or owner */
@@ -150,6 +154,7 @@ static RantString i_rant_call_status_msg(RantCallStatus s){
     case RANT_CALL_NO_HANDLER: return rant_cstr("no handler");
     case RANT_CALL_TIMEOUT:      return rant_cstr("timeout");
     case RANT_CALL_PEER_LOST:    return rant_cstr("peer lost");
+    case RANT_CALL_NO_PROVIDER:  return rant_cstr("no provider");
     case RANT_CALL_CANCELLED:    return rant_cstr("cancelled");
     case RANT_CALL_OK: default: return rant_cstr("");
     }
@@ -650,7 +655,7 @@ int rant_function_retire(RantFunction *fn){
     i_rant_func_drain_defers(fn, "provider retired");
     /* every outstanding call gets its one outcome, CANCELLED. A reentrant call from a
        cancel callback queues and the next round cancels it too */
-    while (fn->pending) i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, 1, 0);
+    while (fn->pending) i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0);
     if (pm){ i_rant_pat_unlink((void**)&pm->funcs, fn, offsetof(RantFunction, next)); pm->auth_dirty = 1; }
     req = fn->req; rsp = fn->rsp; prg = fn->prg;   /* outlive fn, see phase 3 */
     if (fn->sync_buf)  i_rant_node_sys_alloc(n, fn->sync_buf, 0);
@@ -676,7 +681,7 @@ int rant_function_refresh(RantFunction *fn){
     acquired = i_rant_node_sys_lock(n);
     if (!acquired){ i_rant_node_sys_unlock(n, acquired); return RANT_ERR_STATE; }
     i_rant_func_drain_defers(fn, "provider re-typed");
-    while (fn->pending) i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, 1, 0);
+    while (fn->pending) i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0);
     i_rant_node_sys_unlock(n, acquired);
     i_rant_node_flush_tx(n);
     r = i_rant_topic_retype(fn->req, rq, RANT_RELIABLE);
@@ -717,37 +722,36 @@ static void i_rant_func_sync_response(const RantResponse *r){
     c->done = 1;
 }
 
+/* The blocking call's wait predicate, under the node lock. A task that reached RUNNING
+ * has no deadline: it waits for the terminal outcome, and cancel from another thread is
+ * the impatience tool. The local deadline sits past the remote one so the tick's
+ * synthesized TIMEOUT normally lands first. */
+typedef struct { i_RantSyncCtx *ctx; uint32_t id; uint64_t deadline; } i_RantCallWait;
+static int i_rant_func_call_wait_done(RantNode *n, void *user, uint64_t now, uint64_t *deadline){
+    i_RantCallWait *w = (i_RantCallWait*)user;
+    i_RantPending *p;
+    (void)n; (void)now;
+    if (w->ctx->done) return 1;
+    p = i_rant_func_find_pending(w->ctx->fn, w->id);
+    *deadline = (p && p->running) ? RANT__NO_DEADLINE : w->deadline;
+    return 0;
+}
+
 int rant_function_call(RantFunction *fn, RantBytes req, RantResponse *out, int timeout_ms,
                        const RantCallOpts *opts){
-    i_RantSyncCtx ctx; int acquired, r; uint64_t deadline; uint32_t id;
+    i_RantSyncCtx ctx; i_RantCallWait cw; int acquired, r; uint32_t id;
     if (!fn) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_sys_lock(fn->n);
-    if (!acquired || rant_node_is_started(fn->n)){     /* a callback or a service thread */
-        i_rant_node_sys_unlock(fn->n, acquired);
-        return RANT_ERR_STATE;
-    }
+    if (!acquired) return RANT_ERR_STATE;      /* from a callback: can neither pump nor sleep */
     i_rant_node_sys_unlock(fn->n, acquired);
     ctx.fn = fn; ctx.done = 0; ctx.status = RANT_CALL_TIMEOUT; ctx.schema = NULL; ctx.len = 0;
     ctx.provider = 0; ctx.written_us = 0;
     r = i_rant_function_call_id(fn, req, i_rant_func_sync_response, &ctx, opts, &id);
     if (r != RANT_OK) return r;
-    deadline = i_rant_node_now_us(fn->n)
-             + (uint64_t)(timeout_ms >= 0 ? (uint64_t)timeout_ms * 1000u : fn->timeout_us) + 20000u;
-    while (!ctx.done){
-        if (i_rant_node_now_us(fn->n) >= deadline){
-            /* a task that reached RUNNING has no deadline: wait for the terminal outcome,
-               and cancel from another thread is the impatience tool */
-            int running = 0;
-            acquired = i_rant_node_sys_lock(fn->n);
-            {   i_RantPending *p = i_rant_func_find_pending(fn, id);
-                running = p && p->running;
-            }
-            i_rant_node_sys_unlock(fn->n, acquired);
-            if (!running) break;
-            deadline = RANT__NO_DEADLINE;
-        }
-        i_rant_node_sys_poll(fn->n, 5);              /* the tick synthesizes TIMEOUT */
-    }
+    cw.ctx = &ctx; cw.id = id;
+    cw.deadline = i_rant_node_now_us(fn->n)
+                + (uint64_t)(timeout_ms >= 0 ? (uint64_t)timeout_ms * 1000u : fn->timeout_us) + 20000u;
+    (void)i_rant_node_sys_wait(fn->n, i_rant_func_call_wait_done, &cw);
     if (!ctx.done){
         /* the local wait expired first: unlink the entry before this frame dies, or a late
            response fires into a reclaimed frame. A racing poller may have completed it */
@@ -1286,6 +1290,18 @@ int rant_variable_set(RantVariable *var, RantBytes value){
     }
 }
 
+/* The owner's declared attrs gate an accessor's force locally: no FORCEABLE bit refuses
+ * with nothing sent, as cancel does for no_cancel. An owner the mesh has not detailed yet
+ * passes, and its own gate then drops the op. */
+static int i_rant_var_owner_forceable(RantVariable *var){
+    RantEntityInfo ei; char name[RANT_TOPIC_NAME_MAX + 1];
+    RantString nm = i_rant_topic_name(var->value);
+    size_t len = nm.len < RANT_TOPIC_NAME_MAX ? nm.len : RANT_TOPIC_NAME_MAX;
+    memcpy(name, nm.data, len); name[len] = '\0';
+    if (!rant_node_mesh_find(var->n, RANT_ENTITY_VARIABLE, name, &ei)) return 1;
+    return ei.forceable;
+}
+
 int rant_variable_force(RantVariable *var, RantBytes value){
     int acquired, r = RANT_OK;
     if (!var) return RANT_ERR_NO_TOPIC;
@@ -1299,6 +1315,7 @@ int rant_variable_force(RantVariable *var, RantBytes value){
     }
     r = i_rant_var_accessor_route_wait(var);
     if (r != RANT_OK) return r;
+    if (!i_rant_var_owner_forceable(var)) return RANT_ERR_ROLE;
     {   uint8_t op = RANT__SET_OP_FORCE;
         return i_rant_topic_send_hdr(var->set, rant_bytes(&op, 1), value);
     }
@@ -1316,6 +1333,7 @@ int rant_variable_unforce(RantVariable *var){
     }
     r = i_rant_var_accessor_route_wait(var);
     if (r != RANT_OK) return r;
+    if (!i_rant_var_owner_forceable(var)) return RANT_ERR_ROLE;
     {   uint8_t op = RANT__SET_OP_UNFORCE;
         return i_rant_topic_send_hdr(var->set, rant_bytes(&op, 1), rant_bytes(NULL,0));
     }
@@ -1387,18 +1405,22 @@ int rant_variable_on_write(RantVariable *var, RantVariableUpdateFn on_write, voi
     return RANT_OK;     /* writes are events, not state: no replay */
 }
 
+typedef struct { RantVariable *var; uint64_t deadline; } i_RantVarWait;
+static int i_rant_var_wait_done(RantNode *n, void *user, uint64_t now, uint64_t *deadline){
+    i_RantVarWait *w = (i_RantVarWait*)user;
+    (void)n; (void)now;
+    *deadline = w->deadline;
+    return w->var->has_value;
+}
+
 int rant_variable_wait(RantVariable *var, int timeout_ms){
-    int acquired; uint64_t deadline;
+    i_RantVarWait w;
     if (!var) return 0;
-    acquired = i_rant_node_sys_lock(var->n);
-    if (!acquired || rant_node_is_started(var->n)){ i_rant_node_sys_unlock(var->n, acquired); return var->has_value; }
-    if (var->has_value){ i_rant_node_sys_unlock(var->n, acquired); return 1; }
-    deadline = i_rant_node_now_us(var->n) + (uint64_t)(timeout_ms >= 0 ? (uint64_t)timeout_ms*1000u : 3600000000ull);
-    i_rant_node_sys_unlock(var->n, acquired);
-    while (!var->has_value){
-        if (i_rant_node_now_us(var->n) >= deadline) break;
-        i_rant_node_sys_poll(var->n, 5);
-    }
+    if (var->has_value) return 1;
+    w.var = var;
+    w.deadline = timeout_ms >= 0 ? i_rant_node_now_us(var->n) + (uint64_t)timeout_ms * 1000u
+                                 : RANT__NO_DEADLINE;
+    (void)i_rant_node_sys_wait(var->n, i_rant_var_wait_done, &w);   /* -1 from a callback */
     return var->has_value;
 }
 
@@ -1554,18 +1576,26 @@ static void i_rant_pat_dup_forget_peer(i_RantPatterns *pm, uint32_t peer){
 
 /* the manager hooks: call timeouts on the tick, provider loss on the event */
 
-/* Fails pending calls with one synthesized outcome each: those directed at dest, or all,
- * or those past now. Callbacks run after the unlink. Returns the earliest deadline left. */
+/* Fails pending calls with one synthesized outcome each: those directed at dest, else by
+ * which: 0 = past now, 1 = every call, 2 = every call already on the wire. A call still
+ * queued at its deadline never had a provider, so it ends NO_PROVIDER rather than
+ * TIMEOUT. Callbacks run after the unlink. Returns the earliest deadline left. */
 static uint64_t i_rant_func_reap(RantFunction *fn, uint64_t now, RantCallStatus fail_status,
-                                 int all, uint32_t dest){
+                                 int which, uint32_t dest){
     i_RantPending **pp = &fn->pending, *p;
     uint64_t soonest = 0;
     while ((p = *pp) != NULL){
-        if (dest ? (p->dest == dest) : (all || now >= p->deadline_us)){
+        int take = dest ? (p->dest == dest)
+                 : which == RANT__REAP_ALL  ? 1
+                 : which == RANT__REAP_SENT ? (p->queued_req == NULL)
+                 : now >= p->deadline_us;
+        if (take){
+            RantCallStatus st = (fail_status == RANT_CALL_TIMEOUT && p->queued_req)
+                              ? RANT_CALL_NO_PROVIDER : fail_status;
             *pp = p->next;
-            {   RantResponse r; r.status = fail_status; r.data = rant_bytes(NULL,0);
+            {   RantResponse r; r.status = st; r.data = rant_bytes(NULL,0);
                 r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
-                r.message = i_rant_call_status_msg(fail_status);
+                r.message = i_rant_call_status_msg(st);
                 if (p->on_response) p->on_response(&r);
             }
             i_rant_func_free_pending(fn, p);
@@ -1602,7 +1632,7 @@ static uint64_t i_rant_patterns_tick(void *user, uint64_t now_us){
     for (fn = pm->funcs; fn; fn = fn->next){
         uint64_t s;
         i_rant_func_flush_queued(fn);     /* the backstop: the interest event is the fast path */
-        s = i_rant_func_reap(fn, now_us, RANT_CALL_TIMEOUT, 0, 0);
+        s = i_rant_func_reap(fn, now_us, RANT_CALL_TIMEOUT, RANT__REAP_EXPIRED, 0);
         if (s && (!soonest || s < soonest)) soonest = s;
     }
     return soonest;   /* the next timeout deadline for the poll wait cap */
@@ -1620,7 +1650,7 @@ static void i_rant_patterns_on_close(void *user){
             i_rant_node_sys_unlock(pm->n, acquired);
         }
         if (!fn->is_provider && fn->pending)
-            i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, 1, 0);
+            i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0);
     }
     /* the drained CANCELLED replies must leave before the socket closes: no poll pass
        follows this hook */
@@ -1648,12 +1678,14 @@ static void i_rant_patterns_on_event(void *user, const RantEvent *ev){
     }
     if (ev->kind != RANT_PEER_DOWN) return;
     i_rant_pat_dup_forget_peer(pm, ev->peer);
-    /* a provider dropped: a caller with no live provider left fails its calls now with
-       PEER_LOST, and a call directed at the dropped peer fails regardless */
+    /* a provider dropped: a caller with no live provider left fails the calls it already
+       sent with PEER_LOST, and a call directed at the dropped peer fails regardless. A
+       call still queued never had a provider, so an unrelated peer leaving is not its
+       loss: it keeps waiting and its deadline ends it NO_PROVIDER */
     for (fn = pm->funcs; fn; fn = fn->next){
         if (fn->is_provider || !fn->pending) continue;
-        (void)i_rant_func_reap(fn, 0, RANT_CALL_PEER_LOST, 0, ev->peer);       /* directed at it */
+        (void)i_rant_func_reap(fn, 0, RANT_CALL_PEER_LOST, RANT__REAP_EXPIRED, ev->peer);   /* directed at it */
         if (fn->pending && i_rant_topic_live_match_count(fn->req) == 0)
-            i_rant_func_reap(fn, 0, RANT_CALL_PEER_LOST, 1, 0);
+            i_rant_func_reap(fn, 0, RANT_CALL_PEER_LOST, RANT__REAP_SENT, 0);
     }
 }

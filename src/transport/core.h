@@ -404,7 +404,8 @@ typedef enum {
     RANT_ERR_ROLE         = -3,  /* the topic is SUB_ONLY or INACTIVE */
     RANT_ERR_OOM          = -4,  /* the allocator returned NULL */
     RANT_ERR_STATE        = -5,  /* wrong state, or a call not allowed from inside a callback */
-    RANT_ERR_NOSYS        = -6   /* not compiled in */
+    RANT_ERR_NOSYS        = -6,  /* not compiled in */
+    RANT_ERR_SCHEMA       = -7   /* the payload is not a message of the topic's schema */
 } RantResult;
 
 /* Publishes to every matched subscriber. */

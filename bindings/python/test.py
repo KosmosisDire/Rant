@@ -485,11 +485,9 @@ def patterns():
     check("call_async answered", done.wait(5.0) and async_rsp[0].ok
           and async_rsp[0].value.sum == 15)
 
-    # a blocking call is refused while the service thread owns the loop, loudly
-    rr = add_r.call(AddReq(a=1, b=2), 0.1)
-    check("blocking call refused under service thread",
-          rr.status == rant.CallStatus.TIMEOUT
-          and rr.send_status == rant.SendStatus.STATE)
+    # a blocking call under the service thread sleeps on its progress and answers
+    rr = add_r.call(AddReq(a=1, b=2), 2.0)
+    check("blocking call answers under service thread", rr.ok and rr.value.sum == 3)
     cli.stop()
 
     # a call still pending at close gets exactly one CANCELLED outcome, never hangs

@@ -114,8 +114,9 @@ exception AppError. It works through a context that streams `Progress` and expos
 real `CancellationToken`. A completion after Retire or Close is refused by the C and
 swallowed.
 
-`Call()` blocks, drives the loop, and is refused from a callback or under a service
-thread. `CallAsync()` returns a Task that never faults: inspect `Status` and `SendStatus`,
+`Call()` blocks, on the service thread's progress under `Start()` and driving the loop
+otherwise, and is refused from a callback. `CallAsync()` returns a Task that never faults:
+inspect `Status` and `SendStatus`,
 and reading `Value` when the call did not complete Ok throws `CallException`. On a task,
 `CallAsync(req, progress, cancellationToken)` fires progress per update, the untyped form
 with a null value for the RUNNING ack and the typed form skipping it, and cancelling the

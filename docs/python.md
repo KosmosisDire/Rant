@@ -119,7 +119,8 @@ CANCELLED, and any other exception completes APP_ERROR. `progress(x)` streams up
 `cancelled` or the `cancel_event` observe a cooperative cancel. Retiring a definition
 answers every live call CANCELLED, and a worker completing after that is refused silently.
 
-A blocking `call()` drives the loop and is refused from a callback or under a service
+A blocking `call()` waits on the service thread's progress under `start()`, drives the
+loop otherwise, and is refused from a callback. It is also refused under a service
 thread, with `send_status` STATE and `status` TIMEOUT. It never raises on a failed call:
 inspect `status`, and reading `value` raises `CallError` when the call did not complete
 OK. `call_async()` returns the launch status, or on a task the call id for `cancel()`, and
@@ -128,7 +129,8 @@ the value, None for the RUNNING ack, or the value and a `Progress`.
 
 Variables are methods only, so every write returns its status. `set()` answers NO_TOPIC
 when no owner matched and BAD_ROLE when the owner has no set channel. `force()` needs
-`allow_force` on the definition. `wait()` blocks until a value exists. `on_change` replays
+`allow_force` on the definition, STATE on the owner without it and BAD_ROLE on a remote
+whose owner advertises none. `wait()` blocks until a value exists. `on_change` replays
 the current value at registration and fires on every state change, `on_write` fires on
 every applied write, both inline on the thread that applied the write.
 
@@ -137,7 +139,7 @@ every applied write, both inline on the thread that applied the write.
 `node.log(level, text)`, or `node.log.error(text)`, `warn` and `info`, publishes a
 formatted line, truncated at RANT_LOG_MAX. `node.log.on(level, handler)` delivers every
 other node's lines at that level as a `LogLine`, and `node.log.topic(level)` is the topic
-behind a level. `meta(peer, sections)` blocks and must not run under `start()` or from a
-callback, and `meta_async` works anywhere. Both decode into a `MetaSnapshot` whose node and
+behind a level. `meta(peer, sections)` blocks and must not run from a callback, and
+`meta_async` works anywhere. Both decode into a `MetaSnapshot` whose node and
 proc scalars are fields and whose full body is `info`. `node.stats.memory()`,
 `backpressure()` and `evicted_unsent()` are the node's own counters.

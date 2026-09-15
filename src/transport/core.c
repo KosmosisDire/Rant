@@ -1494,18 +1494,23 @@ int rant_transport_topic_define(RantTransportState *st, uint16_t topic_index, co
     i_RantTopic *topic; RantQos q; uint16_t depth, p; size_t lane;
     if (!st || !def) return -1;
     if (topic_index >= st->cfg.n_topics) return -1;            /* out of the reserved range */
-    if (!def->name || !def->name[0]) return -1;             /* the name is the identity */
+    if (!def->name || !def->name[0]) return -3;             /* the name is the identity */
     lane = i_rant_name_len(def->name);
-    if (def->name[lane]) return -1;                          /* longer than RANT_TOPIC_NAME_MAX */
+    if (def->name[lane]) return -3;                          /* longer than RANT_TOPIC_NAME_MAX */
     if (def->directed && def->qos.catch_up) return -1;       /* directed history never replays */
     topic = &st->topics[topic_index];
     if (topic->identity != 0 || topic->history) return -1;        /* already defined */
-    {   /* the same name under a different kind on one node is refused, since the maps bind
-           by identity. Retired slots are exempt. See spec/interest.md */
+    {   /* a same name slot on one node is refused under another kind, and under the same
+           kind while both would be live, since the peer maps bind a name to one local topic
+           and a live twin would only be shadowed. An INACTIVE twin is the QoS switch of
+           spec/interest.md, and retired slots are exempt */
         uint64_t id = rant_topic_identity(def); uint16_t c;
-        for (c=0;c<st->cfg.n_topics;c++)
-            if (i_rant_topic_announced(&st->topics[c]) && st->topics[c].identity == id
-                && st->topics[c].kind != def->kind) return -1;
+        for (c=0;c<st->cfg.n_topics;c++){
+            const i_RantTopic *t = &st->topics[c];
+            if (!i_rant_topic_announced(t) || t->identity != id) continue;
+            if (t->kind != def->kind) return -2;
+            if (t->role != RANT_INACTIVE && def->role != RANT_INACTIVE) return -2;
+        }
     }
     q = def->qos; i_rant_qos_defaults(&q);
     depth = q.keep_last;
@@ -1593,16 +1598,19 @@ int rant_transport_topic_reuse(RantTransportState *st, uint16_t topic_index,
     if (!st || !def) return -1;
     topic = i_rant_topic_at(st, topic_index, NULL);
     if (!topic || !topic->retired) return -1;
-    if (!def->name || !def->name[0]) return -1;
+    if (!def->name || !def->name[0]) return -3;
     nlen = i_rant_name_len(def->name);
-    if (def->name[nlen]) return -1;                          /* longer than RANT_TOPIC_NAME_MAX */
+    if (def->name[nlen]) return -3;                          /* longer than RANT_TOPIC_NAME_MAX */
     if (def->directed && def->qos.catch_up) return -1;       /* directed history never replays */
     id = rant_topic_identity(def);
-    {   /* the same name under a different kind on one node is refused, as at define */
+    {   /* the same name rule as at define */
         uint16_t c;
-        for (c=0;c<st->cfg.n_topics;c++)
-            if (c != topic_index && i_rant_topic_announced(&st->topics[c])
-                && st->topics[c].identity == id && st->topics[c].kind != def->kind) return -1;
+        for (c=0;c<st->cfg.n_topics;c++){
+            const i_RantTopic *t = &st->topics[c];
+            if (c == topic_index || !i_rant_topic_announced(t) || t->identity != id) continue;
+            if (t->kind != def->kind) return -2;
+            if (t->role != RANT_INACTIVE && def->role != RANT_INACTIVE) return -2;
+        }
     }
     if (!binding_changed && (topic->identity != id || topic->kind != def->kind))
         return -1;                       /* asserted identical, but the stored binding differs */

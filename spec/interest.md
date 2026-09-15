@@ -224,11 +224,13 @@ interest paging kinds carry n = 0 and the bodies given above.
 
 ## Kinds and twins
 
-One node cannot define the same name under two kinds. The per peer maps bind an entry to
-one local topic by identity, so local cross kind twins would cross bind and refuse
-forever. Across nodes a name verified peer that advertises the name under another kind is
-refused with `RANT_E_KIND_MISMATCH`, never cross wired. Retired slots are exempt from the
-local check.
+One node cannot define the same name twice while both would be live, nor under two
+kinds at all. The per peer maps bind an entry to one local topic by identity, so a live
+twin would be shadowed and a cross kind twin would cross bind and refuse forever. The
+define returns -2 and the node records `RANT_E_NAME_COLLISION` with `.peer` 0. Across
+nodes a name verified peer that advertises the name under another kind is refused with
+`RANT_E_KIND_MISMATCH`, never cross wired. Retired slots are exempt from the local check,
+and so is a twin on either side that is `RANT_INACTIVE`.
 
 A node may hold two topics of one identity with different QoS and switch which is live by
 role. Identity lookup prefers the non INACTIVE one, and a verdict bound to the parked twin

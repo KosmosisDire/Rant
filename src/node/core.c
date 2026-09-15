@@ -55,6 +55,7 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
     switch (ev->error){
     case RANT_E_NAME_COLLISION:
         p=i_rant_event_append_str(p,end,"name-collision "); p=i_rant_event_append_topic(p,end,ev);
+        if (!ev->peer){ p=i_rant_event_append_str(p,end,": already created on this node, retire it first"); break; }
         p=i_rant_event_append_str(p,end," peer "); p=i_rant_event_append_peer(p,end,ev);
         p=i_rant_event_append_str(p,end," identity=0x"); p=i_rant_event_append_hex(p,end,ev->identity);
         p=i_rant_event_append_str(p,end,": match refused"); break;
@@ -133,7 +134,18 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
         p=i_rant_event_append_str(p,end,"poll failed"); p=i_rant_event_append_oserr(p,end,ev); break;
     case RANT_E_WAKER:
         p=i_rant_event_append_str(p,end,"cross-thread waker unavailable (wakes at next tick)"); break;
-    case RANT_E_NONE: default:
+    case RANT_E_BAD_NAME:
+        p=i_rant_event_append_str(p,end,"bad-name "); p=i_rant_event_append_topic(p,end,ev);
+        p=i_rant_event_append_str(p,end,": empty, too long or '@' outside a pattern channel, create refused"); break;
+    case RANT_E_STATE:
+        p=i_rant_event_append_str(p,end,"state "); p=i_rant_event_append_topic(p,end,ev);
+        p=i_rant_event_append_str(p,end,": create refused from a callback or the topic reserve is full"); break;
+    case RANT_E_BAD_SCHEMA:
+        p=i_rant_event_append_str(p,end,"bad-schema "); p=i_rant_event_append_topic(p,end,ev);
+        p=i_rant_event_append_str(p,end,": the schema failed to parse, create refused"); break;
+    case RANT_E_NONE:
+        p=i_rant_event_append_str(p,end,"no error"); break;
+    default:
         p=i_rant_event_append_str(p,end,"error"); break;
     }
     return p;

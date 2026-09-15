@@ -40,7 +40,8 @@ exact request pointer the callback received, never a copy.
 The caller's `RantResponse` carries `status`, `data`, `schema`, `provider` (the answering
 peer), `message` (human readable outcome text, always displayable) and `written_us`.
 Statuses are `RANT_CALL_OK`, `APP_ERROR`, `NO_HANDLER`, `TIMEOUT`, `PEER_LOST`,
-`CANCELLED` and, for tasks, `RUNNING`.
+`NO_PROVIDER` (the timeout passed and no definition ever matched, so the request never
+left this node), `CANCELLED` and, for tasks, `RUNNING`.
 
 `RantFunctionOpts`: `timeout_us`, `backpressure_wait_us`, `keep_last` (request and
 response history depth, default 10), `reflect_from_mesh` and `multi`. Raise `keep_last`
@@ -51,11 +52,13 @@ past the depth are lost and the callers see `RANT_CALL_TIMEOUT`.
 first answer wins), `on_progress` and `progress_user` (tasks), and `id_out` (the call id,
 for cancel).
 
-`rant_function_call` drives the node loop itself and returns 1 when answered, 0 on a
-timeout and a negative `RantResult` on error, so it is refused with `RANT_ERR_STATE` from
-a callback or under a service thread, where `rant_function_call_async` is the tool. On a
-task the timeout bounds only the wait for the first response, then it waits for the
-terminal outcome and `rant_function_cancel` from another thread is the way out.
+`rant_function_call` blocks and returns 1 with an outcome in `out` (a synthesized
+`NO_PROVIDER` or `PEER_LOST` included), 0 on its own timeout and a negative `RantResult`
+on error. Under `rant_node_start` it sleeps on the service thread's progress,
+otherwise it drives the node loop itself. From a callback it is refused with
+`RANT_ERR_STATE`, and `rant_function_call_async` is the tool there. On a task the timeout
+bounds only the wait for the first response, then it waits for the terminal outcome and
+`rant_function_cancel` from another thread is the way out.
 
 A call from a fresh remote waits for its match like a first topic send (docs/topics.md).
 
@@ -83,6 +86,8 @@ writes, default 10), `backpressure_wait_us` and `reflect_from_mesh`.
 
 `rant_variable_force` overrides the value until `rant_variable_unforce`. Writes while
 forced are absorbed, and unforce restores the latest. `rant_variable_forced` reports it.
+A definition needs `allow_force` (`RANT_ERR_STATE` without), and a remote's force against
+an owner that advertises none is refused with `RANT_ERR_ROLE`, nothing sent.
 
 Events, one slot each, `NULL` clears: `rant_variable_on_change` fires when the observed
 state actually changes (first value, different bytes, a forced flip) and replays the
@@ -99,9 +104,9 @@ A remote's first write waits for the owner match like a first topic send, so
 `rant_function_retire` and `rant_variable_retire` park the entity's channels, answer every
 outstanding call CANCELLED, silence callbacks and free the handle. The handle is invalid
 after. From inside a callback the call is refused with `RANT_ERR_STATE` and the handle
-stays valid. A re created entity with the same name takes its old slots back. Do not
-create a second same name handle while the first lives: it is silently shadowed and
-receives nothing.
+stays valid. A re created entity with the same name takes its old slots back. A second
+same name handle while the first lives is refused: the create returns `NULL` and
+`rant_last_error` says `RANT_E_NAME_COLLISION`. Retire the first.
 Complete or abandon outstanding defer tokens before retiring a definition.
 
 ## Wrappers
