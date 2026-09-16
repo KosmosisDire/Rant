@@ -22,7 +22,7 @@ namespace Rant
     }
 
     /// <summary>A shared, name keyed topic on the scene's RantNodeUnity, one instance per name.
-    /// It survives the native node closing and reopening by re creating its topic lazily.</summary>
+    /// It survives the native node closing and reopening by re creating its handles lazily.</summary>
     public abstract class RantTopicBase
     {
         internal sealed class Sub
@@ -37,11 +37,11 @@ namespace Rant
         private readonly string _name;
         private readonly Qos _qos;
         private readonly List<Sub> _subs = new List<Sub>();
-        private Topic _raw;
-        private Role _appliedRole = Role.Inactive;
         private int _live;          // subs not yet marked dead
         private bool _wantPub;
+        private bool _havePub, _haveSub;   // the sides created on the open node
         private bool _warnedClosed;
+        internal bool Dirty;        // a side to drop, done from the frame outside a dispatch
 
         internal RantTopicBase(RantNodeUnity owner, string name, Qos qos)
         {
@@ -49,80 +49,84 @@ namespace Rant
         }
 
         public string Name => _name;
-        /// <summary>The underlying wrapper Topic, null while the node is closed.</summary>
-        public Topic Raw => _raw;
-        /// <summary>Matched remote endpoints (0 while the node is closed).</summary>
-        public int Matches => _raw != null ? _raw.MatchCount() : 0;
+        /// <summary>Subscribers matched to this node's publishing side, 0 while it has none.</summary>
+        public int Matches => _havePub ? MatchCount() : 0;
         /// <summary>Local handlers currently subscribed.</summary>
         public int SubscriberCount => _live;
         /// <summary>True when a publish would not wait on the match wait.</summary>
-        public bool Ready => _raw != null && _raw.Ready;
+        public bool Ready => _havePub && PubReady();
         /// <summary>Consumer queue depth, bytes, capacity and drops since open.</summary>
         public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
-            => _raw != null ? _raw.QueueStats() : (0u, 0u, 0u, 0u);
+            => _haveSub ? SubQueueStats() : (0u, 0u, 0u, 0u);
 
-        internal abstract Topic CreateRaw(RantNode node, string name, Role role, Qos qos);
+        internal abstract void CreatePub(RantNode node, string name, Qos qos);
+        internal abstract void CreateSub(RantNode node, string name, Qos qos, Action<RantMessage> deliver);
+        internal abstract void DisposeSub();
+        internal abstract void DropHandles();
+        internal abstract int MatchCount();
+        internal abstract bool PubReady();
+        internal abstract (uint, uint, uint, uint) SubQueueStats();
 
-        // The advertised role mirrors actual local use: create the native topic on first use and
-        // flip the role on later changes. SetRole re advertises at once, so this is cheap.
-        internal void ApplyRole()
+        // The node advertises what is used locally: the publishing side is created on the first
+        // Publish and the subscribing side on the first Subscribe, both over the one topic slot,
+        // and the subscribing side is disposed after the last unsubscribe.
+        internal void Apply()
         {
-            Role want = _wantPub ? (_live > 0 ? Role.PubSub : Role.PubOnly)
-                                 : (_live > 0 ? Role.SubOnly : Role.Inactive);
-            if (_raw != null)
-            {
-                if (want != _appliedRole) { _raw.SetRole(want); _appliedRole = want; }
-                return;
-            }
-            if (want == Role.Inactive) return;
+            Dirty = false;
             RantNode node = _owner != null ? _owner.NativeNode : null;
             if (node == null) return;               // deferred until the node opens
-            _raw = CreateRaw(node, _name, want, _qos);
-            _appliedRole = want;
-            // The wrapper fans a topic index out to its own handlers, so the node needs no
-            // router of ours. Every Unity topic is queued, so this lands on the frame.
-            node.AddSubHandler(_raw.Index, Deliver);
+            if (_wantPub && !_havePub) { CreatePub(node, _name, _qos); _havePub = true; }
+            if (_live > 0 && !_haveSub)
+            {
+                // Every Unity topic is queued, so the deliveries land on the frame.
+                CreateSub(node, _name, _qos, Deliver);
+                _haveSub = true;
+            }
+            if (_live == 0 && _haveSub) { DisposeSub(); _haveSub = false; }
         }
 
         internal void OnNodeOpened()
         {
             _warnedClosed = false;
-            try { ApplyRole(); }
+            try { Apply(); }
             catch (Exception e) { Debug.LogError("[Rant] topic '" + _name + "' create failed: " + e.Message); }
         }
 
         internal void OnNodeClosed()
         {
-            _raw = null;                            // native handle died with the node
-            _appliedRole = Role.Inactive;
+            DropHandles();                          // the native handles died with the node
+            _havePub = _haveSub = false;
         }
 
-        protected Topic PubRaw()
+        // True when the publishing side exists, creating it on the first call.
+        protected bool PubOpen()
         {
             _wantPub = true;
-            ApplyRole();
-            if (_raw == null && !_warnedClosed)
+            Apply();
+            if (!_havePub && !_warnedClosed)
             {
                 _warnedClosed = true;
                 Debug.LogWarning("[Rant] publish on '" + _name + "' dropped: no open RantNodeUnity "
                     + "(component disabled, Run In Edit Mode off, or open failed)");
             }
-            return _raw;
+            return _havePub;
         }
 
         internal RantSubscription AddSub(Action<RantMessage> fn, Component owner, bool hasOwner)
         {
             var s = new Sub { Fn = fn, Owner = owner, HasOwner = hasOwner };
             _subs.Add(s); _live++;
-            ApplyRole();
+            Apply();
             return new RantSubscription(() => RemoveSub(s));
         }
 
+        // The native side is dropped on the next frame: a handler may unsubscribe from inside
+        // a delivery, where the topic's queue is still being drained.
         internal void RemoveSub(Sub s)
         {
             if (s == null || s.Dead) return;
             s.Dead = true; _live--;
-            ApplyRole();
+            if (_live == 0) Dirty = true;
         }
 
         // Main thread, from the node's per-frame dispatch. Handlers may subscribe, unsubscribe
@@ -138,13 +142,14 @@ namespace Rant
                 if (s.HasOwner && s.Owner == null)  // owner destroyed: auto-unsubscribe
                 {
                     s.Dead = true; _live--; sawDead = true;
+                    if (_live == 0) Dirty = true;
                     continue;
                 }
                 if (s.HasOwner && !OwnerActive(s.Owner)) continue;   // paused while disabled
                 try { s.Fn(m); }
                 catch (Exception e) { Debug.LogException(e); }
             }
-            if (sawDead) { _subs.RemoveAll(IsDead); ApplyRole(); }
+            if (sawDead) _subs.RemoveAll(IsDead);
         }
 
         internal void PruneDeadOwners()
@@ -155,7 +160,8 @@ namespace Rant
                 Sub s = _subs[i];
                 if (!s.Dead && s.HasOwner && s.Owner == null) { s.Dead = true; _live--; changed = true; }
             }
-            if (changed) { _subs.RemoveAll(IsDead); ApplyRole(); }
+            if (changed) _subs.RemoveAll(IsDead);
+            if (changed && _live == 0) Dirty = true;
         }
 
         private static bool IsDead(Sub s) => s.Dead;
@@ -167,25 +173,29 @@ namespace Rant
         }
     }
 
-    /// <summary>A raw (schemaless) shared topic: bytes or UTF-8 strings.</summary>
+    /// <summary>A raw (schemaless) shared topic carrying bytes.</summary>
     public sealed class RantTopic : RantTopicBase
     {
+        private Publisher<byte[]> _pub;
+        private Subscriber<byte[]> _sub;
+
         internal RantTopic(RantNodeUnity owner, string name, Qos qos) : base(owner, name, qos) { }
 
-        internal override Topic CreateRaw(RantNode node, string name, Role role, Qos qos)
-            => new Topic(node, name, (Schema)null, role, qos);
+        internal override void CreatePub(RantNode node, string name, Qos qos)
+            => _pub = node.Publisher<byte[]>(name, qos);
+        internal override void CreateSub(RantNode node, string name, Qos qos, Action<RantMessage> deliver)
+        {
+            _sub = node.Subscriber<byte[]>(name, qos);
+            _sub.OnMessage += (byte[] b, RantMessage m) => deliver(m);
+        }
+        internal override void DisposeSub() { _sub.Dispose(); _sub = null; }
+        internal override void DropHandles() { _pub = null; _sub = null; }
+        internal override int MatchCount() => _pub.MatchCount;
+        internal override bool PubReady() => _pub.Ready;
+        internal override (uint, uint, uint, uint) SubQueueStats() => _sub.QueueStats();
 
         public SendStatus Publish(byte[] data)
-        {
-            Topic r = PubRaw();
-            return r != null ? r.Send(data) : SendStatus.NoTopic;
-        }
-
-        public SendStatus Publish(string text)
-        {
-            Topic r = PubRaw();
-            return r != null ? r.Send(text) : SendStatus.NoTopic;
-        }
+            => PubOpen() ? _pub.Send(data) : SendStatus.NoTopic;
 
         public RantSubscription Subscribe(Action<RantMessage> handler)
         {
@@ -204,31 +214,41 @@ namespace Rant
     }
 
     /// <summary>A typed shared topic: T's public fields are the schema, as in the core
-    /// wrapper's Topic&lt;T&gt;.</summary>
+    /// wrapper's Publisher&lt;T&gt; and Subscriber&lt;T&gt;.</summary>
     public sealed class RantTopic<T> : RantTopicBase
     {
+        private Publisher<T> _pub;
+        private Subscriber<T> _sub;
+
         internal RantTopic(RantNodeUnity owner, string name, Qos qos) : base(owner, name, qos) { }
 
-        internal override Topic CreateRaw(RantNode node, string name, Role role, Qos qos)
-            => new Topic<T>(node, name, role, qos);
+        internal override void CreatePub(RantNode node, string name, Qos qos)
+            => _pub = node.Publisher<T>(name, qos);
+        internal override void CreateSub(RantNode node, string name, Qos qos, Action<RantMessage> deliver)
+        {
+            _sub = node.Subscriber<T>(name, qos);
+            _sub.OnMessage += (T v, RantMessage m) => deliver(m);
+        }
+        internal override void DisposeSub() { _sub.Dispose(); _sub = null; }
+        internal override void DropHandles() { _pub = null; _sub = null; }
+        internal override int MatchCount() => _pub.MatchCount;
+        internal override bool PubReady() => _pub.Ready;
+        internal override (uint, uint, uint, uint) SubQueueStats() => _sub.QueueStats();
 
         public SendStatus Publish(T message)
-        {
-            Topic r = PubRaw();
-            return r != null ? ((Topic<T>)r).Send(message) : SendStatus.NoTopic;
-        }
+            => PubOpen() ? _pub.Send(message) : SendStatus.NoTopic;
 
         public RantSubscription Subscribe(Action<T> handler)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return AddSub(m => { if (m.Value is T v) handler(v); }, null, false);
+            return AddSub(Typed(handler, null), null, false);
         }
 
         /// <summary>With the message beside the value: sender, both clocks, raw bytes.</summary>
         public RantSubscription Subscribe(Action<T, RantMessage> handler)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return AddSub(m => { if (m.Value is T v) handler(v, m); }, null, false);
+            return AddSub(Typed(null, handler), null, false);
         }
 
         /// <summary>Owner-bound: auto-unsubscribes when owner is destroyed, skipped
@@ -237,7 +257,7 @@ namespace Rant
         {
             if (owner == null) throw new ArgumentNullException(nameof(owner));
             if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return AddSub(m => { if (m.Value is T v) handler(v); }, owner, true);
+            return AddSub(Typed(handler, null), owner, true);
         }
 
         /// <summary>Owner-bound, with the message beside the value.</summary>
@@ -245,8 +265,16 @@ namespace Rant
         {
             if (owner == null) throw new ArgumentNullException(nameof(owner));
             if (handler == null) throw new ArgumentNullException(nameof(handler));
-            return AddSub(m => { if (m.Value is T v) handler(v, m); }, owner, true);
+            return AddSub(Typed(null, handler), owner, true);
         }
+
+        private static Action<RantMessage> Typed(Action<T> plain, Action<T, RantMessage> full)
+            => m =>
+            {
+                T v;
+                if (!Patterns.TryValue(m, out v)) return;
+                if (plain != null) plain(v); else full(v, m);
+            };
     }
 }
 #endif

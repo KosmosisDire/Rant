@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- Subscribes to 'tick' and reports the received message rate (Hz). Pair with
-       bindings/csharp/publisher (or bindings/python/publisher.py) to see end-to-end throughput. -->
+       bindings/csharp/publisher (or bindings/python/publisher.py) to see end-to-end throughput.
+       References the packed Rant package from dist/, as a package user would. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
@@ -9,13 +10,14 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>rant_subscriber</AssemblyName>
     <RootNamespace>RantSubscriber</RootNamespace>
+    <RantVersion>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../../VERSION').Trim())</RantVersion>
+    <!-- A repo local package folder that a fresh pack clears, so a re packed version is
+         taken instead of the global cache serving a stale one. -->
+    <RestorePackagesPath>$(MSBuildThisFileDirectory)../.packages</RestorePackagesPath>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="../Rant.cs" />
-    <None Include="../../../dist/native/**/*" Link="%(Filename)%(Extension)">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
+    <PackageReference Include="Rant" Version="$(RantVersion)" />
   </ItemGroup>
 
 </Project>

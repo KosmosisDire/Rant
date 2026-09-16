@@ -27,3 +27,5 @@ old
 # Python build/cache artifacts (pip build, bytecode)
 __pycache__/
 *.egg-info/
+# the examples restore the packed Rant package here, never the global cache
+/bindings/csharp/.packages/

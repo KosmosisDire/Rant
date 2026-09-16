@@ -11,9 +11,11 @@ about a wrapper API, this file wins.
   `create_remote_function`, `create_variable_definition`, `create_remote_variable`.
 - `call` is the completed transaction in every language. `_async` marks the callback or
   Task form. JS has no callAsync, the Promise is it.
-- Match queries in C++ and C# are side named: the remote side exposes a bool
-  `has_definition`, the definition side `caller_count` or `remote_count`. Python spells
-  every one `match_count`, the count of the other side. C keeps its generic primitives.
+- Match queries in C++ are side named: the remote side exposes a bool `has_definition`,
+  the definition side `caller_count` or `remote_count`. Python and C# spell every one
+  `match_count` and `MatchCount`, the count of the other side, except that a C#
+  `Subscriber<T>` has none since the C exposes no publisher count on the subscribing side.
+  C keeps its generic primitives.
 - A call outcome is a value, never a fault. C# `CallAsync` always completes with a
   Response, and reading `.Value` off OK throws. JS `call()` rejects only on connection loss.
 - Variable reads are local and status free. Writes return a status. C# `Value` has a
@@ -25,8 +27,12 @@ about a wrapper API, this file wins.
 - Node open takes `(name, on_message, on_event, opts)`. `on_message` is nullable, since
   typed subscribers and pattern handles carry their own handlers. `on_event` is validated
   non null by every wrapper so the first diagnostics are never missed. Setter methods
-  exist only for later rebinding.
-- Handlers come in two forms: payload only, or payload plus message envelope.
+  exist only for later rebinding. C# is the exception: `new RantNode(name, NodeOptions)`
+  has no node level message handler, subscribers carry every one, and events are the
+  optional `OnEvent` C# event since `LastError` records the last diagnostic either way.
+- Handlers come in two forms: payload only, or payload plus message envelope. C# has one:
+  every handler is a C# event (`OnMessage`, `OnChange`, `OnWrite`, `OnEvent`, `OnLog`)
+  whose delegate takes the value and the envelope, discarded with `_` when unwanted.
 - An owning message copies its payload, since the transport buffer is reused after the
   callback, but decodes only when the fields or the typed value are read. A handler that
   wants the bytes must not pay for the topic's schema. The decode outlives the callback,
@@ -109,10 +115,17 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
 `Assets/Plugins/`. Nothing is generated.
 
 - Collision prone nouns are Rant prefixed: `RantNode`, `RantEvent`, `RantMessage`,
-  `RantRequest`, `RantResponse`. Domain names (`Publisher`, `Subscriber`, `Topic`) stay
-  bare. The C mirror structs carry a `Native` suffix.
-- Everything user creatable uses `new` with optional named parameters. Constructors throw
-  on failure. `CallAsync` returns a Task that never faults.
+  `RantRequest`, `RantResponse`. Domain names (`Publisher<T>`, `Subscriber<T>`,
+  `Variable<T>`) stay bare. The C mirror structs carry a `Native` suffix.
+- Every handle is the typed generic. A `byte[]` type argument carries the message bytes as
+  is, so there is no untyped tier: the engines behind the generics are internal.
+- Every handle comes from a method on `RantNode` named after it, such as
+  `node.Publisher<T>(name, qos)`, with one options object per kind (`NodeOptions`,
+  `FunctionOptions`, `TaskOptions`, `VariableOptions`). Creation throws on failure. Every
+  handle is `IDisposable`, and same name topic handles share one native slot whose role
+  follows the live handles and which the last dispose retires. The service thread runs from
+  construction unless `NodeOptions.Threading` is `Manual`. `CallAsync` returns a Task that
+  never faults.
 - Typed messages by reflection: any struct or class with public fields. `[RantSchema("Name")]`
   overrides the type name, `[RantArray(N)]` marks fixed arrays, `[RantString(cap)]` is
   required on every string field, `[RantField("name")]` overrides a wire name. Fields
@@ -134,9 +147,9 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   libraries for win-x64, linux-x64 and osx, a `package.json` stamped from `VERSION`, and
   a `.meta` per entry whose GUID is the md5 of its path so an upgrade keeps references.
   Each plugin `.meta` enables exactly its own platform, since the three libraries share
-  the name `rant`. The scene MonoBehaviour is `UnityRantNode`. Unity only
+  the name `rant`. The scene MonoBehaviour is `RantNodeUnity`. Unity only
   registers a MonoBehaviour whose class name matches its file name, and fails silently
-  otherwise. Pattern: `Start()` the service thread, force `QueueBytes` nonzero on every
+  otherwise. Pattern: the node's service thread, force `QueueBytes` nonzero on every
   topic so it is queued from creation, then `Dispatch()` per frame. OnDisable closes and a
   beforeAssemblyReload backstop stops the service thread. The Unity path has never run in
   a real editor here.

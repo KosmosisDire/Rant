@@ -26,7 +26,7 @@ namespace Rant
 #endif
 
     public enum Reliability { BestEffort = 0, Reliable = 1 }
-    public enum Role { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 }
+    internal enum Role { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 }
     public enum SendStatus
     {
         Ok = 0, NoTopic = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
@@ -303,7 +303,7 @@ namespace Rant
 
     // the pattern struct mirrors of src/patterns/core.h, field order and types exact
 
-    // The public head of the C RantRequest, only ever read through the callback's pointer:
+    // The public head of the C RequestCore, only ever read through the callback's pointer:
     // the reply machinery lives behind the struct, so the exact pointer is what reply takes.
     [StructLayout(LayoutKind.Sequential)]
     internal struct RantRequestNative
@@ -719,13 +719,166 @@ namespace Rant
         }
     }
 
-    /// <summary>Override the wire type name of a message struct or class, the class name by
-    /// default. Never required.</summary>
+    /// <summary>Who drives the node's loop: the C service thread, started at construction,
+    /// or your own thread calling Poll().</summary>
+    public enum Threading { ServiceThread = 0, Manual = 1 }
+
+    /// <summary>The node options, the C RantNodeOpts under C# names. 0, false or null is the
+    /// C default. docs/node.md and docs/discovery.md explain each.</summary>
+    public sealed class NodeOptions
+    {
+        /// <summary>Nodes only see peers on the same domain.</summary>
+        public ushort Domain;
+        /// <summary>Topics this node may create, 0 = 8.</summary>
+        public ushort MaxTopics;
+        /// <summary>Never use the same host shared memory path.</summary>
+        public bool DisableShm;
+        /// <summary>Fetch and cache every schema every peer advertises, for observer tools.</summary>
+        public bool FetchDetails;
+        /// <summary>The send path match wait bound. 0 = 1 s, negative = off, and such a send
+        /// fires UnmatchedSend instead of waiting.</summary>
+        public int MatchWaitMs;
+        /// <summary>No @rant/log topics: Log returns NoSys.</summary>
+        public bool DisableLogs;
+        /// <summary>No built in @rant/meta function.</summary>
+        public bool DisableMeta;
+        /// <summary>Do not mirror this node's errors onto @rant/log/error.</summary>
+        public bool DisableErrorLogs;
+        /// <summary>The data socket port, 0 = OS assigned.</summary>
+        public ushort DataPort;
+        /// <summary>The discovery multicast group, null = 239.255.0.[domain].</summary>
+        public string DiscoveryGroup;
+        /// <summary>0 = 7400.</summary>
+        public ushort DiscoveryPort;
+        /// <summary>Pin discovery to this interface IP, null = every interface. "127.0.0.1"
+        /// keeps a node on one host.</summary>
+        public string MulticastInterface;
+        /// <summary>0 = 1 hop.</summary>
+        public byte MulticastTtl;
+        /// <summary>"ip" or "ip:port" unicast announce targets.</summary>
+        public string[] SeedPeers;
+        /// <summary>No group join, the seeds relay this node.</summary>
+        public bool UnicastOnly;
+        /// <summary>UDP payload bytes per fragment, 0 = the default.</summary>
+        public ushort FragmentSize;
+        /// <summary>Data socket OS buffers, 0 = the OS default. Raise both for big payloads.</summary>
+        public uint RecvBufferBytes;
+        public uint SendBufferBytes;
+        /// <summary>Advertise this locator to every peer instead of letting each learn it from
+        /// the datagram source, for a cloud IP or a published container port.</summary>
+        public string SelfIp;
+        public ushort AdvertisePort;
+        /// <summary>Discovery cadence: 0 = 3 s between announces, 12 s peer timeout, 16 peers.</summary>
+        public uint AnnounceIntervalUs;
+        public uint PeerTimeoutUs;
+        public ushort MaxPeers;
+        /// <summary>ServiceThread starts the C service thread at construction and handlers fire
+        /// on it. Manual leaves the loop to your Poll() calls, so handlers fire there.</summary>
+        public Threading Threading = Threading.ServiceThread;
+        /// <summary>Where callbacks run. Null runs them inline on the service or polling thread.
+        /// Set it to a delegate that posts to your thread and every event, pattern handler,
+        /// variable observer, progress report and awaited call result runs there instead.
+        /// Messages are unaffected, they have the consumer queue (docs/node.md).</summary>
+        public Action<Action> Dispatcher;
+    }
+
+    /// <summary>Function options, the C RantFunctionOpts. 0 is the default.</summary>
+    public sealed class FunctionOptions
+    {
+        /// <summary>Reliable send pause for a slow peer, 0 = 1 s.</summary>
+        public uint BackpressureWaitUs;
+        /// <summary>The remote call timeout, 0 = 5 s.</summary>
+        public uint TimeoutUs;
+        /// <summary>Request and response ring depth, 0 = 10.</summary>
+        public ushort KeepLast;
+        /// <summary>Redundant definitions on purpose: no duplicate authority diagnostic.</summary>
+        public bool Multi;
+        /// <summary>A byte[] handle with no schema takes the entity's from the mesh, and
+        /// Refresh() re types it later (docs/reflection.md).</summary>
+        public bool ReflectFromMesh;
+
+        internal RantFunctionOpts ToNative() => new RantFunctionOpts
+        {
+            backpressure_wait_us = BackpressureWaitUs,
+            timeout_us = TimeoutUs,
+            keep_last = KeepLast,
+            multi = (byte)(Multi ? 1 : 0),
+            reflect_from_mesh = (byte)(ReflectFromMesh ? 1 : 0),
+        };
+    }
+
+    /// <summary>Task options, the C RantTaskOpts (docs/tasks.md). 0 is the default.</summary>
+    public sealed class TaskOptions
+    {
+        /// <summary>Best effort progress: the definition offers it, a remote requests it.</summary>
+        public bool ProgressBestEffort;
+        /// <summary>Progress ring depth, 0 = the pattern default.</summary>
+        public ushort ProgressKeepLast;
+        /// <summary>The definition will not honor a cancel: remotes get BadRole.</summary>
+        public bool NoCancel;
+        /// <summary>Declared serialization, enforced by the handler.</summary>
+        public bool Exclusive;
+        /// <summary>Redundant providers, one executor each.</summary>
+        public bool Multi;
+        /// <summary>Remote: the bound until the first response, 0 = 5 s.</summary>
+        public uint TimeoutUs;
+        /// <summary>Reliable send pause for a slow peer, 0 = 1 s.</summary>
+        public uint BackpressureWaitUs;
+        /// <summary>Request and response ring depth, 0 = 10.</summary>
+        public ushort KeepLast;
+        /// <summary>As FunctionOptions.ReflectFromMesh, for all three channels.</summary>
+        public bool ReflectFromMesh;
+
+        internal RantTaskOpts ToNative() => new RantTaskOpts
+        {
+            progress_best_effort = (byte)(ProgressBestEffort ? 1 : 0),
+            progress_keep_last = ProgressKeepLast,
+            no_cancel = (byte)(NoCancel ? 1 : 0),
+            exclusive = (byte)(Exclusive ? 1 : 0),
+            multi = (byte)(Multi ? 1 : 0),
+            timeout_us = TimeoutUs,
+            backpressure_wait_us = BackpressureWaitUs,
+            keep_last = KeepLast,
+            reflect_from_mesh = (byte)(ReflectFromMesh ? 1 : 0),
+        };
+    }
+
+    /// <summary>Variable options, the C RantVariableOpts. 0 is the default. ReadOnly and
+    /// AllowForce are the definition's declarations and mean nothing on a remote.</summary>
+    public sealed class VariableOptions
+    {
+        /// <summary>No set channel: a remote set gets BadRole.</summary>
+        public bool ReadOnly;
+        /// <summary>Permit Force, local and remote.</summary>
+        public bool AllowForce;
+        /// <summary>Value channel catch up, 0 = 1.</summary>
+        public ushort CatchUp;
+        /// <summary>Both channels' repair window, 0 = 10.</summary>
+        public ushort KeepLast;
+        /// <summary>Reliable send pause for a slow peer, 0 = 1 s.</summary>
+        public uint BackpressureWaitUs;
+        /// <summary>A byte[] handle with no schema takes the owner's from the mesh, and
+        /// Refresh() re types it later (docs/reflection.md).</summary>
+        public bool ReflectFromMesh;
+
+        internal RantVariableOpts ToNative() => new RantVariableOpts
+        {
+            access = (byte)(ReadOnly ? 1 : 0),
+            allow_force = (byte)(AllowForce ? 1 : 0),
+            catch_up = CatchUp,
+            keep_last = KeepLast,
+            backpressure_wait_us = BackpressureWaitUs,
+            reflect_from_mesh = (byte)(ReflectFromMesh ? 1 : 0),
+        };
+    }
+
+    /// <summary>Name the wire type of a message struct or class. Without it the class name is
+    /// the wire name, and peers must match it.</summary>
     [AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class)]
     public sealed class RantSchemaAttribute : Attribute
     {
         public string Name;
-        public RantSchemaAttribute(string name = null) { Name = name; }
+        public RantSchemaAttribute(string name) { Name = name; }
     }
 
     /// <summary>A fixed length array field with this element count. Without it an array
@@ -854,18 +1007,11 @@ namespace Rant
     [RantTypeName("JointNames")] public struct JointNames
     { [RantField("name")] [RantString(32)] public string[] Name; }
 
-    /// <summary>The standard-type values that need a platform.</summary>
-    public static class Std
+    /// <summary>The Timestamp clock: microseconds since the Unix epoch UTC, the units of a
+    /// message's WrittenUs and of a Send's captureUs.</summary>
+    public static class Timestamp
     {
-        /// <summary>Now in Timestamp units, microseconds since the Unix epoch UTC, the clock a
-        /// message's WrittenUs uses.</summary>
         public static long Now() => Native.rant_timestamp_now();
-        /// <summary>An identity Quaternion (w = 1).</summary>
-        public static Quaternion IdentityRotation() => new Quaternion { W = 1.0 };
-        /// <summary>A Color from 0xRRGGBBAA.</summary>
-        public static Color ColorFromHex(uint rgba)
-            => new Color { R = (byte)(rgba >> 24), G = (byte)(rgba >> 16),
-                           B = (byte)(rgba >> 8),  A = (byte)rgba };
     }
 
     /// <summary>Override a field's wire name (must match peers, like a topic name).</summary>
@@ -882,7 +1028,7 @@ namespace Rant
     }
 
     /// <summary>A call was refused: a non Ok SendStatus surfaced through a throwing surface
-    /// such as the VariableDefinition&lt;T&gt;.Value setter.</summary>
+    /// such as the Variable&lt;T&gt;.Value setter.</summary>
     public class RantException : Exception
     {
         public SendStatus Status;
@@ -898,6 +1044,8 @@ namespace Rant
 
     // ---- schema: DSL compile, reflection, encode/decode -------------------------
 
+    /// <summary>A compiled message schema: the wire shape of a topic, request, response or
+    /// variable. Compile DSL text, or reflect a type's public fields.</summary>
     public sealed class Schema : IDisposable
     {
         internal IntPtr Handle;
@@ -921,36 +1069,29 @@ namespace Rant
         /// publisher's. Freeing it is this object's job from here on.</summary>
         internal Schema(IntPtr owned) { Handle = owned; }
 
-        // The schema a typed handle uses: the given one bound to T, else T reflected.
+        // The schema a typed handle uses: the given one bound to T, else T reflected. A byte[]
+        // T carries the encoded message as is, so it binds no type and reflects nothing.
         internal static Schema For(Type t, Schema given)
         {
-            if (given == null) return new Schema(t);
+            if (Codec.IsRaw(t)) return given == null ? null : Copy(given, null);
+            return given == null ? new Schema(t) : Copy(given, t);
+        }
+
+        private static Schema Copy(Schema given, Type t)
+        {
             IntPtr h = Native.rant_schema_copy(given.Handle, Codec.SchemaAlloc, IntPtr.Zero);
             if (h == IntPtr.Zero) throw new SchemaException("schema copy failed");
             return new Schema(h) { ClrType = t };
         }
 
+        /// <summary>The wire type name, "" for an anonymous root.</summary>
         public string Name => Codec.Str(Native.rant_schema_name(Handle));
-        public uint Size => Native.rant_schema_size(Handle);
+        /// <summary>The identity of the wire shape, the same value in every language.</summary>
         public ulong Hash => Native.rant_schema_hash(Handle);
-        public ushort FieldCount => Native.rant_schema_field_count(Handle);
-        public byte[] Wire => Codec.Bytes(Native.rant_schema_wire(Handle));
 
         /// <summary>The DSL text reconstructed from the compiled schema (works for any
         /// schema, including one parsed from a peer). Paste into a C node for interop.</summary>
         public string Dsl => Codec.SchemaDsl(Handle);
-
-        /// <summary>True when this schema is a BARE TYPE: its message is one value, so Encode
-        /// takes that value and Decode returns it instead of a field dictionary.</summary>
-        public bool IsValueRoot
-        {
-            get
-            {
-                if (_valueRoot < 0) _valueRoot = Codec.IsValueRoot(Handle) ? 1 : 0;   // probed once
-                return _valueRoot != 0;
-            }
-        }
-        private int _valueRoot = -1;
 
         /// <summary>Can a reader declaring this schema read messages written with pub? Type
         /// names narrow: an anonymous type reads a named one, never the reverse.</summary>
@@ -963,7 +1104,7 @@ namespace Rant
         {
             get
             {
-                ushort n = FieldCount;
+                ushort n = Native.rant_schema_field_count(Handle);
                 var fields = new SchemaField[n];
                 for (ushort i = 0; i < n; i++)
                 {
@@ -999,10 +1140,11 @@ namespace Rant
             return list;
         }
 
+        /// <summary>Encode a value: an instance of the reflected type, or a Dictionary by field
+        /// name against any schema. A field left null keeps the zero default.</summary>
         public byte[] Encode(object value) => Codec.Encode(Handle, value);
-        /// <summary>The decoded fields by name. A bare type schema yields its one value under
-        /// the empty name.</summary>
-        public Dictionary<string, object> DecodeFields(byte[] data) => Codec.DecodeDict(Handle, data);
+        /// <summary>Decode message bytes: an instance of the reflected type, the one value of a
+        /// bare type, else the fields by name as a Dictionary.</summary>
         public object Decode(byte[] data)
         {
             var d = Codec.DecodeDict(Handle, data);
@@ -1041,12 +1183,11 @@ namespace Rant
 
     public sealed class SchemaEnumVariant { public string Name; public long Value; }
 
-    /// <summary>A delivered message. The payload is copied out so it outlives the callback,
-    /// but the decode happens on the first read of Fields or Value and never if neither is
-    /// read. Read it from one thread, as handlers do.</summary>
+    /// <summary>A delivered message: the envelope beside the payload. The payload is copied
+    /// out so it outlives the callback, and the decode happens on the first read of Value and
+    /// never if it is not read. Read it from one thread, as handlers do.</summary>
     public sealed class RantMessage
     {
-        public ushort TopicIndex;
         public uint PublisherId;
         public string PublisherName;
         public string TopicName;
@@ -1071,15 +1212,13 @@ namespace Rant
         private object _value;
         private bool _decoded;
 
-        /// <summary>The decoded fields, null on a raw topic or when the decode failed.
-        /// Decodes on the first read.</summary>
-        public Dictionary<string, object> Fields { get { Decode(); return _fields; } }
-        /// <summary>The typed instance for a typed topic, the bare value for a bare-type
-        /// schema, else Fields. Decodes on the first read.</summary>
+        /// <summary>The typed instance on a typed subscriber, the one value of a bare type,
+        /// else the fields by name as a Dictionary. Null on a raw topic or when the decode
+        /// failed. Decodes on the first read.</summary>
         public object Value { get { Decode(); return _value; } }
 
-        // Decode failures stay where they were: reported once, leaving Fields and Value null,
-        // so one bad publisher never throws out of a handler that only wanted the bytes.
+        // Decode failures stay where they were: reported once, leaving Value null, so one bad
+        // publisher never throws out of a handler that only wanted the bytes.
         private void Decode()
         {
             if (_decoded) return;
@@ -1094,14 +1233,10 @@ namespace Rant
             catch (Exception e) { Console.Error.WriteLine("rant decode: " + e); }
         }
 
-        public string Text => Encoding.UTF8.GetString(Data);
-        public T As<T>() => (T)Value;
-
         internal static RantMessage FromNative(ref RantMsg m, Type clrType, Schema ownedSchema)
         {
             return new RantMessage
             {
-                TopicIndex = m.topic_index,
                 PublisherId = m.publisher_id,
                 PublisherName = Codec.Str(m.publisher_name),
                 TopicName = Codec.Str(m.topic_name),
@@ -1118,6 +1253,8 @@ namespace Rant
             => $"RantMessage(topic={TopicName}, from={PublisherName}, {Data.Length} bytes)";
     }
 
+    /// <summary>One node event: a peer came or went, a peer's interest changed, messages were
+    /// lost, or an error. ToString() is the one line diagnostic.</summary>
     public sealed class RantEvent
     {
         public EventKind Kind;
@@ -1169,6 +1306,20 @@ namespace Rant
         public override string ToString() => _line;
     }
 
+    /// <summary>A node's counters as one snapshot, from RantNode.Stats.</summary>
+    public sealed class NodeStats
+    {
+        /// <summary>Sends that evicted never sent history after the bounded wait, the
+        /// overload indicator (the ErrorKind.EvictedUnsent count).</summary>
+        public uint EvictedUnsent;
+        /// <summary>Bytes of the node's arena in use now and at the peak, and how many
+        /// allocation calls it made.</summary>
+        public ulong MemInUse, MemPeak, AllocCalls;
+        /// <summary>Time reliable sends spent paused for a slow subscriber, and how many did.</summary>
+        public ulong BackpressureWaitedUs;
+        public uint BackpressureWaits;
+    }
+
     /// <summary>One decoded @rant/log line for a RantNode.OnLog handler. WallUs is epoch us,
     /// MonoUs the publisher's monotonic clock, RecvUs this node's clock at receipt.</summary>
     public sealed class RantLogLine
@@ -1211,7 +1362,7 @@ namespace Rant
         private static string S(Dictionary<string, object> d, string k)
             => d.TryGetValue(k, out var o) ? o as string ?? "" : "";
 
-        internal static RantMetaSnapshot FromResponse(RantResponse r)
+        internal static RantMetaSnapshot FromResponse(ResponseCore r)
         {
             var s = new RantMetaSnapshot { Status = r.Status, Provider = r.Provider };
             if (r.Status != CallStatus.Ok || r.SchemaPtr == IntPtr.Zero) return s;
@@ -1325,45 +1476,27 @@ namespace Rant
 
     // ---- topic ----------------------------------------------------------------
 
-    public class Topic : INodeHandle
+    // The native topic slot behind Publisher<T> and Subscriber<T>. Same name handles on one
+    // node share it, held per role in the node's registry, and the last one out retires it.
+    internal sealed class TopicCore : INodeHandle
     {
         internal readonly RantNode _node;
-        internal IntPtr _handle;   // zeroed by Retire, and by the node at Close
+        internal IntPtr _handle;   // zeroed by Release, and by the node at Close
+        internal readonly Schema Schema;
+        internal readonly Role Role;
 
         void INodeHandle.Invalidate() { _handle = IntPtr.Zero; }
-        internal readonly Schema Schema;
 
-        /// <summary>Create a raw (schemaless) topic on the node: send/receive bytes or
-        /// UTF-8 strings. A null qos is every default.</summary>
-        public Topic(RantNode node, string name, Role role = Role.PubSub, Qos qos = null)
-            : this(node, name, (Schema)null, role, qos) { }
-
-        /// <summary>Create a typed topic with an explicit Schema. Topic&lt;T&gt; is the shorthand
-        /// for the reflected case. Same-name topics on one node share the native slot with a
-        /// widened role (registry in RantNode).</summary>
-        public Topic(RantNode node, string name, Schema schema, Role role = Role.PubSub, Qos qos = null)
+        internal TopicCore(RantNode node, string name, Schema schema, Role role, Qos qos)
         {
             _node = node;
             Schema = schema;
-            _handle = node.CreateOrShareTopic(name, role, schema, qos);
+            Role = role;
+            _handle = node.AcquireTopic(name, role, schema, qos);
             node.RegisterHandle(this);
         }
 
-        // Wrap an already-existing native handle (e.g. a @rant/log topic from the node):
-        // no name registry entry, no schema. Query/send/set-role like any topic.
-        internal Topic(RantNode node, IntPtr handle)
-        {
-            _node = node;
-            Schema = null;
-            _handle = handle;
-            node.RegisterHandle(this);
-        }
-
-        /// <summary>Publish bytes/string (raw) or a message object (encoded via the
-        /// topic schema). captureUs is when the data was true rather than when it was
-        /// sent, in Std.Now() units; 0 leaves it unstated and costs no wire bytes.
-        /// Returns a SendStatus.</summary>
-        public SendStatus Send(byte[] data, long captureUs = 0)
+        internal SendStatus Send(byte[] data, long captureUs)
         {
             int r;
             var h = GCHandle.Alloc(data, GCHandleType.Pinned);
@@ -1381,58 +1514,15 @@ namespace Rant
             return (SendStatus)r;
         }
 
-        public SendStatus Send(string text, long captureUs = 0)
-            => Send(Encoding.UTF8.GetBytes(text), captureUs);
+        // Drop this handle's hold on the slot. The native topic is retired with the last one.
+        internal void Release() => _node.ReleaseTopic(this);
+        internal bool Refresh() => _handle != IntPtr.Zero && Native.rant_topic_refresh(_handle) == 1;
+        internal ushort Index => Native.rant_topic_index(_handle);
+        internal int MatchCount => Native.rant_topic_match_count(_handle);
+        internal bool Ready => Native.rant_topic_ready(_handle) == 1;
 
-        public SendStatus Send(object value, long captureUs = 0)
-        {
-            // A bare-type schema frames its own value, so bytes/string go through it too:
-            // a `string` root is a framed value, not loose text.
-            bool bare = Schema != null && Schema.IsValueRoot;
-            if (!bare && value is byte[] b) return Send(b, captureUs);
-            if (!bare && value is string s) return Send(s, captureUs);
-            if (Schema == null)
-                throw new InvalidOperationException(
-                    "topic has no schema; send bytes/string, or create the topic with a schema");
-            return Send(Schema.Encode(value), captureUs);
-        }
-
-        public SendStatus SetRole(Role role)
-        {
-            return (SendStatus)Native.rant_topic_set_role(_handle, (int)role);
-        }
-
-        /// <summary>Retire the topic so the name can be re created with another schema
-        /// (docs/topics.md). On Ok this handle is invalid. Refused from a callback.</summary>
-        public SendStatus Retire() => _node.RetireTopic(this);
-
-        /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
-        /// provider moved. True when it was re typed. See docs/reflection.md.</summary>
-        public bool Refresh() => _handle != IntPtr.Zero && Native.rant_topic_refresh(_handle) == 1;
-
-        public ushort Index => Native.rant_topic_index(_handle);
-
-        public int MatchCount()
-        {
-            return Native.rant_topic_match_count(_handle);
-        }
-
-        /// <summary>True when a send would not wait on the match wait: a subscriber is matched
-        /// or matching has converged. For a GUI: park payloads while false.</summary>
-        public bool Ready => Native.rant_topic_ready(_handle) == 1;
-
-        /// <summary>Unresolved candidate matches right now. 0 = matching has converged for
-        /// every known peer.</summary>
-        public int PendingCount => Native.rant_topic_pending_count(_handle);
-
-        public bool Drain(int timeoutMs)
-        {
-            return Native.rant_topic_drain(_handle, timeoutMs) == 1;
-        }
-
-        /// <summary>Pop the next queued message, fully copied out. The first TryTake or Dispatch
-        /// queues the topic (docs/node.md). timeoutMs 0 = check, negative = forever.</summary>
-        public bool TryTake(out RantMessage message, int timeoutMs = 0)
+        // The first take or dispatch queues the topic (docs/node.md).
+        internal bool TryTake(out RantMessage message, int timeoutMs)
         {
             message = null;
             var m = new RantMsg();
@@ -1442,49 +1532,27 @@ namespace Rant
             return true;
         }
 
-        /// <summary>Drain the queue by running OnMessage on the calling thread, oldest first, up
-        /// to maxMsgs (0 = all), waiting like TryTake. These run without the node lock.</summary>
-        public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
+        internal int Dispatch(int maxMsgs, int timeoutMs)
             => Native.rant_topic_dispatch(_handle, maxMsgs, timeoutMs);
 
-        /// <summary>Consumer queue observability, all zeros when not queued.</summary>
-        public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
+        internal (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
         {
             Native.rant_topic_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
             return (m, b, c, d);
         }
 
-        /// <summary>The cumulative traffic this node committed to the topic and delivered from
-        /// it. Always on, and in the @rant/meta snapshot.</summary>
-        public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts()
+        internal (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts()
         {
             Native.rant_topic_counts(_handle, out ulong tm, out ulong tb, out ulong rm, out ulong rb);
             return (tm, tb, rm, rb);
         }
     }
 
-    /// <summary>A typed topic: T's public fields are the schema, or a bare T is the schema
-    /// itself and Send and TryTake carry the plain value (docs/csharp.md).</summary>
-    public sealed class Topic<T> : Topic
-    {
-        public Topic(RantNode node, string name, Role role = Role.PubSub, Qos qos = null, Schema schema = null)
-            : base(node, name, Schema.For(typeof(T), schema), role, qos) { }
-
-        public SendStatus Send(T value, long captureUs = 0) => Send((object)value, captureUs);
-
-        /// <summary>Typed take: decodes straight from the queue.</summary>
-        public bool TryTake(out T value, int timeoutMs = 0)
-        {
-            value = default(T);
-            RantMessage m;
-            if (!TryTake(out m, timeoutMs) || !(m.Value is T)) return false;
-            value = (T)m.Value;
-            return true;
-        }
-    }
-
     // ---- node -------------------------------------------------------------------
 
+    /// <summary>One participant on the mesh. Its Publisher, Subscriber, function, task and
+    /// variable methods create the handles. The service thread runs from construction unless
+    /// NodeOptions.Threading is Manual, where Poll() drives it. Every call is thread safe.</summary>
     public sealed class RantNode : IDisposable
     {
         private IntPtr _handle;
@@ -1492,8 +1560,7 @@ namespace Rant
         private RantAllocator _alloc;
         private IntPtr _discGroup;   // native strings the node retains for its lifetime
         private IntPtr _mcastIf;
-        private Action<RantMessage> _onMsg;
-        private Action<RantEvent> _onEvt;
+        internal readonly Action<Action> Dispatcher;   // NodeOptions.Dispatcher
         private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
         private readonly List<Schema> _schemas = new List<Schema>();
         // A publisher's schema is a node owned view good only until the next poll, so a
@@ -1503,8 +1570,9 @@ namespace Rant
         // its own lock: the delivery path reaches it while the node lock is held, and
         // _createLock is held across a create, which takes the node lock the other way round
         private readonly object _msgSchemaLock = new object();
-        // same name topic sharing with role widening, serialized by the ctor path's lock
-        private sealed class TopicRec { public IntPtr Handle; public byte Bits; public ulong SchemaHash; }
+        // same name topic sharing: one native slot per name and a hold count per role, so the
+        // role follows the live handles and the last release retires the slot
+        private sealed class TopicRec { public IntPtr Handle; public ulong SchemaHash; public int Pubs, Subs; }
         private readonly Dictionary<string, TopicRec> _topicsByName = new Dictionary<string, TopicRec>();
         private readonly object _createLock = new object();
         // per topic subscriber handlers, copy on write arrays so the poll thread read never
@@ -1526,25 +1594,21 @@ namespace Rant
         private static readonly object s_reg = new object();
         private static long s_nextId = 1;
 
-        /// <summary>Open a node. onMessage may be null, onEvent is required and both are wired
-        /// before the constructor returns. Options are named parameters (docs/csharp.md).</summary>
-        public RantNode(string name, Action<RantMessage> onMessage, Action<RantEvent> onEvent,
-                    int domain = 0, int maxTopics = 0, bool disableShm = false,
-                    bool fetchDetails = false, int matchWaitMs = 0,
-                    bool disableLogs = false, bool disableMeta = false, bool disableErrorLogs = false,
-                    int dataPort = 0, string discoveryGroup = null, int discoveryPort = 0,
-                    string multicastInterface = null, int multicastTtl = 0,
-                    string[] seedPeers = null, bool unicastOnly = false,
-                    string selfIp = null, int advertisePort = 0,
-                    int fragmentSize = 0, int recvBufferBytes = 0, int sendBufferBytes = 0,
-                    int announceIntervalUs = 0, int peerTimeoutUs = 0,
-                    int maxPeers = 0)
+        /// <summary>Peer lifecycle, loss and error events, on the service or polling thread or
+        /// the Dispatcher. Optional: LastError records the last error either way.</summary>
+        public event Action<RantEvent> OnEvent;
+
+        /// <summary>Who drives the loop, as opened.</summary>
+        public Threading Threading { get; }
+
+        /// <summary>Open a node and join the mesh. Null options are the C defaults. The service
+        /// thread runs from here unless options.Threading is Manual, and OnEvent may attach
+        /// after: the first peer takes longer to appear than the next statement.</summary>
+        public RantNode(string name = null, NodeOptions options = null)
         {
-            if (onEvent == null)
-                throw new ArgumentNullException(nameof(onEvent),
-                    "onEvent carries the node's diagnostics (errors, peer lifecycle) and must not be null");
-            _onMsg = onMessage;
-            _onEvt = onEvent;
+            NodeOptions o = options ?? new NodeOptions();
+            Dispatcher = o.Dispatcher;
+            Threading = o.Threading;
             lock (s_reg)
             {
                 _id = s_nextId++;
@@ -1554,41 +1618,41 @@ namespace Rant
 
             var co = new RantNodeOpts
             {
-                domain = (ushort)domain,
-                max_topics = (ushort)maxTopics,
-                disable_shm = (byte)(disableShm ? 1 : 0),
-                fetch_details = (byte)(fetchDetails ? 1 : 0),
-                match_wait_ms = matchWaitMs,
-                disable_logs = (byte)(disableLogs ? 1 : 0),
-                disable_meta = (byte)(disableMeta ? 1 : 0),
-                disable_error_logs = (byte)(disableErrorLogs ? 1 : 0),
+                domain = o.Domain,
+                max_topics = o.MaxTopics,
+                disable_shm = (byte)(o.DisableShm ? 1 : 0),
+                fetch_details = (byte)(o.FetchDetails ? 1 : 0),
+                match_wait_ms = o.MatchWaitMs,
+                disable_logs = (byte)(o.DisableLogs ? 1 : 0),
+                disable_meta = (byte)(o.DisableMeta ? 1 : 0),
+                disable_error_logs = (byte)(o.DisableErrorLogs ? 1 : 0),
                 user_data = (IntPtr)_id,
             };
             // The node retains these pointers for its lifetime, so keep them alive
             // (freed in Close), matching the C++ wrapper.
-            _discGroup = Codec.CStrPtr(discoveryGroup);
-            _mcastIf = Codec.CStrPtr(multicastInterface);
-            co.net.data_port = (ushort)dataPort;
+            _discGroup = Codec.CStrPtr(o.DiscoveryGroup);
+            _mcastIf = Codec.CStrPtr(o.MulticastInterface);
+            co.net.data_port = o.DataPort;
             co.net.discovery_group = _discGroup;
-            co.net.discovery_port = (ushort)discoveryPort;
+            co.net.discovery_port = o.DiscoveryPort;
             co.net.multicast_interface = _mcastIf;
-            co.net.multicast_ttl = (byte)multicastTtl;
+            co.net.multicast_ttl = o.MulticastTtl;
             ushort nSeeds;
-            IntPtr seedBlock = SeedArray(seedPeers, out nSeeds);   // copied by open, freed below
+            IntPtr seedBlock = SeedArray(o.SeedPeers, out nSeeds);   // copied by open, freed below
             co.net.seed_peers = seedBlock;
             co.net.n_seed_peers = nSeeds;
-            co.net.unicast_only = (byte)(unicastOnly ? 1 : 0);
+            co.net.unicast_only = (byte)(o.UnicastOnly ? 1 : 0);
             // parsed into 4 bytes during open, never retained: free it right after (unlike
             // the group/interface strings, which the wrapper keeps for the node's life)
-            IntPtr selfIpPtr = Codec.CStrPtr(selfIp);
+            IntPtr selfIpPtr = Codec.CStrPtr(o.SelfIp);
             co.net.self_ip = selfIpPtr;
-            co.net.advertise_port = (ushort)advertisePort;
-            co.net.fragment_size = (ushort)fragmentSize;
-            co.net.recv_buffer_bytes = (uint)recvBufferBytes;
-            co.net.send_buffer_bytes = (uint)sendBufferBytes;
-            co.discovery.announce_interval_us = (uint)announceIntervalUs;
-            co.discovery.peer_timeout_us = (uint)peerTimeoutUs;
-            co.discovery.max_peers = (ushort)maxPeers;
+            co.net.advertise_port = o.AdvertisePort;
+            co.net.fragment_size = o.FragmentSize;
+            co.net.recv_buffer_bytes = o.RecvBufferBytes;
+            co.net.send_buffer_bytes = o.SendBufferBytes;
+            co.discovery.announce_interval_us = o.AnnounceIntervalUs;
+            co.discovery.peer_timeout_us = o.PeerTimeoutUs;
+            co.discovery.max_peers = o.MaxPeers;
 
             _alloc = Codec.DefaultAllocator();
             byte[] cname = string.IsNullOrEmpty(name) ? null : Codec.CStr(name);
@@ -1605,6 +1669,17 @@ namespace Rant
                 throw new InvalidOperationException("rant_node_open failed: " + err);
             }
             _handle = h;
+            Reflection = new RantReflection(this);
+            if (o.Threading == Threading.ServiceThread)
+            {
+                int rc = Native.rant_node_start(h);
+                if (rc != 0)
+                {
+                    Close(false);
+                    throw new InvalidOperationException("service thread start failed: " + (SendStatus)rc
+                        + " (open with Threading.Manual and Poll() the node)");
+                }
+            }
         }
 
         // Marshal "ip" / "ip:port" seeds into one unmanaged array. The node COPIES it at
@@ -1635,31 +1710,17 @@ namespace Rant
             return block;
         }
 
-        /// <summary>Rebind the message handler set at construction. Rarely needed: the
-        /// constructor already requires an initial one.</summary>
-        public RantNode OnMessage(Action<RantMessage> fn) { _onMsg = fn; return this; }
-
-        /// <summary>Where this node's callbacks run. Null runs them inline on the polling or
-        /// service thread. Set it and every event, pattern handler, variable observer, progress
-        /// report and awaited call result is handed to it instead: a UI toolkit posts to its
-        /// frame. Messages are unaffected, they have the consumer queue (docs/node.md).</summary>
-        public Action<Action> CallbackDispatcher;
-
         // Every callback funnels through here so a dispatcher is honored in one place.
         internal void RunCallback(Action a)
         {
-            Action<Action> d = CallbackDispatcher;
+            Action<Action> d = Dispatcher;
             if (d == null) { a(); return; }
             try { d(a); }
             catch (Exception e) { Console.Error.WriteLine("rant callback dispatcher: " + e); }
         }
-        /// <summary>Rebind the event handler set at construction. Rarely needed: the
-        /// constructor already requires an initial one.</summary>
-        public RantNode OnEvent(Action<RantEvent> fn) { _onEvt = fn; return this; }
-
-        // The native create behind the Topic constructors. Same name creates on this node share
-        // the native slot with a widened role, and a different schema is refused.
-        internal IntPtr CreateOrShareTopic(string name, Role role, Schema schema, Qos qos)
+        // The native create behind Publisher<T> and Subscriber<T>. A same name handle on this
+        // node shares the slot, widening its role, and a different schema is refused.
+        internal IntPtr AcquireTopic(string name, Role role, Schema schema, Qos qos)
         {
             if (string.IsNullOrEmpty(name)) throw new ArgumentException("topic name required", nameof(name));
             lock (_createLock)
@@ -1671,13 +1732,11 @@ namespace Rant
                     if (sh != 0 && rec.SchemaHash != 0 && sh != rec.SchemaHash)
                         throw new InvalidOperationException(
                             "topic '" + name + "' already exists on this node with a different schema"
-                            + " (Retire() it to retype the name)");
-                    byte bits = (byte)(rec.Bits | RoleBits(role));
-                    if (bits != rec.Bits)
-                    {
-                        Native.rant_topic_set_role(rec.Handle, (int)RoleFromBits(bits));
-                        rec.Bits = bits;
-                    }
+                            + " (dispose every handle on it to retype the name)");
+                    Role before = RoleOf(rec);
+                    Hold(rec, role, 1);
+                    Role after = RoleOf(rec);
+                    if (after != before) Native.rant_topic_set_role(rec.Handle, (int)after);
                     if (schema != null) _schemas.Add(schema);
                     return rec.Handle;
                 }
@@ -1694,46 +1753,70 @@ namespace Rant
                     throw new InvalidOperationException("topic create failed: " + LastError);
                 ushort idx = Native.rant_topic_index(h);
                 if (schema != null) { _schemas.Add(schema); _topicTypes[idx] = schema.ClrType; }
-                _topicsByName[name] = new TopicRec { Handle = h, Bits = RoleBits(role), SchemaHash = sh };
+                rec = new TopicRec { Handle = h, SchemaHash = sh };
+                Hold(rec, role, 1);
+                _topicsByName[name] = rec;
                 return h;
             }
         }
 
-        // Topic.Retire: release the native slot for reuse and forget every wrapper registration
-        // for the index, since a reused slot may carry a different topic.
-        internal SendStatus RetireTopic(Topic t)
+        // Release one hold. The role narrows to what is still held, and the last release
+        // retires the native slot and forgets every wrapper registration for the index, since
+        // a reused slot may carry a different topic.
+        internal void ReleaseTopic(TopicCore t)
         {
             lock (_createLock)
             {
-                if (t._handle == IntPtr.Zero) return SendStatus.NoTopic;
-                ushort idx = Native.rant_topic_index(t._handle);
-                int r = Native.rant_topic_retire(t._handle);
-                if (r != 0) return (SendStatus)r;
-                string dead = null;
+                if (t._handle == IntPtr.Zero) return;
+                string name = null;
+                TopicRec rec = null;
                 foreach (var kv in _topicsByName)
-                    if (kv.Value.Handle == t._handle) { dead = kv.Key; break; }
-                if (dead != null) _topicsByName.Remove(dead);
-                _topicTypes.Remove(idx);
-                lock (_subLock)
-            {
-                var next = new Dictionary<ushort, Action<RantMessage>[]>(_subHandlers);
-                next.Remove(idx);
-                _subHandlers = next;
-            }
+                    if (kv.Value.Handle == t._handle) { name = kv.Key; rec = kv.Value; break; }
+                if (rec == null) { t._handle = IntPtr.Zero; return; }
+                Role before = RoleOf(rec);
+                Hold(rec, t.Role, -1);
+                Role after = RoleOf(rec);
+                int r = 0;
+                if (after == Role.Inactive)
+                {
+                    ushort idx = Native.rant_topic_index(t._handle);
+                    r = Native.rant_topic_retire(t._handle);
+                    if (r == 0)
+                    {
+                        _topicsByName.Remove(name);
+                        _topicTypes.Remove(idx);
+                        lock (_subLock)
+                        {
+                            var next = new Dictionary<ushort, Action<RantMessage>[]>(_subHandlers);
+                            next.Remove(idx);
+                            _subHandlers = next;
+                        }
+                    }
+                }
+                else if (after != before)
+                {
+                    r = Native.rant_topic_set_role(rec.Handle, (int)after);
+                }
+                if (r != 0)
+                {
+                    Hold(rec, t.Role, 1);   // still held: the C refused from a callback
+                    throw new InvalidOperationException("topic release refused: " + (SendStatus)r);
+                }
                 t._handle = IntPtr.Zero;
-                return SendStatus.Ok;
             }
         }
 
-        // role to pub and sub bit pair, bit 0 = pub, bit 1 = sub, for role widening
-        private static byte RoleBits(Role r)
-            => r == Role.PubSub ? (byte)3 : r == Role.PubOnly ? (byte)1
-             : r == Role.SubOnly ? (byte)2 : (byte)0;
-        private static Role RoleFromBits(byte b)
-            => b == 3 ? Role.PubSub : b == 1 ? Role.PubOnly : b == 2 ? Role.SubOnly : Role.Inactive;
+        private static void Hold(TopicRec rec, Role role, int delta)
+        {
+            if (role == Role.PubOnly || role == Role.PubSub) rec.Pubs += delta;
+            if (role == Role.SubOnly || role == Role.PubSub) rec.Subs += delta;
+        }
 
-        // Subscriber handlers per topic index, copy on write. When any exist for an index they
-        // receive the message instead of the node wide onMessage.
+        private static Role RoleOf(TopicRec rec)
+            => rec.Pubs > 0 && rec.Subs > 0 ? Role.PubSub : rec.Pubs > 0 ? Role.PubOnly
+             : rec.Subs > 0 ? Role.SubOnly : Role.Inactive;
+
+        // Subscriber handlers per topic index, copy on write.
         internal void AddSubHandler(ushort index, Action<RantMessage> fn)
         {
             lock (_subLock)
@@ -1746,6 +1829,27 @@ namespace Rant
                 nv[cur.Length] = fn;
                 next[index] = nv;
                 _subHandlers = next;   // published whole, so a reader never sees a torn map
+            }
+        }
+
+        internal void RemoveSubHandler(ushort index, Action<RantMessage> fn)
+        {
+            lock (_subLock)
+            {
+                Action<RantMessage>[] cur;
+                if (!_subHandlers.TryGetValue(index, out cur)) return;
+                int at = Array.IndexOf(cur, fn);
+                if (at < 0) return;
+                var next = new Dictionary<ushort, Action<RantMessage>[]>(_subHandlers);
+                if (cur.Length == 1) next.Remove(index);
+                else
+                {
+                    var nv = new Action<RantMessage>[cur.Length - 1];
+                    Array.Copy(cur, 0, nv, 0, at);
+                    Array.Copy(cur, at + 1, nv, at, cur.Length - at - 1);
+                    next[index] = nv;
+                }
+                _subHandlers = next;
             }
         }
 
@@ -1786,24 +1890,13 @@ namespace Rant
         internal void RegisterAsync(long id) { lock (PatternLock) _asyncLive.Add(id); }
         internal void UnregisterAsync(long id) { lock (PatternLock) _asyncLive.Remove(id); }
 
-        /// <summary>One loop tick: discovery, receive, timers and queued sends. Blocks up to
-        /// timeoutMs in the socket wait, 0 = non blocking. State while Start() runs.</summary>
+        /// <summary>One loop tick of a Manual node: discovery, receive, timers and queued
+        /// sends. Blocks up to timeoutMs in the socket wait, 0 = non blocking. State under the
+        /// service thread.</summary>
         public int Poll(int timeoutMs = 0)
         {
             return Native.rant_node_poll(_handle, timeoutMs);
         }
-
-        /// <summary>Run the C service thread. Handlers fire on it, never two at once, and every
-        /// call stays safe from any thread. False if already started or threads are out.</summary>
-        public bool Start()
-        {
-            return Native.rant_node_start(_handle) == 0;
-        }
-
-        /// <summary>Stop and join the service thread. Idempotent, implied by Close.</summary>
-        public void Stop() => Native.rant_node_stop(_handle);
-
-        public bool IsStarted => Native.rant_node_is_started(_handle) == 1;
 
         /// <summary>Block until discovery and matching settle, so everything sent now reaches
         /// everyone. Call after creating the topics. timeoutMs &lt; 0 = 3 intervals.</summary>
@@ -1816,140 +1909,137 @@ namespace Rant
         public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
             => Native.rant_node_dispatch(_handle, maxMsgs, timeoutMs);
 
+        // ---- handles ----------------------------------------------------------------
+
+        /// <summary>The publishing side of a topic. T's public fields are the schema, or the
+        /// given one, and a byte[] T sends the message bytes as is.</summary>
+        public Publisher<T> Publisher<T>(string name, Qos qos = null, Schema schema = null)
+            => new Publisher<T>(this, name, qos, schema);
+
+        /// <summary>The subscribing side of a topic. Add an OnMessage handler, or TryTake and
+        /// Dispatch from a queue.</summary>
+        public Subscriber<T> Subscriber<T>(string name, Qos qos = null, Schema schema = null)
+            => new Subscriber<T>(this, name, qos, schema);
+
+        /// <summary>Define a function, one definition per name on the mesh. The return value
+        /// is the reply and a thrown exception answers AppError with its message.</summary>
+        public FunctionDefinition<TReq, TRsp> FunctionDefinition<TReq, TRsp>(string name,
+                Func<TReq, TRsp> handler, FunctionOptions options = null,
+                Schema requestSchema = null, Schema responseSchema = null)
+            => new FunctionDefinition<TReq, TRsp>(this, name, handler, options, requestSchema, responseSchema);
+
+        /// <summary>The async form: the Task's result answers Ok and an exception AppError. It
+        /// runs on the service thread until its first await.</summary>
+        public FunctionDefinition<TReq, TRsp> FunctionDefinition<TReq, TRsp>(string name,
+                Func<TReq, Task<TRsp>> handler, FunctionOptions options = null,
+                Schema requestSchema = null, Schema responseSchema = null)
+            => new FunctionDefinition<TReq, TRsp>(this, name, handler, options, requestSchema, responseSchema);
+
+        /// <summary>The full form: the handler replies, fails or defers through the request.</summary>
+        public FunctionDefinition<TReq, TRsp> FunctionDefinition<TReq, TRsp>(string name,
+                Action<TReq, RantRequest<TRsp>> handler, FunctionOptions options = null,
+                Schema requestSchema = null, Schema responseSchema = null)
+            => new FunctionDefinition<TReq, TRsp>(this, name, handler, options, requestSchema, responseSchema);
+
+        /// <summary>The caller side of a function defined on another node.</summary>
+        public RemoteFunction<TReq, TRsp> RemoteFunction<TReq, TRsp>(string name,
+                FunctionOptions options = null, Schema requestSchema = null, Schema responseSchema = null)
+            => new RemoteFunction<TReq, TRsp>(this, name, options, requestSchema, responseSchema);
+
+        /// <summary>Define a task: a long running call that streams progress and can be
+        /// cancelled. The async handler's completion answers the call.</summary>
+        public TaskDefinition<TReq, TPrg, TRsp> TaskDefinition<TReq, TPrg, TRsp>(string name,
+                Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler, TaskOptions options = null,
+                Schema requestSchema = null, Schema progressSchema = null, Schema responseSchema = null)
+            => new TaskDefinition<TReq, TPrg, TRsp>(this, name, handler, options,
+                                                    requestSchema, progressSchema, responseSchema);
+
+        /// <summary>The caller side of a task defined on another node.</summary>
+        public RemoteTask<TReq, TPrg, TRsp> RemoteTask<TReq, TPrg, TRsp>(string name,
+                TaskOptions options = null, Schema requestSchema = null, Schema progressSchema = null,
+                Schema responseSchema = null)
+            => new RemoteTask<TReq, TPrg, TRsp>(this, name, options, requestSchema, progressSchema, responseSchema);
+
+        /// <summary>Own a variable: this node holds the value and publishes every applied
+        /// write. One definition per name on the mesh.</summary>
+        public VariableDefinition<T> VariableDefinition<T>(string name, VariableOptions options = null,
+                                                           Schema schema = null)
+            => new VariableDefinition<T>(this, name, false, default(T), options, schema);
+
+        /// <summary>With the value it holds before any set.</summary>
+        public VariableDefinition<T> VariableDefinition<T>(string name, T initial,
+                                                           VariableOptions options = null, Schema schema = null)
+            => new VariableDefinition<T>(this, name, true, initial, options, schema);
+
+        /// <summary>A reference to a variable owned by another node: reads see the cached
+        /// latest, writes go to the owner and come back as a change.</summary>
+        public RemoteVariable<T> RemoteVariable<T>(string name, VariableOptions options = null,
+                                                   Schema schema = null)
+            => new RemoteVariable<T>(this, name, options, schema);
+
         // ---- built-in logs (the @rant/log/{error,warn,info} topics) --------------------
 
-        /// <summary>Publish a line on a level's log topic (already-formatted text, truncated
-        /// at RANT_LOG_MAX). SendStatus.NoSys when logs are disabled. Thread-safe.</summary>
+        /// <summary>Publish a log line at a level (already formatted text, truncated at
+        /// RANT_LOG_MAX). SendStatus.NoSys when logs are disabled. Thread safe.</summary>
         public SendStatus Log(LogLevel level, string text)
         {
             byte[] b = Encoding.UTF8.GetBytes(text ?? "");
             return (SendStatus)Native.rant_node_log_text(_handle, (int)level, b, b.Length);
         }
-        public SendStatus LogError(string text) => Log(LogLevel.Error, text);
-        public SendStatus LogWarn(string text) => Log(LogLevel.Warn, text);
-        public SendStatus LogInfo(string text) => Log(LogLevel.Info, text);
 
-        /// <summary>This node's own handle for a level's log topic (null when disabled):
-        /// widen its role and read it like any topic, or use OnLog.</summary>
-        public Topic LogTopic(LogLevel level)
-        {
-            IntPtr ch = Native.rant_node_log_topic(_handle, (int)level);
-            return ch == IntPtr.Zero ? null : new Topic(this, ch);
-        }
+        private Action<RantLogLine> _onLog;
+        private bool _logBound;
 
-        /// <summary>Subscribe to a level's mesh wide log stream: every other node's lines at that
-        /// level as a RantLogLine, on the polling thread. False when logs are disabled.</summary>
-        public bool OnLog(LogLevel level, Action<RantLogLine> handler)
+        /// <summary>Every other node's log lines at every level as a RantLogLine, on the
+        /// service or polling thread. Nothing arrives when logs are disabled on this node.</summary>
+        public event Action<RantLogLine> OnLog
         {
-            if (handler == null) return false;
-            IntPtr ch = Native.rant_node_log_topic(_handle, (int)level);
-            if (ch == IntPtr.Zero) return false;
-            if (Native.rant_topic_set_role(ch, (int)Role.PubSub) != 0) return false;
-            ushort idx = Native.rant_topic_index(ch);
-            AddSubHandler(idx, m => handler(new RantLogLine
+            add
             {
-                Level = level, Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
-                WrittenUs = m.WrittenUs,
-                WallUs = LogFieldU(m, "wall_us"), MonoUs = LogFieldU(m, "mono_us"),
-                Text = m.Fields != null && m.Fields.TryGetValue("text", out var t) ? t as string ?? "" : "",
-            }));
-            return true;
+                if (value == null) return;
+                lock (_subLock)
+                {
+                    _onLog += value;
+                    if (_logBound) return;
+                    _logBound = true;
+                }
+                BindLog();
+            }
+            remove { lock (_subLock) _onLog -= value; }
         }
 
-        private static ulong LogFieldU(RantMessage m, string k)
-            => m.Fields != null && m.Fields.TryGetValue(k, out var o)
+        // One subscription per level topic for the node's life, fanning into the event.
+        private void BindLog()
+        {
+            foreach (LogLevel level in new[] { LogLevel.Error, LogLevel.Warn, LogLevel.Info })
+            {
+                IntPtr ch = Native.rant_node_log_topic(_handle, (int)level);
+                if (ch == IntPtr.Zero) return;                                   // logs disabled
+                if (Native.rant_topic_set_role(ch, (int)Role.PubSub) != 0) return;
+                LogLevel lv = level;
+                AddSubHandler(Native.rant_topic_index(ch), m =>
+                {
+                    Action<RantLogLine> h = _onLog;
+                    if (h == null) return;
+                    var f = m.Value as Dictionary<string, object>;
+                    h(new RantLogLine
+                    {
+                        Level = lv, Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
+                        WrittenUs = m.WrittenUs,
+                        WallUs = LogFieldU(f, "wall_us"), MonoUs = LogFieldU(f, "mono_us"),
+                        Text = f != null && f.TryGetValue("text", out var t) ? t as string ?? "" : "",
+                    });
+                });
+            }
+        }
+
+        private static ulong LogFieldU(Dictionary<string, object> f, string k)
+            => f != null && f.TryGetValue(k, out var o)
                ? (o is ulong u ? u : o is long l ? (ulong)l : 0UL) : 0UL;
 
-        // ---- @rant/meta introspection --------------------------------------------------
-
-        /// <summary>The local @rant/meta caller handle, null when meta is disabled. Direct it at
-        /// a peer id. Most callers want MetaAsync.</summary>
-        public RemoteFunction MetaFunction()
-        {
-            IntPtr fn = Native.rant_node_meta_function(_handle);
-            return fn == IntPtr.Zero ? null : new RemoteFunction(this, fn);
-        }
-
-        /// <summary>Fetch a peer's snapshot: a directed @rant/meta call decoded into a
-        /// RantMetaSnapshot. The Task never faults. sections is a MetaSection mask.</summary>
-        public async Task<RantMetaSnapshot> MetaAsync(uint peer, MetaSection sections = MetaSection.All)
-        {
-            RemoteFunction fn = MetaFunction();
-            if (fn == null) return new RantMetaSnapshot { Status = CallStatus.NoHandler };
-            byte[] req = sections == MetaSection.All
-                ? Array.Empty<byte>() : BitConverter.GetBytes((uint)sections);
-            RantResponse r = await fn.CallAsync(req, peer).ConfigureAwait(false);
-            return RantMetaSnapshot.FromResponse(r);
-        }
-
-        // ---- reflection walks (docs/reflection.md) -----------------------------------
-
-        /// <summary>Every discovered peer as a copied snapshot, dropped ones included.</summary>
-        public List<RantPeer> Peers()
-        {
-            var list = new List<RantPeer>();
-            Native.rant_node_lock(_handle);
-            try
-            {
-                var it = new RantIter();
-                RantPeerInfoNative p;
-                while (Native.rant_node_peers_next(_handle, ref it, out p) != 0) list.Add(RantPeer.Read(ref p));
-            }
-            finally { Native.rant_node_unlock(_handle); }
-            return list;
-        }
-
-        /// <summary>What one node offers, Self for this one. A dropped peer's last known view
-        /// is served as a ghost. Schemas need fetchDetails on the node.</summary>
-        public List<RantEntity> Entities(uint peer = Self)
-        {
-            var list = new List<RantEntity>();
-            Native.rant_node_lock(_handle);
-            try
-            {
-                var it = new RantIter();
-                RantEntityInfoNative e;
-                while (Native.rant_node_entities_next(_handle, peer, ref it, out e) != 0)
-                    list.Add(RantEntity.Read(ref e));
-            }
-            finally { Native.rant_node_unlock(_handle); }
-            return list;
-        }
-
-        /// <summary>The whole mesh folded: one entity per kind and name across every active
-        /// peer and this node. Schemas need fetchDetails on the node.</summary>
-        public List<RantEntity> Mesh()
-        {
-            var list = new List<RantEntity>();
-            Native.rant_node_lock(_handle);
-            try
-            {
-                var it = new RantIter();
-                RantEntityInfoNative e;
-                while (Native.rant_node_mesh_next(_handle, ref it, out e) != 0) list.Add(RantEntity.Read(ref e));
-            }
-            finally { Native.rant_node_unlock(_handle); }
-            return list;
-        }
-
-        /// <summary>One folded entity by kind and name, null when the mesh has none.</summary>
-        public RantEntity MeshFind(EntityKind kind, string name)
-        {
-            Native.rant_node_lock(_handle);
-            try
-            {
-                RantEntityInfoNative e;
-                if (Native.rant_node_mesh_find(_handle, (int)kind, Codec.CStr(name), out e) == 0) return null;
-                return RantEntity.Read(ref e);
-            }
-            finally { Native.rant_node_unlock(_handle); }
-        }
-
-        /// <summary>Bumps whenever the folded mesh view changed, so a tool knows when to walk again.</summary>
-        public uint MeshEpoch => Native.rant_node_mesh_epoch(_handle);
-
-        /// <summary>The peer id that means this node in Entities.</summary>
-        public const uint Self = 0;
+        /// <summary>The mesh as this node sees it: peers, their entities, the folded mesh
+        /// and the @rant/meta snapshots (docs/reflection.md).</summary>
+        public RantReflection Reflection { get; }
 
         internal Type ClrTypeOf(ushort index)
         {
@@ -1962,26 +2052,24 @@ namespace Rant
         /// an Error event whose Error is None, printing "no error", before any.</summary>
         public RantEvent LastError => RantEvent.FromValue(Native.rant_last_error(_handle));
 
-        /// <summary>Why the most recent node open failed, from the process global slot. The
-        /// constructor already throws with this message.</summary>
-        public static RantEvent LastOpenError() => RantEvent.FromValue(Native.rant_last_error(IntPtr.Zero));
+        // Why the most recent node open failed, from the process global slot.
+        private static RantEvent LastOpenError() => RantEvent.FromValue(Native.rant_last_error(IntPtr.Zero));
 
-        /// <summary>Sends that evicted never-sent history after the bounded wait (the
-        /// ErrorKind.EvictedUnsent count): the send-burst/overload indicator.</summary>
-        public uint EvictedUnsent => Native.rant_node_evicted_unsent(_handle);
-
-        public (ulong inUse, ulong peak, ulong allocCalls) MemoryStats()
+        /// <summary>The node's counters, read at the call.</summary>
+        public NodeStats Stats
         {
-            UIntPtr u, p; ulong c;
-            Native.rant_node_mem_stats(_handle, out u, out p, out c);
-            return ((ulong)u, (ulong)p, c);
-        }
-
-        public (ulong waitedUs, uint waitedSends) BackpressureStats()
-        {
-            ulong us; uint n;
-            Native.rant_node_backpressure_stats(_handle, out us, out n);
-            return (us, n);
+            get
+            {
+                UIntPtr u, p; ulong c, us; uint n;
+                Native.rant_node_mem_stats(_handle, out u, out p, out c);
+                Native.rant_node_backpressure_stats(_handle, out us, out n);
+                return new NodeStats
+                {
+                    EvictedUnsent = Native.rant_node_evicted_unsent(_handle),
+                    MemInUse = (ulong)u, MemPeak = (ulong)p, AllocCalls = c,
+                    BackpressureWaitedUs = us, BackpressureWaits = n,
+                };
+            }
         }
 
         /// <summary>Stop the service thread and tear the node down. False when refused from a
@@ -2033,12 +2121,11 @@ namespace Rant
                 s_nodes.TryGetValue((long)m.user, out node);
                 if (node == null) return;
                 var hs = node.SubHandlersOf(m.topic_index);
-                if (hs == null && node._onMsg == null) return;
+                if (hs == null) return;
                 node._topicTypes.TryGetValue(m.topic_index, out clr);
                 // the payload is copied and the schema is ours, so a later decode is safe
                 var msg = RantMessage.FromNative(ref m, clr, node.OwnedSchema(m.schema));
-                if (hs != null) { foreach (var h in hs) h(msg); }
-                else node._onMsg(msg);
+                foreach (var h in hs) h(msg);
             }
             catch (Exception e) { Console.Error.WriteLine("rant on_message: " + e); }
         }
@@ -2051,12 +2138,100 @@ namespace Rant
                 var e = Marshal.PtrToStructure<RantEventNative>(evPtr);
                 RantNode node;
                 s_nodes.TryGetValue((long)e.user, out node);
-                if (node == null || node._onEvt == null) return;
+                if (node == null) return;
+                Action<RantEvent> fn = node.OnEvent;
+                if (fn == null) return;
                 RantEvent ev = RantEvent.FromNative(evPtr, ref e);       // copied past the callback
-                Action<RantEvent> fn = node._onEvt;
                 node.RunCallback(() => fn(ev));
             }
             catch (Exception ex) { Console.Error.WriteLine("rant on_event: " + ex); }
+        }
+    }
+
+    /// <summary>The reflection walks of docs/reflection.md, from RantNode.Reflection. Every
+    /// result is a copied snapshot, so it outlives the poll and needs no lock.</summary>
+    public sealed class RantReflection
+    {
+        private readonly RantNode _node;
+        internal RantReflection(RantNode node) { _node = node; }
+
+        /// <summary>Every discovered peer, dropped ones included: gate on Active.</summary>
+        public List<RantPeer> Peers()
+        {
+            var list = new List<RantPeer>();
+            Native.rant_node_lock(_node.Handle);
+            try
+            {
+                var it = new RantIter();
+                RantPeerInfoNative p;
+                while (Native.rant_node_peers_next(_node.Handle, ref it, out p) != 0) list.Add(RantPeer.Read(ref p));
+            }
+            finally { Native.rant_node_unlock(_node.Handle); }
+            return list;
+        }
+
+        /// <summary>What one node offers, peer 0 for this one. A dropped peer's last known view
+        /// is served as a ghost. Schemas need FetchDetails on the node.</summary>
+        public List<RantEntity> Entities(uint peer = 0)
+        {
+            var list = new List<RantEntity>();
+            Native.rant_node_lock(_node.Handle);
+            try
+            {
+                var it = new RantIter();
+                RantEntityInfoNative e;
+                while (Native.rant_node_entities_next(_node.Handle, peer, ref it, out e) != 0)
+                    list.Add(RantEntity.Read(ref e));
+            }
+            finally { Native.rant_node_unlock(_node.Handle); }
+            return list;
+        }
+
+        /// <summary>The whole mesh folded: one entity per kind and name across every active
+        /// peer and this node. Schemas need FetchDetails on the node.</summary>
+        public List<RantEntity> Mesh()
+        {
+            var list = new List<RantEntity>();
+            Native.rant_node_lock(_node.Handle);
+            try
+            {
+                var it = new RantIter();
+                RantEntityInfoNative e;
+                while (Native.rant_node_mesh_next(_node.Handle, ref it, out e) != 0) list.Add(RantEntity.Read(ref e));
+            }
+            finally { Native.rant_node_unlock(_node.Handle); }
+            return list;
+        }
+
+        /// <summary>One folded entity by kind and name, null when the mesh has none.</summary>
+        public RantEntity Find(EntityKind kind, string name)
+        {
+            Native.rant_node_lock(_node.Handle);
+            try
+            {
+                RantEntityInfoNative e;
+                if (Native.rant_node_mesh_find(_node.Handle, (int)kind, Codec.CStr(name), out e) == 0) return null;
+                return RantEntity.Read(ref e);
+            }
+            finally { Native.rant_node_unlock(_node.Handle); }
+        }
+
+        /// <summary>Bumps whenever the folded mesh view changed, so a tool knows when to walk
+        /// again.</summary>
+        public uint Epoch => Native.rant_node_mesh_epoch(_node.Handle);
+
+        /// <summary>Fetch a peer's snapshot: a directed @rant/meta call decoded into a
+        /// RantMetaSnapshot. The Task never faults. sections is a MetaSection mask.</summary>
+        public async Task<RantMetaSnapshot> MetaAsync(uint peer, MetaSection sections = MetaSection.All)
+        {
+            // the local @rant/meta caller handle, node owned: callable, never created or
+            // destroyed here, and absent when meta is disabled
+            IntPtr fn = Native.rant_node_meta_function(_node.Handle);
+            if (fn == IntPtr.Zero) return new RantMetaSnapshot { Status = CallStatus.NoHandler };
+            byte[] req = sections == MetaSection.All
+                ? Array.Empty<byte>() : BitConverter.GetBytes((uint)sections);
+            ResponseCore r = await new RemoteFunctionCore(_node, fn).CallAsync(req, peer).ConfigureAwait(false);
+            return RantMetaSnapshot.FromResponse(r);
         }
     }
 
@@ -2094,7 +2269,7 @@ namespace Rant
 
         internal sealed class RequestBox
         {
-            public Action<RantRequest> Handler;
+            public Action<RequestCore> Handler;
             public IntPtr Fn;   // set right after create (the callback cannot fire before poll)
             public RantNode Node;
         }
@@ -2105,9 +2280,9 @@ namespace Rant
         }
         internal sealed class AsyncCall
         {
-            public TaskCompletionSource<RantResponse> Tcs;
+            public TaskCompletionSource<ResponseCore> Tcs;
             public RantNode RantNode;
-            public Action<TaskProgress> OnProgress;   // task calls only, else null
+            public Action<ProgressCore> OnProgress;   // task calls only, else null
         }
 
         // The definition side registry of one task's live calls: defer token to the per call
@@ -2172,7 +2347,7 @@ namespace Rant
         internal static void AbandonAsync(long id)
         {
             AsyncCall c = TakeAsync(id);
-            if (c != null) c.Tcs.TrySetResult(new RantResponse { Status = CallStatus.Cancelled, Message = "cancelled" });
+            if (c != null) c.Tcs.TrySetResult(new ResponseCore { Status = CallStatus.Cancelled, Message = "cancelled" });
         }
 
         // rooted delegates handed to native code
@@ -2193,10 +2368,10 @@ namespace Rant
             {
                 var box = GetBox((long)user) as RequestBox;
                 if (box == null) return;
-                var r = new RantRequest(reqPtr, box.Fn);
+                var r = new RequestCore(reqPtr, box.Fn);
                 // The handler runs after this callback returns, where the native request is
-                // dead, so park the reply now and answer through the Deferred instead.
-                if (box.Node != null && box.Node.CallbackDispatcher != null)
+                // dead, so park the reply now and answer through the DeferredCore instead.
+                if (box.Node != null && box.Node.Dispatcher != null)
                 {
                     r.Rebind(r.Defer());
                     RequestBox b = box;
@@ -2233,7 +2408,7 @@ namespace Rant
                 AsyncCall call = TakeAsync((long)o.user);
                 if (call == null) return;
                 call.RantNode.UnregisterAsync((long)o.user);
-                var r = new RantResponse
+                var r = new ResponseCore
                 {
                     Status = (CallStatus)o.status,
                     Provider = o.provider,
@@ -2256,7 +2431,7 @@ namespace Rant
                 var p = Marshal.PtrToStructure<RantProgressNative>(prgPtr);
                 AsyncCall call = PeekAsync((long)p.user);
                 if (call == null || call.OnProgress == null) return;
-                var prg = new TaskProgress
+                var prg = new ProgressCore
                 {
                     CallId = p.call_id,
                     Provider = p.provider,
@@ -2265,7 +2440,7 @@ namespace Rant
                     RecvUs = p.recv_us,
                     SchemaPtr = p.schema,
                 };
-                Action<TaskProgress> sink = call.OnProgress;
+                Action<ProgressCore> sink = call.OnProgress;
                 if (call.RantNode != null) call.RantNode.RunCallback(() => sink(prg));
                 else sink(prg);
             }
@@ -2309,11 +2484,26 @@ namespace Rant
             catch (Exception e) { Console.Error.WriteLine("rant on_variable_update: " + e); }
         }
 
+        // The bytes a typed handle sends for a value: T encoded with its schema, or a byte[]
+        // T as is (the encoded message).
+        internal static byte[] Encode<T>(Schema s, T value)
+            => Codec.IsRaw(typeof(T)) ? (byte[])(object)value ?? Array.Empty<byte>() : s.Encode(value);
+
+        // A delivered message as T: the decoded value, or the bytes as is for a byte[] T.
+        internal static bool TryValue<T>(RantMessage m, out T value)
+        {
+            if (Codec.IsRaw(typeof(T))) { value = (T)(object)m.Data; return true; }
+            if (m.Value is T v) { value = v; return true; }
+            value = default(T);
+            return false;
+        }
+
         // Decode wire bytes to a typed value: prefer the wire schema (the publisher's
-        // layout bound to ours), fall back to the local one.
+        // layout bound to ours), fall back to the local one. A byte[] target takes the bytes.
         internal static bool TryDecode(Schema local, IntPtr wireSchema, byte[] data, Type t, out object v)
         {
             v = null;
+            if (Codec.IsRaw(t)) { v = data; return true; }
             IntPtr sp = wireSchema != IntPtr.Zero ? wireSchema
                       : local != null ? local.Handle : IntPtr.Zero;
             if (sp == IntPtr.Zero) return false;
@@ -2328,13 +2518,13 @@ namespace Rant
 
     // ---- patterns: functions ----------------------------------------------------
 
-    /// <summary>The request seen by a FunctionDefinition handler, valid only inside the
-    /// callback. Reply there, or Defer() and complete later. No reply acknowledges Ok.</summary>
-    public sealed class RantRequest
+    // The request seen by a definition handler, valid only inside the callback. Reply there,
+    // or Defer() and complete later. No reply acknowledges Ok.
+    internal sealed class RequestCore
     {
         private IntPtr _ptr;          // the exact native pointer, zeroed when the callback returns
         private readonly IntPtr _fn;
-        private Deferred _deferred;   // set when the reply was parked for another thread
+        private DeferredCore _deferred;   // set when the reply was parked for another thread
         private bool _done;
         internal readonly IntPtr SchemaPtr;
 
@@ -2348,7 +2538,7 @@ namespace Rant
         /// <summary>True once Reply/Fail/Defer has been called.</summary>
         public bool Answered => _done;
 
-        internal RantRequest(IntPtr ptr, IntPtr fn)
+        internal RequestCore(IntPtr ptr, IntPtr fn)
         {
             _ptr = ptr;
             _fn = fn;
@@ -2382,20 +2572,20 @@ namespace Rant
                 Native.rant_request_fail(_ptr, string.IsNullOrEmpty(message) ? null : Codec.CStr(message), p.B);
         }
 
-        /// <summary>Park the reply and return now. The Deferred completes the call later from
+        /// <summary>Park the reply and return now. The DeferredCore completes the call later from
         /// any thread.</summary>
-        public Deferred Defer()
+        public DeferredCore Defer()
         {
             Guard();
             _done = true;
             if (_deferred != null) return _deferred;
             ulong token = Native.rant_request_defer(_ptr);
-            return new Deferred(_fn, token);
+            return new DeferredCore(_fn, token);
         }
 
         // The reply is parked so the handler can run on another thread. Every field is already
         // copied out, so only the answer has to move off the dead native pointer.
-        internal void Rebind(Deferred d) { _ptr = IntPtr.Zero; _deferred = d; _done = false; }
+        internal void Rebind(DeferredCore d) { _ptr = IntPtr.Zero; _deferred = d; _done = false; }
 
         internal void FailQuiet(string message = null)
         {
@@ -2411,18 +2601,18 @@ namespace Rant
         }
     }
 
-    /// <summary>A parked function reply (from RantRequest.Defer): complete exactly once,
-    /// from any thread. Dropping it leaves the caller to its timeout.</summary>
-    public sealed class Deferred
+    // A parked reply (from RequestCore.Defer): complete exactly once, from any thread.
+    // Dropping it leaves the caller to its timeout.
+    internal sealed class DeferredCore
     {
         private readonly IntPtr _fn;
         private long _token;
 
-        internal Deferred(IntPtr fn, ulong token) { _fn = fn; _token = (long)token; }
+        internal DeferredCore(IntPtr fn, ulong token) { _fn = fn; _token = (long)token; }
 
         public bool Valid => _fn != IntPtr.Zero && Interlocked.Read(ref _token) != 0;
 
-        /// <summary>message as in RantRequest.Fail, also carried on Ok as debug text.</summary>
+        /// <summary>message as in RequestCore.Fail, also carried on Ok as debug text.</summary>
         public bool Complete(byte[] rsp = null, string message = null) => Finish(CallStatus.Ok, message, rsp);
         public bool Fail(string message = null, byte[] rsp = null) => Finish(CallStatus.AppError, message, rsp);
         /// <summary>Complete Cancelled, the cooperative honor of a task cancel.</summary>
@@ -2441,27 +2631,20 @@ namespace Rant
         }
     }
 
-    /// <summary>The untyped implementation side of a function: one reply per call, one
-    /// definition per name. A null handler answers NoHandler.</summary>
-    public class FunctionDefinition : INodeHandle
+    // The engine of FunctionDefinition<TReq, TRsp>: one reply per call, one definition per
+    // name. A null handler answers NoHandler.
+    internal sealed class FunctionDefinitionCore : INodeHandle
     {
-        internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
+        internal IntPtr Fn;   // zeroed by Dispose, and by the node at Close
         internal readonly RantNode RantNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public FunctionDefinition(RantNode node, string name, Schema requestSchema, Schema responseSchema,
-                                  Action<RantRequest> handler, int backpressureWaitMs = 0, int timeoutMs = 0,
-                                  int keepLast = 0, bool reflectFromMesh = false)
+        public FunctionDefinitionCore(RantNode node, string name, Schema requestSchema, Schema responseSchema,
+                                  Action<RequestCore> handler, FunctionOptions options)
         {
             RantNode = node;
-            var co = new RantFunctionOpts
-            {
-                backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
-                timeout_us = (uint)timeoutMs * 1000u,
-                keep_last = (ushort)keepLast,
-                reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
-            };
+            RantFunctionOpts co = (options ?? new FunctionOptions()).ToNative();
             long id = 0;
             Patterns.RequestBox box = null;
             if (handler != null)
@@ -2486,21 +2669,18 @@ namespace Rant
 
         /// <summary>The async handler form: the Task's completion answers the call, its result
         /// Ok and an exception AppError. On the polling thread until the first await.</summary>
-        public FunctionDefinition(RantNode node, string name, Schema requestSchema, Schema responseSchema,
-                                  Func<RantRequest, Task<byte[]>> handler,
-                                  int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
-                                  bool reflectFromMesh = false)
-            : this(node, name, requestSchema, responseSchema, AsyncAdapter(handler),
-                   backpressureWaitMs, timeoutMs, keepLast) { }
+        public FunctionDefinitionCore(RantNode node, string name, Schema requestSchema, Schema responseSchema,
+                                  Func<RequestCore, Task<byte[]>> handler, FunctionOptions options)
+            : this(node, name, requestSchema, responseSchema, AsyncAdapter(handler), options) { }
 
         // Defer FIRST (a continuation may finish before the invocation returns), then the
-        // Task's completion answers through the Deferred.
-        internal static Action<RantRequest> AsyncAdapter(Func<RantRequest, Task<byte[]>> handler)
+        // Task's completion answers through the DeferredCore.
+        internal static Action<RequestCore> AsyncAdapter(Func<RequestCore, Task<byte[]>> handler)
         {
             if (handler == null) return null;
             return r =>
             {
-                Deferred d = r.Defer();
+                DeferredCore d = r.Defer();
                 Task<byte[]> t;
                 try { t = handler(r); }
                 catch (Exception e) { d.Fail(Patterns.FailText(e)); return; }
@@ -2508,32 +2688,29 @@ namespace Rant
             };
         }
 
-        private static async Task FinishAsync(Task<byte[]> t, Deferred d)
+        private static async Task FinishAsync(Task<byte[]> t, DeferredCore d)
         {
             try { d.Complete(await t.ConfigureAwait(false)); }
             catch (Exception e) { d.Fail(Patterns.FailText(e)); }
         }
 
-        /// <summary>Callers currently matched to this definition.</summary>
-        public int CallerCount => Native.rant_function_match_count(Fn);
+        public int MatchCount => Native.rant_function_match_count(Fn);
 
-        /// <summary>Retire the definition: park its channels and release the name, else a re
-        /// created same name handle is shadowed. Unusable after, refused from a callback.</summary>
-        public SendStatus Retire()
+        // Retire the handle: park its channels and release the name. No op once dead.
+        public void Dispose()
         {
+            if (Fn == IntPtr.Zero) return;
             var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
-            return rc;
+            if (rc != SendStatus.Ok) throw new InvalidOperationException("retire refused: " + rc);
+            Fn = IntPtr.Zero;
         }
 
-        /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
-        /// moved. True when it was re typed. See docs/reflection.md.</summary>
         public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
     }
 
-    /// <summary>An owning call outcome, the payload copied out. SendStatus carries a
-    /// synchronous refusal, and Status stays Timeout then.</summary>
-    public sealed class RantResponse
+    // An owning call outcome, the payload copied out. SendStatus carries a synchronous
+    // refusal, and Status stays Timeout then.
+    internal sealed class ResponseCore
     {
         public CallStatus Status { get; internal set; } = CallStatus.Timeout;
         public SendStatus SendStatus { get; internal set; } = SendStatus.Ok;
@@ -2549,26 +2726,19 @@ namespace Rant
         public bool Ok => Status == CallStatus.Ok;
     }
 
-    /// <summary>A reference to a function definition on another node (untyped).</summary>
-    public class RemoteFunction : INodeHandle
+    // The engine of RemoteFunction<TReq, TRsp>, and the @rant/meta caller.
+    internal sealed class RemoteFunctionCore : INodeHandle
     {
-        internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
+        internal IntPtr Fn;   // zeroed by Dispose, and by the node at Close
         internal readonly RantNode RantNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public RemoteFunction(RantNode node, string name, Schema requestSchema = null,
-                              Schema responseSchema = null, int backpressureWaitMs = 0, int timeoutMs = 0,
-                              int keepLast = 0, bool reflectFromMesh = false)
+        public RemoteFunctionCore(RantNode node, string name, Schema requestSchema, Schema responseSchema,
+                              FunctionOptions options)
         {
             RantNode = node;
-            var co = new RantFunctionOpts
-            {
-                backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
-                timeout_us = (uint)timeoutMs * 1000u,
-                keep_last = (ushort)keepLast,
-                reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
-            };
+            RantFunctionOpts co = (options ?? new FunctionOptions()).ToNative();
             Fn = Native.rant_node_create_remote_function(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
@@ -2581,7 +2751,7 @@ namespace Rant
 
         // Wrap an existing node-owned function handle (the @rant/meta endpoint): callable,
         // never created or destroyed here.
-        internal RemoteFunction(RantNode node, IntPtr fn)
+        internal RemoteFunctionCore(RantNode node, IntPtr fn)
         {
             RantNode = node; Fn = fn;
             node.RegisterHandle(this);
@@ -2600,9 +2770,9 @@ namespace Rant
         /// <summary>Blocking call: waits for the response or timeoutMs, negative = the default,
         /// on the service thread's progress under Start() and driving the loop otherwise.
         /// Refused from a callback. Never throws.</summary>
-        public RantResponse Call(byte[] request, int timeoutMs = -1, uint provider = 0)
+        public ResponseCore Call(byte[] request, int timeoutMs = -1, uint provider = 0)
         {
-            var r = new RantResponse();
+            var r = new ResponseCore();
             RantResponseNative o;
             int rc;
             GCHandle og = OptsHandle(provider, out IntPtr optp);
@@ -2631,12 +2801,12 @@ namespace Rant
 
         /// <summary>Async call: the Task completes with the outcome and never faults. The
         /// response fires from the polling thread and continuations run off it.</summary>
-        public Task<RantResponse> CallAsync(byte[] request, uint provider = 0)
+        public Task<ResponseCore> CallAsync(byte[] request, uint provider = 0)
         {
             // A dispatcher already completes on the thread the caller chose, so continuations
             // belong there. With none, keep them off the polling thread.
-            var tcs = new TaskCompletionSource<RantResponse>(
-                RantNode.CallbackDispatcher != null ? TaskCreationOptions.None
+            var tcs = new TaskCompletionSource<ResponseCore>(
+                RantNode.Dispatcher != null ? TaskCreationOptions.None
                                                     : TaskCreationOptions.RunContinuationsAsynchronously);
             long id = Patterns.AddAsync(new Patterns.AsyncCall { Tcs = tcs, RantNode = RantNode });
             RantNode.RegisterAsync(id);
@@ -2652,34 +2822,30 @@ namespace Rant
             {
                 Patterns.TakeAsync(id);
                 RantNode.UnregisterAsync(id);
-                tcs.TrySetResult(new RantResponse { SendStatus = (SendStatus)rc });
+                tcs.TrySetResult(new ResponseCore { SendStatus = (SendStatus)rc });
             }
             return tcs.Task;
         }
 
-        /// <summary>Providers currently matched (the definition side present).</summary>
         public int MatchCount => Native.rant_function_match_count(Fn);
-        public bool HasDefinition => MatchCount > 0;
 
-        /// <summary>Retire the remote: park its channels and release the name. Every outstanding
-        /// call completes Cancelled. Unusable after, refused from a callback.</summary>
-        public SendStatus Retire()
+        // Retire the handle: park its channels and release the name. No op once dead.
+        public void Dispose()
         {
+            if (Fn == IntPtr.Zero) return;
             var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
-            return rc;
+            if (rc != SendStatus.Ok) throw new InvalidOperationException("retire refused: " + rc);
+            Fn = IntPtr.Zero;
         }
 
-        /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
-        /// moved. True when it was re typed. See docs/reflection.md.</summary>
         public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
     }
 
     // ---- patterns: tasks --------------------------------------------------------
 
-    /// <summary>What a task handler works through: stream progress, observe cancellation.
-    /// Thread safe across awaits. Once the call completed, Progress returns State.</summary>
-    public sealed class TaskContext
+    // What a task handler works through: stream progress, observe cancellation. Thread safe
+    // across awaits. Once the call completed, Progress returns State.
+    internal sealed class TaskContextCore
     {
         private readonly IntPtr _fn;
         private readonly ulong _token;
@@ -2692,7 +2858,7 @@ namespace Rant
         public ulong RecvUs { get; }
         public ulong WrittenUs { get; }
 
-        internal TaskContext(IntPtr fn, ulong token, CancellationToken ct, RantRequest r)
+        internal TaskContextCore(IntPtr fn, ulong token, CancellationToken ct, RequestCore r)
         {
             _fn = fn; _token = token;
             CancellationToken = ct;
@@ -2714,35 +2880,21 @@ namespace Rant
             || Native.rant_function_cancelled(_fn, _token) == 1;
     }
 
-    /// <summary>The untyped implementation side of a task. The handler is an async delegate
-    /// whose completion answers the call (docs/csharp.md). Null answers NoHandler.</summary>
-    public class TaskDefinition : INodeHandle
+    // The engine of TaskDefinition<TReq, TPrg, TRsp>. The handler is an async delegate whose
+    // completion answers the call. Null answers NoHandler.
+    internal sealed class TaskDefinitionCore : INodeHandle
     {
-        internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
+        internal IntPtr Fn;   // zeroed by Dispose, and by the node at Close
         internal readonly RantNode RantNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public TaskDefinition(RantNode node, string name, Schema requestSchema, Schema progressSchema,
-                              Schema responseSchema, Func<RantRequest, TaskContext, Task<byte[]>> handler,
-                              bool progressBestEffort = false, int progressKeepLast = 0,
-                              bool noCancel = false, bool exclusive = false, bool multi = false,
-                              int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
-                              bool reflectFromMesh = false)
+        public TaskDefinitionCore(RantNode node, string name, Schema requestSchema, Schema progressSchema,
+                              Schema responseSchema, Func<RequestCore, TaskContextCore, Task<byte[]>> handler,
+                              TaskOptions options)
         {
             RantNode = node;
-            var co = new RantTaskOpts
-            {
-                keep_last = (ushort)keepLast,
-                reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
-                progress_best_effort = (byte)(progressBestEffort ? 1 : 0),
-                progress_keep_last = (ushort)progressKeepLast,
-                no_cancel = (byte)(noCancel ? 1 : 0),
-                exclusive = (byte)(exclusive ? 1 : 0),
-                multi = (byte)(multi ? 1 : 0),
-                backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
-                timeout_us = (uint)timeoutMs * 1000u,
-            };
+            RantTaskOpts co = (options ?? new TaskOptions()).ToNative();
             long id = 0, cancelId = 0;
             Patterns.RequestBox box = null;
             Patterns.TaskCancelBox cancels = null;
@@ -2782,13 +2934,13 @@ namespace Rant
         // Poll thread: defer, which implies RUNNING, arm the per call CancellationTokenSource,
         // invoke the async delegate. Wherever its completion lands answers the call.
         private static void RunCall(Patterns.RequestBox box, Patterns.TaskCancelBox cancels,
-                                    Func<RantRequest, TaskContext, Task<byte[]>> handler, RantRequest r)
+                                    Func<RequestCore, TaskContextCore, Task<byte[]>> handler, RequestCore r)
         {
-            Deferred d = r.Defer();
+            DeferredCore d = r.Defer();
             ulong token = d.Token;
             var cts = new CancellationTokenSource();
             cancels.Add(token, cts);
-            var ctx = new TaskContext(box.Fn, token, cts.Token, r);
+            var ctx = new TaskContextCore(box.Fn, token, cts.Token, r);
             Task<byte[]> t;
             try { t = handler(r, ctx); }
             catch (OperationCanceledException) { cancels.Drop(token); d.CompleteCancelled(); return; }
@@ -2796,7 +2948,7 @@ namespace Rant
             _ = FinishCall(t, d, cancels, token);
         }
 
-        private static async Task FinishCall(Task<byte[]> t, Deferred d,
+        private static async Task FinishCall(Task<byte[]> t, DeferredCore d,
                                              Patterns.TaskCancelBox cancels, ulong token)
         {
             try { d.Complete(await t.ConfigureAwait(false)); }
@@ -2805,26 +2957,23 @@ namespace Rant
             finally { cancels.Drop(token); }
         }
 
-        /// <summary>Callers currently matched to this definition.</summary>
-        public int CallerCount => Native.rant_function_match_count(Fn);
+        public int MatchCount => Native.rant_function_match_count(Fn);
 
-        /// <summary>Retire the definition: every live deferred call answers Cancelled while the
-        /// channels are up, a later completion is refused. Refused from a callback.</summary>
-        public SendStatus Retire()
+        // Retire the handle: park its channels and release the name. No op once dead.
+        public void Dispose()
         {
+            if (Fn == IntPtr.Zero) return;
             var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
-            return rc;
+            if (rc != SendStatus.Ok) throw new InvalidOperationException("retire refused: " + rc);
+            Fn = IntPtr.Zero;
         }
 
-        /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
-        /// moved. True when it was re typed. See docs/reflection.md.</summary>
         public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
     }
 
-    /// <summary>One task progress update, the untyped form. Value is the payload copied out,
-    /// null = the RUNNING acknowledgment.</summary>
-    public sealed class TaskProgress
+    // One task progress update as delivered. Value is the payload copied out, null = the
+    // RUNNING acknowledgment.
+    internal sealed class ProgressCore
     {
         public uint CallId { get; internal set; }
         /// <summary>The peer working the call.</summary>
@@ -2836,31 +2985,20 @@ namespace Rant
         internal IntPtr SchemaPtr;
     }
 
-    /// <summary>The untyped reference to a task defined elsewhere. A request is always
-    /// directed at one provider, and the timeout bounds only the first response.</summary>
-    public class RemoteTask : INodeHandle
+    // The engine of RemoteTask<TReq, TPrg, TRsp>. A request is always directed at one
+    // provider, and the timeout bounds only the first response.
+    internal sealed class RemoteTaskCore : INodeHandle
     {
-        internal IntPtr Fn;   // zeroed by Retire, and by the node at Close
+        internal IntPtr Fn;   // zeroed by Dispose, and by the node at Close
         internal readonly RantNode RantNode;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
-        public RemoteTask(RantNode node, string name, Schema requestSchema = null,
-                          Schema progressSchema = null, Schema responseSchema = null,
-                          bool progressBestEffort = false, int progressKeepLast = 0,
-                          int backpressureWaitMs = 0, int timeoutMs = 0, int keepLast = 0,
-                          bool reflectFromMesh = false)
+        public RemoteTaskCore(RantNode node, string name, Schema requestSchema, Schema progressSchema,
+                          Schema responseSchema, TaskOptions options)
         {
             RantNode = node;
-            var co = new RantTaskOpts
-            {
-                keep_last = (ushort)keepLast,
-                reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
-                progress_best_effort = (byte)(progressBestEffort ? 1 : 0),
-                progress_keep_last = (ushort)progressKeepLast,
-                backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
-                timeout_us = (uint)timeoutMs * 1000u,
-            };
+            RantTaskOpts co = (options ?? new TaskOptions()).ToNative();
             Fn = Native.rant_node_create_remote_task(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 progressSchema != null ? progressSchema.Handle : IntPtr.Zero,
@@ -2873,30 +3011,15 @@ namespace Rant
             node.RegisterHandle(this);
         }
 
-        /// <summary>Start the task: the Task completes with the terminal outcome and never
-        /// faults. progress fires per update, null for RUNNING. The token cancels.</summary>
-        public Task<RantResponse> CallAsync(byte[] request, IProgress<TaskProgress> progress = null,
-                                            CancellationToken cancellationToken = default, uint provider = 0)
-            => CallAsync(request, out _, progress, cancellationToken, provider);
-
-        /// <summary>As above, and callId receives the call id at commit, the handle for Cancel
-        /// from anywhere. 0 when the request never committed.</summary>
-        public Task<RantResponse> CallAsync(byte[] request, out uint callId,
-                                            IProgress<TaskProgress> progress = null,
-                                            CancellationToken cancellationToken = default, uint provider = 0)
-        {
-            Action<TaskProgress> sink = null;
-            if (progress != null) { var pr = progress; sink = v => pr.Report(v); }
-            return CallCore(request, out callId, sink, cancellationToken, provider);
-        }
-
-        internal Task<RantResponse> CallCore(byte[] request, out uint callId, Action<TaskProgress> sink,
+        // Start the task: the Task completes with the terminal outcome and never faults. sink
+        // fires per update, null Value for RUNNING. The token cancels through Cancel.
+        internal Task<ResponseCore> CallCore(byte[] request, out uint callId, Action<ProgressCore> sink,
                                              CancellationToken cancellationToken, uint provider)
         {
             // A dispatcher already completes on the thread the caller chose, so continuations
             // belong there. With none, keep them off the polling thread.
-            var tcs = new TaskCompletionSource<RantResponse>(
-                RantNode.CallbackDispatcher != null ? TaskCreationOptions.None
+            var tcs = new TaskCompletionSource<ResponseCore>(
+                RantNode.Dispatcher != null ? TaskCreationOptions.None
                                                     : TaskCreationOptions.RunContinuationsAsynchronously);
             long id = Patterns.AddAsync(new Patterns.AsyncCall
             {
@@ -2931,7 +3054,7 @@ namespace Rant
             {
                 Patterns.TakeAsync(id);
                 RantNode.UnregisterAsync(id);
-                tcs.TrySetResult(new RantResponse { SendStatus = (SendStatus)rc });
+                tcs.TrySetResult(new ResponseCore { SendStatus = (SendStatus)rc });
                 return tcs.Task;
             }
             if (cancellationToken.CanBeCanceled)
@@ -2946,25 +3069,21 @@ namespace Rant
             return tcs.Task;
         }
 
-        /// <summary>Request cancellation of the call. Cooperative and never acked, the terminal
-        /// status answers. BadRole when the provider declared noCancel, State if done.</summary>
+        // Cooperative and never acked, the terminal status answers. BadRole when the provider
+        // declared noCancel, State if done.
         public SendStatus Cancel(uint callId) => (SendStatus)Native.rant_function_cancel(Fn, callId);
 
-        /// <summary>Providers currently matched (the definition side present).</summary>
         public int MatchCount => Native.rant_function_match_count(Fn);
-        public bool HasDefinition => MatchCount > 0;
 
-        /// <summary>Retire the remote: every outstanding call completes Cancelled. Unusable
-        /// after, refused from a callback.</summary>
-        public SendStatus Retire()
+        // Retire the handle: park its channels and release the name. No op once dead.
+        public void Dispose()
         {
+            if (Fn == IntPtr.Zero) return;
             var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc == SendStatus.Ok) Fn = IntPtr.Zero;
-            return rc;
+            if (rc != SendStatus.Ok) throw new InvalidOperationException("retire refused: " + rc);
+            Fn = IntPtr.Zero;
         }
 
-        /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
-        /// moved. True when it was re typed. See docs/reflection.md.</summary>
         public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
     }
 
@@ -2986,39 +3105,22 @@ namespace Rant
         internal IntPtr SchemaPtr;
     }
 
-    /// <summary>Replicated state, ONE owner: this node holds the authoritative value
-    /// (untyped: Schema + byte[]). Remotes cache the latest published value.</summary>
-    public class VariableDefinition : INodeHandle
+    // The engine of Variable<T>, both sides: definition = true holds the authoritative value,
+    // false caches the owner's latest and writes over the set channel.
+    internal sealed class VariableCore : INodeHandle
     {
-        internal IntPtr Var;   // zeroed by Retire, and by the node at Close
+        internal IntPtr Var;   // zeroed by Dispose, and by the node at Close
         internal readonly RantNode RantNode;
 
         void INodeHandle.Invalidate() { Var = IntPtr.Zero; }
         internal readonly string Name;
 
-        public VariableDefinition(RantNode node, string name, Schema schema, byte[] initial = null,
-                                  bool readOnly = false, bool allowForce = false,
-                                  int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0,
-                                  bool reflectFromMesh = false)
-            : this(node, name, schema, initial, readOnly, allowForce, catchUp, keepLast,
-                   backpressureWaitMs, reflectFromMesh, true) { }
-
-        private protected VariableDefinition(RantNode node, string name, Schema schema, byte[] initial,
-                                             bool readOnly, bool allowForce, int catchUp,
-                                             int keepLast, int backpressureWaitMs,
-                                             bool reflectFromMesh, bool definition)
+        internal VariableCore(RantNode node, string name, Schema schema, byte[] initial,
+                                    VariableOptions options, bool definition)
         {
             RantNode = node;
             Name = name;
-            var co = new RantVariableOpts
-            {
-                access = (byte)(readOnly ? 1 : 0),
-                allow_force = (byte)(allowForce ? 1 : 0),
-                catch_up = (ushort)catchUp,
-                keep_last = (ushort)keepLast,
-                backpressure_wait_us = (uint)backpressureWaitMs * 1000u,
-                reflect_from_mesh = (byte)(reflectFromMesh ? 1 : 0),
-            };
+            RantVariableOpts co = (options ?? new VariableOptions()).ToNative();
             using (var p = new PinnedBytes(initial))
             {
                 co.initial = p.B;
@@ -3069,107 +3171,37 @@ namespace Rant
         public SendStatus Unforce() => (SendStatus)Native.rant_variable_unforce(Var);
         public bool Forced => Native.rant_variable_forced(Var) == 1;
 
-        /// <summary>Remotes matched to this definition (on a RemoteVariable: owners
-        /// matched, 0 = no owner present).</summary>
-        public int RemoteCount => Native.rant_variable_match_count(Var);
+        public int MatchCount => Native.rant_variable_match_count(Var);
 
         /// <summary>Block until a value exists or timeoutMs elapses, on the service thread's
         /// progress under Start() and driving the loop otherwise. Refused from a callback.</summary>
         public bool Wait(int timeoutMs) => Native.rant_variable_wait(Var, timeoutMs) == 1;
 
-        /// <summary>Observe changes: fires on every state change and replays the current value
-        /// at registration, inline on the thread that applied the write. Null clears.</summary>
-        public IDisposable OnChange(Action<VariableUpdate> handler) => Observe(handler, true);
+        private bool _changeBound, _writeBound;
+        // the last change delivered, replayed to a handler added after the first
+        internal VariableUpdate LastChange;
 
-        /// <summary>Observe every applied write, identical bytes or not, with no replay at
-        /// registration. The same threading as OnChange. Null clears every observer.</summary>
-        public IDisposable OnWrite(Action<VariableUpdate> handler) => Observe(handler, false);
-
-        // One native registration per kind fans out to every observer, as a topic index does.
-        // The C replays the current value at registration, so a later observer is replayed the
-        // last one seen instead, and both see the same first value.
-        private readonly List<Action<VariableUpdate>> _change = new List<Action<VariableUpdate>>();
-        private readonly List<Action<VariableUpdate>> _write = new List<Action<VariableUpdate>>();
-        private bool _changeBound, _writeBound, _hasLast;
-        private VariableUpdate _last;
-
-        private IDisposable Observe(Action<VariableUpdate> handler, bool change)
+        // One native registration per kind for the handle's life, fanning into the typed
+        // events. True when this call bound it: the C then replayed the current value into a
+        // change binding before returning, so a later handler is replayed LastChange instead.
+        internal bool Bind(bool change, Action<VariableUpdate> fan)
         {
-            List<Action<VariableUpdate>> list = change ? _change : _write;
-            if (handler == null)
-            {
-                lock (list) list.Clear();
-                if (change) { Native.rant_variable_on_change(Var, null, IntPtr.Zero); _changeBound = false; }
-                else { Native.rant_variable_on_write(Var, null, IntPtr.Zero); _writeBound = false; }
-                return null;
-            }
-            bool bound = change ? _changeBound : _writeBound;
-            lock (list) list.Add(handler);
-            if (!bound)
-            {
-                List<Action<VariableUpdate>> l = list;
-                bool ch = change;
-                long id = Patterns.AddBox(new Patterns.VarBox
-                {
-                    Handler = u => Fan(l, ch, u),
-                    Node = RantNode,
-                });
-                RantNode.RegisterPatternBox(id);
-                if (change) { Native.rant_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id); _changeBound = true; }
-                else { Native.rant_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id); _writeBound = true; }
-            }
-            else if (change)
-            {
-                bool had; VariableUpdate last;
-                lock (list) { had = _hasLast; last = _last; }
-                if (had)
-                {
-                    try { handler(last); }     // late observer: the replay it missed
-                    catch (Exception e) { Console.Error.WriteLine("rant variable observer: " + e); }
-                }
-            }
-            return new Observer(list, handler);
+            if (change ? _changeBound : _writeBound) return false;
+            Action<VariableUpdate> h = change ? (u => { LastChange = u; fan(u); }) : fan;
+            long id = Patterns.AddBox(new Patterns.VarBox { Handler = h, Node = RantNode });
+            RantNode.RegisterPatternBox(id);
+            if (change) { Native.rant_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id); _changeBound = true; }
+            else { Native.rant_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id); _writeBound = true; }
+            return true;
         }
 
-        private void Fan(List<Action<VariableUpdate>> list, bool change, VariableUpdate u)
+        // Retire the handle: park its channels and release the name. No op once dead.
+        public void Dispose()
         {
-            Action<VariableUpdate>[] hs;
-            lock (list)
-            {
-                if (change) { _last = u; _hasLast = true; }
-                hs = list.ToArray();           // an observer may add or drop from inside
-            }
-            for (int i = 0; i < hs.Length; i++)
-            {
-                try { hs[i](u); }
-                catch (Exception e) { Console.Error.WriteLine("rant variable observer: " + e); }
-            }
-        }
-
-        private sealed class Observer : IDisposable
-        {
-            private List<Action<VariableUpdate>> _list;
-            private Action<VariableUpdate> _fn;
-            internal Observer(List<Action<VariableUpdate>> list, Action<VariableUpdate> fn)
-            {
-                _list = list; _fn = fn;
-            }
-            public void Dispose()
-            {
-                List<Action<VariableUpdate>> l = _list;
-                Action<VariableUpdate> f = _fn;
-                _list = null; _fn = null;
-                if (l != null) lock (l) l.Remove(f);
-            }
-        }
-
-        /// <summary>Retire the handle: park its channels and release the name, else a re created
-        /// same name handle is shadowed. Unusable after, refused from a callback.</summary>
-        public SendStatus Retire()
-        {
+            if (Var == IntPtr.Zero) return;
             var rc = (SendStatus)Native.rant_variable_retire(Var);
-            if (rc == SendStatus.Ok) Var = IntPtr.Zero;
-            return rc;
+            if (rc != SendStatus.Ok) throw new InvalidOperationException("retire refused: " + rc);
+            Var = IntPtr.Zero;
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
@@ -3177,111 +3209,68 @@ namespace Rant
         public bool Refresh() => Var != IntPtr.Zero && Native.rant_variable_refresh(Var) == 1;
     }
 
-    /// <summary>A reference to a variable owned by another node (untyped): reads see
-    /// the cached latest, writes go over the set channel (dumb writes, no response).</summary>
-    public class RemoteVariable : VariableDefinition
-    {
-        public RemoteVariable(RantNode node, string name, Schema schema = null,
-                              int catchUp = 0, int keepLast = 0, int backpressureWaitMs = 0,
-                              bool reflectFromMesh = false)
-            : base(node, name, schema, null, false, false, catchUp, keepLast,
-                   backpressureWaitMs, reflectFromMesh, false) { }
+    // ---- the typed handles --------------------------------------------------------
 
-        /// <summary>Owners currently matched.</summary>
-        public int MatchCount => RemoteCount;
-        public bool HasDefinition => RemoteCount > 0;
-    }
-
-    // ---- patterns: pub/sub handles ----------------------------------------------
-
-    /// <summary>The publish-side handle over a (possibly shared) topic (untyped).
-    /// Same-name handles on one node share the topic slot with a widened role.</summary>
-    public class Publisher
-    {
-        internal readonly Topic T;
-
-        public Publisher(RantNode node, string name, Schema schema = null, Qos qos = null)
-        {
-            T = new Topic(node, name, schema, Role.PubOnly, qos);
-        }
-
-        public SendStatus Send(byte[] data, long captureUs = 0) => T.Send(data, captureUs);
-        public SendStatus Send(string text, long captureUs = 0) => T.Send(text, captureUs);
-        public int MatchCount => T.MatchCount();
-        public int PendingCount => T.PendingCount;
-        public bool Ready => T.Ready;
-        public Topic Topic => T;
-    }
-
-    /// <summary>The untyped subscribe side. A handler fires per message on the polling
-    /// thread instead of the node wide onMessage, or consume with TryTake and Dispatch.</summary>
-    public class Subscriber
-    {
-        internal readonly Topic T;
-
-        public Subscriber(RantNode node, string name, Schema schema = null,
-                          Action<RantMessage> handler = null, Qos qos = null)
-        {
-            T = new Topic(node, name, schema, Role.SubOnly, qos);
-            if (handler != null) node.AddSubHandler(T.Index, handler);
-        }
-
-        public bool TryTake(out RantMessage message, int timeoutMs = 0) => T.TryTake(out message, timeoutMs);
-        public int Dispatch(int maxMsgs = 0, int timeoutMs = 0) => T.Dispatch(maxMsgs, timeoutMs);
-        public Topic Topic => T;
-    }
-
-    // ---- patterns: typed sugar --------------------------------------------------
-
-    /// <summary>The typed request view inside a full-form function handler: reply with
-    /// a typed value, Fail, or Defer. Valid only inside the handler callback.</summary>
+    /// <summary>The request inside a full form function handler: reply with a typed value,
+    /// Fail, or Defer. Valid only inside the handler callback.</summary>
     public sealed class RantRequest<TRsp>
     {
-        private readonly RantRequest _core;
+        private readonly RequestCore _core;
         private readonly Schema _rsp;
 
-        internal RantRequest(RantRequest core, Schema rsp) { _core = core; _rsp = rsp; }
+        internal RantRequest(RequestCore core, Schema rsp) { _core = core; _rsp = rsp; }
 
+        /// <summary>The request bytes as sent.</summary>
         public byte[] Data => _core.Data;
+        /// <summary>The calling peer's id and node name.</summary>
         public uint Caller => _core.Caller;
         public string CallerName => _core.CallerName;
         public string FunctionName => _core.FunctionName;
         public ulong RecvUs => _core.RecvUs;
+        /// <summary>The caller's wall clock when it sent the request, 0 = unstamped.</summary>
+        public ulong WrittenUs => _core.WrittenUs;
+        /// <summary>True once Reply, Fail or Defer has been called.</summary>
         public bool Answered => _core.Answered;
 
-        public void Reply(TRsp value) => _core.Reply(_rsp.Encode(value));
+        /// <summary>Answer CallStatus.Ok with value.</summary>
+        public void Reply(TRsp value) => _core.Reply(Patterns.Encode(_rsp, value));
+        /// <summary>Answer AppError. message is the text the caller sees, empty = the default.</summary>
         public void Fail(string message = null) => _core.Fail(message);
+        /// <summary>Park the reply and return now. The Deferred completes the call later from
+        /// any thread.</summary>
         public Deferred<TRsp> Defer() => new Deferred<TRsp>(_core.Defer(), _rsp);
     }
 
-    /// <summary>The typed parked reply: Complete(value)/Fail() exactly once, any thread.</summary>
+    /// <summary>A parked reply from RantRequest&lt;TRsp&gt;.Defer: Complete or Fail exactly once,
+    /// from any thread. Dropping it leaves the caller to its timeout.</summary>
     public sealed class Deferred<TRsp>
     {
-        private readonly Deferred _core;
+        private readonly DeferredCore _core;
         private readonly Schema _rsp;
 
-        internal Deferred(Deferred core, Schema rsp) { _core = core; _rsp = rsp; }
+        internal Deferred(DeferredCore core, Schema rsp) { _core = core; _rsp = rsp; }
 
+        /// <summary>False once completed, or after the node closed.</summary>
         public bool Valid => _core.Valid;
-        public bool Complete(TRsp value, string message = null) => _core.Complete(_rsp.Encode(value), message);
+        /// <summary>Answer Ok with value. message rides along as debug text.</summary>
+        public bool Complete(TRsp value, string message = null) => _core.Complete(Patterns.Encode(_rsp, value), message);
+        /// <summary>Answer AppError with message as the text the caller sees.</summary>
         public bool Fail(string message = null) => _core.Fail(message);
     }
 
-    /// <summary>The typed implementation side. Simple form: the return value is the reply
-    /// and a thrown exception answers AppError. Full form: RantRequest&lt;TRsp&gt;.</summary>
-    public sealed class FunctionDefinition<TReq, TRsp>
+    /// <summary>The implementation of a function, from RantNode.FunctionDefinition. One
+    /// definition per name on the mesh. A byte[] type carries the message bytes as is.</summary>
+    public sealed class FunctionDefinition<TReq, TRsp> : IDisposable
     {
-        private readonly FunctionDefinition _core;
+        private readonly FunctionDefinitionCore _core;
         private readonly Schema _req, _rsp;
 
-        public FunctionDefinition(RantNode node, string name, Func<TReq, TRsp> handler,
-                                  int backpressureWaitMs = 0, int timeoutMs = 0,
-                                  bool reflectFromMesh = false,
-                                  Schema requestSchema = null, Schema responseSchema = null)
+        internal FunctionDefinition(RantNode node, string name, Func<TReq, TRsp> handler,
+                                    FunctionOptions options, Schema requestSchema, Schema responseSchema)
         {
             _req = Schema.For(typeof(TReq), requestSchema);
             _rsp = Schema.For(typeof(TRsp), responseSchema);
-            Action<RantRequest> h = null;
+            Action<RequestCore> h = null;
             if (handler != null)
             {
                 Schema req = _req, rsp = _rsp;
@@ -3290,23 +3279,18 @@ namespace Rant
                     object q;
                     if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q)) { r.Fail("request decode failed"); return; }
                     TRsp outv = handler((TReq)q);   // a throw answers AppError (trampoline catch)
-                    if (!r.Answered) r.Reply(rsp.Encode(outv));
+                    if (!r.Answered) r.Reply(Patterns.Encode(rsp, outv));
                 };
             }
-            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs,
-                                           reflectFromMesh: reflectFromMesh);
+            _core = new FunctionDefinitionCore(node, name, _req, _rsp, h, options);
         }
 
-        /// <summary>The async handler form: the Task's completion answers the call, its result
-        /// Ok and an exception AppError. On the polling thread until the first await.</summary>
-        public FunctionDefinition(RantNode node, string name, Func<TReq, Task<TRsp>> handler,
-                                  int backpressureWaitMs = 0, int timeoutMs = 0,
-                                  bool reflectFromMesh = false,
-                                  Schema requestSchema = null, Schema responseSchema = null)
+        internal FunctionDefinition(RantNode node, string name, Func<TReq, Task<TRsp>> handler,
+                                    FunctionOptions options, Schema requestSchema, Schema responseSchema)
         {
             _req = Schema.For(typeof(TReq), requestSchema);
             _rsp = Schema.For(typeof(TRsp), responseSchema);
-            Func<RantRequest, Task<byte[]>> h = null;
+            Func<RequestCore, Task<byte[]>> h = null;
             if (handler != null)
             {
                 Schema req = _req, rsp = _rsp;
@@ -3316,21 +3300,18 @@ namespace Rant
                     if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q))
                         throw new Exception("request decode failed");
                     TRsp outv = await handler((TReq)q).ConfigureAwait(false);
-                    return rsp.Encode(outv);
+                    return Patterns.Encode(rsp, outv);
                 };
             }
-            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs,
-                                           reflectFromMesh: reflectFromMesh);
+            _core = new FunctionDefinitionCore(node, name, _req, _rsp, h, options);
         }
 
-        public FunctionDefinition(RantNode node, string name, Action<TReq, RantRequest<TRsp>> handler,
-                                  int backpressureWaitMs = 0, int timeoutMs = 0,
-                                  bool reflectFromMesh = false,
-                                  Schema requestSchema = null, Schema responseSchema = null)
+        internal FunctionDefinition(RantNode node, string name, Action<TReq, RantRequest<TRsp>> handler,
+                                    FunctionOptions options, Schema requestSchema, Schema responseSchema)
         {
             _req = Schema.For(typeof(TReq), requestSchema);
             _rsp = Schema.For(typeof(TRsp), responseSchema);
-            Action<RantRequest> h = null;
+            Action<RequestCore> h = null;
             if (handler != null)
             {
                 Schema req = _req, rsp = _rsp;
@@ -3341,30 +3322,35 @@ namespace Rant
                     handler((TReq)q, new RantRequest<TRsp>(r, rsp));
                 };
             }
-            _core = new FunctionDefinition(node, name, _req, _rsp, h, backpressureWaitMs, timeoutMs,
-                                           reflectFromMesh: reflectFromMesh);
+            _core = new FunctionDefinitionCore(node, name, _req, _rsp, h, options);
         }
 
-        public int CallerCount => _core.CallerCount;
-        /// <summary>A reflectFromMesh handle: re type in place when the mesh moved. True when
+        /// <summary>Callers currently matched to this definition.</summary>
+        public int MatchCount => _core.MatchCount;
+        /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See docs/reflection.md.</summary>
         public bool Refresh() => _core.Refresh();
-        public SendStatus Retire() => _core.Retire();
+        /// <summary>Retire the definition and release the name. Refused from a callback.</summary>
+        public void Dispose() => _core.Dispose();
     }
 
-    /// <summary>The typed owning call outcome. Reading Value when not Ok throws
+    /// <summary>A call outcome. Reading Value when the call did not complete Ok throws
     /// CallException. Status never throws.</summary>
     public sealed class RantResponse<TRsp>
     {
-        internal RantResponse Core;
+        internal ResponseCore Core;
         internal Schema RspSchema;
 
         public CallStatus Status => Core.Status;
         public bool Ok => Core.Ok;
+        /// <summary>The peer that answered.</summary>
         public uint Provider => Core.Provider;
+        /// <summary>The provider's wall clock when it sent the response, 0 = synthesized.</summary>
         public ulong WrittenUs => Core.WrittenUs;
+        /// <summary>A synchronous refusal of the send. Status stays Timeout then.</summary>
         public SendStatus SendStatus => Core.SendStatus;
-        /// <summary>Human-readable outcome text (see RantResponse.Message).</summary>
+        /// <summary>The outcome text to display on a failure: the definition's message, else
+        /// the default status text.</summary>
         public string Message => Core.Message;
 
         public TRsp Value
@@ -3383,52 +3369,61 @@ namespace Rant
         }
     }
 
-    /// <summary>The typed caller side of a function defined on another node.</summary>
-    public sealed class RemoteFunction<TReq, TRsp>
+    /// <summary>The caller side of a function defined on another node, from
+    /// RantNode.RemoteFunction. A byte[] type carries the message bytes as is, with an
+    /// explicit Schema or none.</summary>
+    public sealed class RemoteFunction<TReq, TRsp> : IDisposable
     {
-        private readonly RemoteFunction _core;
+        private readonly RemoteFunctionCore _core;
         private readonly Schema _req, _rsp;
 
-        public RemoteFunction(RantNode node, string name, int backpressureWaitMs = 0, int timeoutMs = 0,
-                              bool reflectFromMesh = false,
-                              Schema requestSchema = null, Schema responseSchema = null)
+        internal RemoteFunction(RantNode node, string name, FunctionOptions options,
+                                Schema requestSchema, Schema responseSchema)
         {
             _req = Schema.For(typeof(TReq), requestSchema);
             _rsp = Schema.For(typeof(TRsp), responseSchema);
-            _core = new RemoteFunction(node, name, _req, _rsp, backpressureWaitMs, timeoutMs,
-                                       reflectFromMesh: reflectFromMesh);
+            _core = new RemoteFunctionCore(node, name, _req, _rsp, options);
         }
 
-        /// <summary>BLOCKING call (see the untyped RemoteFunction.Call). provider directs it
-        /// at one definition by peer id (0 = undirected, first answer wins).</summary>
+        /// <summary>Blocking call: waits for the response or timeoutMs, negative = the default,
+        /// on the service thread's progress or driving a Manual node's loop. Refused from a
+        /// callback. Never throws. provider directs it at one definition by peer id, 0 =
+        /// undirected, first answer wins.</summary>
         public RantResponse<TRsp> Call(TReq request, int timeoutMs = -1, uint provider = 0)
-            => new RantResponse<TRsp> { Core = _core.Call(_req.Encode(request), timeoutMs, provider), RspSchema = _rsp };
+            => new RantResponse<TRsp> { Core = _core.Call(Patterns.Encode(_req, request), timeoutMs, provider), RspSchema = _rsp };
 
-        /// <summary>Async call: the Task NEVER faults, inspect Status.</summary>
+        /// <summary>Async call: the Task completes with the outcome and never faults, inspect
+        /// Status. Continuations run off the service thread.</summary>
         public async Task<RantResponse<TRsp>> CallAsync(TReq request, uint provider = 0)
         {
-            RantResponse core = await _core.CallAsync(_req.Encode(request), provider).ConfigureAwait(false);
+            ResponseCore core = await _core.CallAsync(Patterns.Encode(_req, request), provider).ConfigureAwait(false);
             return new RantResponse<TRsp> { Core = core, RspSchema = _rsp };
         }
 
+        /// <summary>Definitions currently matched, 0 = no provider present.</summary>
         public int MatchCount => _core.MatchCount;
-        public bool HasDefinition => _core.HasDefinition;
-        /// <summary>A reflectFromMesh handle: re type in place when the mesh moved. True when
+        /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See docs/reflection.md.</summary>
         public bool Refresh() => _core.Refresh();
-        public SendStatus Retire() => _core.Retire();
+        /// <summary>Retire the remote: every outstanding call completes Cancelled. Refused
+        /// from a callback.</summary>
+        public void Dispose() => _core.Dispose();
     }
 
-    /// <summary>The typed task handler context: typed Progress over the untyped surface.</summary>
+    /// <summary>What a task handler works through: stream typed Progress and observe
+    /// cancellation. Thread safe across awaits.</summary>
     public sealed class TaskContext<TPrg>
     {
-        private readonly TaskContext _core;
+        private readonly TaskContextCore _core;
         private readonly Schema _prg;
 
-        internal TaskContext(TaskContext core, Schema prg) { _core = core; _prg = prg; }
+        internal TaskContext(TaskContextCore core, Schema prg) { _core = core; _prg = prg; }
 
-        public SendStatus Progress(TPrg value) => _core.Progress(_prg.Encode(value));
-        public SendStatus Progress(byte[] value) => _core.Progress(value);
+        /// <summary>Broadcast one progress update. A reliable subscriber backpressures end to
+        /// end. State once the call completed.</summary>
+        public SendStatus Progress(TPrg value) => _core.Progress(Patterns.Encode(_prg, value));
+        /// <summary>Cancelled the moment a cancel arrives. Honor it by throwing
+        /// OperationCanceledException, or run to completion anyway.</summary>
         public CancellationToken CancellationToken => _core.CancellationToken;
         public bool Cancelled => _core.Cancelled;
         public uint Caller => _core.Caller;
@@ -3437,24 +3432,22 @@ namespace Rant
         public ulong WrittenUs => _core.WrittenUs;
     }
 
-    /// <summary>The typed implementation side of a task. The async handler's completion
-    /// answers the call (docs/csharp.md), on the polling thread until its first await.</summary>
-    public sealed class TaskDefinition<TReq, TPrg, TRsp>
+    /// <summary>The implementation of a task, from RantNode.TaskDefinition: a long running
+    /// call that streams progress and can be cancelled. The async handler's completion
+    /// answers the call, on the service thread until its first await (docs/csharp.md).</summary>
+    public sealed class TaskDefinition<TReq, TPrg, TRsp> : IDisposable
     {
-        private readonly TaskDefinition _core;
+        private readonly TaskDefinitionCore _core;
         private readonly Schema _req, _prg, _rsp;
 
-        public TaskDefinition(RantNode node, string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
-                              bool progressBestEffort = false, int progressKeepLast = 0,
-                              bool noCancel = false, bool exclusive = false, bool multi = false,
-                              int backpressureWaitMs = 0, int timeoutMs = 0,
-                              bool reflectFromMesh = false,
-                              Schema requestSchema = null, Schema progressSchema = null, Schema responseSchema = null)
+        internal TaskDefinition(RantNode node, string name, Func<TReq, TaskContext<TPrg>, Task<TRsp>> handler,
+                                TaskOptions options, Schema requestSchema, Schema progressSchema,
+                                Schema responseSchema)
         {
             _req = Schema.For(typeof(TReq), requestSchema);
             _prg = Schema.For(typeof(TPrg), progressSchema);
             _rsp = Schema.For(typeof(TRsp), responseSchema);
-            Func<RantRequest, TaskContext, Task<byte[]>> h = null;
+            Func<RequestCore, TaskContextCore, Task<byte[]>> h = null;
             if (handler != null)
             {
                 Schema req = _req, prg = _prg, rsp = _rsp;
@@ -3464,56 +3457,47 @@ namespace Rant
                     if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q))
                         throw new Exception("request decode failed");
                     TRsp outv = await handler((TReq)q, new TaskContext<TPrg>(ctx, prg)).ConfigureAwait(false);
-                    return rsp.Encode(outv);
+                    return Patterns.Encode(rsp, outv);
                 };
             }
-            _core = new TaskDefinition(node, name, _req, _prg, _rsp, h, progressBestEffort,
-                                       progressKeepLast, noCancel, exclusive, multi,
-                                       backpressureWaitMs, timeoutMs,
-                                       reflectFromMesh: reflectFromMesh);
+            _core = new TaskDefinitionCore(node, name, _req, _prg, _rsp, h, options);
         }
 
-        public int CallerCount => _core.CallerCount;
-        /// <summary>A reflectFromMesh handle: re type in place when the mesh moved. True when
+        /// <summary>Callers currently matched to this definition.</summary>
+        public int MatchCount => _core.MatchCount;
+        /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See docs/reflection.md.</summary>
         public bool Refresh() => _core.Refresh();
-        public SendStatus Retire() => _core.Retire();
+        /// <summary>Retire the definition: every live deferred call answers Cancelled, a later
+        /// completion is refused. Refused from a callback.</summary>
+        public void Dispose() => _core.Dispose();
     }
 
-    /// <summary>The typed caller side of a task defined on another node.</summary>
-    public sealed class RemoteTask<TReq, TPrg, TRsp>
+    /// <summary>The caller side of a task defined on another node, from RantNode.RemoteTask.
+    /// A request is always directed at one provider, and the timeout bounds only the first
+    /// response.</summary>
+    public sealed class RemoteTask<TReq, TPrg, TRsp> : IDisposable
     {
-        private readonly RemoteTask _core;
+        private readonly RemoteTaskCore _core;
         private readonly Schema _req, _prg, _rsp;
 
-        public RemoteTask(RantNode node, string name, bool progressBestEffort = false,
-                          int progressKeepLast = 0, int backpressureWaitMs = 0, int timeoutMs = 0,
-                          bool reflectFromMesh = false,
-                          Schema requestSchema = null, Schema progressSchema = null, Schema responseSchema = null)
+        internal RemoteTask(RantNode node, string name, TaskOptions options,
+                            Schema requestSchema, Schema progressSchema, Schema responseSchema)
         {
             _req = Schema.For(typeof(TReq), requestSchema);
             _prg = Schema.For(typeof(TPrg), progressSchema);
             _rsp = Schema.For(typeof(TRsp), responseSchema);
-            _core = new RemoteTask(node, name, _req, _prg, _rsp, progressBestEffort,
-                                   progressKeepLast, backpressureWaitMs, timeoutMs,
-                                   reflectFromMesh: reflectFromMesh);
+            _core = new RemoteTaskCore(node, name, _req, _prg, _rsp, options);
         }
 
-        /// <summary>Start the task: the Task never faults. progress fires per typed update and
-        /// skips the valueless RUNNING ack. The token requests cooperative cancellation.</summary>
+        /// <summary>Start the task: the Task completes with the terminal outcome and never
+        /// faults. progress fires per update, skipping the valueless RUNNING ack. Cancelling
+        /// the token requests cooperative cancellation, the terminal status answers.</summary>
         public Task<RantResponse<TRsp>> CallAsync(TReq request, IProgress<TPrg> progress = null,
                                                   CancellationToken cancellationToken = default,
                                                   uint provider = 0)
-            => CallAsync(request, out _, progress, cancellationToken, provider);
-
-        /// <summary>As above, and callId receives the call id at commit, the handle for Cancel.
-        /// 0 when the request never committed.</summary>
-        public Task<RantResponse<TRsp>> CallAsync(TReq request, out uint callId,
-                                                  IProgress<TPrg> progress = null,
-                                                  CancellationToken cancellationToken = default,
-                                                  uint provider = 0)
         {
-            Action<TaskProgress> sink = null;
+            Action<ProgressCore> sink = null;
             if (progress != null)
             {
                 Schema prg = _prg;
@@ -3526,54 +3510,34 @@ namespace Rant
                         pr.Report((TPrg)v);
                 };
             }
-            Task<RantResponse> core = _core.CallCore(_req.Encode(request), out callId, sink,
+            uint callId;
+            Task<ResponseCore> core = _core.CallCore(Patterns.Encode(_req, request), out callId, sink,
                                                      cancellationToken, provider);
             return Wrap(core);
         }
 
-        private async Task<RantResponse<TRsp>> Wrap(Task<RantResponse> core)
+        private async Task<RantResponse<TRsp>> Wrap(Task<ResponseCore> core)
             => new RantResponse<TRsp> { Core = await core.ConfigureAwait(false), RspSchema = _rsp };
 
-        /// <summary>Cancel the call callId, see the untyped RemoteTask.Cancel.</summary>
-        public SendStatus Cancel(uint callId) => _core.Cancel(callId);
+        /// <summary>Definitions currently matched, 0 = no provider present.</summary>
         public int MatchCount => _core.MatchCount;
-        public bool HasDefinition => _core.HasDefinition;
-        /// <summary>A reflectFromMesh handle: re type in place when the mesh moved. True when
+        /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See docs/reflection.md.</summary>
         public bool Refresh() => _core.Refresh();
-        public SendStatus Retire() => _core.Retire();
+        /// <summary>Retire the remote: every outstanding call completes Cancelled. Refused
+        /// from a callback.</summary>
+        public void Dispose() => _core.Dispose();
     }
 
-    /// <summary>The typed authoritative variable. Value get throws while no value exists,
-    /// Value set throws RantException on a non Ok status. Set returns the status.</summary>
-    public class VariableDefinition<T>
+    /// <summary>The surface shared by VariableDefinition&lt;T&gt; and RemoteVariable&lt;T&gt;: read
+    /// the latest value, write, force and observe. Value get throws while no value exists,
+    /// Value set throws RantException on a non Ok status, and Set returns the status.</summary>
+    public abstract class Variable<T> : IDisposable
     {
-        private protected VariableDefinition _core;
+        private protected VariableCore _core;
         private protected Schema _schema;
 
-        private protected VariableDefinition() { }
-
-        public VariableDefinition(RantNode node, string name, bool readOnly = false,
-                                  bool allowForce = false, int catchUp = 0, int keepLast = 0,
-                                  int backpressureWaitMs = 0, bool reflectFromMesh = false,
-                                  Schema schema = null)
-        {
-            _schema = Schema.For(typeof(T), schema);
-            _core = new VariableDefinition(node, name, _schema, null, readOnly, allowForce,
-                                           catchUp, keepLast, backpressureWaitMs, reflectFromMesh);
-        }
-
-        /// <summary>Overload with an initial value (the value before any set).</summary>
-        public VariableDefinition(RantNode node, string name, T initial, bool readOnly = false,
-                                  bool allowForce = false, int catchUp = 0, int keepLast = 0,
-                                  int backpressureWaitMs = 0, bool reflectFromMesh = false,
-                                  Schema schema = null)
-        {
-            _schema = Schema.For(typeof(T), schema);
-            _core = new VariableDefinition(node, name, _schema, _schema.Encode(initial),
-                                           readOnly, allowForce, catchUp, keepLast,
-                                           backpressureWaitMs, reflectFromMesh);
-        }
+        private protected Variable() { }
 
         public T Value
         {
@@ -3592,6 +3556,8 @@ namespace Rant
             }
         }
 
+        /// <summary>Read the current value copied out, the store or the cached latest. False
+        /// when no value exists yet.</summary>
         public bool TryGet(out T value)
         {
             value = default(T);
@@ -3603,110 +3569,212 @@ namespace Rant
             return true;
         }
 
-        public SendStatus Set(T value) => _core.Set(_schema.Encode(value));
-        public SendStatus Force(T value) => _core.Force(_schema.Encode(value));
+        /// <summary>Write the value: apply and publish on the owner, or send it to the owner
+        /// from a remote. BadRole = the owner advertises no set channel.</summary>
+        public SendStatus Set(T value) => _core.Set(Patterns.Encode(_schema, value));
+        /// <summary>Force the value: writes are absorbed until Unforce restores the latest.
+        /// Needs AllowForce on the definition: State on the owner without it, BadRole on a
+        /// remote whose owner advertises none.</summary>
+        public SendStatus Force(T value) => _core.Force(Patterns.Encode(_schema, value));
         public SendStatus Unforce() => _core.Unforce();
         public bool Forced => _core.Forced;
-        public int RemoteCount => _core.RemoteCount;
+        /// <summary>Handles matched on the other side: remotes for a definition, owners for a
+        /// remote, 0 = no owner present.</summary>
+        public int MatchCount => _core.MatchCount;
+        /// <summary>Block until a value exists or timeoutMs elapses, on the service thread's
+        /// progress or driving a Manual node's loop. Refused from a callback.</summary>
         public bool Wait(int timeoutMs) => _core.Wait(timeoutMs);
-        /// <summary>A reflectFromMesh handle: re type in place when the mesh moved. True when
+        /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See docs/reflection.md.</summary>
         public bool Refresh() => _core.Refresh();
-        public SendStatus Retire() => _core.Retire();
+        /// <summary>Retire the handle: park its channels and release the name. Refused from a
+        /// callback.</summary>
+        public void Dispose() => _core.Dispose();
 
-        /// <summary>Observe changes, typed. Handler forms: (T value) or (T value, VariableUpdate
-        /// update). A null cast delegate clears.</summary>
-        public IDisposable OnChange(Action<T> handler) => _core.OnChange(Adapt(handler, null));
-        public IDisposable OnChange(Action<T, VariableUpdate> handler) => _core.OnChange(Adapt(null, handler));
-        /// <summary>Observe every applied write, typed (no replay at registration).</summary>
-        public IDisposable OnWrite(Action<T> handler) => _core.OnWrite(Adapt(handler, null));
-        public IDisposable OnWrite(Action<T, VariableUpdate> handler) => _core.OnWrite(Adapt(null, handler));
+        private readonly object _lock = new object();
+        private Action<T, VariableUpdate> _onChange, _onWrite;
 
-        private Action<VariableUpdate> Adapt(Action<T> plain, Action<T, VariableUpdate> full)
+        /// <summary>Fires on every state change with the value and its update envelope, and
+        /// replays the current value to a handler as it is added. Inline on the thread that
+        /// applied the write, or on the Dispatcher.</summary>
+        public event Action<T, VariableUpdate> OnChange
         {
-            if (plain == null && full == null) return null;
-            Schema schema = _schema;
-            return u =>
+            add
             {
-                object v;
-                if (!Patterns.TryDecode(schema, u.SchemaPtr, u.Data, typeof(T), out v)) return;
-                if (plain != null) plain((T)v); else full((T)v, u);
-            };
+                if (value == null) return;
+                bool first;
+                lock (_lock) { first = _onChange == null; _onChange += value; }
+                if (first && _core.Bind(true, u => Fan(_onChange, u))) return;
+                VariableUpdate last = _core.LastChange;
+                if (last != null) Fan(value, last);   // the replay the others already saw
+            }
+            remove { lock (_lock) _onChange -= value; }
+        }
+
+        /// <summary>Fires on every applied write, identical bytes or not, with no replay. The
+        /// same threading as OnChange.</summary>
+        public event Action<T, VariableUpdate> OnWrite
+        {
+            add
+            {
+                if (value == null) return;
+                bool first;
+                lock (_lock) { first = _onWrite == null; _onWrite += value; }
+                if (first) _core.Bind(false, u => Fan(_onWrite, u));
+            }
+            remove { lock (_lock) _onWrite -= value; }
+        }
+
+        private void Fan(Action<T, VariableUpdate> hs, VariableUpdate u)
+        {
+            if (hs == null) return;
+            object v;
+            if (!Patterns.TryDecode(_schema, u.SchemaPtr, u.Data, typeof(T), out v)) return;
+            foreach (Delegate d in hs.GetInvocationList())
+            {
+                try { ((Action<T, VariableUpdate>)d)((T)v, u); }
+                catch (Exception e) { Console.Error.WriteLine("rant variable observer: " + e); }
+            }
         }
     }
 
-    /// <summary>The typed accessor of a variable owned elsewhere. The same surface as the
-    /// definition plus HasDefinition and MatchCount.</summary>
-    public sealed class RemoteVariable<T> : VariableDefinition<T>
+    /// <summary>The authoritative variable, from RantNode.VariableDefinition: this node owns
+    /// the value and publishes every applied write. One definition per name on the mesh.</summary>
+    public sealed class VariableDefinition<T> : Variable<T>
     {
-        public RemoteVariable(RantNode node, string name, int catchUp = 0, int keepLast = 0,
-                              int backpressureWaitMs = 0, bool reflectFromMesh = false,
-                              Schema schema = null)
+        internal VariableDefinition(RantNode node, string name, bool hasInitial, T initial,
+                                    VariableOptions options, Schema schema)
         {
             _schema = Schema.For(typeof(T), schema);
-            _core = new RemoteVariable(node, name, _schema, catchUp, keepLast, backpressureWaitMs,
-                                       reflectFromMesh);
+            byte[] first = hasInitial ? Patterns.Encode(_schema, initial) : null;
+            _core = new VariableCore(node, name, _schema, first, options, true);
         }
-
-        /// <summary>Owners currently matched.</summary>
-        public int MatchCount => _core.RemoteCount;
-        public bool HasDefinition => _core.RemoteCount > 0;
     }
 
-    /// <summary>The typed publish side.</summary>
-    public sealed class Publisher<T>
+    /// <summary>A reference to a variable owned by another node, from RantNode.RemoteVariable:
+    /// reads see the cached latest, writes go to the owner and come back as a change.</summary>
+    public sealed class RemoteVariable<T> : Variable<T>
     {
-        private readonly Publisher _core;
-        private readonly Schema _schema;
-
-        public Publisher(RantNode node, string name, Qos qos = null, Schema schema = null)
+        internal RemoteVariable(RantNode node, string name, VariableOptions options, Schema schema)
         {
             _schema = Schema.For(typeof(T), schema);
-            _core = new Publisher(node, name, _schema, qos);
+            _core = new VariableCore(node, name, _schema, null, options, false);
+        }
+    }
+
+    /// <summary>The publishing side of a topic, from RantNode.Publisher. Send encodes T with
+    /// the topic's schema: T's public fields by reflection, or the given Schema. A byte[] T
+    /// sends the message bytes as is. Same name handles on one node share the topic.</summary>
+    public sealed class Publisher<T> : IDisposable
+    {
+        private readonly TopicCore _topic;
+        internal TopicCore Topic => _topic;
+
+        internal Publisher(RantNode node, string name, Qos qos, Schema schema)
+        {
+            _topic = new TopicCore(node, name, Schema.For(typeof(T), schema), Role.PubOnly, qos);
         }
 
+        /// <summary>Publish one message to every matched subscriber. captureUs is when the
+        /// data was true rather than when it was sent, in Timestamp.Now() units, 0 = unstated.</summary>
         public SendStatus Send(T value, long captureUs = 0)
-            => _core.Send(_schema.Encode(value), captureUs);
-        public int MatchCount => _core.MatchCount;
-        public int PendingCount => _core.PendingCount;
-        public bool Ready => _core.Ready;
-        public Topic Topic => _core.Topic;
+            => _topic.Send(Patterns.Encode(_topic.Schema, value), captureUs);
+
+        /// <summary>Subscribers currently matched.</summary>
+        public int MatchCount => _topic.MatchCount;
+        /// <summary>True when a send would not wait on the match wait: a subscriber is matched
+        /// or matching has converged. For a GUI: park payloads while false.</summary>
+        public bool Ready => _topic.Ready;
+        /// <summary>The cumulative traffic this node committed to the topic and delivered from
+        /// it.</summary>
+        public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts() => _topic.Counts();
+        /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
+        /// provider moved. True when it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => _topic.Refresh();
+        /// <summary>Stop publishing. The node stops advertising the role no handle holds, and
+        /// the last handle on the name retires the topic. Refused from a callback.</summary>
+        public void Dispose() => _topic.Release();
     }
 
-    /// <summary>The typed subscribe side: a handler per message (on the polling
-    /// thread), or the typed TryTake/Dispatch consumer-queue form.</summary>
-    public sealed class Subscriber<T>
+    /// <summary>The subscribing side of a topic, from RantNode.Subscriber. OnMessage fires per
+    /// message on the service or polling thread, or TryTake and Dispatch consume from a queue
+    /// instead. T decodes against the publisher's schema, a byte[] T is the bytes as is.</summary>
+    public sealed class Subscriber<T> : IDisposable
     {
-        private readonly Subscriber _core;
+        private readonly TopicCore _topic;
+        private readonly Action<RantMessage> _deliver;
+        private readonly object _lock = new object();
+        private Action<T, RantMessage> _onMessage;
+        private bool _bound;
+        internal TopicCore Topic => _topic;
 
-        public Subscriber(RantNode node, string name, Action<T> handler = null, Qos qos = null,
-                          Schema schema = null)
+        internal Subscriber(RantNode node, string name, Qos qos, Schema schema)
         {
-            _core = new Subscriber(node, name, Schema.For(typeof(T), schema),
-                handler == null ? (Action<RantMessage>)null : m => { if (m.Value is T v) handler(v); },
-                qos);
+            _topic = new TopicCore(node, name, Schema.For(typeof(T), schema), Role.SubOnly, qos);
+            _deliver = Deliver;
         }
 
-        public Subscriber(RantNode node, string name, Action<T, RantMessage> handler,
-                          Qos qos = null, Schema schema = null)
+        /// <summary>A message as the decoded value and its envelope: sender, clocks, raw
+        /// bytes. The first handler binds the topic to handler delivery.</summary>
+        public event Action<T, RantMessage> OnMessage
         {
-            if (handler == null) throw new ArgumentNullException(nameof(handler));
-            _core = new Subscriber(node, name, Schema.For(typeof(T), schema),
-                m => { if (m.Value is T v) handler(v, m); }, qos);
+            add
+            {
+                if (value == null) return;
+                lock (_lock)
+                {
+                    _onMessage += value;
+                    if (_bound || _topic._handle == IntPtr.Zero) return;
+                    _bound = true;
+                    _topic._node.AddSubHandler(_topic.Index, _deliver);
+                }
+            }
+            remove { lock (_lock) _onMessage -= value; }
         }
 
-        /// <summary>Typed take: decodes straight from the queue.</summary>
+        private void Deliver(RantMessage m)
+        {
+            Action<T, RantMessage> hs = _onMessage;
+            if (hs == null) return;
+            T v;
+            if (!Patterns.TryValue(m, out v)) return;
+            hs(v, m);
+        }
+
+        /// <summary>Pop the next queued message. The first TryTake or Dispatch switches the
+        /// topic to queued delivery (docs/node.md). timeoutMs 0 = check, negative = forever.</summary>
         public bool TryTake(out T value, int timeoutMs = 0)
         {
             value = default(T);
             RantMessage m;
-            if (!_core.TryTake(out m, timeoutMs) || !(m.Value is T)) return false;
-            value = (T)m.Value;
-            return true;
+            return _topic.TryTake(out m, timeoutMs) && Patterns.TryValue(m, out value);
         }
 
-        public int Dispatch(int maxMsgs = 0, int timeoutMs = 0) => _core.Dispatch(maxMsgs, timeoutMs);
-        public Topic Topic => _core.Topic;
+        /// <summary>Drain the queue by running OnMessage on the calling thread, oldest first,
+        /// up to maxMsgs (0 = all), waiting like TryTake. Runs without the node lock.</summary>
+        public int Dispatch(int maxMsgs = 0, int timeoutMs = 0) => _topic.Dispatch(maxMsgs, timeoutMs);
+
+        /// <summary>Consumer queue observability, all zeros when not queued.</summary>
+        public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats() => _topic.QueueStats();
+        /// <summary>The cumulative traffic this node committed to the topic and delivered from
+        /// it.</summary>
+        public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts() => _topic.Counts();
+        /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
+        /// provider moved. True when it was re typed. See docs/reflection.md.</summary>
+        public bool Refresh() => _topic.Refresh();
+        /// <summary>Stop receiving: the handlers are dropped, the node stops advertising the
+        /// role no handle holds, and the last handle on the name retires the topic. Refused
+        /// from a callback.</summary>
+        public void Dispose()
+        {
+            lock (_lock)
+            {
+                if (_bound && _topic._handle != IntPtr.Zero) _topic._node.RemoveSubHandler(_topic.Index, _deliver);
+                _bound = false;
+                _onMessage = null;
+            }
+            _topic.Release();
+        }
     }
 
     // ---- marshaling, allocators, schema codec + reflection ----------------------
@@ -3842,6 +3910,9 @@ namespace Rant
         // A `map` field: any dictionary (canonically Dictionary<string, object>).
         private static bool IsMapType(Type t)
             => typeof(System.Collections.IDictionary).IsAssignableFrom(t);
+
+        // A byte[] as a handle's T is the encoded message as is, never a reflected u8[].
+        internal static bool IsRaw(Type t) => t == typeof(byte[]);
 
         // A bare type used directly as a handle's T is the whole schema, anonymous, so the same
         // bare type in any language is the same bytes and hash. A plain array is the variable one.

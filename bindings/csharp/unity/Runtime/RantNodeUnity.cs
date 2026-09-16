@@ -76,7 +76,7 @@ namespace Rant
         internal RantNode NativeNode => _node;
 
         /// <summary>Peer lifecycle + errors, delivered on the main thread.</summary>
-        public static event Action<RantEvent> Events;
+        public static event Action<RantEvent> OnEvent;
 
         // ---- topics -----------------------------------------------------------------
 
@@ -194,63 +194,33 @@ namespace Rant
 
         /// <summary>The scene shared authoritative variable of this name.</summary>
         public static VariableDefinition<T> VariableDefinition<T>(string name)
-            => Shared(name, n => new VariableDefinition<T>(n, name));
+            => Shared(name, n => n.VariableDefinition<T>(name));
 
         /// <summary>Overload with the value it holds before any set.</summary>
         public static VariableDefinition<T> VariableDefinition<T>(string name, T initial)
-            => Shared(name, n => new VariableDefinition<T>(n, name, initial));
+            => Shared(name, n => n.VariableDefinition<T>(name, initial));
 
         /// <summary>The scene shared reference to a variable owned by another node.</summary>
         public static RemoteVariable<T> RemoteVariable<T>(string name)
-            => Shared(name, n => new RemoteVariable<T>(n, name));
+            => Shared(name, n => n.RemoteVariable<T>(name));
 
         /// <summary>The scene shared function definition, one per name on the network.</summary>
         public static FunctionDefinition<TReq, TRsp> FunctionDefinition<TReq, TRsp>(
                 string name, Func<TReq, TRsp> handler)
-            => Shared(name, n => new FunctionDefinition<TReq, TRsp>(n, name, handler));
+            => Shared(name, n => n.FunctionDefinition<TReq, TRsp>(name, handler));
 
         /// <summary>The scene shared reference to a function defined on another node.</summary>
         public static RemoteFunction<TReq, TRsp> RemoteFunction<TReq, TRsp>(string name)
-            => Shared(name, n => new RemoteFunction<TReq, TRsp>(n, name));
+            => Shared(name, n => n.RemoteFunction<TReq, TRsp>(name));
 
         /// <summary>The scene shared task definition, one per name.</summary>
         public static TaskDefinition<TReq, TPrg, TRsp> TaskDefinition<TReq, TPrg, TRsp>(
                 string name, Func<TReq, TaskContext<TPrg>, System.Threading.Tasks.Task<TRsp>> handler)
-            => Shared(name, n => new TaskDefinition<TReq, TPrg, TRsp>(n, name, handler));
+            => Shared(name, n => n.TaskDefinition<TReq, TPrg, TRsp>(name, handler));
 
         /// <summary>The scene shared reference to a task defined on another node.</summary>
         public static RemoteTask<TReq, TPrg, TRsp> RemoteTask<TReq, TPrg, TRsp>(string name)
-            => Shared(name, n => new RemoteTask<TReq, TPrg, TRsp>(n, name));
-
-        // ---- owner bound lifetime ----------------------------------------------------
-
-        private sealed class Bound { internal Component Owner; internal IDisposable Sub; }
-        private readonly List<Bound> _bound = new List<Bound>();
-
-        /// <summary>Tie a subscription to a component, so it is disposed when that component is
-        /// destroyed. Topic subscriptions take an owner directly; this covers the pattern
-        /// observers, whose handles are plain IDisposable.</summary>
-        public static IDisposable Bind(Component owner, IDisposable sub)
-            => RequireMain().BindTo(owner, sub);
-
-        public IDisposable BindTo(Component owner, IDisposable sub)
-        {
-            if (owner == null) throw new ArgumentNullException(nameof(owner));
-            if (sub == null) throw new ArgumentNullException(nameof(sub));
-            _bound.Add(new Bound { Owner = owner, Sub = sub });
-            return sub;
-        }
-
-        private void PruneBound()
-        {
-            for (int i = _bound.Count - 1; i >= 0; i--)
-            {
-                if (_bound[i].Owner != null) continue;
-                try { _bound[i].Sub.Dispose(); }
-                catch (Exception e) { Debug.LogException(e); }
-                _bound.RemoveAt(i);
-            }
-        }
+            => Shared(name, n => n.RemoteTask<TReq, TPrg, TRsp>(name));
 
         // ---- lifecycle ------------------------------------------------------------
 
@@ -317,29 +287,35 @@ namespace Rant
 
         private void OpenNativeNode()
         {
-            try
+            var options = new NodeOptions
             {
-                _node = new RantNode(string.IsNullOrEmpty(nodeName) ? null : nodeName,
-                                 null, OnNodeEvent,
-                                 domain: Mathf.Clamp(domain, 0, ushort.MaxValue),
-                                 maxTopics: Mathf.Clamp(maxTopics, 0, ushort.MaxValue),
-                                 // A frame must never block: publishing into an unresolved match
-                                 // returns at once and topic.Ready is the check (docs/topics.md).
-                                 matchWaitMs: -1,
-                                 multicastInterface: string.IsNullOrEmpty(multicastInterface)
-                                     ? null : multicastInterface);
-            }
-            catch (Exception e)
+                Domain = (ushort)Mathf.Clamp(domain, 0, ushort.MaxValue),
+                MaxTopics = (ushort)Mathf.Clamp(maxTopics, 0, ushort.MaxValue),
+                // A frame must never block: publishing into an unresolved match returns at
+                // once and topic.Ready is the check (docs/topics.md).
+                MatchWaitMs = -1,
+                MulticastInterface = string.IsNullOrEmpty(multicastInterface) ? null : multicastInterface,
+                // Everything that is not a message arrives on the frame: events, pattern
+                // handlers, variable observers, awaited call results. Messages ride the C queue.
+                Dispatcher = PostToFrame,
+            };
+            string name = string.IsNullOrEmpty(nodeName) ? null : nodeName;
+            _pollFallback = false;
+            try { _node = new RantNode(name, options); }
+            catch (Exception first)
             {
-                Debug.LogError("[Rant] node open failed: " + e.Message, this);
-                _node = null;
-                return;
+                // A RANT_NO_THREADS build refuses the service thread: the pump polls instead.
+                options.Threading = Threading.Manual;
+                try { _node = new RantNode(name, options); _pollFallback = true; }
+                catch (Exception)
+                {
+                    Debug.LogError("[Rant] node open failed: " + first.Message, this);
+                    _node = null;
+                    return;
+                }
             }
-            // Everything that is not a message now arrives on the frame: events, pattern
-            // handlers, variable observers, awaited call results. Messages ride the C queue.
-            _node.CallbackDispatcher = PostToFrame;
+            _node.OnEvent += OnNodeEvent;
             _openName = nodeName; _openDomain = domain; _openMax = maxTopics; _openIf = multicastInterface;
-            _pollFallback = !_node.Start();     // RANT_NO_THREADS builds: pump polls
             foreach (RantTopicBase ch in _topics.Values) ch.OnNodeOpened();
             foreach (KeyValuePair<string, SharedEntry> kv in _shared)
             {
@@ -355,7 +331,6 @@ namespace Rant
         {
             if (_node == null) return;
             foreach (RantTopicBase ch in _topics.Values) ch.OnNodeClosed();
-            _bound.Clear();           // the observers those handles carried died with the node
             _node.Close();
             _node = null;
             lock (_cbLock) _callbacks.Clear();
@@ -373,8 +348,9 @@ namespace Rant
             if ((++_frame & 0xFF) == 0)
             {
                 foreach (RantTopicBase ch in _topics.Values) ch.PruneDeadOwners();
-                PruneBound();
             }
+            foreach (RantTopicBase ch in _topics.Values)
+                if (ch.Dirty) ch.OnNodeOpened();    // drop the side nobody holds, off the dispatch
         }
 
         // The node's threads park work here. Nothing is dropped: a deep backlog is reported and
@@ -412,7 +388,7 @@ namespace Rant
                 else if (e.Kind == EventKind.MessageLost) Debug.LogWarning("[Rant] " + e, this);
                 else Debug.Log("[Rant] " + e, this);
             }
-            Action<RantEvent> handler = Events;
+            Action<RantEvent> handler = OnEvent;
             if (handler == null) return;
             try { handler(e); }
             catch (Exception ex) { Debug.LogException(ex); }

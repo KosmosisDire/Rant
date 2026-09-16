@@ -11,7 +11,7 @@ struct Tick
     [RantField("seq")]   public ulong Seq;
     [RantField("when")] [RantTypeName("Timestamp")] public long When;   // Unix-epoch us, UTC
     [RantField("value")] public double Value;
-    [RantField("at")]    public Pose At;                                // meters + a quaternion
+    [RantField("at")]    public Transform At;                           // meters and a quaternion
 }
 
 static class Program
@@ -22,10 +22,11 @@ static class Program
     {
         double seconds = args.Length > 0 ? double.Parse(args[0]) : 0.0;  // 0 = run forever
         string iface = args.Length > 1 ? args[1] : null;                 // optional: pin the interface
-        var node = new RantNode("cs-publisher", null, e => Console.Error.WriteLine("event: " + e),
-                            multicastInterface: iface);
+        var node = new RantNode("cs-publisher", new NodeOptions { MulticastInterface = iface,
+                                                                  Threading = Threading.Manual });
+        node.OnEvent += e => Console.Error.WriteLine("event: " + e);
         // keep_last deep enough that a small per-loop burst is not evicted before it flushes.
-        var ch = new Topic<Tick>(node, "tick", Role.PubOnly, new Qos { KeepLast = 64 });
+        var ch = node.Publisher<Tick>("tick", new Qos { KeepLast = 64 });
         Console.WriteLine($"publishing 'tick' at {Hz} Hz on the default interface, domain 0 (Ctrl+C to stop)");
         using (var s = new Schema(typeof(Tick)))
             Console.WriteLine("schema: " + string.Join(" ", s.Dsl.Split((char[])null, StringSplitOptions.RemoveEmptyEntries)));
@@ -45,16 +46,16 @@ static class Program
             {
                 double angle = seq * 0.01;
                 ch.Send(new Tick {
-                    Seq = seq, When = Std.Now(), Value = Math.Sin(angle),
-                    At = new Pose { Position = new Double3 { X = Math.Cos(angle), Y = Math.Sin(angle) },
-                                    Orientation = Std.IdentityRotation() } });
+                    Seq = seq, When = Timestamp.Now(), Value = Math.Sin(angle),
+                    At = new Transform { Translation = new Double3 { X = Math.Cos(angle), Y = Math.Sin(angle) },
+                                         Rotation = new Quaternion { W = 1.0 } } });
                 seq++;
             }
             node.Poll(0);                                      // non-blocking: flush the burst + service RX
             if (now - lastReport >= 1.0)
             {
                 double rate = (seq - lastSeq) / (now - lastReport);
-                Console.WriteLine($"seq={seq}  rate={rate:F0} Hz  subscribers={ch.MatchCount()}");
+                Console.WriteLine($"seq={seq}  rate={rate:F0} Hz  subscribers={ch.MatchCount}");
                 lastReport = now; lastSeq = seq;
             }
             if (seconds > 0 && now >= seconds) break;

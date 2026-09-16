@@ -47,7 +47,8 @@ This is what makes the code above safe, and it is the main thing the component b
 
 The network runs on its own thread and never waits for a frame. Received messages are copied
 into a queue per topic, and once per frame, before other scripts' `Update()`, the component
-drains those queues and calls your handlers. It also sets the node's `CallbackDispatcher`, so
+drains those queues and calls your handlers. It also opens the node with a `Dispatcher`
+that posts to the frame, so
 peer events, variable observers, function handlers and the result of a call you awaited all
 land on the frame too. You can touch transforms, UI and any other Unity object from any of
 them. Nothing is thrown away to keep up.
@@ -59,8 +60,8 @@ instead of pausing. Check `topic.Ready` if you would rather hold a payload back.
 ## Roles happen by themselves
 
 A topic starts advertising nothing. The first `Publish` tells the network this node
-publishes, the first `Subscribe` tells it this node subscribes, and the last unsubscribe
-withdraws that interest. You never set a role by hand.
+publishes and the first `Subscribe` tells it this node subscribes. When the last
+subscription ends the node stops advertising that side. You never set a role by hand.
 
 ## Subscriptions and lifetime
 
@@ -104,8 +105,10 @@ public class MotorPanel : MonoBehaviour {
     RemoteVariable<float> speed;
     void OnEnable() {
         speed = RantNodeUnity.RemoteVariable<float>("motor/speed");
-        RantNodeUnity.Bind(this, speed.OnChange(v => slider.value = v));
+        speed.OnChange += OnSpeed;
     }
+    void OnDisable() { if (speed != null) speed.OnChange -= OnSpeed; }
+    void OnSpeed(float v, VariableUpdate u) { slider.value = v; }
 }
 ```
 
@@ -117,11 +120,11 @@ not cover, build the handle yourself and let the component share it:
 
 ```csharp
 RantNodeUnity.Shared("motor/speed",
-    n => new RemoteVariable<float>(n, "motor/speed", catchUp: 5));
+    n => n.RemoteVariable<float>("motor/speed", new VariableOptions { CatchUp = 5 }));
 ```
 
-`RantNodeUnity.Bind(component, subscription)` disposes an observer when that component is
-destroyed, which is the pattern side of an owner bound subscription.
+A variable's `OnChange` and `OnWrite` are plain C# events, so remove the handler in
+`OnDisable` as above: unlike a topic subscription, nothing removes it for you.
 
 ## Edit mode and reopening
 
@@ -131,8 +134,8 @@ at edit time is up to them.
 
 The node is closed and reopened when you change one of its settings in the inspector, and
 around an editor script recompile. Topics survive that on their own. Pattern handles are
-rebuilt, so ask for one again rather than keeping it in a field across a reopen, and observers
-you registered on the old one are gone. `OnEnable` is the right place, since it runs again
+rebuilt, so ask for one again rather than keeping it in a field across a reopen, and handlers
+you added on the old one are gone. `OnEnable` is the right place, since it runs again
 after a recompile. A handle left over from before a reopen refuses cleanly, it never
 misbehaves.
 
@@ -152,13 +155,14 @@ misbehaves.
 
 ## Watching what happens
 
-`RantNodeUnity.Events` reports peers joining and leaving, lost messages and errors, on the
+`RantNodeUnity.OnEvent` reports peers joining and leaving, lost messages and errors, on the
 main thread. With Log Events on they also go to the Console. On a `RantTopic`, `Matches`
-counts matched remote endpoints and `SubscriberCount` your own handlers.
+counts the subscribers matched to this node's publishing side and `SubscriberCount` your
+own handlers.
 
-`RantNodeUnity.Main.Raw` is the underlying `RantNode` and `topic.Raw` the underlying `Topic`,
-which is where the rest of docs/csharp.md lives. The plain wrapper also works on its own in
-Unity without the component.
+`RantNodeUnity.Main.Raw` is the underlying `RantNode`, which is where the rest of
+docs/csharp.md lives. The plain wrapper also works on its own in Unity without the
+component.
 
 ## Things that catch people out
 

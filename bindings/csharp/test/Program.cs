@@ -55,7 +55,18 @@ sealed class InlineProgress<T> : IProgress<T>
 static class Program
 {
     static readonly ManualResetEventSlim Got = new ManualResetEventSlim(false);
+
+    // A node on the loopback interface of an isolated domain, on its service thread unless
+    // the leg polls it by hand.
+    static NodeOptions Local(int domain, Threading threading = Threading.ServiceThread,
+                             bool fetchDetails = false, Action<Action> dispatcher = null)
+        => new NodeOptions
+        {
+            Domain = (ushort)domain, MulticastInterface = "127.0.0.1", MaxTopics = 32,
+            Threading = threading, FetchDetails = fetchDetails, Dispatcher = dispatcher,
+        };
     static RantMessage Received;
+    static Pose ReceivedPose;
 
     // Encode and decode round trip of the variable kinds, no networking.
     static bool RoundTrip()
@@ -112,9 +123,10 @@ static class Program
         Check("empty labels", o2.Labels != null && o2.Labels.Length == 0);
         Check("empty map", o2.Extras != null && o2.Extras.Count == 0);
 
-        // decode to dict, the reflection path bridges and observers use, must surface the
-        // variable kinds too: a string, a typed array and a dictionary
-        var fd = s.DecodeFields(raw);
+        // a text schema of the same shape decodes to a dictionary, the form bridges and
+        // observers use, and it must surface the variable kinds too
+        using var text = new Schema(s.Dsl);
+        var fd = (Dictionary<string, object>)text.Decode(raw);
         Check("fields note", (string)fd["Note"] == src.Note);
         Check("fields samples", fd["Samples"] is float[] fs && fs.Length == 3);
         Check("fields labels", fd["Labels"] is string[] fl && fl.Length == 3 && fl[2] == "rearmost");
@@ -155,18 +167,19 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var srv = new RantNode("srv", null, e => Console.WriteLine("event(srv): " + e),
-                           domain: 43, multicastInterface: "127.0.0.1", maxTopics: 32);
-        var cli = new RantNode("cli", null, e => Console.WriteLine("event(cli): " + e),
-                           domain: 43, multicastInterface: "127.0.0.1", maxTopics: 32);
+        // srv runs on its service thread, so handlers fire there. cli is polled by hand, so
+        // its blocking calls drive its loop themselves.
+        var srv = new RantNode("srv", Local(43));
+        srv.OnEvent += e => Console.WriteLine("event(srv): " + e);
+        var cli = new RantNode("cli", Local(43, Threading.Manual));
+        cli.OnEvent += e => Console.WriteLine("event(cli): " + e);
 
         // definitions on srv: the simple form, a thrower giving AppError, and a full form that
         // defers off thread
-        var add = new FunctionDefinition<AddReq, AddRsp>(srv, "add",
-            q => new AddRsp { Sum = q.A + q.B });
-        var boom = new FunctionDefinition<AddReq, AddRsp>(srv, "boom",
+        var add = srv.FunctionDefinition<AddReq, AddRsp>("add", q => new AddRsp { Sum = q.A + q.B });
+        var boom = srv.FunctionDefinition<AddReq, AddRsp>("boom",
             (Func<AddReq, AddRsp>)(q => throw new Exception("kaboom")));
-        var late = new FunctionDefinition<AddReq, AddRsp>(srv, "late", (q, req) =>
+        var late = srv.FunctionDefinition<AddReq, AddRsp>("late", (q, req) =>
         {
             var d = req.Defer();
             ThreadPool.QueueUserWorkItem(_ =>
@@ -175,22 +188,19 @@ static class Program
                 d.Complete(new AddRsp { Sum = q.A + q.B });
             });
         });
-        var lvlDef = new VariableDefinition<Level>(srv, "level", new Level { Value = 5 },
-                                                   allowForce: true);
+        var lvlDef = srv.VariableDefinition<Level>("level", new Level { Value = 5 },
+                                                   new VariableOptions { AllowForce = true });
 
-        srv.Start();   // the service thread owns srv's loop, handlers fire on it
-
-        // remotes on cli (manual poll: blocking calls drive cli's loop themselves)
-        var addR = new RemoteFunction<AddReq, AddRsp>(cli, "add");
-        var boomR = new RemoteFunction<AddReq, AddRsp>(cli, "boom");
-        var lateR = new RemoteFunction<AddReq, AddRsp>(cli, "late");
-        var lvl = new RemoteVariable<Level>(cli, "level");
+        var addR = cli.RemoteFunction<AddReq, AddRsp>("add");
+        var boomR = cli.RemoteFunction<AddReq, AddRsp>("boom");
+        var lateR = cli.RemoteFunction<AddReq, AddRsp>("late");
+        var lvl = cli.RemoteVariable<Level>("level");
 
         var deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline
-               && !(addR.HasDefinition && boomR.HasDefinition && lateR.HasDefinition))
+               && !(addR.MatchCount > 0 && boomR.MatchCount > 0 && lateR.MatchCount > 0))
             cli.Poll(5);
-        Check("definitions discovered", addR.HasDefinition && boomR.HasDefinition && lateR.HasDefinition);
+        Check("definitions discovered", addR.MatchCount > 0 && boomR.MatchCount > 0 && lateR.MatchCount > 0);
 
         // blocking calls
         var r = addR.Call(new AddReq { A = 2, B = 3 }, 3000);
@@ -206,13 +216,13 @@ static class Program
 
         var rl = lateR.Call(new AddReq { A = 20, B = 22 }, 3000);
         Check("deferred completion", rl.Ok && rl.Value.Sum == 42);
-        Check("caller count seen by definition", add.CallerCount == 1);
+        Check("caller count seen by definition", add.MatchCount == 1);
 
         // variable: catch_up hands the remote the initial value
         Check("variable wait", lvl.Wait(3000));
         Level lv;
         Check("initial value", lvl.TryGet(out lv) && lv.Value == 5);
-        Check("HasDefinition", lvl.HasDefinition);
+        Check("owner matched", lvl.MatchCount > 0);
         Check("remote set accepted", lvl.Set(new Level { Value = 9 }) == SendStatus.Ok);
         deadline = DateTime.UtcNow.AddSeconds(5);
         while (DateTime.UtcNow < deadline && !(lvl.TryGet(out lv) && lv.Value == 9)) cli.Poll(5);
@@ -233,9 +243,9 @@ static class Program
         // variable events: OnChange dedups + replays at registration, OnWrite counts
         // every applied write
         var chg = new List<long>(); uint chgSource = 1234; int wr = 0;
-        lvlDef.OnChange((Level v, VariableUpdate u) => { chg.Add(v.Value); chgSource = u.Source; });
+        lvlDef.OnChange += (v, u) => { chg.Add(v.Value); chgSource = u.Source; };
         Check("OnChange replays current at registration", chg.Count == 1 && chg[0] == 9);
-        lvlDef.OnWrite((Level v) => Interlocked.Increment(ref wr));
+        lvlDef.OnWrite += (v, u) => Interlocked.Increment(ref wr);
         Check("OnWrite does not replay", wr == 0);
         Check("identical re-set accepted", lvlDef.Set(new Level { Value = 9 }) == SendStatus.Ok);
         Check("identical re-set is a write, not a change", chg.Count == 1 && wr == 1);
@@ -243,7 +253,7 @@ static class Program
         Check("change fires inline with the new value",
               chg.Count == 2 && chg[1] == 12 && chgSource == 0 && wr == 2);
         var rchg = new List<long>();
-        lvl.OnChange((Level v) => { lock (rchg) rchg.Add(v.Value); });
+        lvl.OnChange += (v, u) => { lock (rchg) rchg.Add(v.Value); };
         lock (rchg) Check("remote OnChange replays the cache", rchg.Count == 1 && rchg[0] == 9);
         deadline = DateTime.UtcNow.AddSeconds(5);
         while (DateTime.UtcNow < deadline)
@@ -252,21 +262,10 @@ static class Program
             cli.Poll(5);
         }
         lock (rchg) Check("remote change arrives", rchg.Count > 0 && rchg[rchg.Count - 1] == 12);
-        lvlDef.OnChange((Action<Level>)null);
-        lvlDef.OnWrite((Action<Level>)null);
-        lvl.OnChange((Action<Level>)null);
-
-        // async form: start cli's service thread, await the Task (it never faults)
-        cli.Start();
-        var t = addR.CallAsync(new AddReq { A = 10, B = 5 });
-        Check("await CallAsync", t.Wait(5000) && t.Result.Ok && t.Result.Value.Sum == 15);
-        // a blocking call under the service thread sleeps on its progress and answers
-        var rr = addR.Call(new AddReq { A = 1, B = 2 }, 2000);
-        Check("blocking call answers under service thread", rr.Ok && rr.Value.Sum == 3);
-        cli.Stop();
-
-        // a call still pending at Close settles its Task with Cancelled, never hangs
-        var never = new RemoteFunction(cli, "never-served", null, null, timeoutMs: 60000);
+        // a call still pending at Close settles its Task with Cancelled, never hangs. A byte[]
+        // typed remote with no schema is the raw form.
+        var never = cli.RemoteFunction<byte[], byte[]>("never-served",
+                                                       new FunctionOptions { TimeoutUs = 60000000 });
         var tc = never.CallAsync(null);
         srv.Close();
         cli.Close();
@@ -276,22 +275,22 @@ static class Program
         return ok;
     }
 
-    // Tasks between two nodes: async handlers, typed + untyped progress, RUNNING order,
-    // CancellationToken cancel, noCancel refusal, and the async function-handler overload.
+    // Tasks between two nodes: async handlers, typed + raw progress, CancellationToken cancel,
+    // noCancel refusal, and the async function-handler overload.
     static bool Tasks()
     {
         Console.WriteLine("tasks leg: two nodes, domain 47, loopback");
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var srv = new RantNode("tsrv", null, e => { if (e.IsError) Console.WriteLine("event(tsrv): " + e); },
-                               domain: 47, multicastInterface: "127.0.0.1", maxTopics: 32);
-        var cli = new RantNode("tcli", null, e => { if (e.IsError) Console.WriteLine("event(tcli): " + e); },
-                               domain: 47, multicastInterface: "127.0.0.1", maxTopics: 32);
+        var srv = new RantNode("tsrv", Local(47));
+        srv.OnEvent += e => { if (e.IsError) Console.WriteLine("event(tsrv): " + e); };
+        var cli = new RantNode("tcli", Local(47));
+        cli.OnEvent += e => { if (e.IsError) Console.WriteLine("event(tcli): " + e); };
         try
         {
             // a transfer that streams progress between awaits and honors its token
-            var xfer = new TaskDefinition<XferReq, XferPrg, XferRsp>(srv, "xfer", async (q, ctx) =>
+            var xfer = srv.TaskDefinition<XferReq, XferPrg, XferRsp>("xfer", async (q, ctx) =>
             {
                 for (int i = 1; i <= q.Chunks; i++)
                 {
@@ -301,20 +300,20 @@ static class Program
                 return new XferRsp { Total = q.Chunks };
             });
             // runs until cancelled through its token
-            var forever = new TaskDefinition<XferReq, XferPrg, XferRsp>(srv, "forever", async (q, ctx) =>
+            var forever = srv.TaskDefinition<XferReq, XferPrg, XferRsp>("forever", async (q, ctx) =>
             {
                 await Task.Delay(Timeout.Infinite, ctx.CancellationToken).ConfigureAwait(false);
                 return new XferRsp();
             });
             // declares cancellation will not be honored
-            var stubborn = new TaskDefinition<XferReq, XferPrg, XferRsp>(srv, "stubborn", async (q, ctx) =>
+            var stubborn = srv.TaskDefinition<XferReq, XferPrg, XferRsp>("stubborn", async (q, ctx) =>
             {
                 await Task.Delay(20).ConfigureAwait(false);
                 return new XferRsp { Total = 1 };
-            }, noCancel: true);
-            // a second transfer for the untyped leg: a same-name second handle on one node
-            // would be shadowed by the first (one name = one topic per node)
-            var xfer2 = new TaskDefinition<XferReq, XferPrg, XferRsp>(srv, "xfer2", async (q, ctx) =>
+            }, new TaskOptions { NoCancel = true });
+            // a second transfer for the raw leg: a live same name second handle on one node is
+            // refused (one name = one topic per node)
+            var xfer2 = srv.TaskDefinition<XferReq, XferPrg, XferRsp>("xfer2", async (q, ctx) =>
             {
                 for (int i = 1; i <= q.Chunks; i++)
                 {
@@ -324,31 +323,31 @@ static class Program
                 return new XferRsp { Total = q.Chunks };
             });
             // the async FUNCTION handler overload
-            var amul = new FunctionDefinition<AddReq, AddRsp>(srv, "amul", async q =>
+            var amul = srv.FunctionDefinition<AddReq, AddRsp>("amul", async q =>
             {
                 await Task.Delay(10).ConfigureAwait(false);
                 return new AddRsp { Sum = q.A * q.B };
             });
 
-            srv.Start();
-
-            var xferR = new RemoteTask<XferReq, XferPrg, XferRsp>(cli, "xfer");
-            var foreverR = new RemoteTask<XferReq, XferPrg, XferRsp>(cli, "forever");
-            var stubbornR = new RemoteTask<XferReq, XferPrg, XferRsp>(cli, "stubborn");
+            var xferR = cli.RemoteTask<XferReq, XferPrg, XferRsp>("xfer");
+            var foreverR = cli.RemoteTask<XferReq, XferPrg, XferRsp>("forever");
+            var stubbornR = cli.RemoteTask<XferReq, XferPrg, XferRsp>("stubborn");
             var reqS = new Schema(typeof(XferReq));
             var prgS = new Schema(typeof(XferPrg));
             var rspS = new Schema(typeof(XferRsp));
-            var xferRaw = new RemoteTask(cli, "xfer2", reqS, prgS, rspS);
-            var amulR = new RemoteFunction<AddReq, AddRsp>(cli, "amul");
+            // the raw form: byte[] types carry the encoded messages as is under explicit schemas
+            var xferRaw = cli.RemoteTask<byte[], byte[], byte[]>("xfer2",
+                requestSchema: reqS, progressSchema: prgS, responseSchema: rspS);
+            var amulR = cli.RemoteFunction<AddReq, AddRsp>("amul");
 
             var deadline = DateTime.UtcNow.AddSeconds(8);
             while (DateTime.UtcNow < deadline
-                   && !(xferR.HasDefinition && foreverR.HasDefinition && stubbornR.HasDefinition
-                        && xferRaw.HasDefinition && amulR.HasDefinition))
-                cli.Poll(5);
-            Check("definitions discovered", xferR.HasDefinition && foreverR.HasDefinition
-                  && stubbornR.HasDefinition && xferRaw.HasDefinition && amulR.HasDefinition);
-            cli.Start();   // CallAsync outcomes and progress fire on cli's service thread
+                   && !(xferR.MatchCount > 0 && foreverR.MatchCount > 0 && stubbornR.MatchCount > 0
+                        && xferRaw.MatchCount > 0 && amulR.MatchCount > 0))
+                Thread.Sleep(5);
+            Check("definitions discovered", xferR.MatchCount > 0 && foreverR.MatchCount > 0
+                  && stubbornR.MatchCount > 0 && xferRaw.MatchCount > 0 && amulR.MatchCount > 0);
+            // CallAsync outcomes and progress fire on cli's service thread
 
             // typed: progress values in order, terminal Ok with the decoded result
             var seen = new List<int>();
@@ -360,19 +359,17 @@ static class Program
                 Check("typed progress in order (no RUNNING ack)",
                       seen.Count == 3 && seen[0] == 1 && seen[1] == 2 && seen[2] == 3);
 
-            // untyped info form: the RUNNING ack (null Value) first, then the values
-            var infos = new List<TaskProgress>();
+            // raw form: the progress bytes decode with the schema, the result bytes likewise
+            var infos = new List<byte[]>();
             var t2 = xferRaw.CallAsync(reqS.Encode(new XferReq { Chunks = 2 }),
-                new InlineProgress<TaskProgress>(p => { lock (infos) infos.Add(p); }));
-            Check("untyped task Ok", t2.Wait(10000) && t2.Result.Status == CallStatus.Ok);
+                new InlineProgress<byte[]>(p => { lock (infos) infos.Add(p); }));
+            Check("raw task Ok", t2.Wait(10000) && t2.Result.Status == CallStatus.Ok);
             lock (infos)
             {
-                Check("RUNNING ack first (null Value)", infos.Count == 3 && infos[0].Value == null);
-                Check("then the progress values", infos.Count == 3
-                      && infos[1].Value != null && infos[2].Value != null
-                      && Convert.ToInt64(prgS.DecodeFields(infos[2].Value)["Done"]) == 2);
-                Check("info carries the provider", infos.Count == 3 && infos[1].Provider != 0);
+                Check("raw progress values", infos.Count == 2
+                      && ((XferPrg)prgS.Decode(infos[1])).Done == 2);
             }
+            Check("raw result decodes", t2.Result.Ok && ((XferRsp)rspS.Decode(t2.Result.Value)).Total == 2);
 
             // cancellation: the token ends the handler via ITS token, caller sees Cancelled
             var cts = new CancellationTokenSource();
@@ -382,11 +379,12 @@ static class Program
             Check("cancel honored end to end", t3.Wait(10000)
                   && t3.Result.Status == CallStatus.Cancelled);
 
-            // noCancel: refused locally with BadRole, the call completes anyway
-            uint sid;
-            var t4 = stubbornR.CallAsync(new XferReq(), out sid);
-            Check("call id delivered at commit", sid != 0);
-            Check("noCancel refused locally", stubbornR.Cancel(sid) == SendStatus.BadRole);
+            // noCancel: the cancel request is refused by the provider's declaration and the
+            // call completes anyway
+            var cts4 = new CancellationTokenSource();
+            var t4 = stubbornR.CallAsync(new XferReq(), null, cts4.Token);
+            Thread.Sleep(5);
+            cts4.Cancel();
             Check("noCancel call completes anyway", t4.Wait(10000) && t4.Result.Ok
                   && t4.Result.Value.Total == 1);
 
@@ -394,8 +392,9 @@ static class Program
             var t5 = amulR.CallAsync(new AddReq { A = 6, B = 7 });
             Check("async function handler", t5.Wait(10000) && t5.Result.Ok
                   && t5.Result.Value.Sum == 42);
-
-            cli.Stop();
+            // a blocking call under the service thread sleeps on its progress and answers
+            var rr = amulR.Call(new AddReq { A = 2, B = 3 }, 2000);
+            Check("blocking call answers under service thread", rr.Ok && rr.Value.Sum == 6);
         }
         finally
         {
@@ -434,6 +433,9 @@ static class Program
         [RantField("velocity")] public Rant.Float3 Velocity;
     }
 
+    // The fixed message size of a schema: its default message with nothing set.
+    static int SizeOf(Schema s) => s.Encode(new Dictionary<string, object>()).Length;
+
     static bool StdTypes()
     {
         bool ok = true;
@@ -443,7 +445,7 @@ static class Program
         using (var mirror = new Schema(typeof(Rant.Float3)))
         {
             Check("Float3 compiles by name alone, golden hash", f3.Hash == HashFloat3);
-            Check("Float3 is 12 message bytes", f3.Size == 12);
+            Check("Float3 is 12 message bytes", SizeOf(f3) == 12);
             Check("the mirror struct IS that type", mirror.Hash == HashFloat3);
         }
         // a name narrows: an anonymous field of the same shape reads a Transform field, never
@@ -465,13 +467,13 @@ static class Program
             Check("the reflected schema spells the names, not the shapes",
                   text.Contains("at: Transform") && text.Contains("when: Timestamp")
                   && text.Contains("id: Uuid") && text.Contains("velocity: Float3"));
-            Check("its message is the sum of the wire shapes (88+8+4+16+12)", sch.Size == 128);
+            Check("its message is the sum of the wire shapes (88+8+4+16+12)", SizeOf(sch) == 128);
 
             var t = new Track {
                 At = new Rant.Transform { Translation = new Rant.Double3 { X = 4.5, Y = -1.25, Z = 9.0 },
-                                Rotation = Std.IdentityRotation() },
-                When = Std.Now(),
-                Tag = Std.ColorFromHex(0x112233FFu),
+                                Rotation = new Rant.Quaternion { W = 1.0 } },
+                When = Timestamp.Now(),
+                Tag = new Rant.Color { R = 0x11, G = 0x22, B = 0x33, A = 0xFF },
                 Id = new byte[16],
                 Velocity = new Rant.Float3 { X = 1.0f, Y = 2.0f, Z = 3.0f } };
             for (int i = 0; i < 16; i++) t.Id[i] = (byte)i;
@@ -480,7 +482,7 @@ static class Program
                   back.At.Translation.X == 4.5 && back.At.Rotation.W == 1.0
                   && back.When == t.When && back.Tag.R == 0x11 && back.Tag.A == 0xFF
                   && back.Id != null && back.Id[15] == 15 && back.Velocity.Z == 3.0f);
-            Check("Std.Now is Unix-epoch microseconds", Std.Now() > 1600000000000000L);
+            Check("Timestamp.Now is Unix-epoch microseconds", Timestamp.Now() > 1600000000000000L);
         }
         // the video family: the shipped mirror must compile to the canonical bytes, and the
         // bare name must resolve to the same ones, so both forms are checked hash-exact
@@ -509,14 +511,15 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var a = new RantNode("MA", null, e => { if (e.IsError) Console.WriteLine("event(MA): " + e); },
-                             domain: 46, multicastInterface: "127.0.0.1");
-        var b = new RantNode("MB", null, e => { if (e.IsError) Console.WriteLine("event(MB): " + e); },
-                             domain: 46, multicastInterface: "127.0.0.1");
+        var a = new RantNode("MA", Local(46, Threading.Manual));
+        a.OnEvent += e => { if (e.IsError) Console.WriteLine("event(MA): " + e); };
+        var b = new RantNode("MB", Local(46, Threading.Manual));
+        b.OnEvent += e => { if (e.IsError) Console.WriteLine("event(MB): " + e); };
         try
         {
-            var pub = new Topic<Rant.Image>(a, "frame", Role.PubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
-            var sub = new Topic<Rant.Image>(b, "frame", Role.SubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
+            var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 4 };
+            var pub = a.Publisher<Rant.Image>("frame", qos);
+            var sub = b.Subscriber<Rant.Image>("frame", qos: qos);
             sub.TryTake(out Rant.Image _);     // switch to queued delivery
             var initial = new Rant.ExternalVideoStream
             {
@@ -527,17 +530,17 @@ static class Program
                 Url = "rtsp://cam.local/main",
                 Name = "front door",
             };
-            var vd = new VariableDefinition<Rant.ExternalVideoStream>(a, "stream", initial);
-            var rv = new RemoteVariable<Rant.ExternalVideoStream>(b, "stream");
+            var vd = a.VariableDefinition<Rant.ExternalVideoStream>("stream", initial);
+            var rv = b.RemoteVariable<Rant.ExternalVideoStream>("stream");
 
             var deadline = DateTime.UtcNow.AddSeconds(8);
             while (DateTime.UtcNow < deadline
-                   && (pub.MatchCount() == 0 || !rv.TryGet(out Rant.ExternalVideoStream _)))
+                   && (pub.MatchCount == 0 || !rv.TryGet(out Rant.ExternalVideoStream _)))
             {
                 a.Poll(1);
                 b.Poll(1);
             }
-            Check("image topic matched", pub.MatchCount() == 1);
+            Check("image topic matched", pub.MatchCount == 1);
 
             var img = new Rant.Image
             {
@@ -610,8 +613,9 @@ static class Program
             Check("float[] canonical hash", sa.Hash == HashF32Arr);
             Check("bool dsl", sb.Dsl == "bool\n");
             Check("float[] dsl", sa.Dsl == "f32[]\n");
+            var f = sb.Fields;
             Check("bare root is one anonymous field",
-                  sb.FieldCount == 1 && sb.Name == "" && sb.IsValueRoot);
+                  f.Length == 1 && sb.Name == "" && f[0].Name == "" && f[0].Kind == FieldType.Bool);
             using (var text = new Schema("bool"))
                 Check("text `bool` == typeof(bool)", text.Hash == sb.Hash);
         }
@@ -650,28 +654,29 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var a = new RantNode("VA", null, e => { if (e.IsError) Console.WriteLine("event(VA): " + e); },
-                             domain: 44, multicastInterface: "127.0.0.1");
-        var b = new RantNode("VB", null, e => { if (e.IsError) Console.WriteLine("event(VB): " + e); },
-                             domain: 44, multicastInterface: "127.0.0.1");
+        var a = new RantNode("VA", Local(44, Threading.Manual));
+        a.OnEvent += e => { if (e.IsError) Console.WriteLine("event(VA): " + e); };
+        var b = new RantNode("VB", Local(44, Threading.Manual));
+        b.OnEvent += e => { if (e.IsError) Console.WriteLine("event(VB): " + e); };
         try
         {
-            var pubFlag = new Topic<bool>(a, "flag", Role.PubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
-            var subFlag = new Topic<bool>(b, "flag", Role.SubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
-            var pubNote = new Topic<string>(a, "note", Role.PubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
-            var subNote = new Topic<string>(b, "note", Role.SubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
+            var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 4 };
+            var pubFlag = a.Publisher<bool>("flag", qos);
+            var subFlag = b.Subscriber<bool>("flag", qos: qos);
+            var pubNote = a.Publisher<string>("note", qos);
+            var subNote = b.Subscriber<string>("note", qos: qos);
             subFlag.TryTake(out bool _);      // switch both to queued delivery
             subNote.TryTake(out string _);
-            var vd = new VariableDefinition<double>(a, "gain", 1.25);
-            var rv = new RemoteVariable<double>(b, "gain");
+            var vd = a.VariableDefinition<double>("gain", 1.25);
+            var rv = b.RemoteVariable<double>("gain");
             var deadline = DateTime.UtcNow.AddSeconds(8);
-            while (DateTime.UtcNow < deadline && (pubFlag.MatchCount() == 0
-                   || pubNote.MatchCount() == 0 || !rv.TryGet(out double _)))
+            while (DateTime.UtcNow < deadline && (pubFlag.MatchCount == 0
+                   || pubNote.MatchCount == 0 || !rv.TryGet(out double _)))
             {
                 a.Poll(1);
                 b.Poll(1);
             }
-            Check("bare topics matched", pubFlag.MatchCount() == 1 && pubNote.MatchCount() == 1);
+            Check("bare topics matched", pubFlag.MatchCount == 1 && pubNote.MatchCount == 1);
             Check("bare variable replicated the initial",
                   rv.TryGet(out double gain0) && gain0 == 1.25);
             Check("bool send", pubFlag.Send(true) == SendStatus.Ok);
@@ -719,39 +724,33 @@ static class Program
 
         int evtId = 0, fnId = 0, changeId = 0, doneId = 0, sum = 0, level = 0;
 
-        var srv = new RantNode("dsrv", null,
-            e => { if (evtId == 0) evtId = Thread.CurrentThread.ManagedThreadId; },
-            domain: 48, multicastInterface: "127.0.0.1", maxTopics: 32);
-        var cli = new RantNode("dcli", null, e => { },
-            domain: 48, multicastInterface: "127.0.0.1", maxTopics: 32);
-        srv.CallbackDispatcher = a => work.Enqueue(a);
-        cli.CallbackDispatcher = a => work.Enqueue(a);
+        // both wires owned by service threads: nothing polls on this one
+        var srv = new RantNode("dsrv", Local(48, dispatcher: a => work.Enqueue(a)));
+        srv.OnEvent += e => { if (evtId == 0) evtId = Thread.CurrentThread.ManagedThreadId; };
+        var cli = new RantNode("dcli", Local(48, dispatcher: a => work.Enqueue(a)));
 
-        var add = new FunctionDefinition<AddReq, AddRsp>(srv, "dadd", q =>
+        var add = srv.FunctionDefinition<AddReq, AddRsp>("dadd", q =>
         {
             fnId = Thread.CurrentThread.ManagedThreadId;
             return new AddRsp { Sum = q.A + q.B };
         });
-        var lvlDef = new VariableDefinition<Level>(srv, "dlevel", new Level { Value = 1 });
+        var lvlDef = srv.VariableDefinition<Level>("dlevel", new Level { Value = 1 });
 
-        srv.Start();          // both wires owned by service threads: nothing polls on this one
-        cli.Start();
-
-        var call = new RemoteFunction<AddReq, AddRsp>(cli, "dadd");
-        var rvar = new RemoteVariable<Level>(cli, "dlevel");
-        rvar.OnChange((v, u) =>
+        var call = cli.RemoteFunction<AddReq, AddRsp>("dadd");
+        var rvar = cli.RemoteVariable<Level>("dlevel");
+        rvar.OnChange += (v, u) =>
         {
             changeId = Thread.CurrentThread.ManagedThreadId;
             level = v.Value;
-        });
+        };
 
         var deadline = DateTime.UtcNow.AddSeconds(8);
-        while (DateTime.UtcNow < deadline && !(call.HasDefinition && rvar.RemoteCount > 0))
+        while (DateTime.UtcNow < deadline && !(call.MatchCount > 0 && rvar.MatchCount > 0))
         {
             Drain();
             Thread.Sleep(5);
         }
-        Check("definitions matched", call.HasDefinition && rvar.RemoteCount > 0);
+        Check("definitions matched", call.MatchCount > 0 && rvar.MatchCount > 0);
 
         // the handler runs a frame later, through the parked reply, and still answers
         var t = call.CallAsync(new AddReq { A = 2, B = 3 });
@@ -772,11 +771,12 @@ static class Program
         Check("variable change arrived", level == 9);
         Check("observer ran on the drain thread", changeId == drainId);
 
-        // several scripts share one variable: every observer fires, a late one is replayed
-        // the current value, and dropping one leaves the rest alone
+        // several scripts share one variable: every handler fires, a late one is replayed
+        // the current value, and removing one leaves the rest alone
         int a2 = 0, b2 = 0;
-        var subA = rvar.OnChange(v => a2 = v.Value);
-        var subB = rvar.OnChange(v => b2 = v.Value);
+        Action<Level, VariableUpdate> subA = (v, u) => a2 = v.Value;
+        rvar.OnChange += subA;
+        rvar.OnChange += (v, u) => b2 = v.Value;
         Check("late observers replayed the current value", a2 == 9 && b2 == 9);
 
         lvlDef.Set(new Level { Value = 11 });
@@ -788,7 +788,7 @@ static class Program
         }
         Check("every observer fired", a2 == 11 && b2 == 11 && level == 11);
 
-        subA.Dispose();
+        rvar.OnChange -= subA;
         lvlDef.Set(new Level { Value = 12 });
         deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline && b2 != 12) { Drain(); Thread.Sleep(5); }
@@ -803,15 +803,15 @@ static class Program
               evtId == drainId && fnId == drainId && changeId == drainId && doneId == drainId);
 
         // a handle that outlives its node must refuse, never read the freed arena
-        var staleTopic = new Topic<Level>(cli, "dstale", Role.PubOnly);
-        bool matchedBefore = call.HasDefinition;
+        var stalePub = cli.Publisher<Level>("dstale");
+        bool matchedBefore = call.MatchCount > 0;
         srv.Close();
         cli.Close();
         Level got;
         Check("stale variable set refuses", rvar.Set(new Level { Value = 1 }) == SendStatus.NoTopic);
         Check("stale variable read is empty", !rvar.TryGet(out got));
-        Check("stale topic send refuses", staleTopic.Send(new Level { Value = 1 }) == SendStatus.NoTopic);
-        Check("stale remote function is unmatched", matchedBefore && !call.HasDefinition);
+        Check("stale publisher send refuses", stalePub.Send(new Level { Value = 1 }) == SendStatus.NoTopic);
+        Check("stale remote function is unmatched", matchedBefore && call.MatchCount == 0);
 
         Console.WriteLine(ok ? "dispatcher: PASS\n" : "dispatcher: FAIL\n");
         return ok;
@@ -825,37 +825,96 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var a = new RantNode("rsrv", null, e => { },
-            domain: 49, multicastInterface: "127.0.0.1", maxTopics: 32);
-        var b = new RantNode("rcli", null, e => { },
-            domain: 49, multicastInterface: "127.0.0.1", maxTopics: 32, fetchDetails: true);
+        var a = new RantNode("rsrv", Local(49));
+        var b = new RantNode("rcli", Local(49, fetchDetails: true));
 
-        var pub = new Topic<Level>(a, "reflected", Role.PubOnly,
-                                   new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
-        a.Start();
-        b.Start();
+        var pub = a.Publisher<Level>("reflected", new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
         pub.Send(new Level { Value = 3 });
 
-        // nobody provides this one, so there is nothing to copy and it stays untyped
-        var plain = new Topic(b, "unprovided", Role.SubOnly, new Qos { ReflectFromMesh = true });
+        // a byte[] subscriber with no schema is raw. Nobody provides this one, so there is
+        // nothing to copy and it stays untyped
+        var plain = b.Subscriber<byte[]>("unprovided", qos: new Qos { ReflectFromMesh = true });
         Check("an unprovided reflect topic stays untyped",
-              Native.rant_topic_schema(plain._handle) == IntPtr.Zero);
+              Native.rant_topic_schema(plain.Topic._handle) == IntPtr.Zero);
 
-        var reflect = new Topic(b, "reflected", Role.SubOnly, new Qos { ReflectFromMesh = true });
+        var reflect = b.Subscriber<byte[]>("reflected", qos: new Qos { ReflectFromMesh = true });
         var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (DateTime.UtcNow < deadline && Native.rant_topic_schema(reflect._handle) == IntPtr.Zero)
+        while (DateTime.UtcNow < deadline && Native.rant_topic_schema(reflect.Topic._handle) == IntPtr.Zero)
         {
             reflect.Refresh();          // never automatic: the app picks the moment
             Thread.Sleep(20);
         }
         Check("a reflect topic took the provider's schema",
-              Native.rant_topic_schema(reflect._handle) != IntPtr.Zero);
+              Native.rant_topic_schema(reflect.Topic._handle) != IntPtr.Zero);
         Check("refresh on a settled handle reports no change", !reflect.Refresh());
 
         a.Close();
         b.Close();
         Console.WriteLine(ok ? "reflect: PASS\n" : "reflect: FAIL\n");
         return ok;
+    }
+
+    // Same name handles on one node share the native topic: disposing one leaves its siblings
+    // receiving, disposing the last retires the slot so the name can carry another schema.
+    static bool DisposeLeg()
+    {
+        Console.WriteLine("dispose leg: two nodes, domain 50, loopback");
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        var a = new RantNode("da", Local(50, Threading.Manual));
+        var b = new RantNode("db", Local(50, Threading.Manual));
+        try
+        {
+            var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 4 };
+            int n1 = 0, n2 = 0;
+            var pub = a.Publisher<Level>("shared", qos);
+            var s1 = b.Subscriber<Level>("shared", qos);
+            s1.OnMessage += (v, m) => n1 = v.Value;
+            var s2 = b.Subscriber<Level>("shared", qos);
+            s2.OnMessage += (v, m) => n2 = v.Value;
+            var deadline = DateTime.UtcNow.AddSeconds(8);
+            while (DateTime.UtcNow < deadline && !(n1 == 1 && n2 == 1))
+            {
+                pub.Send(new Level { Value = 1 });
+                a.Poll(1);
+                b.Poll(1);
+            }
+            Check("two subscribers share one slot", n1 == 1 && n2 == 1 && pub.MatchCount == 1);
+
+            s1.Dispose();
+            deadline = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < deadline && n2 != 2)
+            {
+                pub.Send(new Level { Value = 2 });
+                a.Poll(1);
+                b.Poll(1);
+            }
+            Check("the sibling still receives after one dispose", n2 == 2 && n1 == 1);
+            Check("the slot is still matched", pub.MatchCount == 1);
+
+            s2.Dispose();
+            bool retyped = false;
+            try { b.Subscriber<AddReq>("shared", qos: qos); retyped = true; }
+            catch (InvalidOperationException) { }
+            Check("the last dispose retires the slot, the name retypes", retyped);
+            pub.Dispose();
+            Check("a disposed publisher refuses", pub.Send(new Level { Value = 3 }) == SendStatus.NoTopic);
+            Check("dispose is idempotent", DisposeTwice(s2) && DisposeTwice(pub));
+        }
+        finally
+        {
+            a.Close();
+            b.Close();
+        }
+        Console.WriteLine(ok ? "dispose: PASS\n" : "dispose: FAIL\n");
+        return ok;
+    }
+
+    static bool DisposeTwice(IDisposable d)
+    {
+        try { d.Dispose(); d.Dispose(); return true; }
+        catch (Exception) { return false; }
     }
 
     static int Main()
@@ -865,21 +924,22 @@ static class Program
         if (!StdTypes()) return 1;
         Console.WriteLine("opening nodes...");
 
-        var sub = new RantNode("sub",
-            onMessage: m =>
-            {
-                Received = m;
-                Console.WriteLine($"recv: [{m.TopicName}] from {m.PublisherName} -> {m.As<Pose>()}");
-                Got.Set();
-            },
-            onEvent: e => Console.WriteLine("event(sub): " + e),
-            domain: 42, multicastInterface: "127.0.0.1");
+        // Single-threaded: both nodes are driven by polling them in the loop below.
+        var sub = new RantNode("sub", Local(42, Threading.Manual));
+        sub.OnEvent += e => Console.WriteLine("event(sub): " + e);
+        var pub = new RantNode("pub", Local(42, Threading.Manual));
+        pub.OnEvent += e => Console.WriteLine("event(pub): " + e);
 
-        var pub = new RantNode("pub", null, e => Console.WriteLine("event(pub): " + e),
-            domain: 42, multicastInterface: "127.0.0.1");
-
-        new Topic<Pose>(sub, "pose", Role.SubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 8 });
-        var pubch = new Topic<Pose>(pub, "pose", Role.PubOnly, new Qos { Reliability = Reliability.Reliable, KeepLast = 8 });
+        var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
+        // the handler gets the value and the envelope: the stamps are checked below
+        sub.Subscriber<Pose>("pose", qos).OnMessage += (p, m) =>
+        {
+            Received = m;
+            ReceivedPose = p;
+            Console.WriteLine($"recv: [{m.TopicName}] from {m.PublisherName} -> {p}");
+            Got.Set();
+        };
+        var pubch = pub.Publisher<Pose>("pose", qos);
 
         var sent = new Pose
         {
@@ -892,8 +952,7 @@ static class Program
             Vel = new Twist { Dx = 0.5f, Dy = 0.25f },
         };
 
-        // Single-threaded: drive both nodes by polling them in the loop (no start()).
-        long captured = Std.Now() - 5000;   // "true" 5 ms before the send, to read back
+        long captured = Timestamp.Now() - 5000;   // "true" 5 ms before the send, to read back
         var deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline && !Got.IsSet)
         {
@@ -905,7 +964,7 @@ static class Program
         bool ok = Got.IsSet;
         if (ok)
         {
-            var r = Received.As<Pose>();
+            var r = ReceivedPose;
             ok = r.Stamp == 7 && Math.Abs(r.X - 1.5) < 1e-9 && Math.Abs(r.Y + 2.5) < 1e-9
                  && r.Uuid != null && r.Uuid.Length == 4 && r.Uuid[0] == 1 && r.Uuid[3] == 4
                  && r.Frame == "map"
@@ -941,27 +1000,35 @@ static class Program
             catch (SchemaException) { Console.WriteLine("PASS: over-cap string refused"); }
         }
 
+        pub.Close();
+        sub.Close();
+
         // threaded: both nodes on their service threads, sent from this thread, delivered with
         // no Poll() anywhere
         if (ok)
         {
-            if (!pub.Start() || !sub.Start()) { Console.WriteLine("FAIL: Start"); ok = false; }
-            else if (pub.Poll(0) != (int)SendStatus.State) { Console.WriteLine("FAIL: Poll not refused while started"); ok = false; }
+            var subT = new RantNode("sub", Local(42));
+            var pubT = new RantNode("pub", Local(42));
+            subT.Subscriber<Pose>("pose", qos).OnMessage += (p, m) => { ReceivedPose = p; Got.Set(); };
+            var pubchT = pubT.Publisher<Pose>("pose", qos);
+            if (pubT.Poll(0) != (int)SendStatus.State) { Console.WriteLine("FAIL: Poll not refused under the service thread"); ok = false; }
             else
             {
                 Got.Reset();
                 sent.Stamp = 8;
-                pubch.Send(sent);
-                ok = Got.Wait(3000) && Received.As<Pose>().Stamp == 8;
-                Console.WriteLine(ok ? $"PASS: threaded delivery via Start() (evictedUnsent={pub.EvictedUnsent})"
+                deadline = DateTime.UtcNow.AddSeconds(8);
+                while (DateTime.UtcNow < deadline && !Got.IsSet)
+                {
+                    pubchT.Send(sent);
+                    Got.Wait(50);
+                }
+                ok = Got.IsSet && ReceivedPose.Stamp == 8;
+                Console.WriteLine(ok ? $"PASS: threaded delivery on the service thread (evictedUnsent={pubT.Stats.EvictedUnsent})"
                                      : "FAIL: threaded delivery");
-                pub.Stop();
-                sub.Stop();
             }
+            pubT.Close();
+            subT.Close();
         }
-
-        pub.Close();
-        sub.Close();
 
         if (ok) ok = ValueRootsLive();
         if (ok) ok = VideoLive();
@@ -969,6 +1036,7 @@ static class Program
         if (ok) ok = Tasks();
         if (ok) ok = DispatcherLeg();
         if (ok) ok = ReflectLeg();
+        if (ok) ok = DisposeLeg();
         Console.WriteLine(ok ? "ALL PASS" : "FAIL");
         return ok ? 0 : 1;
     }

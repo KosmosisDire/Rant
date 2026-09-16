@@ -33,4 +33,10 @@
     <None Include="../../dist/native/**" Pack="true" PackagePath="runtimes/%(RecursiveDir)native/%(Filename)%(Extension)" />
   </ItemGroup>
 
+  <!-- The examples restore from dist/ into bindings/csharp/.packages. A fresh pack drops the
+       extracted copy, so their next build takes this package rather than a stale same version. -->
+  <Target Name="RantDropExtracted" AfterTargets="Pack">
+    <RemoveDir Directories="$(MSBuildThisFileDirectory).packages/rant" />
+  </Target>
+
 </Project>
