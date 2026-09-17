@@ -27,6 +27,40 @@ Reflection views (the names, addresses and schemas the `rant_node_*_next` walks 
 are bracketed with `rant_node_lock` and `rant_node_unlock` when a poller runs on another
 thread.
 
+## Callback queues
+
+A callback fires inline on the thread running the node loop unless the handle was created
+with a queue. Then the loop parks the callback as a record and `rant_queue_dispatch` runs
+the parked callbacks on the calling thread outside the node lock, so they may use the
+whole API. The choice is made at creation and never changes.
+
+- `rant_node_create_queue(n)` makes a queue, up to `RANT_QUEUES_MAX` (8) per node, freed
+  at close.
+- `RantTopicOpts.queue` binds a topic to it. `qos.queue_bytes` caps its ring, 0 = 1 MB.
+- `rant_queue_dispatch(q, max_callbacks, timeout_ms)` runs what was parked at entry,
+  oldest first across the queue's topics, at most `max_callbacks` (0 = all). Timeout 0
+  returns at once when empty, positive waits that long for the first record, negative
+  waits forever. Without a service thread the wait drives the loop itself.
+- `rant_queue_stats(q, &waiting, &dropped)` counts records parked and dropped.
+
+One thread drains a queue at a time. A concurrent dispatch, a dispatch from an inline
+callback or from one of the queue's own callbacks returns `RANT_ERR_STATE`. Retiring a
+topic from its own running callback, or while it runs on another thread, is refused the
+same way, and from anywhere else it drops the unrun records. `rant_node_close` is refused
+while any queue is being dispatched. At the ring cap the reliability QoS decides, as for
+consumer queues below.
+
+```c
+RantQueue *main_q = rant_node_create_queue(n);
+RantTopic *pose = rant_node_create_topic(n, "robot/pose", RANT_SUB_ONLY, pose_schema,
+                                         &(RantTopicOpts){ .queue = main_q });
+rant_node_start(n);
+while (running){
+    rant_queue_dispatch(main_q, 0, 0);   /* never waits, runs the parked callbacks here */
+    draw();
+}
+```
+
 ## Consumer queues
 
 By default callbacks run on whichever thread polls, so a heavy handler lags the whole

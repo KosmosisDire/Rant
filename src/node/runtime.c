@@ -50,9 +50,16 @@ typedef struct {
     uint8_t   parked;      /* transport lanes parked on this topic, retried as we drain */
 } i_RantMsgQueue;
 
+/* A callback queue: a drain group over the rings of the handles created with it. */
+struct RantQueue {
+    RantNode *n;
+    uint8_t   busy;         /* a dispatch is running on some thread */
+};
+
 struct RantTopic {
     RantNode *n; uint16_t index; RantSchema *schema;       /* the schema is the node's own copy */
     i_RantMsgQueue *q;                    /* the consumer queue, NULL = inline callbacks */
+    RantQueue *queue;                     /* the callback queue the topic was created with, or NULL */
     i_RantSysMsgFn sys_on_message;        /* the patterns layer's routing, NULL = a normal topic */
     void    *sys_msg_user;
     uint64_t  tx_msgs, tx_bytes;         /* committed by our sends */
@@ -179,6 +186,10 @@ struct RantNode {
     uint16_t      builtin_lo;      /* the first builtin index */
     uint16_t      n_builtin;
     uint8_t       creating_builtin;/* open is creating builtins: allocate from the block */
+    /* the callback queues, stable pool allocations, see spec/node.md */
+    RantQueue    *queues[RANT_QUEUES_MAX];
+    uint8_t       n_queues;
+    uint8_t       dispatching;     /* queues busy right now, close is refused while nonzero */
 #ifdef RANT_SHM
     /* the same host path: lazy per topic and size class segments, see spec/shm.md */
     uint8_t        shm_capable;
@@ -511,6 +522,14 @@ static i_RantMsgQueue *i_rant_node_queue_ensure(RantNode *n, RantTopic *h, const
     q->reliable = (qos && qos->reliability == RANT_RELIABLE) ? 1u : 0u;
     h->q = q;
     return q;
+}
+
+/* Frees a topic's ring, if any. Lock held. */
+static void i_rant_node_queue_drop(RantNode *n, RantTopic *h){
+    if (!h->q) return;
+    if (h->q->buf) i_rant_node_alloc(n, h->q->buf, 0);
+    i_rant_node_alloc(n, h->q, 0);
+    h->q = NULL;
 }
 
 /* Finishes an outstanding take view, then retries parked lanes into the freed space. Their
@@ -1219,11 +1238,23 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
         if (!schema) schema = ms;
         if (!h->qos.reliability) h->qos.reliability = rel ? RANT_RELIABLE : RANT_BEST_EFFORT;
     }
+    if (opts && opts->queue){
+        if (opts->queue->n != n){          /* another node's queue */
+            i_rant_node_create_fail(n, RANT_E_STATE, name, 0, 1);
+            i_rant_node_alloc(n, h, 0); i_rant_node_unlock(n, acquired); return NULL;
+        }
+        h->queue = opts->queue;
+        if (!i_rant_node_queue_ensure(n, h, &h->qos)){
+            i_rant_node_create_fail(n, RANT_E_OOM, name, 4096, 1);
+            i_rant_node_alloc(n, h, 0); i_rant_node_unlock(n, acquired); return NULL;
+        }
+    }
     if (schema){   /* copied into node memory so the caller's schema need not outlive the topic */
         RantBytes w = rant_schema_wire(schema);
         h->schema = rant_schema_parse(w.data, w.len, i_rant_node_alloc, n);
         if (!h->schema){
             i_rant_node_create_fail(n, RANT_E_BAD_SCHEMA, name, 0, 1);
+            i_rant_node_queue_drop(n, h);
             i_rant_node_alloc(n, h, 0); i_rant_node_unlock(n, acquired); return NULL;
         }
     }
@@ -1251,6 +1282,7 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
             i_rant_node_create_fail(n, rc == -2 ? RANT_E_NAME_COLLISION : rc == -3 ? RANT_E_BAD_NAME
                                      : rc == -4 ? RANT_E_OOM : RANT_E_STATE, name, 0, 1);
             if (h->schema) rant_schema_free(h->schema, i_rant_node_alloc, n);
+            i_rant_node_queue_drop(n, h);
             i_rant_node_alloc(n, h, 0);
             i_rant_node_unlock(n, acquired);
             return NULL;
@@ -1268,7 +1300,7 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
         memcpy(h->name, name, nl);
         h->name_len = (uint8_t)nl;
     }
-    if (def.qos.queue_bytes)   /* queued from creation, best effort on OOM (take retries) */
+    if (def.qos.queue_bytes && !h->queue)   /* queued from creation, best effort on OOM (take retries) */
         (void)i_rant_node_queue_ensure(n, h, &def.qos);
     if (h->schema || reuse)   /* advertise and gate with it. A reused slot must also clear
                                  the retired occupant's fingerprint when the new topic is untyped */
@@ -2213,11 +2245,7 @@ int rant_topic_retire(RantTopic *topic){
     }
     /* the slot keeps its schema hash as the reuse fingerprint, the parsed copy goes */
     i_rant_node_core_retire_topic_schema(n->core, idx);
-    if (topic->q){
-        if (topic->q->buf) i_rant_node_alloc(n, topic->q->buf, 0);
-        i_rant_node_alloc(n, topic->q, 0);
-        topic->q = NULL;
-    }
+    i_rant_node_queue_drop(n, topic);
     if (topic->schema) rant_schema_free(topic->schema, i_rant_node_alloc, n);
     n->handles[idx] = NULL;
     i_rant_node_alloc(n, topic, 0);           /* the handle is invalid from here */
@@ -2742,22 +2770,32 @@ static int i_rant_node_any_queued(RantNode *n){
     return 0;
 }
 
-/* the queue wait's predicate: data on q when one was given, else on any queued topic. The
- * queue struct is a stable allocation, so the pointer survives the waits. */
-typedef struct { i_RantMsgQueue *q; uint64_t deadline; } i_RantQueueWait;
+/* records waiting on the handles created with the callback queue g */
+static int i_rant_queue_any(RantNode *n, RantQueue *g){
+    uint16_t i, hi = i_rant_node_topic_hi(n);
+    for (i = 0; i < hi; i++){
+        RantTopic *h = n->handles[i];
+        if (h && h->queue == g && h->q && h->q->count) return 1;
+    }
+    return 0;
+}
+
+/* the queue wait's predicate: data on q when one was given, else on the group g, else on
+ * any queued topic. The structs are stable allocations, so the pointers survive the waits. */
+typedef struct { i_RantMsgQueue *q; RantQueue *g; uint64_t deadline; } i_RantQueueWait;
 
 static int i_rant_node_queue_wait_done(RantNode *n, void *ctx, uint64_t now, uint64_t *deadline){
     i_RantQueueWait *c = (i_RantQueueWait*)ctx;
     (void)now;
     *deadline = c->deadline;
-    return c->q ? (c->q->count != 0) : i_rant_node_any_queued(n);
+    return c->q ? (c->q->count != 0) : c->g ? i_rant_queue_any(n, c->g) : i_rant_node_any_queued(n);
 }
 
 /* Waits until data is queued: on the service thread's progress when one runs, else by
  * driving the poll loop itself. Lock held on entry and exit, never from a callback. */
-static void i_rant_node_queue_wait(RantNode *n, i_RantMsgQueue *q, int timeout_ms){
+static void i_rant_node_queue_wait(RantNode *n, i_RantMsgQueue *q, RantQueue *g, int timeout_ms){
     i_RantQueueWait c; i_RantWait w = { 0 };
-    c.q = q;
+    c.q = q; c.g = g;
     c.deadline = timeout_ms < 0 ? (uint64_t)-1
                                 : i_rant_plat_now_us() + (uint64_t)timeout_ms * 1000u;
     w.done = i_rant_node_queue_wait_done; w.ctx = &c;
@@ -2810,7 +2848,7 @@ int rant_topic_take(RantTopic *topic, RantMsg *out, int timeout_ms){
     if (q->busy){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }
     i_rant_node_queue_release(n, topic, q);        /* finish the previous view first */
     if (!q->count && timeout_ms != 0 && acquired)
-        i_rant_node_queue_wait(n, q, timeout_ms);
+        i_rant_node_queue_wait(n, q, NULL, timeout_ms);
     {   const i_RantQRec *rec = i_rant_q_peek(q);
         if (rec){
             i_rant_node_queue_msg(n, topic, rec, out);
@@ -2832,7 +2870,7 @@ int rant_topic_dispatch(RantTopic *topic, int max_msgs, int timeout_ms){
     if (q->busy){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }
     i_rant_node_queue_release(n, topic, q);
     if (!q->count && timeout_ms != 0 && acquired)
-        i_rant_node_queue_wait(n, q, timeout_ms);
+        i_rant_node_queue_wait(n, q, NULL, timeout_ms);
     done = i_rant_topic_dispatch_locked(n, topic, max_msgs, acquired);
     i_rant_node_unlock(n, acquired);
     return done;
@@ -2844,7 +2882,7 @@ int rant_node_dispatch(RantNode *n, int max_msgs, int timeout_ms){
     if (!n) return RANT_ERR_STATE;
     acquired = i_rant_node_lock(n);
     if (!i_rant_node_any_queued(n) && timeout_ms != 0 && acquired)
-        i_rant_node_queue_wait(n, NULL, timeout_ms);
+        i_rant_node_queue_wait(n, NULL, NULL, timeout_ms);
     for (i = 0; i < i_rant_node_topic_hi(n); i++){
         RantTopic *h = n->handles[i];
         if (!h || !h->q || !h->q->count) continue;
@@ -2853,6 +2891,95 @@ int rant_node_dispatch(RantNode *n, int max_msgs, int timeout_ms){
     }
     i_rant_node_unlock(n, acquired);
     return total;
+}
+
+/* the callback queue API, see spec/node.md */
+
+RantQueue *rant_node_create_queue(RantNode *n){
+    RantQueue *q; int acquired;
+    if (!n) return NULL;
+    acquired = i_rant_node_lock(n);
+    if (!acquired || n->n_queues >= RANT_QUEUES_MAX){
+        i_rant_node_create_fail(n, RANT_E_STATE, NULL, 0, 1);
+        i_rant_node_unlock(n, acquired); return NULL;
+    }
+    q = (RantQueue*)i_rant_node_alloc(n, NULL, sizeof *q);
+    if (!q){
+        i_rant_node_create_fail(n, RANT_E_OOM, NULL, sizeof *q, 1);
+        i_rant_node_unlock(n, acquired); return NULL;
+    }
+    memset(q, 0, sizeof *q);
+    q->n = n;
+    n->queues[n->n_queues++] = q;
+    i_rant_node_unlock(n, acquired);
+    return q;
+}
+
+/* The handle holding the oldest waiting record of the group, stamped at or before cutoff
+ * so arrivals during a dispatch wait for the next call. NULL when none. Lock held. */
+static RantTopic *i_rant_queue_oldest(RantNode *n, RantQueue *g, uint64_t cutoff){
+    RantTopic *best = NULL; uint64_t best_us = 0;
+    uint16_t i, hi = i_rant_node_topic_hi(n);
+    for (i = 0; i < hi; i++){
+        RantTopic *h = n->handles[i]; const i_RantQRec *rec;
+        if (!h || h->queue != g || !h->q || !h->q->count) continue;
+        rec = i_rant_q_peek(h->q);
+        if (rec->t_recv_us > cutoff) continue;
+        if (!best || rec->t_recv_us < best_us){ best = h; best_us = rec->t_recv_us; }
+    }
+    return best;
+}
+
+int rant_queue_dispatch(RantQueue *g, int max_callbacks, int timeout_ms){
+    RantNode *n; int acquired, done = 0; uint64_t cutoff;
+    if (!g) return RANT_ERR_STATE;
+    n = g->n;
+    acquired = i_rant_node_lock(n);
+    if (!acquired) return RANT_ERR_STATE;          /* from an inline callback */
+    if (g->busy){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* nested, or another thread */
+    if (!i_rant_queue_any(n, g) && timeout_ms != 0 && acquired)
+        i_rant_node_queue_wait(n, NULL, g, timeout_ms);
+    cutoff = i_rant_plat_now_us();
+    g->busy = 1; n->dispatching++;
+    while (max_callbacks <= 0 || done < max_callbacks){
+        RantTopic *h = i_rant_queue_oldest(n, g, cutoff);
+        i_RantMsgQueue *q; RantMsg m;
+        if (!h) break;
+        q = h->q;
+        i_rant_node_queue_msg(n, h, i_rant_q_peek(q), &m);
+        q->viewing = 1; q->busy = 1;          /* busy: retire of this handle is refused meanwhile */
+        if (n->user_on_message){
+#ifdef RANT_THREADS
+            if (acquired){
+                i_rant_node_unlock_raw(n);
+                n->user_on_message(&m);
+                i_rant_node_lock_raw(n);
+            } else
+#endif
+            n->user_on_message(&m);
+        }
+        q->busy = 0;
+        i_rant_node_queue_release(n, h, q);
+        done++;
+    }
+    g->busy = 0; n->dispatching--;
+    i_rant_node_unlock(n, acquired);
+    return done;
+}
+
+void rant_queue_stats(RantQueue *g, uint32_t *waiting, uint32_t *dropped){
+    uint32_t w = 0, d = 0;
+    if (g){
+        RantNode *n = g->n; int acquired = i_rant_node_lock(n);
+        uint16_t i, hi = i_rant_node_topic_hi(n);
+        for (i = 0; i < hi; i++){
+            RantTopic *h = n->handles[i];
+            if (h && h->queue == g && h->q){ w += h->q->count; d += h->q->dropped; }
+        }
+        i_rant_node_unlock(n, acquired);
+    }
+    if (waiting) *waiting = w;
+    if (dropped) *dropped = d;
 }
 
 void rant_topic_queue_stats(RantTopic *topic, uint32_t *msgs, uint32_t *bytes,
@@ -2972,6 +3099,8 @@ void rant_node_unlock(RantNode *n){
 int rant_node_close(RantNode *n, int send_bye){
     RantAllocator pool;
     if (!n) return RANT_OK;
+    /* a dispatch in progress, on this thread or another, still views a ring: refuse loudly */
+    if (n->dispatching) return RANT_ERR_STATE;
 #ifdef RANT_THREADS
     /* from a callback: refuse loudly, the return code lets a binding keep its handle alive */
     if (n->lock_held && n->lock_owner == i_rant_plat_thread_id()) return RANT_ERR_STATE;

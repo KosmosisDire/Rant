@@ -87,6 +87,20 @@ strict prefix of it.
 - `RANT_NO_THREADS` keeps the single threaded contract and `rant_node_start` returns
   `RANT_ERR_NOSYS`. Guards are `#ifdef RANT_THREADS`.
 
+## Callback queues
+
+`RantQueue` is a drain group, not storage. `rant_queue_dispatch` scans the handles created
+with it (`RantTopic.queue`) and pops the record with the oldest arrival stamp across their
+rings, stopping at the stamp taken on entry so arrivals during the dispatch wait for the
+next call. Each pop views the record (`viewing`), sets the ring busy so a retire of that
+handle is refused meanwhile, releases the node lock around the callback when this thread
+owns it, and releases the view after. `RantQueue.busy` refuses a concurrent or nested
+dispatch, and `RantNode.dispatching` counts busy queues and refuses close. A topic created
+with a queue allocates its ring at creation and the create fails with `OOM` when it cannot.
+A queue of another node fails the create with `STATE`. Queues are pool allocations freed by
+the reset at close, at most `RANT_QUEUES_MAX`. The rings, caps and park rules are the
+consumer queue's below.
+
 ## Consumer queues
 
 A queued topic's messages are copied by the poll thread into a per topic byte ring

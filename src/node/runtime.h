@@ -69,11 +69,15 @@ typedef struct {
     RantNodeDiscovery     discovery;
 } RantNodeOpts;
 
+typedef struct RantQueue RantQueue;       /* a callback queue, owned by the node, freed at close */
+
 /* Per topic options, passed as a compound literal. */
 typedef struct {
     RantQos    qos;
     uint8_t    reflect_from_mesh;  /* fill what was left unspecified from the mesh: a NULL schema and
                                     a zero reliability follow it. See docs/reflection.md */
+    RantQueue *queue;              /* callbacks park here and run on rant_queue_dispatch. NULL =
+                                    inline on the loop thread. Fixed for the topic's life */
 } RantTopicOpts;
 
 typedef struct RantNode      RantNode;
@@ -119,7 +123,8 @@ RANT_API RantEvent        rant_last_error(RantNode *n);
 /* One loop tick, blocking up to timeout_ms. RANT_ERR_STATE while a service thread runs
  * or from inside a callback. */
 RANT_API int            rant_node_poll(RantNode *n, int timeout_ms);
-/* Stops the service thread, then tears the node down. RANT_ERR_STATE from a callback. */
+/* Stops the service thread, then tears the node down. RANT_ERR_STATE from a callback or
+ * while a queue is being dispatched: stop the draining threads first. */
 RANT_API int            rant_node_close(RantNode *n, int send_bye);
 
 /* Threading: every call is thread safe under one node lock never held across a wait.
@@ -156,11 +161,28 @@ RANT_API int rant_topic_retire(RantTopic *topic);
  * provider moved. 1 re created, 0 current, negative on error. */
 RANT_API int rant_topic_refresh(RantTopic *topic);
 
+/* Callback queues: a handle created with opts.queue parks each callback as a record on its
+ * own ring, and rant_queue_dispatch runs the parked callbacks on the calling thread with
+ * the node lock released. docs/node.md explains the rules. */
+#ifndef RANT_QUEUE_CAP
+#define RANT_QUEUE_CAP (1u << 20)     /* the default ring growth cap, bytes per topic */
+#endif
+#ifndef RANT_QUEUES_MAX
+#define RANT_QUEUES_MAX 8             /* callback queues per node */
+#endif
+/* NULL with RANT_E_STATE from a callback or past RANT_QUEUES_MAX, RANT_E_OOM otherwise. */
+RANT_API RantQueue *rant_node_create_queue(RantNode *n);
+/* Runs the callbacks parked at entry, oldest first across the queue's handles, up to
+ * max_callbacks (0 = all). timeout_ms waits for the first record like take: 0 checks,
+ * positive waits, negative forever, driving the loop itself when no service thread runs.
+ * Returns the count run. RANT_ERR_STATE from an inline callback, from one of its own
+ * callbacks, or while another thread dispatches the same queue. */
+RANT_API int        rant_queue_dispatch(RantQueue *q, int max_callbacks, int timeout_ms);
+/* Records waiting across the queue's handles, and records dropped since open. */
+RANT_API void       rant_queue_stats(RantQueue *q, uint32_t *waiting, uint32_t *dropped);
+
 /* Consumer queues: a topic becomes queued on its first take or dispatch, or from creation
  * with qos.queue_bytes. docs/node.md explains the rules. */
-#ifndef RANT_QUEUE_CAP
-#define RANT_QUEUE_CAP (1u << 20)     /* the default queue growth cap, bytes per topic */
-#endif
 /* Pops the next queued message. The views stay valid until the next take or dispatch.
  * timeout_ms 0 checks, positive waits, negative waits forever. 1 got one, 0 empty. */
 RANT_API int rant_topic_take(RantTopic *topic, RantMsg *out, int timeout_ms);

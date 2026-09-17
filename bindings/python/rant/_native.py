@@ -65,7 +65,11 @@ class RantQos(Structure):
 
 
 class RantTopicOpts(Structure):
-    _fields_ = [("qos", RantQos)]
+    _fields_ = [
+        ("qos", RantQos),
+        ("reflect_from_mesh", c_uint8),
+        ("queue", c_void_p),
+    ]
 
 
 class RantDiscoveryAddr(Structure):

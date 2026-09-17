@@ -4525,6 +4525,153 @@ static void queue_checks(void){
     rant_node_close(a, 1);
 }
 
+/* The callback queue phases (spec/testing.md): a pub only A and a sub only B whose topics
+ * cq/x and cq/y share one queue while cq/in stays inline. */
+static RantNode  *cq_b;
+static RantQueue *cq_q;
+static RantTopic *cq_x, *cq_y;
+static unsigned long cq_seen[3];
+static uint32_t   cq_order[32]; static int cq_n_order;
+static int        cq_nested_rc, cq_retire_self_rc, cq_retire_other_rc, cq_close_rc, cq_inline_rc;
+static uint64_t   cq_thread;
+static void cq_on_message(const RantMsg *m){
+    uint32_t v = get32(m->data.data);
+    if (m->topic_index < 3) cq_seen[m->topic_index]++;
+    if (cq_n_order < 32) cq_order[cq_n_order++] = v;
+#ifdef RANT_THREADS
+    cq_thread = i_rant_plat_thread_id();
+#endif
+    if (m->topic_index == 2){                      /* inline: the lock is held by this thread */
+        cq_inline_rc = rant_queue_dispatch(cq_q, 0, 0);
+        return;
+    }
+    if (v == 1){                                    /* the first y record: the refusals */
+        cq_nested_rc      = rant_queue_dispatch(cq_q, 0, 0);
+        cq_retire_self_rc = rant_topic_retire(cq_y);
+        cq_close_rc       = rant_node_close(cq_b, 0);
+    }
+    if (v == 5) cq_retire_other_rc = rant_topic_retire(cq_y);   /* from x's callback, y idle */
+}
+
+static void callback_queue_checks(void){
+    static uint8_t mem_a[1], mem_b[1];
+    uint8_t payload[64];
+    RantTopicDef ca[3];
+    RantNodeOpts ao, bo;
+    RantNode *a, *b;
+    RantTopic *in;
+    RantTopicOpts co;
+    uint32_t waiting = 0, dropped = 0;
+    int i, r;
+    memset(ca, 0, sizeof ca); memset(payload, 0, sizeof payload);
+    ca[0].name="cq/x";  ca[0].role=RANT_PUB_ONLY; ca[0].qos.reliability=RANT_RELIABLE;
+    ca[0].qos.keep_last=8; ca[0].qos.heartbeat_us=20000;
+    ca[1] = ca[0]; ca[1].name="cq/y";
+    ca[2] = ca[0]; ca[2].name="cq/in";
+    ao = (RantNodeOpts){ .domain=ST_DOMAIN+5, .discovery={ .max_peers=4 } };
+    bo = ao; bo.max_topics = 3;
+    a = test_node_open(mem_a, sizeof mem_a, "cqa-node", NULL, NULL, ao, ca, 3);
+    b = test_node_open(mem_b, sizeof mem_b, "cqb-node", cq_on_message, st_on_event, bo, NULL, 0);
+    ST_CHECK(a && b, "cqueue: nodes open");
+    if (!a || !b){ if (a) rant_node_close(a,0); if (b) rant_node_close(b,0); return; }
+    cq_b = b;
+    cq_q = rant_node_create_queue(b);
+    ST_CHECK(cq_q != NULL, "cqueue: queue created");
+    memset(&co, 0, sizeof co); co.qos = ca[0].qos; co.queue = cq_q;
+    cq_x = rant_node_create_topic(b, "cq/x", RANT_SUB_ONLY, NULL, &co);
+    cq_y = rant_node_create_topic(b, "cq/y", RANT_SUB_ONLY, NULL, &co);
+    co.queue = NULL;
+    in = rant_node_create_topic(b, "cq/in", RANT_SUB_ONLY, NULL, &co);
+    ST_CHECK(cq_x && cq_y && in, "cqueue: topics created (x=%d y=%d in=%d)", !!cq_x, !!cq_y, !!in);
+    if (!cq_x || !cq_y || !in){ rant_node_close(b,0); rant_node_close(a,0); return; }
+
+    /* a queue of another node is refused loudly */
+    co.queue = cq_q;
+    ST_CHECK(rant_node_create_topic(a, "cq/foreign", RANT_SUB_ONLY, NULL, &co) == NULL
+             && rant_last_error(a).error == RANT_E_STATE,
+             "cqueue: another node's queue refused with STATE (%d)", (int)rant_last_error(a).error);
+    /* the queue budget */
+    for (i = 1; i < RANT_QUEUES_MAX; i++) if (!rant_node_create_queue(b)) break;
+    ST_CHECK(i == RANT_QUEUES_MAX && rant_node_create_queue(b) == NULL
+             && rant_last_error(b).error == RANT_E_STATE,
+             "cqueue: the %dth queue is refused with STATE (made %d)", RANT_QUEUES_MAX + 1, i);
+
+    { uint64_t end = i_rant_plat_now_us()+5000000u;
+      while (i_rant_plat_now_us()<end &&
+             (rant_node_publisher_match_count(a,0)<1 || rant_node_publisher_match_count(a,1)<1 ||
+              rant_node_publisher_match_count(a,2)<1))
+          st_pump(a,b,10); }
+    ST_CHECK(rant_node_publisher_match_count(a,0)==1 && rant_node_publisher_match_count(a,1)==1
+             && rant_node_publisher_match_count(a,2)==1, "cqueue: matches formed");
+
+    /* CQ1: six sends in a known arrival order, x0 y1 x2 in3 y4 x5. The inline one fires
+       during the poll, the queued ones wait */
+    memset(cq_seen, 0, sizeof cq_seen); cq_n_order = 0; cq_inline_rc = 1;
+    {   static const uint16_t on[6] = { 0, 1, 0, 2, 1, 0 };
+        for (i=0;i<6;i++){ put32(payload,(uint32_t)i); rant_node_send(a, on[i], payload, 64); st_pump(a,b,5); }
+    }
+    st_pump(a,b,30);
+    rant_queue_stats(cq_q, &waiting, &dropped);
+    ST_CHECK(cq_seen[2]==1 && cq_seen[0]==0 && cq_seen[1]==0 && waiting==5 && dropped==0,
+             "cqueue: inline fired in the poll, 5 parked (in=%lu x=%lu y=%lu waiting=%u)",
+             cq_seen[2], cq_seen[0], cq_seen[1], waiting);
+#ifdef RANT_THREADS
+    ST_CHECK(cq_inline_rc == RANT_ERR_STATE, "cqueue: dispatch from an inline callback is refused (%d)", cq_inline_rc);
+#endif
+
+    /* CQ2: a capped dispatch runs the two oldest, across topics, in arrival order */
+    cq_n_order = 0;
+    r = rant_queue_dispatch(cq_q, 2, 0);
+    ST_CHECK(r==2 && cq_n_order==2 && cq_order[0]==0 && cq_order[1]==1,
+             "cqueue: max 2 ran x0 then y1 (r=%d got %u %u)", r, cq_order[0], cq_order[1]);
+    ST_CHECK(cq_nested_rc == RANT_ERR_STATE, "cqueue: nested dispatch refused (%d)", cq_nested_rc);
+    ST_CHECK(cq_retire_self_rc == RANT_ERR_STATE, "cqueue: retire from its own callback refused (%d)", cq_retire_self_rc);
+    ST_CHECK(cq_close_rc == RANT_ERR_STATE, "cqueue: close from a dispatched callback refused (%d)", cq_close_rc);
+    r = rant_queue_dispatch(cq_q, 0, 0);
+    ST_CHECK(r==3 && cq_n_order==5 && cq_order[2]==2 && cq_order[3]==4 && cq_order[4]==5,
+             "cqueue: the rest ran in arrival order (r=%d got %u %u %u)", r, cq_order[2], cq_order[3], cq_order[4]);
+    ST_CHECK(cq_retire_other_rc == RANT_OK, "cqueue: retire of an idle sibling from a callback (%d)", cq_retire_other_rc);
+    r = rant_queue_dispatch(cq_q, 0, 0);
+    ST_CHECK(r==0, "cqueue: nothing left (%d)", r);
+    { uint64_t t0 = i_rant_plat_now_us();
+      r = rant_queue_dispatch(cq_q, 0, 30);
+      ST_CHECK(r==0 && i_rant_plat_now_us()-t0 >= 25000u, "cqueue: a timed wait pumps and returns 0 (%d)", r); }
+
+    /* CQ3: y comes back on the queue in its retired slot, and a retire from outside drops
+       what it had not run yet */
+    co.queue = cq_q;
+    cq_y = rant_node_create_topic(b, "cq/y", RANT_SUB_ONLY, NULL, &co);
+    ST_CHECK(cq_y != NULL, "cqueue: y recreated on the queue");
+    /* a must process the hole and the recreate before the first send: the lane re forms
+       future only, so a message committed to the old reader is a late subscriber's loss */
+    st_pump(a,b,300);
+    for (i=0;i<3;i++){ put32(payload,100u+(uint32_t)i); rant_node_send(a, 1, payload, 64); st_pump(a,b,5); }
+    { uint64_t end = i_rant_plat_now_us()+3000000u;         /* the reformed lane may still repair */
+      do { st_pump(a,b,10); rant_queue_stats(cq_q, &waiting, NULL); } while (waiting<3 && i_rant_plat_now_us()<end); }
+    r = cq_y ? rant_topic_retire(cq_y) : -1;
+    ST_CHECK(waiting==3 && r==RANT_OK, "cqueue: 3 parked, retire drops them (waiting=%u rc=%d)", waiting, r);
+    rant_queue_stats(cq_q, &waiting, NULL);
+    ST_CHECK(waiting==0, "cqueue: nothing waiting after the retire (%u)", waiting);
+
+#ifdef RANT_THREADS
+    /* CQ4: under service threads a timed dispatch wakes on arrival and runs the callback on
+       the caller's thread. ST_CHECK evaluates twice, so the starts run outside it. */
+    r = (rant_node_start(a)==RANT_OK && rant_node_start(b)==RANT_OK);
+    ST_CHECK(r, "cqueue: services start");
+    cq_n_order = 0; cq_thread = 0;
+    for (i=0;i<20;i++){
+        put32(payload,200u+(uint32_t)i);
+        rant_node_send(a, 0, payload, 64);
+        if (rant_queue_dispatch(cq_q, 0, 2000) < 1 || cq_order[cq_n_order-1] != 200u+(uint32_t)i) break;
+    }
+    ST_CHECK(i==20 && cq_thread == i_rant_plat_thread_id(),
+             "cqueue: threaded dispatch delivers 20 in order on this thread (%d)", i);
+    rant_node_stop(b); rant_node_stop(a);
+#endif
+    rant_node_close(b, 1);
+    rant_node_close(a, 1);
+}
+
 /* The function phases: a provider node and a caller node in one process
  * (spec/testing.md). */
 static volatile int   pf_reply_done;
@@ -7779,6 +7926,7 @@ static int selftest_main(void){
     interest_external_checks();   /* 19b4. external interest: bootstrap plus paged fetch */
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
     queue_checks();               /* 19d. consumer queues: take, dispatch, overwrite, park */
+    callback_queue_checks();      /* 19e. callback queues: explicit queue, order, refusals */
     patterns_checks();            /* 19e. functions: request, reply, defer, timeout, sync */
     metalog_checks();             /* 19e1. built-in @rant/log topics + the @rant/meta endpoint */
     dup_authority_checks();       /* 19e2. duplicate provider or owner, both rivals */
