@@ -45,13 +45,12 @@ every node using the topic.
 
 This is what makes the code above safe, and it is the main thing the component buys you.
 
-The network runs on its own thread and never waits for a frame. Received messages are copied
-into a queue per topic, and once per frame, before other scripts' `Update()`, the component
-drains those queues and calls your handlers. It also opens the node with a `Dispatcher`
-that posts to the frame, so
-peer events, variable observers, function handlers and the result of a call you awaited all
-land on the frame too. You can touch transforms, UI and any other Unity object from any of
-them. Nothing is thrown away to keep up.
+The network runs on its own thread and never waits for a frame. The component opens the
+node in `Threading.Dispatch`, so every callback parks, and once per frame, before other
+scripts' `Update()`, it calls `Dispatch()` and your handlers run: messages, peer events,
+variable observers, function handlers and the result of a call you awaited all land on
+the frame. You can touch transforms, UI and any other Unity object from any of them.
+Nothing is thrown away to keep up.
 
 `Publish` is safe from any thread at any time, and it never blocks the frame: the component
 turns off the send path match wait, so a publish before anybody is matched returns at once

@@ -35,21 +35,13 @@ namespace Rant
         [Tooltip("Play mode: survive scene loads (DontDestroyOnLoad).")]
         [SerializeField] private bool persistAcrossScenes = true;
 
-        // A frame that has to run more than this many parked callbacks is a symptom, not a
-        // budget: nothing is dropped, but the console says so.
-        private const int CallbackBacklogWarn = 4096;
-
         private static RantNodeUnity s_main;
 
         private RantNode _node;
-        private bool _pollFallback;      // service thread unavailable: pump polls instead
         private bool _configDirty;
         private int _frame;
         private readonly Dictionary<string, RantTopicBase> _topics = new Dictionary<string, RantTopicBase>();
         private readonly Dictionary<string, SharedEntry> _shared = new Dictionary<string, SharedEntry>();
-        private readonly List<Action> _callbacks = new List<Action>();   // node threads to the frame
-        private readonly List<Action> _drain = new List<Action>();
-        private readonly object _cbLock = new object();
         private string _openName; private int _openDomain; private int _openMax; private string _openIf;
 
         /// <summary>The scene's RantNodeUnity (found lazily), or null if none exists.</summary>
@@ -295,24 +287,17 @@ namespace Rant
                 // once and topic.Ready is the check (docs/topics.md).
                 MatchWaitMs = -1,
                 MulticastInterface = string.IsNullOrEmpty(multicastInterface) ? null : multicastInterface,
-                // Everything that is not a message arrives on the frame: events, pattern
-                // handlers, variable observers, awaited call results. Messages ride the C queue.
-                Dispatcher = PostToFrame,
+                // Every callback parks on the node's queue and runs in Pump, on the frame. A
+                // build without threads makes Dispatch() poll as well.
+                Threading = Threading.Dispatch,
             };
             string name = string.IsNullOrEmpty(nodeName) ? null : nodeName;
-            _pollFallback = false;
             try { _node = new RantNode(name, options); }
-            catch (Exception first)
+            catch (Exception e)
             {
-                // A RANT_NO_THREADS build refuses the service thread: the pump polls instead.
-                options.Threading = Threading.Manual;
-                try { _node = new RantNode(name, options); _pollFallback = true; }
-                catch (Exception)
-                {
-                    Debug.LogError("[Rant] node open failed: " + first.Message, this);
-                    _node = null;
-                    return;
-                }
+                Debug.LogError("[Rant] node open failed: " + e.Message, this);
+                _node = null;
+                return;
             }
             _node.OnEvent += OnNodeEvent;
             _openName = nodeName; _openDomain = domain; _openMax = maxTopics; _openIf = multicastInterface;
@@ -333,7 +318,6 @@ namespace Rant
             foreach (RantTopicBase ch in _topics.Values) ch.OnNodeClosed();
             _node.Close();
             _node = null;
-            lock (_cbLock) _callbacks.Clear();
         }
 
         // ---- per-frame pump ---------------------------------------------------------
@@ -342,9 +326,7 @@ namespace Rant
         {
             if (_configDirty) Reconcile();
             if (_node == null) return;
-            if (_pollFallback) _node.Poll(0);
-            _node.Dispatch(Mathf.Max(dispatchBudget, 0));   // every queued topic, up to the budget
-            DrainCallbacks();
+            _node.Dispatch(Mathf.Max(dispatchBudget, 0));   // every parked callback, up to the budget
             if ((++_frame & 0xFF) == 0)
             {
                 foreach (RantTopicBase ch in _topics.Values) ch.PruneDeadOwners();
@@ -353,33 +335,7 @@ namespace Rant
                 if (ch.Dirty) ch.OnNodeOpened();    // drop the side nobody holds, off the dispatch
         }
 
-        // The node's threads park work here. Nothing is dropped: a deep backlog is reported and
-        // still run, since a swallowed callback is a silent fault.
-        private void PostToFrame(Action a)
-        {
-            lock (_cbLock) _callbacks.Add(a);
-        }
-
-        private void DrainCallbacks()
-        {
-            lock (_cbLock)
-            {
-                if (_callbacks.Count == 0) return;
-                _drain.AddRange(_callbacks);
-                _callbacks.Clear();
-            }
-            if (_drain.Count > CallbackBacklogWarn)
-                Debug.LogWarning("[Rant] " + _drain.Count + " callbacks parked for one frame: "
-                    + "the frame is behind the wire", this);
-            for (int i = 0; i < _drain.Count; i++)
-            {
-                try { _drain[i](); }
-                catch (Exception e) { Debug.LogException(e); }
-            }
-            _drain.Clear();
-        }
-
-        // Already on the frame: the node hands its events here through the dispatcher.
+        // Already on the frame: the node hands its events here from Pump's Dispatch.
         private void OnNodeEvent(RantEvent e)
         {
             if (logEvents)

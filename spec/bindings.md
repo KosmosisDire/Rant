@@ -123,9 +123,12 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   `node.Publisher<T>(name, qos)`, with one options object per kind (`NodeOptions`,
   `FunctionOptions`, `TaskOptions`, `VariableOptions`). Creation throws on failure. Every
   handle is `IDisposable`, and same name topic handles share one native slot whose role
-  follows the live handles and which the last dispose retires. The service thread runs from
-  construction unless `NodeOptions.Threading` is `Manual`. `CallAsync` returns a Task that
-  never faults.
+  follows the live handles and which the last dispose retires. `NodeOptions.Threading` is
+  ServiceThread, Manual or Dispatch: Dispatch creates one `RantQueue` at open, hands it to
+  every handle and to the events, and `node.Dispatch()` drains it. `RantQueue` from
+  `CreateQueue()` goes into a handle's options (`Qos.Queue` on a topic) for a thread of
+  its own, and same name handles must agree on it. `CallAsync` returns a Task that never
+  faults, with continuations kept off the loop thread unless the handle is queued.
 - Typed messages by reflection: any struct or class with public fields. `[RantSchema("Name")]`
   overrides the type name, `[RantArray(N)]` marks fixed arrays, `[RantString(cap)]` is
   required on every string field, `[RantField("name")]` overrides a wire name. Fields
@@ -149,9 +152,9 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   Each plugin `.meta` enables exactly its own platform, since the three libraries share
   the name `rant`. The scene MonoBehaviour is `RantNodeUnity`. Unity only
   registers a MonoBehaviour whose class name matches its file name, and fails silently
-  otherwise. Pattern: the node's service thread, force `QueueBytes` nonzero on every
-  topic so it is queued from creation, then `Dispatch()` per frame. OnDisable closes and a
-  beforeAssemblyReload backstop stops the service thread. The Unity path has never run in
+  otherwise. Pattern: open in `Threading.Dispatch` and call `Dispatch()` per frame, which
+  runs every callback on the frame. OnDisable closes and a beforeAssemblyReload backstop
+  stops the service thread. The Unity path has never run in
   a real editor here.
 
 ## Python

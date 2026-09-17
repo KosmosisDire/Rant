@@ -24,22 +24,30 @@ one options object, `FunctionOptions`, `TaskOptions` or `VariableOptions`, mirro
 options. Every handle is `IDisposable`: `Dispose()` retires it and releases the name, and
 is refused from a callback.
 
-Every call is thread safe. The C service thread runs from construction and handlers fire
-on it one at a time. `NodeOptions.Threading = Threading.Manual` leaves the loop to your
-own thread instead: call `Poll()` from it and handlers fire there. Under the service
-thread, `Dispatch()` once per frame runs every queued message handler on the calling
-thread. `Dispatch()` covers messages only. `NodeOptions.Dispatcher` covers the rest: set
-it to a delegate that posts to your thread and every event, pattern handler, variable
-observer, progress report and awaited call result runs there instead of on the service
-thread. A function or task handler that lands this way has its reply parked first, so it
-still answers from wherever it runs. From inside a handler, `Send` and read only queries
-are allowed, and Poll, handle creation, Dispose and Close are refused with
-`SendStatus.State` or an exception. `Close()` returns false from a handler.
+Every call is thread safe. `NodeOptions.Threading` says where callbacks run, and it is
+one rule for every callback: OnMessage, OnEvent, OnLog, function and task handlers,
+progress, OnChange, OnWrite and awaited call results.
+
+- `ServiceThread`, the default: the C service thread runs the loop from construction and
+  every callback fires on it, one at a time. From inside one, `Send` and read only
+  queries are allowed, and Poll, handle creation, Dispose and Close are refused with
+  `SendStatus.State` or an exception. `Close()` returns false from a callback.
+- `Manual`: your thread calls `Poll()` and callbacks fire there, under the same rules.
+- `Dispatch`: the service thread runs the loop, every callback parks, and `Dispatch()` runs
+  the parked ones on the calling thread with the whole API available. Call it once per
+  frame. `Dispatch(maxCallbacks, timeoutMs)` caps a burst and can wait for the first one.
+  A build without threads makes `Dispatch()` poll as well.
+
+A handle that wants its own thread takes a queue from `node.CreateQueue()` as the `Queue`
+of its options (`Qos.Queue` on a subscriber), and that thread calls `queue.Dispatch()`.
+One thread drains a queue at a time, and same name handles share the slot's queue. State
+applies at receipt either way: a variable reads its newest value before its `OnChange`
+runs, and `Call()` completes without a dispatch. See docs/node.md.
 
 A construction failure throws with the C reason in the message, since there is no handle
 to ask. A build without threads refuses the service thread the same way, and
-`Threading.Manual` is the way in. `Stats` reads the node's counters: memory, backpressure
-and the evicted unsent sends.
+`Threading.Manual` or `Threading.Dispatch` is the way in. `Stats` reads the node's
+counters: memory, backpressure and the evicted unsent sends.
 
 ## Schemas
 
@@ -105,9 +113,8 @@ does. `RecvUs` is the node's monotonic clock at receipt, `WrittenUs` the sender'
 clock, 0 when it opted out, and `CaptureUs` when the publisher says the data was true, 0
 when it gave none.
 
-`TryTake(out value, timeoutMs)` and `Dispatch(maxMsgs, timeoutMs)` on a subscriber switch
-the topic to queued delivery, as in docs/node.md. Dispatch handlers run on the calling
-thread without the node lock. `QueueStats` and the traffic counters are always available.
+`Qos.QueueBytes` caps a queued subscriber's ring, 0 = 1 MB. `QueueStats` reads that ring,
+and the traffic counters are always available.
 Same name handles on one node share the topic slot: the node advertises the roles the live
 handles hold, `Dispose()` on one leaves its siblings receiving, and the last one retires
 the slot so the name can carry another schema. `Ready` on a publisher is true when a send

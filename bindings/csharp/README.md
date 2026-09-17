@@ -5,8 +5,9 @@ multicast plus reliable realtime UDP pub/sub, with typed (schema) messages.
 
 `Rant.cs` is a thin P/Invoke layer over a **prebuilt native library** (`rant`), bundled
 per-platform (win-x64, linux-x64, linux-arm64, osx). Every call is **thread-safe** (a node-level lock in
-the C core): a C service thread runs the loop and fires handlers, or with
-`Threading.Manual` your own loop calls `Poll()`.
+the C core): a C service thread runs the loop and fires handlers, with `Threading.Manual`
+your own loop calls `Poll()`, and with `Threading.Dispatch` your thread calls `Dispatch()`
+to run every parked callback.
 
 ## Layout
 
@@ -97,4 +98,5 @@ topic. `new Schema(typeof(Pose)).Dsl` prints the DSL for pasting into a C/C++ no
 Handlers fire on the service thread (never two at once for one node). From inside a
 handler, `Send` and read-only queries are allowed, Poll, handle creation, Dispose and
 Close are not. To keep handlers on one thread (e.g. Unity's main thread), open the node
-with `Threading.Manual` and call `Poll()` from that thread.
+with `Threading.Dispatch` and call `Dispatch()` from that thread, where the whole API is
+allowed.

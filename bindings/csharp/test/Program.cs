@@ -59,11 +59,11 @@ static class Program
     // A node on the loopback interface of an isolated domain, on its service thread unless
     // the leg polls it by hand.
     static NodeOptions Local(int domain, Threading threading = Threading.ServiceThread,
-                             bool fetchDetails = false, Action<Action> dispatcher = null)
+                             bool fetchDetails = false)
         => new NodeOptions
         {
             Domain = (ushort)domain, MulticastInterface = "127.0.0.1", MaxTopics = 32,
-            Threading = threading, FetchDetails = fetchDetails, Dispatcher = dispatcher,
+            Threading = threading, FetchDetails = fetchDetails,
         };
     static RantMessage Received;
     static Pose ReceivedPose;
@@ -532,7 +532,6 @@ static class Program
             var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 4 };
             var pub = a.Publisher<Rant.Image>("frame", qos);
             var sub = b.Subscriber<Rant.Image>("frame", qos: qos);
-            sub.TryTake(out Rant.Image _);     // switch to queued delivery
             var initial = new Rant.ExternalVideoStream
             {
                 Kind = Rant.VideoStreamKind.Rtsp,
@@ -561,19 +560,19 @@ static class Program
                 Data = new byte[256],
             };
             for (int i = 0; i < img.Data.Length; i++) img.Data[i] = (byte)(i * 7);
+            bool gotImage = false;
+            sub.OnMessage += (got, m) =>
+                gotImage = got.Width == 64 && got.Height == 4 && got.Stride == 64
+                           && got.Format == Rant.ImageFormat.Mono8
+                           && got.Data != null && got.Data.Length == img.Data.Length
+                           && got.Data[0] == img.Data[0] && got.Data[255] == img.Data[255];
             Check("image send", pub.Send(img) == SendStatus.Ok);
 
-            bool gotImage = false;
             deadline = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < deadline && !gotImage)
             {
                 a.Poll(1);
                 b.Poll(1);
-                if (sub.TryTake(out Rant.Image got, 1))
-                    gotImage = got.Width == 64 && got.Height == 4 && got.Stride == 64
-                               && got.Format == Rant.ImageFormat.Mono8
-                               && got.Data != null && got.Data.Length == img.Data.Length
-                               && got.Data[0] == img.Data[0] && got.Data[255] == img.Data[255];
             }
             Check("an Image crosses whole (fixed fields + the variable payload)", gotImage);
 
@@ -612,7 +611,7 @@ static class Program
         return ok;
     }
 
-    // Bare types as whole schemas: no struct wrapper, plain values through Send/TryTake.
+    // Bare types as whole schemas: no struct wrapper, plain values through Send and OnMessage.
     static bool ValueRoots()
     {
         bool ok = true;
@@ -677,8 +676,9 @@ static class Program
             var subFlag = b.Subscriber<bool>("flag", qos: qos);
             var pubNote = a.Publisher<string>("note", qos);
             var subNote = b.Subscriber<string>("note", qos: qos);
-            subFlag.TryTake(out bool _);      // switch both to queued delivery
-            subNote.TryTake(out string _);
+            bool gotFlag = false, gotNote = false;
+            subFlag.OnMessage += (f, m) => { if (f) gotFlag = true; };
+            subNote.OnMessage += (str, m) => { if (str == "a bare unbounded string") gotNote = true; };
             var vd = a.VariableDefinition<double>("gain", 1.25);
             var rv = b.RemoteVariable<double>("gain");
             var deadline = DateTime.UtcNow.AddSeconds(8);
@@ -693,17 +693,14 @@ static class Program
                   rv.TryGet(out double gain0) && gain0 == 1.25);
             Check("bool send", pubFlag.Send(true) == SendStatus.Ok);
             Check("string send", pubNote.Send("a bare unbounded string") == SendStatus.Ok);
-            bool gotFlag = false, gotNote = false;
             deadline = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < deadline && !(gotFlag && gotNote))
             {
                 a.Poll(1);
                 b.Poll(1);
-                if (subFlag.TryTake(out bool f, 1) && f) gotFlag = true;
-                if (subNote.TryTake(out string s, 1) && s == "a bare unbounded string") gotNote = true;
             }
-            Check("bool taken as a plain value", gotFlag);
-            Check("string taken as a plain value", gotNote);
+            Check("bool received as a plain value", gotFlag);
+            Check("string received as a plain value", gotNote);
             Check("bare variable set accepted", rv.Set(2.5) == SendStatus.Ok);
             deadline = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < deadline && !(vd.TryGet(out double g) && g == 2.5))
@@ -722,24 +719,23 @@ static class Program
         return ok;
     }
 
-    // The callback dispatcher: with one set, every event, handler, observer and awaited
-    // result must run on the thread that drains it, never on a service thread.
-    static bool DispatcherLeg()
+    // Threading.Dispatch: every event, handler, observer and awaited result must run on the
+    // thread that calls Dispatch(), never on a service thread.
+    static bool DispatchLeg()
     {
-        Console.WriteLine("dispatcher leg: two nodes, domain 48, loopback");
+        Console.WriteLine("dispatch leg: two nodes, domain 48, loopback");
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var work = new System.Collections.Concurrent.ConcurrentQueue<Action>();
         int drainId = Thread.CurrentThread.ManagedThreadId;
-        void Drain() { Action a; while (work.TryDequeue(out a)) a(); }
 
         int evtId = 0, fnId = 0, changeId = 0, doneId = 0, sum = 0, level = 0;
 
         // both wires owned by service threads: nothing polls on this one
-        var srv = new RantNode("dsrv", Local(48, dispatcher: a => work.Enqueue(a)));
+        var srv = new RantNode("dsrv", Local(48, Threading.Dispatch));
         srv.OnEvent += e => { if (evtId == 0) evtId = Thread.CurrentThread.ManagedThreadId; };
-        var cli = new RantNode("dcli", Local(48, dispatcher: a => work.Enqueue(a)));
+        var cli = new RantNode("dcli", Local(48, Threading.Dispatch));
+        void Drain() { srv.Dispatch(); cli.Dispatch(); }
 
         var add = srv.FunctionDefinition<AddReq, AddRsp>("dadd", q =>
         {
@@ -764,7 +760,7 @@ static class Program
         }
         Check("definitions matched", call.MatchCount > 0 && rvar.MatchCount > 0);
 
-        // the handler runs a frame later, through the parked reply, and still answers
+        // the handler runs at the next Dispatch and answers from there
         var t = call.CallAsync(new AddReq { A = 2, B = 3 });
         t.ContinueWith(x =>
         {
@@ -773,7 +769,7 @@ static class Program
         }, TaskContinuationOptions.ExecuteSynchronously);
         deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline && doneId == 0) { Drain(); Thread.Sleep(5); }
-        Check("deferred handler answered the call", sum == 5);
+        Check("dispatched handler answered the call", sum == 5);
         Check("handler ran on the drain thread", fnId == drainId);
         Check("awaited result resumed on the drain thread", doneId == drainId);
 
@@ -825,7 +821,7 @@ static class Program
         Check("stale publisher send refuses", stalePub.Send(new Level { Value = 1 }) == SendStatus.NoTopic);
         Check("stale remote function is unmatched", matchedBefore && call.MatchCount == 0);
 
-        Console.WriteLine(ok ? "dispatcher: PASS\n" : "dispatcher: FAIL\n");
+        Console.WriteLine(ok ? "dispatch: PASS\n" : "dispatch: FAIL\n");
         return ok;
     }
 
@@ -1046,7 +1042,7 @@ static class Program
         if (ok) ok = VideoLive();
         if (ok) ok = Patterns();
         if (ok) ok = Tasks();
-        if (ok) ok = DispatcherLeg();
+        if (ok) ok = DispatchLeg();
         if (ok) ok = ReflectLeg();
         if (ok) ok = DisposeLeg();
         Console.WriteLine(ok ? "ALL PASS" : "FAIL");

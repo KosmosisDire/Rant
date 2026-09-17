@@ -471,11 +471,13 @@ namespace Rant
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_topic_drain(IntPtr ch, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int rant_topic_take(IntPtr ch, ref RantMsg msg, int timeout_ms);
+        internal static extern IntPtr rant_node_create_queue(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int rant_topic_dispatch(IntPtr ch, int max_msgs, int timeout_ms);
+        internal static extern int rant_queue_dispatch(IntPtr q, int max_callbacks, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int rant_node_dispatch(IntPtr node, int max_msgs, int timeout_ms);
+        internal static extern void rant_queue_stats(IntPtr q, out uint waiting, out uint dropped);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_node_set_event_queue(IntPtr node, IntPtr q);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern void rant_topic_queue_stats(IntPtr ch, out uint msgs,
             out uint bytes, out uint capacity, out uint dropped);
@@ -677,12 +679,16 @@ namespace Rant
         public uint RepairDelayUs = 0;        // the reliable re ask bound. 0 = adaptive from the round trip
         public uint BackpressureWaitUs = 0;   // reliable send pause for a slow subscriber. 0 = none
         public uint ShmMaxBytes = 0;          // pin the topic to one SHM class. 0 = per message
-        public uint QueueBytes = 0;           // consumer queue cap. Setting it queues from creation
+        public uint QueueBytes = 0;           // the ring cap of a queued topic, 0 = 1 MB
         public ushort MaxRateHz = 0;          // subscriber side, best effort: a delivery cap per publisher
         public bool NoTimestamp = false;      // publisher side: no source stamp, receivers see WrittenUs 0
         /// <summary>Not a QoS field: it rides beside them in the C topic opts. A null schema and
         /// a BestEffort reliability then follow the mesh. See docs/reflection.md.</summary>
         public bool ReflectFromMesh = false;
+        /// <summary>The queue the subscriber's OnMessage parks on, null = the node's default
+        /// under Threading.Dispatch, else inline on the loop thread. Not a QoS field, it rides
+        /// here because the topic options are this object (docs/node.md).</summary>
+        public RantQueue Queue = null;
 
         public Qos() { }
 
@@ -699,6 +705,7 @@ namespace Rant
             BackpressureWaitUs = other.BackpressureWaitUs;
             ShmMaxBytes = other.ShmMaxBytes;
             QueueBytes = other.QueueBytes;
+            Queue = other.Queue;
             MaxRateHz = other.MaxRateHz;
             NoTimestamp = other.NoTimestamp;
             ReflectFromMesh = other.ReflectFromMesh;
@@ -723,9 +730,42 @@ namespace Rant
         }
     }
 
-    /// <summary>Who drives the node's loop: the C service thread, started at construction,
-    /// or your own thread calling Poll().</summary>
-    public enum Threading { ServiceThread = 0, Manual = 1 }
+    /// <summary>Who drives the node's loop and where callbacks run. ServiceThread: the C
+    /// service thread runs the loop from construction and every callback fires on it.
+    /// Manual: your thread calls Poll() and callbacks fire there. Dispatch: the service
+    /// thread runs the loop, every callback parks on the node's queue and runs when your
+    /// thread calls Dispatch().</summary>
+    public enum Threading { ServiceThread = 0, Manual = 1, Dispatch = 2 }
+
+    /// <summary>A callback queue: a handle created with it parks its callbacks, and Dispatch
+    /// runs them on the calling thread with the whole API available. One thread drains a
+    /// queue at a time. From RantNode.CreateQueue, or the node's own under
+    /// Threading.Dispatch (docs/node.md).</summary>
+    public sealed class RantQueue
+    {
+        internal readonly IntPtr Handle;
+        internal readonly RantNode Node;
+        internal RantQueue(RantNode node, IntPtr handle) { Node = node; Handle = handle; }
+
+        /// <summary>Run the callbacks parked at entry, oldest first, up to maxCallbacks (0 =
+        /// all). timeoutMs 0 returns at once when empty, positive waits that long for the
+        /// first record, negative waits forever. Returns the count run, or State from an
+        /// inline callback or while another thread dispatches this queue.</summary>
+        public int Dispatch(int maxCallbacks = 0, int timeoutMs = 0)
+            => Node.Handle == IntPtr.Zero ? (int)SendStatus.State
+                                          : Native.rant_queue_dispatch(Handle, maxCallbacks, timeoutMs);
+
+        /// <summary>Records parked, and records dropped since open.</summary>
+        public (uint Waiting, uint Dropped) Stats
+        {
+            get
+            {
+                if (Node.Handle == IntPtr.Zero) return (0u, 0u);
+                Native.rant_queue_stats(Handle, out uint w, out uint d);
+                return (w, d);
+            }
+        }
+    }
 
     /// <summary>The node options, the C RantNodeOpts under C# names. 0, false or null is the
     /// C default. docs/node.md and docs/discovery.md explain each.</summary>
@@ -776,14 +816,11 @@ namespace Rant
         public uint AnnounceIntervalUs;
         public uint PeerTimeoutUs;
         public ushort MaxPeers;
-        /// <summary>ServiceThread starts the C service thread at construction and handlers fire
-        /// on it. Manual leaves the loop to your Poll() calls, so handlers fire there.</summary>
+        /// <summary>ServiceThread starts the C service thread at construction and callbacks
+        /// fire on it. Manual leaves the loop to your Poll() calls, so they fire there.
+        /// Dispatch runs the loop on the service thread and every callback at your
+        /// Dispatch() calls. A build without threads makes Dispatch() poll as well.</summary>
         public Threading Threading = Threading.ServiceThread;
-        /// <summary>Where callbacks run. Null runs them inline on the service or polling thread.
-        /// Set it to a delegate that posts to your thread and every event, pattern handler,
-        /// variable observer, progress report and awaited call result runs there instead.
-        /// Messages are unaffected, they have the consumer queue (docs/node.md).</summary>
-        public Action<Action> Dispatcher;
     }
 
     /// <summary>Function options, the C RantFunctionOpts. 0 is the default.</summary>
@@ -800,14 +837,18 @@ namespace Rant
         /// <summary>A byte[] handle with no schema takes the entity's from the mesh, and
         /// Refresh() re types it later (docs/reflection.md).</summary>
         public bool ReflectFromMesh;
+        /// <summary>The queue the handle's callbacks park on, null = the node's default under
+        /// Threading.Dispatch, else inline on the loop thread.</summary>
+        public RantQueue Queue;
 
-        internal RantFunctionOpts ToNative() => new RantFunctionOpts
+        internal RantFunctionOpts ToNative(IntPtr queue) => new RantFunctionOpts
         {
             backpressure_wait_us = BackpressureWaitUs,
             timeout_us = TimeoutUs,
             keep_last = KeepLast,
             multi = (byte)(Multi ? 1 : 0),
             reflect_from_mesh = (byte)(ReflectFromMesh ? 1 : 0),
+            queue = queue,
         };
     }
 
@@ -832,9 +873,12 @@ namespace Rant
         public ushort KeepLast;
         /// <summary>As FunctionOptions.ReflectFromMesh, for all three channels.</summary>
         public bool ReflectFromMesh;
+        /// <summary>As FunctionOptions.Queue, for every callback of the handle.</summary>
+        public RantQueue Queue;
 
-        internal RantTaskOpts ToNative() => new RantTaskOpts
+        internal RantTaskOpts ToNative(IntPtr queue) => new RantTaskOpts
         {
+            queue = queue,
             progress_best_effort = (byte)(ProgressBestEffort ? 1 : 0),
             progress_keep_last = ProgressKeepLast,
             no_cancel = (byte)(NoCancel ? 1 : 0),
@@ -864,9 +908,13 @@ namespace Rant
         /// <summary>A byte[] handle with no schema takes the owner's from the mesh, and
         /// Refresh() re types it later (docs/reflection.md).</summary>
         public bool ReflectFromMesh;
+        /// <summary>The queue OnChange and OnWrite park on, null = the node's default under
+        /// Threading.Dispatch, else inline on the thread that applied the write.</summary>
+        public RantQueue Queue;
 
-        internal RantVariableOpts ToNative() => new RantVariableOpts
+        internal RantVariableOpts ToNative(IntPtr queue) => new RantVariableOpts
         {
+            queue = queue,
             access = (byte)(ReadOnly ? 1 : 0),
             allow_force = (byte)(AllowForce ? 1 : 0),
             catch_up = CatchUp,
@@ -1530,20 +1578,6 @@ namespace Rant
         internal int MatchCount => Native.rant_topic_match_count(_handle);
         internal bool Ready => Native.rant_topic_ready(_handle) == 1;
 
-        // The first take or dispatch queues the topic (docs/node.md).
-        internal bool TryTake(out RantMessage message, int timeoutMs)
-        {
-            message = null;
-            var m = new RantMsg();
-            if (Native.rant_topic_take(_handle, ref m, timeoutMs) != 1) return false;
-            message = RantMessage.FromNative(ref m, _node.ClrTypeOf(m.topic_index),
-                                             _node.OwnedSchema(m.schema));
-            return true;
-        }
-
-        internal int Dispatch(int maxMsgs, int timeoutMs)
-            => Native.rant_topic_dispatch(_handle, maxMsgs, timeoutMs);
-
         internal (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
         {
             Native.rant_topic_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
@@ -1569,7 +1603,8 @@ namespace Rant
         private RantAllocator _alloc;
         private IntPtr _discGroup;   // native strings the node retains for its lifetime
         private IntPtr _mcastIf;
-        internal readonly Action<Action> Dispatcher;   // NodeOptions.Dispatcher
+        private RantQueue _queue;         // the node's own queue under Threading.Dispatch
+        private bool _pumpInDispatch;     // no service thread: Dispatch() polls first
         private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
         private readonly List<Schema> _schemas = new List<Schema>();
         // A publisher's schema is a node owned view good only until the next poll, so a
@@ -1581,7 +1616,7 @@ namespace Rant
         private readonly object _msgSchemaLock = new object();
         // same name topic sharing: one native slot per name and a hold count per role, so the
         // role follows the live handles and the last release retires the slot
-        private sealed class TopicRec { public IntPtr Handle; public ulong SchemaHash; public int Pubs, Subs; }
+        private sealed class TopicRec { public IntPtr Handle; public IntPtr Queue; public ulong SchemaHash; public int Pubs, Subs; }
         private readonly Dictionary<string, TopicRec> _topicsByName = new Dictionary<string, TopicRec>();
         private readonly object _createLock = new object();
         // per topic subscriber handlers, copy on write arrays so the poll thread read never
@@ -1603,8 +1638,8 @@ namespace Rant
         private static readonly object s_reg = new object();
         private static long s_nextId = 1;
 
-        /// <summary>Peer lifecycle, loss and error events, on the service or polling thread or
-        /// the Dispatcher. Optional: LastError records the last error either way.</summary>
+        /// <summary>Peer lifecycle, loss and error events, where the node's callbacks run.
+        /// Optional: LastError records the last error either way.</summary>
         public event Action<RantEvent> OnEvent;
 
         /// <summary>Who drives the loop, as opened.</summary>
@@ -1616,7 +1651,6 @@ namespace Rant
         public RantNode(string name = null, NodeOptions options = null)
         {
             NodeOptions o = options ?? new NodeOptions();
-            Dispatcher = o.Dispatcher;
             Threading = o.Threading;
             lock (s_reg)
             {
@@ -1679,16 +1713,41 @@ namespace Rant
             }
             _handle = h;
             Reflection = new RantReflection(this);
-            if (o.Threading == Threading.ServiceThread)
+            if (o.Threading == Threading.Dispatch)
+            {
+                _queue = CreateQueue();
+                Native.rant_node_set_event_queue(h, _queue.Handle);
+            }
+            if (o.Threading != Threading.Manual)
             {
                 int rc = Native.rant_node_start(h);
-                if (rc != 0)
+                if (rc != 0 && o.Threading == Threading.Dispatch)
+                    _pumpInDispatch = true;   /* no threads in this build: Dispatch() drives the loop */
+                else if (rc != 0)
                 {
                     Close(false);
                     throw new InvalidOperationException("service thread start failed: " + (SendStatus)rc
                         + " (open with Threading.Manual and Poll() the node)");
                 }
             }
+        }
+
+        /// <summary>A callback queue of this node, for a handle that wants its callbacks on a
+        /// thread of its own: pass it as the Queue of that handle's options. At most
+        /// RANT_QUEUES_MAX (8) per node, freed with the node.</summary>
+        public RantQueue CreateQueue()
+        {
+            IntPtr q = Native.rant_node_create_queue(_handle);
+            if (q == IntPtr.Zero) throw new InvalidOperationException("queue create failed: " + LastError);
+            return new RantQueue(this, q);
+        }
+
+        // The native queue a handle is created with: the named one, else the node's default.
+        internal IntPtr QueueHandle(RantQueue q)
+        {
+            if (q == null) return _queue != null ? _queue.Handle : IntPtr.Zero;
+            if (q.Node != this) throw new ArgumentException("the queue belongs to another node");
+            return q.Handle;
         }
 
         // Marshal "ip" / "ip:port" seeds into one unmanaged array. The node COPIES it at
@@ -1719,14 +1778,6 @@ namespace Rant
             return block;
         }
 
-        // Every callback funnels through here so a dispatcher is honored in one place.
-        internal void RunCallback(Action a)
-        {
-            Action<Action> d = Dispatcher;
-            if (d == null) { a(); return; }
-            try { d(a); }
-            catch (Exception e) { Console.Error.WriteLine("rant callback dispatcher: " + e); }
-        }
         // The native create behind Publisher<T> and Subscriber<T>. A same name handle on this
         // node shares the slot, widening its role, and a different schema is refused.
         internal IntPtr AcquireTopic(string name, Role role, Schema schema, Qos qos)
@@ -1736,12 +1787,17 @@ namespace Rant
             {
                 TopicRec rec;
                 ulong sh = schema != null ? schema.Hash : 0;
+                IntPtr wantQueue = QueueHandle(qos != null ? qos.Queue : null);
                 if (_topicsByName.TryGetValue(name, out rec))
                 {
                     if (sh != 0 && rec.SchemaHash != 0 && sh != rec.SchemaHash)
                         throw new InvalidOperationException(
                             "topic '" + name + "' already exists on this node with a different schema"
                             + " (dispose every handle on it to retype the name)");
+                    if (wantQueue != rec.Queue)
+                        throw new InvalidOperationException(
+                            "topic '" + name + "' already exists on this node with a different queue"
+                            + " (same name handles share one slot and its queue)");
                     Role before = RoleOf(rec);
                     Hold(rec, role, 1);
                     Role after = RoleOf(rec);
@@ -1755,6 +1811,7 @@ namespace Rant
                 {
                     qos = qos.ToNative(),
                     reflect_from_mesh = (byte)(qos.ReflectFromMesh ? 1 : 0),
+                    queue = wantQueue,
                 };
                 IntPtr h = Native.rant_node_create_topic(_handle, Codec.CStr(name), (int)role,
                     schema != null ? schema.Handle : IntPtr.Zero, ref co);
@@ -1762,7 +1819,7 @@ namespace Rant
                     throw new InvalidOperationException("topic create failed: " + LastError);
                 ushort idx = Native.rant_topic_index(h);
                 if (schema != null) { _schemas.Add(schema); _topicTypes[idx] = schema.ClrType; }
-                rec = new TopicRec { Handle = h, SchemaHash = sh };
+                rec = new TopicRec { Handle = h, Queue = wantQueue, SchemaHash = sh };
                 Hold(rec, role, 1);
                 _topicsByName[name] = rec;
                 return h;
@@ -1913,10 +1970,16 @@ namespace Rant
 
         internal IntPtr Handle => _handle;
 
-        /// <summary>Dispatch every queued topic on the calling thread, waiting up to timeoutMs
-        /// for any to hold data. Per frame in Unity, so every queued handler runs there.</summary>
-        public int Dispatch(int maxMsgs = 0, int timeoutMs = 0)
-            => Native.rant_node_dispatch(_handle, maxMsgs, timeoutMs);
+        /// <summary>Under Threading.Dispatch: run every callback parked since the last call
+        /// on the calling thread, up to maxCallbacks (0 = all), waiting up to timeoutMs for
+        /// the first (0 = never). Per frame in Unity. Throws for another threading mode.</summary>
+        public int Dispatch(int maxCallbacks = 0, int timeoutMs = 0)
+        {
+            if (_queue == null)
+                throw new InvalidOperationException("Dispatch() needs Threading.Dispatch, this node is " + Threading);
+            if (_pumpInDispatch && timeoutMs == 0) Native.rant_node_poll(_handle, 0);
+            return _queue.Dispatch(maxCallbacks, timeoutMs);
+        }
 
         // ---- handles ----------------------------------------------------------------
 
@@ -1925,8 +1988,7 @@ namespace Rant
         public Publisher<T> Publisher<T>(string name, Qos qos = null, Schema schema = null)
             => new Publisher<T>(this, name, qos, schema);
 
-        /// <summary>The subscribing side of a topic. Add an OnMessage handler, or TryTake and
-        /// Dispatch from a queue.</summary>
+        /// <summary>The subscribing side of a topic: add an OnMessage handler.</summary>
         public Subscriber<T> Subscriber<T>(string name, Qos qos = null, Schema schema = null)
             => new Subscriber<T>(this, name, qos, schema);
 
@@ -2150,8 +2212,7 @@ namespace Rant
                 if (node == null) return;
                 Action<RantEvent> fn = node.OnEvent;
                 if (fn == null) return;
-                RantEvent ev = RantEvent.FromNative(evPtr, ref e);       // copied past the callback
-                node.RunCallback(() => fn(ev));
+                fn(RantEvent.FromNative(evPtr, ref e));
             }
             catch (Exception ex) { Console.Error.WriteLine("rant on_event: " + ex); }
         }
@@ -2378,23 +2439,6 @@ namespace Rant
                 var box = GetBox((long)user) as RequestBox;
                 if (box == null) return;
                 var r = new RequestCore(reqPtr, box.Fn);
-                // The handler runs after this callback returns, where the native request is
-                // dead, so park the reply now and answer through the DeferredCore instead.
-                if (box.Node != null && box.Node.Dispatcher != null)
-                {
-                    r.Rebind(r.Defer());
-                    RequestBox b = box;
-                    box.Node.RunCallback(() =>
-                    {
-                        try { b.Handler(r); }
-                        catch (Exception e)
-                        {
-                            r.FailQuiet(string.IsNullOrEmpty(e.Message) ? "handler threw" : e.Message);
-                            Console.Error.WriteLine("rant on_request: " + e);
-                        }
-                    });
-                    return;
-                }
                 try { box.Handler(r); }
                 catch (Exception e)
                 {
@@ -2426,8 +2470,7 @@ namespace Rant
                     Data = Codec.Bytes(o.data),   // copied out: the view dies with the callback
                     Message = Codec.Str(o.message),
                 };
-                if (call.RantNode != null) call.RantNode.RunCallback(() => call.Tcs.TrySetResult(r));
-                else call.Tcs.TrySetResult(r);
+                call.Tcs.TrySetResult(r);
             }
             catch (Exception e) { Console.Error.WriteLine("rant on_response: " + e); }
         }
@@ -2449,9 +2492,7 @@ namespace Rant
                     RecvUs = p.recv_us,
                     SchemaPtr = p.schema,
                 };
-                Action<ProgressCore> sink = call.OnProgress;
-                if (call.RantNode != null) call.RantNode.RunCallback(() => sink(prg));
-                else sink(prg);
+                call.OnProgress(prg);
             }
             catch (Exception e) { Console.Error.WriteLine("rant on_progress: " + e); }
         }
@@ -2486,9 +2527,7 @@ namespace Rant
                     WrittenUs = u.written_us,
                     SchemaPtr = u.schema,
                 };
-                Action<VariableUpdate> fn = box.Handler;
-                if (box.Node != null) box.Node.RunCallback(() => fn(vu));
-                else fn(vu);
+                box.Handler(vu);
             }
             catch (Exception e) { Console.Error.WriteLine("rant on_variable_update: " + e); }
         }
@@ -2653,7 +2692,8 @@ namespace Rant
                                   Action<RequestCore> handler, FunctionOptions options)
         {
             RantNode = node;
-            RantFunctionOpts co = (options ?? new FunctionOptions()).ToNative();
+            FunctionOptions opt = options ?? new FunctionOptions();
+            RantFunctionOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
             long id = 0;
             Patterns.RequestBox box = null;
             if (handler != null)
@@ -2743,11 +2783,15 @@ namespace Rant
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
+        internal readonly bool Queued;   // the outcome runs at Dispatch, so continuations stay there
+
         public RemoteFunctionCore(RantNode node, string name, Schema requestSchema, Schema responseSchema,
                               FunctionOptions options)
         {
             RantNode = node;
-            RantFunctionOpts co = (options ?? new FunctionOptions()).ToNative();
+            FunctionOptions opt = options ?? new FunctionOptions();
+            RantFunctionOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
+            Queued = co.queue != IntPtr.Zero;
             Fn = Native.rant_node_create_remote_function(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
@@ -2812,11 +2856,10 @@ namespace Rant
         /// response fires from the polling thread and continuations run off it.</summary>
         public Task<ResponseCore> CallAsync(byte[] request, uint provider = 0)
         {
-            // A dispatcher already completes on the thread the caller chose, so continuations
-            // belong there. With none, keep them off the polling thread.
+            // A queued outcome completes on the thread the caller dispatches from, so the
+            // continuations belong there. Inline, keep them off the loop thread.
             var tcs = new TaskCompletionSource<ResponseCore>(
-                RantNode.Dispatcher != null ? TaskCreationOptions.None
-                                                    : TaskCreationOptions.RunContinuationsAsynchronously);
+                Queued ? TaskCreationOptions.None : TaskCreationOptions.RunContinuationsAsynchronously);
             long id = Patterns.AddAsync(new Patterns.AsyncCall { Tcs = tcs, RantNode = RantNode });
             RantNode.RegisterAsync(id);
             int rc;
@@ -2903,7 +2946,8 @@ namespace Rant
                               TaskOptions options)
         {
             RantNode = node;
-            RantTaskOpts co = (options ?? new TaskOptions()).ToNative();
+            TaskOptions opt = options ?? new TaskOptions();
+            RantTaskOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
             long id = 0, cancelId = 0;
             Patterns.RequestBox box = null;
             Patterns.TaskCancelBox cancels = null;
@@ -3003,11 +3047,15 @@ namespace Rant
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
+        internal readonly bool Queued;   // the outcome runs at Dispatch, so continuations stay there
+
         public RemoteTaskCore(RantNode node, string name, Schema requestSchema, Schema progressSchema,
                           Schema responseSchema, TaskOptions options)
         {
             RantNode = node;
-            RantTaskOpts co = (options ?? new TaskOptions()).ToNative();
+            TaskOptions opt = options ?? new TaskOptions();
+            RantTaskOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
+            Queued = co.queue != IntPtr.Zero;
             Fn = Native.rant_node_create_remote_task(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 progressSchema != null ? progressSchema.Handle : IntPtr.Zero,
@@ -3025,11 +3073,10 @@ namespace Rant
         internal Task<ResponseCore> CallCore(byte[] request, out uint callId, Action<ProgressCore> sink,
                                              CancellationToken cancellationToken, uint provider)
         {
-            // A dispatcher already completes on the thread the caller chose, so continuations
-            // belong there. With none, keep them off the polling thread.
+            // A queued outcome completes on the thread the caller dispatches from, so the
+            // continuations belong there. Inline, keep them off the loop thread.
             var tcs = new TaskCompletionSource<ResponseCore>(
-                RantNode.Dispatcher != null ? TaskCreationOptions.None
-                                                    : TaskCreationOptions.RunContinuationsAsynchronously);
+                Queued ? TaskCreationOptions.None : TaskCreationOptions.RunContinuationsAsynchronously);
             long id = Patterns.AddAsync(new Patterns.AsyncCall
             {
                 Tcs = tcs, RantNode = RantNode, OnProgress = sink,
@@ -3129,7 +3176,8 @@ namespace Rant
         {
             RantNode = node;
             Name = name;
-            RantVariableOpts co = (options ?? new VariableOptions()).ToNative();
+            VariableOptions opt = options ?? new VariableOptions();
+            RantVariableOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
             using (var p = new PinnedBytes(initial))
             {
                 co.initial = p.B;
@@ -3605,7 +3653,7 @@ namespace Rant
 
         /// <summary>Fires on every state change with the value and its update envelope, and
         /// replays the current value to a handler as it is added. Inline on the thread that
-        /// applied the write, or on the Dispatcher.</summary>
+        /// applied the write, or at Dispatch with a queue.</summary>
         public event Action<T, VariableUpdate> OnChange
         {
             add
@@ -3706,8 +3754,8 @@ namespace Rant
     }
 
     /// <summary>The subscribing side of a topic, from RantNode.Subscriber. OnMessage fires per
-    /// message on the service or polling thread, or TryTake and Dispatch consume from a queue
-    /// instead. T decodes against the publisher's schema, a byte[] T is the bytes as is.</summary>
+    /// message where the node's callbacks run: the loop thread, or Dispatch() with a queue.
+    /// T decodes against the publisher's schema, a byte[] T is the bytes as is.</summary>
     public sealed class Subscriber<T> : IDisposable
     {
         private readonly TopicCore _topic;
@@ -3750,20 +3798,7 @@ namespace Rant
             hs(v, m);
         }
 
-        /// <summary>Pop the next queued message. The first TryTake or Dispatch switches the
-        /// topic to queued delivery (docs/node.md). timeoutMs 0 = check, negative = forever.</summary>
-        public bool TryTake(out T value, int timeoutMs = 0)
-        {
-            value = default(T);
-            RantMessage m;
-            return _topic.TryTake(out m, timeoutMs) && Patterns.TryValue(m, out value);
-        }
-
-        /// <summary>Drain the queue by running OnMessage on the calling thread, oldest first,
-        /// up to maxMsgs (0 = all), waiting like TryTake. Runs without the node lock.</summary>
-        public int Dispatch(int maxMsgs = 0, int timeoutMs = 0) => _topic.Dispatch(maxMsgs, timeoutMs);
-
-        /// <summary>Consumer queue observability, all zeros when not queued.</summary>
+        /// <summary>The ring behind a queued subscriber, all zeros when inline.</summary>
         public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats() => _topic.QueueStats();
         /// <summary>The cumulative traffic this node committed to the topic and delivered from
         /// it.</summary>
