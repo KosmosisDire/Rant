@@ -205,6 +205,8 @@ int rant_transport_send_would_evict_unsent(RantTransportState *st, uint16_t topi
     if (!slot->valid) return 0;
     for (li=topic->lane_head; li!=RANT__NIL; li=st->lanes[li].topic_next){
         i_RantLane *l=&st->lanes[li];
+        /* a throttled lane holds samples back on purpose and decimates to the newest */
+        if (l->w.rate_interval_us && !l->w.reader_reliable && !topic->directed) continue;
         if (l->w.used && !st->peer_dormant[l->peer_slot] && l->w.sent_upto < slot->base + slot->count){
             if (evict_base)  *evict_base  = slot->base;
             if (evict_count) *evict_count = slot->count;

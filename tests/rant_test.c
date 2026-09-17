@@ -4319,6 +4319,44 @@ static void threaded_checks(void){
       }
     }
 
+    /* 22b. CAPPED: a rate capped subscriber holds samples back on its lane, which must never
+       slow a depth 1 publisher. A send that waits for the lane's tick takes 20 ms here. */
+    { RantTopicDef cd[1]; RantNodeOpts o; RantNode *w, *r; uint8_t payload[16];
+      memset(payload, 0, sizeof payload);
+      memset(cd, 0, sizeof cd);
+      cd[0].name = "th/capped"; cd[0].role = RANT_PUB_ONLY;
+      cd[0].qos.keep_last = 1; cd[0].qos.max_message_bytes = 32;
+      memset(&o, 0, sizeof o);
+      o.domain = ST_DOMAIN+12; o.disable_shm = 1; o.discovery.max_peers = 4;
+      w = test_node_open(dummy, 0, "th-cpub", NULL, th_on_event, o, cd, 1);
+      cd[0].role = RANT_SUB_ONLY; cd[0].qos.max_rate_hz = 50;
+      r = test_node_open(dummy, 0, "th-csub", th_on_message, th_on_event, o, cd, 1);
+      ST_CHECK(w && r, "capped: nodes open");
+      if (w && r){
+          uint64_t worst = 0; int i;
+          th_recv = 0;
+          rant_node_start(w); rant_node_start(r);
+          { uint64_t end = i_rant_plat_now_us() + 5000000u;
+            while (rant_node_publisher_match_count(w, 0) == 0 && i_rant_plat_now_us() < end)
+                sw_sleep_ms(5); }
+          sw_sleep_ms(300);                     /* the rate section rides an announce */
+          for (i=0;i<200;i++){
+              uint64_t t0 = i_rant_plat_now_us(), dt;
+              rant_node_send(w, 0, payload, sizeof payload);
+              dt = i_rant_plat_now_us() - t0;
+              if (dt > worst) worst = dt;
+              sw_sleep_ms(1);
+          }
+          ST_CHECK(worst < 10000u, "capped: no send waits for the capped lane (worst %.2f ms)",
+                   worst/1000.0);
+          ST_CHECK(th_recv >= 2 && th_recv < 100, "capped: the subscriber is still paced (%lu of 200)",
+                   th_recv);
+          ST_CHECK(rant_node_evicted_unsent(w) == 0, "capped: a held back sample is not an eviction (%u)",
+                   rant_node_evicted_unsent(w));
+          rant_node_close(r, 1); rant_node_close(w, 1);
+      }
+    }
+
     /* 23. REENTRANT: echo from the callback, forbidden calls refuse loudly. The ring must be
        deeper than the request burst since a reentrant send never waits for a TX pass. */
     { RantTopicDef ca[2], cb[2]; RantNodeOpts o; RantNode *a, *b;
