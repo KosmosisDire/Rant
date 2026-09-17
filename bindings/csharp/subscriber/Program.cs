@@ -5,8 +5,10 @@ using System;
 using Rant;
 
 
+
 var n = new RantNode("test");
-var v = n.
+var v = n.FunctionDefinition("test", (Rant.Double2 v) => v.X + v.Y);
+
 
 Console.ReadLine();
 

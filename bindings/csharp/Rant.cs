@@ -1062,19 +1062,24 @@ namespace Rant
         }
 
         /// <summary>Reflect a type into a compiled schema: public fields become the wire fields.
-        /// A bare type is the whole schema, an anonymous root whose message is one value.</summary>
-        public Schema(Type t) : this(Codec.TypeDsl(t)) { ClrType = t; }
+        /// A bare type is the whole schema, an anonymous root whose message is one value. A
+        /// tuple has no name of its own and throws here: a handle names it after itself.</summary>
+        public Schema(Type t) : this(Codec.TypeDsl(t, null)) { ClrType = t; }
+
+        // Reflect with a wire name for a nameless type, derived from the handle's name.
+        internal Schema(Type t, string namelessAs) : this(Codec.TypeDsl(t, namelessAs)) { ClrType = t; }
 
         /// <summary>Adopt a compiled schema this wrapper already owns, such as a copy of a
         /// publisher's. Freeing it is this object's job from here on.</summary>
         internal Schema(IntPtr owned) { Handle = owned; }
 
-        // The schema a typed handle uses: the given one bound to T, else T reflected. A byte[]
-        // T carries the encoded message as is, so it binds no type and reflects nothing.
-        internal static Schema For(Type t, Schema given)
+        // The schema a typed handle uses: the given one bound to T, else T reflected under the
+        // handle's name when T has none of its own. A byte[] T carries the encoded message as
+        // is, so it binds no type and reflects nothing.
+        internal static Schema For(Type t, Schema given, string handleName)
         {
             if (Codec.IsRaw(t)) return given == null ? null : Copy(given, null);
-            return given == null ? new Schema(t) : Copy(given, t);
+            return given == null ? new Schema(t, Codec.WireName(handleName)) : Copy(given, t);
         }
 
         private static Schema Copy(Schema given, Type t)
@@ -3268,8 +3273,8 @@ namespace Rant
         internal FunctionDefinition(RantNode node, string name, Func<TReq, TRsp> handler,
                                     FunctionOptions options, Schema requestSchema, Schema responseSchema)
         {
-            _req = Schema.For(typeof(TReq), requestSchema);
-            _rsp = Schema.For(typeof(TRsp), responseSchema);
+            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
+            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
             Action<RequestCore> h = null;
             if (handler != null)
             {
@@ -3288,8 +3293,8 @@ namespace Rant
         internal FunctionDefinition(RantNode node, string name, Func<TReq, Task<TRsp>> handler,
                                     FunctionOptions options, Schema requestSchema, Schema responseSchema)
         {
-            _req = Schema.For(typeof(TReq), requestSchema);
-            _rsp = Schema.For(typeof(TRsp), responseSchema);
+            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
+            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
             Func<RequestCore, Task<byte[]>> h = null;
             if (handler != null)
             {
@@ -3309,8 +3314,8 @@ namespace Rant
         internal FunctionDefinition(RantNode node, string name, Action<TReq, RantRequest<TRsp>> handler,
                                     FunctionOptions options, Schema requestSchema, Schema responseSchema)
         {
-            _req = Schema.For(typeof(TReq), requestSchema);
-            _rsp = Schema.For(typeof(TRsp), responseSchema);
+            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
+            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
             Action<RequestCore> h = null;
             if (handler != null)
             {
@@ -3380,8 +3385,8 @@ namespace Rant
         internal RemoteFunction(RantNode node, string name, FunctionOptions options,
                                 Schema requestSchema, Schema responseSchema)
         {
-            _req = Schema.For(typeof(TReq), requestSchema);
-            _rsp = Schema.For(typeof(TRsp), responseSchema);
+            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
+            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
             _core = new RemoteFunctionCore(node, name, _req, _rsp, options);
         }
 
@@ -3444,9 +3449,9 @@ namespace Rant
                                 TaskOptions options, Schema requestSchema, Schema progressSchema,
                                 Schema responseSchema)
         {
-            _req = Schema.For(typeof(TReq), requestSchema);
-            _prg = Schema.For(typeof(TPrg), progressSchema);
-            _rsp = Schema.For(typeof(TRsp), responseSchema);
+            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
+            _prg = Schema.For(typeof(TPrg), progressSchema, name + "_prg");
+            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
             Func<RequestCore, TaskContextCore, Task<byte[]>> h = null;
             if (handler != null)
             {
@@ -3484,9 +3489,9 @@ namespace Rant
         internal RemoteTask(RantNode node, string name, TaskOptions options,
                             Schema requestSchema, Schema progressSchema, Schema responseSchema)
         {
-            _req = Schema.For(typeof(TReq), requestSchema);
-            _prg = Schema.For(typeof(TPrg), progressSchema);
-            _rsp = Schema.For(typeof(TRsp), responseSchema);
+            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
+            _prg = Schema.For(typeof(TPrg), progressSchema, name + "_prg");
+            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
             _core = new RemoteTaskCore(node, name, _req, _prg, _rsp, options);
         }
 
@@ -3645,7 +3650,7 @@ namespace Rant
         internal VariableDefinition(RantNode node, string name, bool hasInitial, T initial,
                                     VariableOptions options, Schema schema)
         {
-            _schema = Schema.For(typeof(T), schema);
+            _schema = Schema.For(typeof(T), schema, name);
             byte[] first = hasInitial ? Patterns.Encode(_schema, initial) : null;
             _core = new VariableCore(node, name, _schema, first, options, true);
         }
@@ -3657,7 +3662,7 @@ namespace Rant
     {
         internal RemoteVariable(RantNode node, string name, VariableOptions options, Schema schema)
         {
-            _schema = Schema.For(typeof(T), schema);
+            _schema = Schema.For(typeof(T), schema, name);
             _core = new VariableCore(node, name, _schema, null, options, false);
         }
     }
@@ -3672,7 +3677,7 @@ namespace Rant
 
         internal Publisher(RantNode node, string name, Qos qos, Schema schema)
         {
-            _topic = new TopicCore(node, name, Schema.For(typeof(T), schema), Role.PubOnly, qos);
+            _topic = new TopicCore(node, name, Schema.For(typeof(T), schema, name), Role.PubOnly, qos);
         }
 
         /// <summary>Publish one message to every matched subscriber. captureUs is when the
@@ -3710,7 +3715,7 @@ namespace Rant
 
         internal Subscriber(RantNode node, string name, Qos qos, Schema schema)
         {
-            _topic = new TopicCore(node, name, Schema.For(typeof(T), schema), Role.SubOnly, qos);
+            _topic = new TopicCore(node, name, Schema.For(typeof(T), schema, name), Role.SubOnly, qos);
             _deliver = Deliver;
         }
 
@@ -3914,6 +3919,29 @@ namespace Rant
         // A byte[] as a handle's T is the encoded message as is, never a reflected u8[].
         internal static bool IsRaw(Type t) => t == typeof(byte[]);
 
+        // A tuple is a struct with no name to put on the wire, so its handle names it.
+        internal static bool IsNameless(Type t)
+            => t.IsGenericType && t.FullName != null && t.FullName.StartsWith("System.ValueTuple`", StringComparison.Ordinal);
+
+        // A handle name as a PascalCase type name: every run of letters and digits is a word
+        // with its first letter raised, and everything else is dropped.
+        internal static string WireName(string handleName)
+        {
+            if (string.IsNullOrEmpty(handleName)) return null;
+            var sb = new StringBuilder(handleName.Length);
+            bool wordStart = true;
+            foreach (char c in handleName)
+            {
+                if (!(char.IsLetterOrDigit(c) && c < 128)) { wordStart = true; continue; }
+                sb.Append(wordStart ? char.ToUpperInvariant(c) : c);
+                wordStart = false;
+            }
+            if (sb.Length == 0) return null;
+            if (char.IsDigit(sb[0])) sb.Insert(0, '_');
+            if (sb.Length > 255) sb.Length = 255;
+            return sb.ToString();
+        }
+
         // A bare type used directly as a handle's T is the whole schema, anonymous, so the same
         // bare type in any language is the same bytes and hash. A plain array is the variable one.
         private static bool IsValueType(Type t)
@@ -3958,7 +3986,8 @@ namespace Rant
                     return cached;
                 }
                 var attr = (RantSchemaAttribute)Attribute.GetCustomAttribute(t, typeof(RantSchemaAttribute));
-                string name = attr != null && !string.IsNullOrEmpty(attr.Name) ? attr.Name : t.Name;
+                string name = attr != null && !string.IsNullOrEmpty(attr.Name) ? attr.Name
+                            : IsNameless(t) ? "" : t.Name;   // "" = named by the handle
                 FieldInfo[] fields = t.GetFields(BindingFlags.Public | BindingFlags.Instance);
                 Array.Sort(fields, (a, b) => a.MetadataToken.CompareTo(b.MetadataToken));
                 var plans = new List<FieldPlan>();
@@ -4032,12 +4061,16 @@ namespace Rant
             }
         }
 
-        internal static string TypeDsl(Type t)
+        internal static string TypeDsl(Type t, string namelessAs)
         {
             var spec = Spec(t);
             if (spec.Name == null) return TypeToken(spec.Fields[0]) + "\n";   // a bare type
+            string name = spec.Name.Length != 0 ? spec.Name : namelessAs;
+            if (name == null)
+                throw new SchemaException(t + " has no wire name: use it as a handle's type, which"
+                    + " names it after the handle, or compile a Schema from DSL text");
             var sb = new StringBuilder();
-            sb.Append(spec.Name).Append("\n{\n");
+            sb.Append(name).Append("\n{\n");
             for (int i = 0; i < spec.Fields.Count; i++)
             {
                 if (i > 0) sb.Append(",\n");

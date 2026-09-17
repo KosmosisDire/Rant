@@ -46,7 +46,8 @@ binds a name to one local topic, so a handle beside raw twin channels would shad
 
 Schema re adoption: `cap_schema_poll` compares an entity's mesh generation with the one
 the subscription adopted, retires the channels and re runs `cap_sub_reconcile` when it
-moved. Triggered by PEER_UP, PEER_DOWN, PEER_INTEREST, SCHEMA_MISMATCH and a 1 s fallback.
+moved. This covers every kind: a function handle is retired, a task drops its typed @prg and
+@req channels and keeps the untyped @rsp. Triggered by PEER_UP, PEER_DOWN, PEER_INTEREST, SCHEMA_MISMATCH and a 1 s fallback.
 Observers key cached reflection walks on the per peer interest epoch alone.
 
 Meta: the watched node's `@rant/meta` is polled once per second with a directed call. The

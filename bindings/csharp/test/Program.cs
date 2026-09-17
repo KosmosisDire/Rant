@@ -148,6 +148,10 @@ static class Program
         Check("dict labels (List)", od.Labels != null && od.Labels.Length == 2 && od.Labels[1] == "bb");
         Check("dict map", od.Extras != null && Convert.ToInt64(od.Extras["k"]) == 9);
 
+        // a tuple has no name of its own: only a handle can name it
+        try { new Schema(typeof((double, double))); Check("nameless tuple refused", false); }
+        catch (SchemaException) { Check("nameless tuple refused", true); }
+
         // an over-cap element in a variable string array must throw
         try
         {
@@ -177,6 +181,8 @@ static class Program
         // definitions on srv: the simple form, a thrower giving AppError, and a full form that
         // defers off thread
         var add = srv.FunctionDefinition<AddReq, AddRsp>("add", q => new AddRsp { Sum = q.A + q.B });
+        // a tuple type is named after the handle, so both ends of a C# pair match
+        var add2 = srv.FunctionDefinition<(double, double), double>("add2", v => v.Item1 + v.Item2);
         var boom = srv.FunctionDefinition<AddReq, AddRsp>("boom",
             (Func<AddReq, AddRsp>)(q => throw new Exception("kaboom")));
         var late = srv.FunctionDefinition<AddReq, AddRsp>("late", (q, req) =>
@@ -192,15 +198,21 @@ static class Program
                                                    new VariableOptions { AllowForce = true });
 
         var addR = cli.RemoteFunction<AddReq, AddRsp>("add");
+        var add2R = cli.RemoteFunction<(double, double), double>("add2");
         var boomR = cli.RemoteFunction<AddReq, AddRsp>("boom");
         var lateR = cli.RemoteFunction<AddReq, AddRsp>("late");
         var lvl = cli.RemoteVariable<Level>("level");
 
         var deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline
-               && !(addR.MatchCount > 0 && boomR.MatchCount > 0 && lateR.MatchCount > 0))
+               && !(addR.MatchCount > 0 && boomR.MatchCount > 0 && lateR.MatchCount > 0 && add2R.MatchCount > 0))
             cli.Poll(5);
-        Check("definitions discovered", addR.MatchCount > 0 && boomR.MatchCount > 0 && lateR.MatchCount > 0);
+        Check("definitions discovered", addR.MatchCount > 0 && boomR.MatchCount > 0 && lateR.MatchCount > 0
+              && add2R.MatchCount > 0);
+        var r2 = add2R.Call((2.5, 4.0), 3000);
+        Check("tuple request and response", r2.Ok && r2.Value == 6.5);
+        Check("a handle names a tuple in PascalCase", Codec.WireName("motor/speed_2d") == "MotorSpeed2d"
+              && Codec.WireName("add2_req") == "Add2Req");
 
         // blocking calls
         var r = addR.Call(new AddReq { A = 2, B = 3 }, 3000);

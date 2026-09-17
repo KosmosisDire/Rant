@@ -58,6 +58,13 @@ or an enum. Such a root is anonymous,
 so it is the same bytes and hash in every language. A `Dictionary<string, object>` also
 encodes against any compiled schema by field name, nested structs as nested dictionaries.
 
+A tuple such as `(double, double)` has no name of its own, and a struct root needs one, so
+the handle names it after itself in PascalCase: `AddReq` and `AddRsp` on function `add`,
+`AddPrg` on a task, `MotorSpeed` on a topic or variable named `motor/speed`. Every run of
+letters and digits is a word and everything else is dropped. Its fields are `Item1`,
+`Item2` and so on. Both ends of a C# pair derive the same name, and another language must
+spell it. `new Schema(typeof((double, double)))` on its own throws.
+
 Every typed handle also takes its schema as an optional `Schema` argument (`schema:` on a
 topic or variable, `requestSchema:`, `responseSchema:` and `progressSchema:` on a function
 or task), usually compiled from DSL text. The type argument is then only the C# shape the
