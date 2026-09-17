@@ -101,6 +101,13 @@ A queue of another node fails the create with `STATE`. Queues are pool allocatio
 the reset at close, at most `RANT_QUEUES_MAX`. The rings, caps and park rules are the
 consumer queue's below.
 
+Events park on one node ring (`RantNode.event_q`, allocated by `rant_node_set_event_queue`,
+`silent` so an eviction counts without emitting) as `I_RANT_REC_EVENT` records: the
+`RantEvent` copy, then `topic_name`, `peer_name` and `schema_detail` as length, presence and
+NUL terminated bytes, since all three are views that die with a retire or a peer drop. The
+patterns layer's `sys_on_event` still runs inline at emit, state applies at receipt. The
+group walk treats the ring as a handle less member of the event queue.
+
 ## Consumer queues
 
 A queued topic's messages are copied by the poll thread into a per topic byte ring

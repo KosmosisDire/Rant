@@ -157,6 +157,7 @@ namespace Rant
         public byte disable_error_logs;   // no error mirroring onto @rant/log/error
         public RantNodeNet net;
         public RantNodeDiscovery discovery;
+        public uint event_queue_bytes;
     }
 
     [StructLayout(LayoutKind.Sequential)]

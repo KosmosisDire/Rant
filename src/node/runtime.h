@@ -67,6 +67,8 @@ typedef struct {
     uint8_t               disable_error_logs; /* 1 = do not mirror errors onto @rant/log/error */
     RantNodeNet           net;
     RantNodeDiscovery     discovery;
+    uint32_t              event_queue_bytes; /* the event ring cap once rant_node_set_event_queue is
+                                                called, 0 = 64 KB. Overflow drops the oldest event */
 } RantNodeOpts;
 
 typedef struct RantQueue RantQueue;       /* a callback queue, owned by the node, freed at close */
@@ -180,6 +182,10 @@ RANT_API RantQueue *rant_node_create_queue(RantNode *n);
 RANT_API int        rant_queue_dispatch(RantQueue *q, int max_callbacks, int timeout_ms);
 /* Records waiting across the queue's handles, and records dropped since open. */
 RANT_API void       rant_queue_stats(RantQueue *q, uint32_t *waiting, uint32_t *dropped);
+/* Parks on_event on q from now on, NULL = inline again and the parked events are dropped.
+ * rant_last_error stays current either way. RANT_ERR_STATE from a callback, for another
+ * node's queue or while the events are being dispatched, RANT_ERR_OOM for the ring. */
+RANT_API int        rant_node_set_event_queue(RantNode *n, RantQueue *q);
 
 /* Consumer queues: a topic becomes queued on its first take or dispatch, or from creation
  * with qos.queue_bytes. docs/node.md explains the rules. */

@@ -4534,6 +4534,16 @@ static unsigned long cq_seen[3];
 static uint32_t   cq_order[32]; static int cq_n_order;
 static int        cq_nested_rc, cq_retire_self_rc, cq_retire_other_rc, cq_close_rc, cq_inline_rc;
 static uint64_t   cq_thread;
+static int        cq_ev_n; static RantErrorKind cq_ev_error; static char cq_ev_topic[64];
+static void cq_on_event(const RantEvent *ev){
+    st_on_event(ev);
+    cq_ev_n++;
+    if (ev->kind == RANT_ERROR){
+        cq_ev_error = ev->error;
+        cq_ev_topic[0] = 0;
+        if (ev->topic_name){ strncpy(cq_ev_topic, ev->topic_name, sizeof cq_ev_topic - 1); cq_ev_topic[sizeof cq_ev_topic - 1] = 0; }
+    }
+}
 static void cq_on_message(const RantMsg *m){
     uint32_t v = get32(m->data.data);
     if (m->topic_index < 3) cq_seen[m->topic_index]++;
@@ -4571,7 +4581,7 @@ static void callback_queue_checks(void){
     ao = (RantNodeOpts){ .domain=ST_DOMAIN+5, .discovery={ .max_peers=4 } };
     bo = ao; bo.max_topics = 3;
     a = test_node_open(mem_a, sizeof mem_a, "cqa-node", NULL, NULL, ao, ca, 3);
-    b = test_node_open(mem_b, sizeof mem_b, "cqb-node", cq_on_message, st_on_event, bo, NULL, 0);
+    b = test_node_open(mem_b, sizeof mem_b, "cqb-node", cq_on_message, cq_on_event, bo, NULL, 0);
     ST_CHECK(a && b, "cqueue: nodes open");
     if (!a || !b){ if (a) rant_node_close(a,0); if (b) rant_node_close(b,0); return; }
     cq_b = b;
@@ -4668,6 +4678,26 @@ static void callback_queue_checks(void){
              "cqueue: threaded dispatch delivers 20 in order on this thread (%d)", i);
     rant_node_stop(b); rant_node_stop(a);
 #endif
+    /* CQ5: events park on the event queue, last_error stays current, the strings are
+       copied, and NULL drops what is parked */
+    r = rant_node_set_event_queue(b, cq_q);
+    ST_CHECK(r==RANT_OK, "cqueue: event queue set (%d)", r);
+    cq_ev_n = 0; cq_ev_error = RANT_E_NONE;
+    ST_CHECK(rant_node_create_topic(b, "@bad", RANT_SUB_ONLY, NULL, NULL)==NULL
+             && rant_last_error(b).error==RANT_E_BAD_NAME && cq_ev_n==0,
+             "cqueue: error event parked, last_error current (n=%d err=%d)", cq_ev_n, (int)rant_last_error(b).error);
+    rant_queue_stats(cq_q, &waiting, NULL);
+    r = rant_queue_dispatch(cq_q, 0, 0);
+    ST_CHECK(waiting==1 && r==1 && cq_ev_n==1 && cq_ev_error==RANT_E_BAD_NAME && strcmp(cq_ev_topic, "@bad")==0,
+             "cqueue: event dispatched with its copied name (r=%d n=%d name=%s)", r, cq_ev_n, cq_ev_topic);
+    (void)rant_node_create_topic(b, "@bad2", RANT_SUB_ONLY, NULL, NULL);
+    rant_queue_stats(cq_q, &waiting, NULL);
+    r = rant_node_set_event_queue(b, NULL);
+    ST_CHECK(waiting==1 && r==RANT_OK && cq_ev_n==1, "cqueue: NULL drops the parked event (rc=%d n=%d)", r, cq_ev_n);
+    rant_queue_stats(cq_q, &waiting, NULL);
+    (void)rant_node_create_topic(b, "@bad3", RANT_SUB_ONLY, NULL, NULL);
+    ST_CHECK(waiting==0 && cq_ev_n==2, "cqueue: events inline again (waiting=%u n=%d)", waiting, cq_ev_n);
+
     rant_node_close(b, 1);
     rant_node_close(a, 1);
 }

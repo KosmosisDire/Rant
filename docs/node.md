@@ -42,6 +42,11 @@ whole API. The choice is made at creation and never changes.
   returns at once when empty, positive waits that long for the first record, negative
   waits forever. Without a service thread the wait drives the loop itself.
 - `rant_queue_stats(q, &waiting, &dropped)` counts records parked and dropped.
+- `rant_node_set_event_queue(n, q)` parks `on_event` too, on a node level ring capped by
+  `RantNodeOpts.event_queue_bytes` (0 = 64 KB) that drops the oldest on overflow. NULL
+  makes events inline again and drops what is parked. `rant_last_error` is current either
+  way. Functions, tasks and variables take `queue` in their options the same way, see
+  docs/patterns.md.
 
 One thread drains a queue at a time. A concurrent dispatch, a dispatch from an inline
 callback or from one of the queue's own callbacks returns `RANT_ERR_STATE`. Retiring a

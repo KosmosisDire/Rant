@@ -140,6 +140,7 @@ class RantNodeOpts(Structure):
         ("disable_error_logs", c_uint8),
         ("net", RantNodeNet),
         ("discovery", RantNodeDiscovery),
+        ("event_queue_bytes", c_uint32),
     ]
 
 

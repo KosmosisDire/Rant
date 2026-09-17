@@ -172,7 +172,9 @@ process base picked from the clock so concurrent runs never join each other.
   an inline callback, a nested dispatch, a retire of the running handle and a close from a
   callback are refused, a sibling retire from a callback works, a retire from outside drops
   the unrun records, another node's queue and the ninth queue are refused, and a timed
-  dispatch under service threads wakes on arrival on the caller's thread.
+  dispatch under service threads wakes on arrival on the caller's thread. An error event
+  parks on the event queue with last_error current, dispatches with its copied name, and
+  a NULL event queue drops the parked one and fires inline again.
 - Callback queues on patterns: a provider and a caller with one queue each. The request
   parks at the provider and its handler's own retire is refused, the reply parks at the
   caller, a blocking call completes inline through a queued channel, a NO_PROVIDER outcome
