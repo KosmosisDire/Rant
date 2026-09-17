@@ -272,6 +272,7 @@ class RantFunctionOpts(Structure):
         ("keep_last", c_uint16),
         ("multi", c_uint8),
     ]
+        ("queue", c_void_p),
 
 
 class RantVariableOpts(Structure):
@@ -283,6 +284,8 @@ class RantVariableOpts(Structure):
         ("keep_last", c_uint16),
         ("backpressure_wait_us", c_uint32),
     ]
+        ("reflect_from_mesh", c_uint8),
+        ("queue", c_void_p),
 
 
 class RantVariableUpdate(Structure):
@@ -310,6 +313,8 @@ class RantTaskOpts(Structure):
         ("backpressure_wait_us", c_uint32),
         ("keep_last", c_uint16),
     ]
+        ("reflect_from_mesh", c_uint8),
+        ("queue", c_void_p),
 
 
 class RantProgress(Structure):

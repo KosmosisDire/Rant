@@ -338,6 +338,7 @@ namespace Rant
         public ushort keep_last;        // req and rsp ring depth, 0 = 10
         public byte reflect_from_mesh;
         public byte multi;              // duplicate-authority diagnostic suppressed (@rant/meta)
+        public IntPtr queue;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -350,6 +351,7 @@ namespace Rant
         public ushort keep_last;
         public uint backpressure_wait_us;
         public byte reflect_from_mesh;
+        public IntPtr queue;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -387,6 +389,7 @@ namespace Rant
         public uint backpressure_wait_us;
         public ushort keep_last;        // req and rsp ring depth, 0 = 10
         public byte reflect_from_mesh;
+        public IntPtr queue;
     }
 
     [StructLayout(LayoutKind.Sequential)]

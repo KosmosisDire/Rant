@@ -82,6 +82,8 @@ typedef struct {
                                        re types the handle when that moves. A passed schema wins */
     uint8_t  multi;                 /* many definitions are expected, so the duplicate authority
                                        diagnostic is off. An undirected call reaches every one */
+    RantQueue *queue;               /* the handle's callbacks park here and run on
+                                       rant_queue_dispatch. NULL = inline on the loop thread */
 } RantFunctionOpts;
 
 /* One progress update as delivered to a task caller's on_progress. Views are valid for
@@ -101,8 +103,8 @@ typedef void (*RantProgressFn)(const RantProgress *progress);
 typedef struct {
     uint32_t provider;              /* direct the call at this peer only, 0 = every definition and
                                        the first answer wins. A task always directs, 0 = oldest */
-    RantProgressFn on_progress;       /* task: fires per progress update on the delivering thread,
-                                       NULL = updates are discarded */
+    RantProgressFn on_progress;       /* task: fires per progress update where the handle's
+                                       callbacks run, NULL = updates are discarded */
     void     *progress_user;        /* RantProgress.user */
     uint32_t *id_out;               /* filled with the call id, for rant_function_cancel */
 } RantCallOpts;
@@ -164,6 +166,7 @@ typedef struct {
     uint32_t backpressure_wait_us;  /* 0 = RANT_PATTERN_BP_WAIT_US */
     uint16_t keep_last;             /* req and rsp history depth, as RantFunctionOpts.keep_last */
     uint8_t  reflect_from_mesh;     /* as RantFunctionOpts.reflect_from_mesh, for all three */
+    RantQueue *queue;               /* as RantFunctionOpts.queue, for every callback of the handle */
 } RantTaskOpts;
 
 /* Creates the definition or a remote, exactly as for a function, with prg_schema typing the
@@ -183,8 +186,8 @@ RANT_API int rant_request_start(RantRequest *request);
  * channel, cancelled answers 1 once a cancel arrived. Cancellation is cooperative. */
 RANT_API int rant_function_progress (RantFunction *fn, uint64_t token, RantBytes progress);
 RANT_API int rant_function_cancelled(RantFunction *fn, uint64_t token);
-/* The cancel notification, one slot per definition, NULL clears. Fires on the poll thread
- * under the usual callback restrictions. Polling rant_function_cancelled alone is complete. */
+/* The cancel notification, one slot per definition, NULL clears. Fires where the handle's
+ * callbacks run. Polling rant_function_cancelled alone is complete. */
 typedef void (*RantCancelFn)(uint64_t token, void *user);
 RANT_API int rant_function_on_cancel(RantFunction *def, RantCancelFn on_cancel, void *user);
 /* Requests cancellation of call_id, cooperative and never acked: the terminal status is the
@@ -207,6 +210,8 @@ typedef struct {
     uint32_t  backpressure_wait_us;/* 0 = RANT_PATTERN_BP_WAIT_US */
     uint8_t   reflect_from_mesh;   /* a NULL schema takes the owner's from the mesh, and refresh
                                       re types the handle when that moves */
+    RantQueue *queue;              /* on_change and on_write park here and run on
+                                      rant_queue_dispatch. NULL = inline on the applying thread */
 } RantVariableOpts;
 
 /* Creates the definition (this node holds the value) or a remote (reads see the cached
@@ -231,8 +236,9 @@ RANT_API int    rant_variable_forced(RantVariable *var);
 
 /* Variable events, one slot each, NULL clears. on_write fires on every applied write,
  * on_change only when the observed state changes, with a replay at registration. */
-/* Both fire inline under the node lock on the thread that applied the write, with the usual
- * callback restrictions. A set from inside a callback is safe. See spec/patterns.md. */
+/* Without a queue both fire inline under the node lock on the thread that applied the
+ * write, with the usual callback restrictions, and a set from inside a callback is safe.
+ * With a queue they run at dispatch with the value of that write. See spec/patterns.md. */
 typedef struct {
     RantVariable       *variable;
     RantString          name;      /* a stable view */

@@ -29,7 +29,8 @@ typedef struct {
     uint64_t t_capture_us; /* the publisher's capture stamp, 0 = it sent none */
     uint32_t publisher_id;
     uint8_t  name_len;     /* the name is copied inline, discovery views die with the peer */
-    uint8_t  pad[3];
+    uint8_t  kind;         /* 0 a delivered message, else the patterns layer's record kind */
+    uint8_t  pad[2];
 } i_RantQRec;
 #define RANT__QWRAP 0xFFFFFFFFu
 #define RANT__QALIGN(x) (((uint32_t)(x) + 7u) & ~7u)
@@ -62,6 +63,7 @@ struct RantTopic {
     RantQueue *queue;                     /* the callback queue the topic was created with, or NULL */
     i_RantSysMsgFn sys_on_message;        /* the patterns layer's routing, NULL = a normal topic */
     void    *sys_msg_user;
+    i_RantSysDispatchFn sys_on_dispatch;  /* the patterns layer's parked record handler */
     uint64_t  tx_msgs, tx_bytes;         /* committed by our sends */
     uint64_t  rx_msgs, rx_bytes;         /* delivered to us, parked excluded */
     uint32_t  resolve_epoch;             /* match_epoch at the last convergence, 0 = never */
@@ -447,16 +449,19 @@ static void i_rant_node_queue_lost(RantNode *n, uint16_t topic_index, uint32_t f
     i_rant_node_emit(n, &e);
 }
 
-/* Enqueues one message. 0 = accepted (stored, or dropped per the best effort contract),
- * 1 = refused, a reliable queue at cap: the transport parks and flow control backpressures. */
+/* Enqueues one record, hdr then data as one body. 0 = accepted (stored, or dropped per
+ * the best effort contract), 1 = refused, a reliable queue at cap: the transport parks and
+ * flow control backpressures. kind 0 is a delivered message. recv_us 0 = now. */
 static int i_rant_node_queue_push(RantNode *n, uint16_t topic_index, i_RantMsgQueue *q,
-                                  uint32_t from, RantBytes data, uint64_t written_us,
-                                  uint64_t capture_us){
+                                  uint32_t from, RantBytes hdr, RantBytes data,
+                                  uint64_t written_us, uint64_t capture_us,
+                                  uint8_t kind, uint64_t recv_us){
     RantString name = i_rant_node_core_peer_name(n->core, from);
     uint32_t name_len = name.len > RANT_NODE_NAME_MAX ? (uint32_t)RANT_NODE_NAME_MAX
                                                       : (uint32_t)name.len;
     uint32_t payload_off = RANT__QALIGN(sizeof(i_RantQRec) + name_len);
-    uint32_t need = RANT__QALIGN(payload_off + data.len);
+    uint32_t body_len = (uint32_t)(hdr.len + data.len);
+    uint32_t need = RANT__QALIGN(payload_off + body_len);
     uint32_t at = 0, evicted = 0;
     for (;;){
         if (i_rant_q_fit(q, need, &at)) break;
@@ -470,14 +475,15 @@ static int i_rant_node_queue_push(RantNode *n, uint16_t topic_index, i_RantMsgQu
         return 0;
     }
     {   i_RantQRec *rec = (i_RantQRec*)(q->buf + at);
-        rec->rec_bytes = need; rec->data_len = (uint32_t)data.len;
-        rec->t_recv_us = i_rant_plat_now_us();
+        rec->rec_bytes = need; rec->data_len = body_len;
+        rec->t_recv_us = recv_us ? recv_us : i_rant_plat_now_us();
         rec->t_written_us = written_us;
         rec->t_capture_us = capture_us;
         rec->publisher_id = from; rec->name_len = (uint8_t)name_len;
-        rec->pad[0] = rec->pad[1] = rec->pad[2] = 0;
+        rec->kind = kind; rec->pad[0] = rec->pad[1] = 0;
         if (name_len) memcpy((uint8_t*)rec + sizeof *rec, name.data, name_len);
-        if (data.len) memcpy(q->buf + at + payload_off, data.data, data.len);
+        if (hdr.len) memcpy(q->buf + at + payload_off, hdr.data, hdr.len);
+        if (data.len) memcpy(q->buf + at + payload_off + hdr.len, data.data, data.len);
         q->head = at + need;
         q->bytes += need; q->count++;
     }
@@ -495,10 +501,16 @@ static void i_rant_node_queue_msg(RantNode *n, RantTopic *h, const i_RantQRec *r
     m->publisher_name = rec->name_len ? rant_string((const char*)(rec + 1), rec->name_len)
                                    : rant_cstr("unknown-peer");
     m->topic_name = rant_string(h->name, h->name_len);
-    i_rant_node_split(h, rant_bytes((const uint8_t*)rec + RANT__QALIGN(sizeof *rec + rec->name_len),
-                         rec->data_len), &m->header, &m->data);
-    m->schema = i_rant_node_core_msg_schema(n->core, rec->publisher_id, h->index);
-    if (h->prefix_bytes && m->data.len == 0) m->schema = NULL;   /* an op only pattern message */
+    if (rec->kind & I_RANT_REC_SYNTH){     /* the patterns layer's own blob, whole */
+        m->header = rant_bytes(NULL, 0);
+        m->data = rant_bytes((const uint8_t*)rec + RANT__QALIGN(sizeof *rec + rec->name_len), rec->data_len);
+        m->schema = NULL;
+    } else {
+        i_rant_node_split(h, rant_bytes((const uint8_t*)rec + RANT__QALIGN(sizeof *rec + rec->name_len),
+                             rec->data_len), &m->header, &m->data);
+        m->schema = i_rant_node_core_msg_schema(n->core, rec->publisher_id, h->index);
+        if (h->prefix_bytes && m->data.len == 0) m->schema = NULL;   /* an op only pattern message */
+    }
     m->recv_us = rec->t_recv_us;
     m->written_us = rec->t_written_us;
     m->capture_us = rec->t_capture_us;
@@ -591,9 +603,10 @@ static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from,
         i_rant_node_emit(n, &e);
         return 0;
     }
-    if (h && h->q){
+    if (h && h->q && h->kind == RANT_KIND_TOPIC){
         /* store the wire minus the stamps, the stamps ride the record */
-        if (i_rant_node_queue_push(n, topic_index, h->q, from, body, written_us, capture_us))
+        if (i_rant_node_queue_push(n, topic_index, h->q, from, rant_bytes(NULL, 0), body,
+                                   written_us, capture_us, 0, 0))
             return 1;   /* parked: the accepted retry re counts */
         h->rx_msgs++; h->rx_bytes += data.len;
         return 0;
@@ -1248,6 +1261,7 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
             i_rant_node_create_fail(n, RANT_E_OOM, name, 4096, 1);
             i_rant_node_alloc(n, h, 0); i_rant_node_unlock(n, acquired); return NULL;
         }
+        if (kind != RANT_KIND_TOPIC) h->q->reliable = 0;   /* state applied at receipt: never park the lane */
     }
     if (schema){   /* copied into node memory so the caller's schema need not outlive the topic */
         RantBytes w = rant_schema_wire(schema);
@@ -2063,6 +2077,21 @@ void i_rant_topic_clear_sys(RantTopic *topic){
     if (!topic) return;
     topic->sys_on_message = NULL;
     topic->sys_msg_user = NULL;
+    topic->sys_on_dispatch = NULL;
+}
+
+void i_rant_topic_set_dispatch(RantTopic *topic, i_RantSysDispatchFn on_dispatch){
+    if (topic) topic->sys_on_dispatch = on_dispatch;
+}
+RantQueue *i_rant_topic_queue(RantTopic *topic){ return topic ? topic->queue : NULL; }
+int i_rant_topic_busy(RantTopic *topic){ return topic && topic->q && topic->q->busy; }
+
+int i_rant_topic_park(RantTopic *topic, uint8_t kind, uint32_t from, RantBytes hdr,
+                      RantBytes body, uint64_t written_us, uint64_t recv_us){
+    if (!topic || !topic->q) return RANT_ERR_STATE;
+    (void)i_rant_node_queue_push(topic->n, topic->index, topic->q, from, hdr, body,
+                                 written_us, 0, kind, recv_us);   /* never refused: evicts */
+    return RANT_OK;
 }
 
 int i_rant_topic_match_wait(RantTopic *topic){
@@ -2208,6 +2237,10 @@ int rant_topic_set_role(RantTopic *topic, RantRole role){
     acquired = i_rant_node_lock(topic->n);
     if (!acquired){
         /* from a callback: the replay would rematch the reader proxy mid delivery, refuse loudly */
+        return RANT_ERR_STATE;
+    }
+    if (topic->q && topic->q->busy){    /* its own dispatched callback is running somewhere */
+        i_rant_node_unlock(topic->n, acquired);
         return RANT_ERR_STATE;
     }
     /* a log builtin is queued before its subscribe side goes live, so the catch up replay
@@ -2946,17 +2979,22 @@ int rant_queue_dispatch(RantQueue *g, int max_callbacks, int timeout_ms){
         i_RantMsgQueue *q; RantMsg m;
         if (!h) break;
         q = h->q;
-        i_rant_node_queue_msg(n, h, i_rant_q_peek(q), &m);
-        q->viewing = 1; q->busy = 1;          /* busy: retire of this handle is refused meanwhile */
-        if (n->user_on_message){
+        {   const i_RantQRec *rec = i_rant_q_peek(q);
+            uint8_t kind = rec->kind;
+            i_RantSysDispatchFn sys = h->kind != RANT_KIND_TOPIC ? h->sys_on_dispatch : NULL;
+            i_rant_node_queue_msg(n, h, rec, &m);
+            q->viewing = 1; q->busy = 1;      /* busy: retire of this handle is refused meanwhile */
+            /* a pattern channel whose routing was cleared mid retire drops the record */
+            if (sys || (h->kind == RANT_KIND_TOPIC && n->user_on_message)){
 #ifdef RANT_THREADS
-            if (acquired){
-                i_rant_node_unlock_raw(n);
-                n->user_on_message(&m);
-                i_rant_node_lock_raw(n);
-            } else
+                if (acquired){
+                    i_rant_node_unlock_raw(n);
+                    if (sys) sys(h->sys_msg_user, &m, kind); else n->user_on_message(&m);
+                    i_rant_node_lock_raw(n);
+                } else
 #endif
-            n->user_on_message(&m);
+                if (sys) sys(h->sys_msg_user, &m, kind); else n->user_on_message(&m);
+            }
         }
         q->busy = 0;
         i_rant_node_queue_release(n, h, q);

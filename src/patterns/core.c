@@ -36,7 +36,7 @@ static void     i_rant_patterns_on_close(void *user);
 #define RANT__REAP_ALL     1
 #define RANT__REAP_SENT    2
 static uint64_t i_rant_func_reap(struct RantFunction *fn, uint64_t now,
-                                 RantCallStatus fail_status, int all, uint32_t dest);
+                                 RantCallStatus fail_status, int all, uint32_t dest, int park);
 /* the duplicate authority sweep for a just created provider or owner */
 static void i_rant_pat_dup_sweep(RantNode *n, RantTopic *primary, RantEntityKind kind,
                                  uint32_t **ids, uint16_t *n_ids, uint16_t *cap);
@@ -147,6 +147,19 @@ static void i_rant_pat_unlink(void **head, void *elem, size_t next_off){
                                 broadcast, since call ids are per caller counters */
 #define RANT__NO_DEADLINE ((uint64_t)-1)     /* a RUNNING call has no timeout */
 
+/* The parked record kinds, see spec/patterns.md. A delivered message is parked whole and
+ * split again at dispatch, a synthetic record carries the layer's own blob. */
+#define RANT__REC_REQUEST    1u   /* req: a CALL op, the handler runs at dispatch */
+#define RANT__REC_CANCEL_OP  2u   /* req: a CANCEL op, on_cancel runs at dispatch */
+#define RANT__REC_RESPONSE   3u   /* rsp: a terminal outcome, its pending entry is parked */
+#define RANT__REC_RUNNING    4u   /* rsp: RUNNING, on_progress runs once with no data */
+#define RANT__REC_PROGRESS   5u   /* prg: one progress update */
+#define RANT__REC_OUTCOME   (I_RANT_REC_SYNTH | 1u)   /* [u32 call_id][u8 status][text] */
+#define RANT__REC_VAR       (I_RANT_REC_SYNTH | 2u)   /* [u32 write_seq][u8 forced][u8 flags][2][value] */
+#define RANT__VAR_REC_CHANGED 0x01u
+#define RANT__VAR_REC_REPLAY  0x02u   /* the on_change replay at registration: no on_write */
+#define RANT__VAR_REC_HDR     8u
+
 /* the default response text, so a generic consumer always has text for a failure */
 static RantString i_rant_call_status_msg(RantCallStatus s){
     switch (s){
@@ -172,6 +185,7 @@ typedef struct i_RantPending {
     RantProgressFn    on_progress; /* task: per progress update */
     void           *progress_user;
     uint8_t         running;     /* a non terminal response arrived, the deadline is dropped */
+    uint8_t         sync;        /* the blocking call's entry: its outcome completes inline */
     uint8_t        *queued_req;
     uint32_t        queued_len;
 } i_RantPending;
@@ -185,6 +199,7 @@ typedef struct i_RantDefer {
     uint32_t      caller_lo;   /* the caller's uuid low 32 for progress and cancel */
     uint32_t      call_id;
     uint8_t       cancelled;   /* a cancel landed */
+    uint8_t       cancel_notified;   /* on_cancel ran, or is parked to run, once */
 } i_RantDefer;
 
 struct RantFunction {
@@ -198,6 +213,7 @@ struct RantFunction {
     uint32_t          next_call_id;   /* the caller counter */
     uint32_t          timeout_us;
     i_RantPending    *pending;        /* caller: outstanding calls */
+    i_RantPending    *parked;         /* caller: answered, the callback waits for a dispatch */
     i_RantDefer      *defers;         /* provider: the live defer registry */
     RantCancelFn      on_cancel; void *on_cancel_user;     /* task definition, one slot */
     uint32_t          self_lo;        /* our own uuid low 32, the progress demux filter */
@@ -246,6 +262,14 @@ static void i_rant_func_send_reply(RantFunction *fn, uint32_t caller, uint32_t c
     (void)i_rant_topic_send_to(fn->rsp, caller, rant_bytes(hdr, hl), rsp);
 }
 
+/* parks a delivered pattern message whole on its channel's ring, lock held */
+static void i_rant_func_park_msg(RantTopic *ch, uint8_t kind, const RantMsg *msg){
+    const uint8_t *start = msg->header.data ? msg->header.data : msg->data.data;
+    (void)i_rant_topic_park(ch, kind, msg->publisher_id, rant_bytes(NULL, 0),
+                            rant_bytes(start, msg->header.len + msg->data.len),
+                            msg->written_us, msg->recv_us);
+}
+
 /* provider: a CANCEL op landed. The target is the payload's caller_lo, else the sender's.
  * A match on a live defer sets its flag and fires on_cancel once, no match is a no op. */
 static void i_rant_func_cancel_op(RantFunction *fn, const RantMsg *msg){
@@ -257,19 +281,29 @@ static void i_rant_func_cancel_op(RantFunction *fn, const RantMsg *msg){
         if (d->caller_lo == lo && d->call_id == call_id) break;
     if (!d || d->cancelled) return;
     d->cancelled = 1;
-    if (fn->on_cancel) fn->on_cancel((uint64_t)(uintptr_t)d, fn->on_cancel_user);
+    if (!fn->on_cancel) return;
+    if (i_rant_topic_queue(fn->req)){ i_rant_func_park_msg(fn->req, RANT__REC_CANCEL_OP, msg); return; }
+    d->cancel_notified = 1;
+    fn->on_cancel((uint64_t)(uintptr_t)d, fn->on_cancel_user);
 }
 
-/* provider: a request arrived, or an op */
-static void i_rant_func_on_request(void *user, const RantMsg *msg){
-    RantFunction *fn = (RantFunction*)user;
+/* dispatch: on_cancel for a parked CANCEL op, once, if the defer is still live */
+static void i_rant_func_run_cancel(RantFunction *fn, const RantMsg *msg){
+    uint32_t lo = msg->data.len >= 4 ? i_rant_le_r32(msg->data.data)
+                                     : i_rant_pat_peer_lo(msg->node, msg->publisher_id);
+    uint32_t call_id = i_rant_le_r32(msg->header.data);
+    i_RantDefer *d; RantCancelFn cb = NULL; void *user = NULL;
+    int acquired = i_rant_node_sys_lock(fn->n);
+    for (d = fn->defers; d; d = d->next)
+        if (d->caller_lo == lo && d->call_id == call_id) break;
+    if (d && !d->cancel_notified){ d->cancel_notified = 1; cb = fn->on_cancel; user = fn->on_cancel_user; }
+    i_rant_node_sys_unlock(fn->n, acquired);
+    if (cb) cb((uint64_t)(uintptr_t)d, user);
+}
+
+/* provider: runs the handler for one request, inline or at dispatch, and auto acks */
+static void i_rant_func_run_request(RantFunction *fn, const RantMsg *msg){
     i_RantRequest r;
-    if (msg->header.len < RANT__FN_PREFIX) return;     /* a malformed prefix */
-    if (msg->header.data[4] != RANT__FN_OP_CALL){      /* an op, not a request */
-        if (fn->is_task && msg->header.data[4] == RANT__FN_OP_CANCEL)
-            i_rant_func_cancel_op(fn, msg);
-        return;   /* an unknown op is dropped */
-    }
     r.pub.node          = msg->node;
     r.pub.function_name = rant_string(msg->topic_name.data,
                               msg->topic_name.len > 4u ? msg->topic_name.len - 4u : 0);
@@ -297,6 +331,19 @@ static void i_rant_func_on_request(void *user, const RantMsg *msg){
     }
 }
 
+/* provider: a request arrived, or an op */
+static void i_rant_func_on_request(void *user, const RantMsg *msg){
+    RantFunction *fn = (RantFunction*)user;
+    if (msg->header.len < RANT__FN_PREFIX) return;     /* a malformed prefix */
+    if (msg->header.data[4] != RANT__FN_OP_CALL){      /* an op, not a request */
+        if (fn->is_task && msg->header.data[4] == RANT__FN_OP_CANCEL)
+            i_rant_func_cancel_op(fn, msg);
+        return;   /* an unknown op is dropped */
+    }
+    if (i_rant_topic_queue(fn->req)){ i_rant_func_park_msg(fn->req, RANT__REC_REQUEST, msg); return; }
+    i_rant_func_run_request(fn, msg);
+}
+
 /* caller: unlinks the pending entry for call_id, so a second provider's reply finds none */
 static i_RantPending *i_rant_func_take_pending(RantFunction *fn, uint32_t call_id){
     i_RantPending **pp = &fn->pending, *p;
@@ -309,6 +356,22 @@ static i_RantPending *i_rant_func_take_pending(RantFunction *fn, uint32_t call_i
 static i_RantPending *i_rant_func_find_pending(RantFunction *fn, uint32_t call_id){
     i_RantPending *p;
     for (p = fn->pending; p; p = p->next) if (p->call_id == call_id) return p;
+    return NULL;
+}
+
+/* caller: the answered entry for call_id, unlinked from the parked list. Lock held */
+static i_RantPending *i_rant_func_take_parked(RantFunction *fn, uint32_t call_id){
+    i_RantPending **pp = &fn->parked, *p;
+    for (; (p = *pp) != NULL; pp = &p->next)
+        if (p->call_id == call_id){ *pp = p->next; return p; }
+    return NULL;
+}
+
+/* caller: the entry for call_id in either list, left linked. Lock held */
+static i_RantPending *i_rant_func_find_any(RantFunction *fn, uint32_t call_id){
+    i_RantPending *p = i_rant_func_find_pending(fn, call_id);
+    if (p) return p;
+    for (p = fn->parked; p; p = p->next) if (p->call_id == call_id) return p;
     return NULL;
 }
 
@@ -359,11 +422,28 @@ static void i_rant_func_on_progress(void *user, const RantMsg *msg){
     if (!p) return;   /* already answered: a straggler */
     i_rant_func_mark_running(p);
     if (!p->on_progress) return;
+    if (i_rant_topic_queue(fn->prg)){ i_rant_func_park_msg(fn->prg, RANT__REC_PROGRESS, msg); return; }
     pr.call_id = p->call_id; pr.provider = msg->publisher_id;
     pr.data = msg->data; pr.schema = msg->schema;
     pr.written_us = msg->written_us; pr.recv_us = msg->recv_us;
     pr.user = p->progress_user;
     p->on_progress(&pr);
+}
+
+/* dispatch: a parked progress update or RUNNING for a call still known here */
+static void i_rant_func_run_progress(RantFunction *fn, const RantMsg *msg, int running){
+    i_RantPending *p; RantProgress pr; RantProgressFn cb = NULL;
+    uint32_t call_id = running ? i_rant_le_r32(msg->header.data) : i_rant_le_r32(msg->header.data + 4);
+    int acquired = i_rant_node_sys_lock(fn->n);
+    p = i_rant_func_find_any(fn, call_id);
+    if (p){ cb = p->on_progress; pr.user = p->progress_user; }
+    i_rant_node_sys_unlock(fn->n, acquired);
+    if (!cb) return;   /* answered and dispatched already: a straggler */
+    pr.call_id = call_id; pr.provider = msg->publisher_id;
+    pr.data = running ? rant_bytes(NULL, 0) : msg->data;
+    pr.schema = running ? NULL : msg->schema;
+    pr.written_us = msg->written_us; pr.recv_us = msg->recv_us;
+    cb(&pr);
 }
 
 /* caller: a response arrived */
@@ -377,6 +457,11 @@ static void i_rant_func_on_response(void *user, const RantMsg *msg){
            with zero length data, unless progress already beat the status here */
         p = i_rant_func_find_pending(fn, i_rant_le_r32(msg->header.data));
         if (!p) return;
+        if (!p->running && p->on_progress && i_rant_topic_queue(fn->rsp)){
+            i_rant_func_mark_running(p);
+            i_rant_func_park_msg(fn->rsp, RANT__REC_RUNNING, msg);
+            return;
+        }
         if (!p->running && p->on_progress){
             RantProgress pr;
             pr.call_id = p->call_id; pr.provider = msg->publisher_id;
@@ -390,6 +475,12 @@ static void i_rant_func_on_response(void *user, const RantMsg *msg){
     }
     p = i_rant_func_take_pending(fn, i_rant_le_r32(msg->header.data));
     if (!p) return;                          /* an unknown or duplicate call_id: dropped */
+    if (!p->sync && i_rant_topic_queue(fn->rsp)){
+        /* the entry moves to the parked list: no timeout can reach it, the record finds it */
+        p->next = fn->parked; fn->parked = p;
+        i_rant_func_park_msg(fn->rsp, RANT__REC_RESPONSE, msg);
+        return;
+    }
     r.status = (RantCallStatus)msg->header.data[4];
     r.data = msg->data; r.schema = msg->schema;
     r.provider = msg->publisher_id; r.user = p->user;
@@ -402,6 +493,79 @@ static void i_rant_func_on_response(void *user, const RantMsg *msg){
               : i_rant_call_status_msg(r.status);
     if (p->on_response) p->on_response(&r);
     i_rant_func_free_pending(fn, p);
+}
+
+/* dispatch: the parked outcome for a call, a delivered reply or a synthesized one */
+static void i_rant_func_run_outcome(RantFunction *fn, const RantMsg *msg, int synthetic){
+    i_RantPending *p; RantResponse r; int acquired; uint32_t call_id;
+    if (synthetic ? msg->data.len < 5 : msg->header.len < RANT__FN_PREFIX) return;
+    call_id = i_rant_le_r32(synthetic ? msg->data.data : msg->header.data);
+    acquired = i_rant_node_sys_lock(fn->n);
+    p = i_rant_func_take_parked(fn, call_id);
+    i_rant_node_sys_unlock(fn->n, acquired);
+    if (!p) return;                          /* retired under the record: already answered */
+    if (synthetic){
+        r.status = (RantCallStatus)msg->data.data[4];
+        r.data = rant_bytes(NULL, 0); r.schema = NULL; r.provider = 0; r.written_us = 0;
+        r.message = msg->data.len > 5 ? rant_string((const char*)msg->data.data + 5, msg->data.len - 5)
+                                      : i_rant_call_status_msg(r.status);
+    } else {
+        r.status = (RantCallStatus)msg->header.data[4];
+        r.data = msg->data; r.schema = msg->schema;
+        r.provider = msg->publisher_id; r.written_us = msg->written_us;
+        r.message = (msg->header.len > RANT__FN_PREFIX + 1u)
+                  ? rant_string((const char*)msg->header.data + RANT__FN_PREFIX + 1u,
+                                msg->header.len - (RANT__FN_PREFIX + 1u))
+                  : i_rant_call_status_msg(r.status);
+    }
+    r.user = p->user;
+    if (p->on_response) p->on_response(&r);
+    acquired = i_rant_node_sys_lock(fn->n);
+    i_rant_func_free_pending(fn, p);
+    i_rant_node_sys_unlock(fn->n, acquired);
+}
+
+/* the queue's drain hands every parked record of the three channels back here */
+static void i_rant_func_dispatch(void *user, const RantMsg *msg, uint8_t kind){
+    RantFunction *fn = (RantFunction*)user;
+    switch (kind){
+    case RANT__REC_REQUEST:   i_rant_func_run_request(fn, msg); break;
+    case RANT__REC_CANCEL_OP: i_rant_func_run_cancel(fn, msg); break;
+    case RANT__REC_RESPONSE:  i_rant_func_run_outcome(fn, msg, 0); break;
+    case RANT__REC_OUTCOME:   i_rant_func_run_outcome(fn, msg, 1); break;
+    case RANT__REC_RUNNING:   i_rant_func_run_progress(fn, msg, 1); break;
+    case RANT__REC_PROGRESS:  i_rant_func_run_progress(fn, msg, 0); break;
+    default: break;
+    }
+}
+
+/* Fails one unlinked pending entry with a synthesized outcome: parked as a record when the
+ * handle has a queue and park says so, else fired inline. Frees the entry when fired. */
+static void i_rant_func_fail_pending(RantFunction *fn, i_RantPending *p, RantCallStatus st,
+                                     RantString message, int park){
+    if (park && !p->sync && i_rant_topic_queue(fn->rsp)){
+        uint8_t hdr[5];
+        i_rant_le_w32(hdr, p->call_id); hdr[4] = (uint8_t)st;
+        p->next = fn->parked; fn->parked = p;
+        (void)i_rant_topic_park(fn->rsp, RANT__REC_OUTCOME, 0, rant_bytes(hdr, 5),
+                                rant_bytes((const uint8_t*)message.data, message.len), 0, 0);
+        return;
+    }
+    {   RantResponse r; r.status = st; r.data = rant_bytes(NULL,0);
+        r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
+        r.message = message;
+        if (p->on_response) p->on_response(&r);
+    }
+    i_rant_func_free_pending(fn, p);
+}
+
+/* Retire and close: an answered call whose callback never dispatched gets CANCELLED
+ * inline, since its record dies with the ring. Lock held. */
+static void i_rant_func_drop_parked(RantFunction *fn){
+    while (fn->parked){
+        i_RantPending *p = fn->parked; fn->parked = p->next;
+        i_rant_func_fail_pending(fn, p, RANT_CALL_CANCELLED, i_rant_call_status_msg(RANT_CALL_CANCELLED), 0);
+    }
 }
 
 /* a leading '@' is reserved for the @rant/ builtins, refused in every public constructor */
@@ -439,6 +603,9 @@ static RantFunction *i_rant_function_new(RantNode *n, const char *name,
     topt.qos.keep_last = (opts && opts->keep_last) ? opts->keep_last : 0u;
     topt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : RANT_PATTERN_BP_WAIT_US;
+    /* the ring goes on the channels this side receives on, so a definition's rsp and a
+       remote's req stay plain senders */
+    topt.queue = (opts && handles_req) ? opts->queue : NULL;
     fn = (RantFunction*)i_rant_pat_handle_new(n, sizeof *fn, &pm);
     if (!fn) return NULL;
     if (opts && opts->reflect_from_mesh){
@@ -473,6 +640,8 @@ static RantFunction *i_rant_function_new(RantNode *n, const char *name,
     fn->req = i_rant_node_create_pattern_topic(n, rn, req_role, req_schema, &topt,
                               req_kind, RANT__FN_PREFIX, 1 /*directed*/, req_attrs, req_cb, fn);
     if (!fn->req) return NULL;   /* fn stays pool allocated: nothing routes into it yet */
+    i_rant_topic_set_dispatch(fn->req, i_rant_func_dispatch);
+    topt.queue = (opts && makes_calls) ? opts->queue : NULL;
     if (topts){
         /* the broadcast progress channel: reliability is the definition's offer or the
            remote's request, the RxO rule composes them */
@@ -486,6 +655,7 @@ static RantFunction *i_rant_function_new(RantNode *n, const char *name,
                               handles_req ? NULL : i_rant_func_on_progress, fn);
         if (!fn->prg)
             return (RantFunction*)i_rant_pat_half_create_fail(fn->req);
+        i_rant_topic_set_dispatch(fn->prg, i_rant_func_dispatch);
     }
     memcpy(rn + nl, "@rsp", 5);
     fn->rsp = i_rant_node_create_pattern_topic(n, rn, rsp_role, rsp_schema, &topt,
@@ -494,6 +664,7 @@ static RantFunction *i_rant_function_new(RantNode *n, const char *name,
         if (fn->prg) (void)rant_topic_set_role(fn->prg, RANT_INACTIVE);
         return (RantFunction*)i_rant_pat_half_create_fail(fn->req);
     }
+    i_rant_topic_set_dispatch(fn->rsp, i_rant_func_dispatch);
 
     acquired = i_rant_node_sys_lock(n);         /* publish into the manager list */
     fn->next = pm->funcs; pm->funcs = fn; pm->auth_dirty = 1;
@@ -535,6 +706,7 @@ static RantFunctionOpts i_rant_task_fn_opts(const RantTaskOpts *to){
     fo.timeout_us = to->timeout_us;
     fo.keep_last = to->keep_last;
     fo.multi = to->multi;
+    fo.queue = to->queue;
     return fo;
 }
 
@@ -563,7 +735,7 @@ RantFunction *rant_node_create_remote_task(RantNode *n, const char *name,
 /* Links the pending entry under the lock, then sends outside it so the request engages the
  * flow control wait. A task call with no provider auto directs at the oldest matched. */
 static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponseFn on_response,
-                                   void *user, const RantCallOpts *opts, uint32_t *id_out){
+                                   void *user, const RantCallOpts *opts, uint32_t *id_out, int sync){
     uint8_t hdr[RANT__FN_PREFIX]; i_RantPending *p; int acquired, r; uint32_t id;
     uint32_t dest = opts ? opts->provider : 0;
     if (!fn || !fn->req || !fn->rsp) return RANT_ERR_NO_TOPIC;
@@ -578,7 +750,7 @@ static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponse
     p->on_response = on_response; p->user = user;
     p->on_progress = opts ? opts->on_progress : NULL;
     p->progress_user = opts ? opts->progress_user : NULL;
-    p->running = 0;
+    p->running = 0; p->sync = (uint8_t)sync;
     p->queued_req = NULL; p->queued_len = 0;
     p->next = fn->pending; fn->pending = p;
     if (id_out) *id_out = id;
@@ -614,7 +786,7 @@ static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponse
 
 int rant_function_call_async(RantFunction *fn, RantBytes req, RantResponseFn on_response,
                              void *user, const RantCallOpts *opts){
-    return i_rant_function_call_id(fn, req, on_response, user, opts, NULL);
+    return i_rant_function_call_id(fn, req, on_response, user, opts, NULL, 0);
 }
 
 /* Answers and frees every live deferred call of a definition with CANCELLED. Lock held,
@@ -635,7 +807,8 @@ int rant_function_retire(RantFunction *fn){
     pm = fn->pm; n = fn->n;
     if (pm && fn == pm->meta) return RANT_ERR_STATE;     /* the builtin is node infrastructure */
     acquired = i_rant_node_sys_lock(n);
-    if (!acquired){   /* from a callback: refuse with nothing mutated */
+    if (!acquired || i_rant_topic_busy(fn->req) || i_rant_topic_busy(fn->rsp) || i_rant_topic_busy(fn->prg)){
+        /* from a callback, or one of its dispatched callbacks runs: refuse with nothing mutated */
         i_rant_node_sys_unlock(n, acquired);
         return RANT_ERR_STATE;
     }
@@ -655,7 +828,8 @@ int rant_function_retire(RantFunction *fn){
     i_rant_func_drain_defers(fn, "provider retired");
     /* every outstanding call gets its one outcome, CANCELLED. A reentrant call from a
        cancel callback queues and the next round cancels it too */
-    while (fn->pending) i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0);
+    while (fn->pending) i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0, 0);
+    i_rant_func_drop_parked(fn);
     if (pm){ i_rant_pat_unlink((void**)&pm->funcs, fn, offsetof(RantFunction, next)); pm->auth_dirty = 1; }
     req = fn->req; rsp = fn->rsp; prg = fn->prg;   /* outlive fn, see phase 3 */
     if (fn->sync_buf)  i_rant_node_sys_alloc(n, fn->sync_buf, 0);
@@ -679,9 +853,12 @@ int rant_function_refresh(RantFunction *fn){
     if (fn->prg) i_rant_node_reflect_pick(n, ek, i_rant_pat_base_name(fn->req), 2, fn->is_provider, &pg, NULL, NULL);
     /* every outstanding call gets its one outcome before the lanes go */
     acquired = i_rant_node_sys_lock(n);
-    if (!acquired){ i_rant_node_sys_unlock(n, acquired); return RANT_ERR_STATE; }
+    if (!acquired || i_rant_topic_busy(fn->req) || i_rant_topic_busy(fn->rsp) || i_rant_topic_busy(fn->prg)){
+        i_rant_node_sys_unlock(n, acquired); return RANT_ERR_STATE;
+    }
     i_rant_func_drain_defers(fn, "provider re-typed");
-    while (fn->pending) i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0);
+    while (fn->pending) i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0, 0);
+    i_rant_func_drop_parked(fn);
     i_rant_node_sys_unlock(n, acquired);
     i_rant_node_flush_tx(n);
     r = i_rant_topic_retype(fn->req, rq, RANT_RELIABLE);
@@ -746,7 +923,7 @@ int rant_function_call(RantFunction *fn, RantBytes req, RantResponse *out, int t
     i_rant_node_sys_unlock(fn->n, acquired);
     ctx.fn = fn; ctx.done = 0; ctx.status = RANT_CALL_TIMEOUT; ctx.schema = NULL; ctx.len = 0;
     ctx.provider = 0; ctx.written_us = 0;
-    r = i_rant_function_call_id(fn, req, i_rant_func_sync_response, &ctx, opts, &id);
+    r = i_rant_function_call_id(fn, req, i_rant_func_sync_response, &ctx, opts, &id, 1);
     if (r != RANT_OK) return r;
     cw.ctx = &ctx; cw.id = id;
     cw.deadline = i_rant_node_now_us(fn->n)
@@ -819,7 +996,7 @@ uint64_t rant_request_defer(RantRequest *request){
     d = (i_RantDefer*)i_rant_node_sys_alloc(r->fn->n, NULL, sizeof *d);
     if (d){
         d->fn = r->fn; d->caller = request->caller; d->caller_lo = r->caller_lo;
-        d->call_id = r->call_id; d->cancelled = 0;
+        d->call_id = r->call_id; d->cancelled = 0; d->cancel_notified = 0;
         d->next = r->fn->defers; r->fn->defers = d;   /* into the live defer registry */
         r->replied = 1;   /* no auto ack, the reply comes via rant_function_complete */
     }
@@ -906,13 +1083,8 @@ int rant_function_cancel(RantFunction *fn, uint32_t call_id){
     }
     if (p->queued_req){
         /* never sent: cancel locally with the one CANCELLED outcome */
-        RantResponse r;
         (void)i_rant_func_take_pending(fn, call_id);
-        r.status = RANT_CALL_CANCELLED; r.data = rant_bytes(NULL, 0);
-        r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
-        r.message = i_rant_call_status_msg(RANT_CALL_CANCELLED);
-        if (p->on_response) p->on_response(&r);
-        i_rant_func_free_pending(fn, p);
+        i_rant_func_fail_pending(fn, p, RANT_CALL_CANCELLED, i_rant_call_status_msg(RANT_CALL_CANCELLED), 1);
         i_rant_node_sys_unlock(fn->n, acquired);
         return RANT_OK;
     }
@@ -1065,16 +1237,54 @@ static void i_rant_var_update_view(RantVariable *v, RantVariableUpdate *u){
     u->written_us = v->last_written_us;
 }
 
+/* parks the current state as one RANT__REC_VAR record on the value channel, lock held */
+static void i_rant_var_park(RantVariable *v, uint8_t flags, uint32_t source, uint64_t when_us,
+                            uint64_t written_us){
+    uint8_t hdr[RANT__VAR_REC_HDR];
+    i_rant_le_w32(hdr, v->write_seq); hdr[4] = v->forced; hdr[5] = flags; hdr[6] = hdr[7] = 0;
+    (void)i_rant_topic_park(v->value, RANT__REC_VAR, source, rant_bytes(hdr, sizeof hdr),
+                            rant_bytes(v->store, v->store_len), written_us, when_us);
+}
+
 /* A write just applied, lock held: stamp the write context, then fire on_write always and
- * on_change when the state changed, inline on this thread. */
+ * on_change when the state changed, inline on this thread or parked for the queue. */
 static void i_rant_var_notify(RantVariable *v, int changed, uint32_t source, uint64_t when_us,
                               uint64_t written_us){
     RantVariableUpdate u;
     v->last_source = source; v->last_write_us = when_us; v->last_written_us = written_us;
     if (!v->on_write && !(changed && v->on_change)) return;
+    if (i_rant_topic_queue(v->value)){
+        i_rant_var_park(v, changed ? RANT__VAR_REC_CHANGED : 0u, source, when_us, written_us);
+        return;
+    }
     i_rant_var_update_view(v, &u);
     if (v->on_write)             v->on_write(&u, v->on_write_user);
     if (changed && v->on_change) v->on_change(&u, v->on_change_user);
+}
+
+/* dispatch: the parked write with the value it carried, the observers as they are now */
+static void i_rant_var_dispatch(void *user, const RantMsg *msg, uint8_t kind){
+    RantVariable *v = (RantVariable*)user;
+    RantVariableUpdate u; uint8_t flags;
+    RantVariableUpdateFn on_write, on_change; void *write_user, *change_user;
+    int acquired;
+    if (kind != RANT__REC_VAR || msg->data.len < RANT__VAR_REC_HDR) return;
+    acquired = i_rant_node_sys_lock(v->n);
+    on_write = v->on_write; write_user = v->on_write_user;
+    on_change = v->on_change; change_user = v->on_change_user;
+    u.schema = v->cur_schema;
+    i_rant_node_sys_unlock(v->n, acquired);
+    flags = msg->data.data[5];
+    u.variable   = v;
+    u.name       = i_rant_topic_name(v->value);
+    u.value      = rant_bytes(msg->data.data + RANT__VAR_REC_HDR, msg->data.len - RANT__VAR_REC_HDR);
+    u.forced     = msg->data.data[4];
+    u.write_seq  = i_rant_le_r32(msg->data.data);
+    u.source     = msg->publisher_id;
+    u.recv_us    = msg->recv_us;
+    u.written_us = msg->written_us;
+    if (on_write && !(flags & RANT__VAR_REC_REPLAY)) on_write(&u, write_user);
+    if (on_change && (flags & RANT__VAR_REC_CHANGED)) on_change(&u, change_user);
 }
 
 /* owner: publishes the store under a held lock, a reentrant send with no wait */
@@ -1174,7 +1384,10 @@ static RantVariable *i_rant_variable_new(RantNode *n, const char *name, const Ra
         vopt.qos.keep_last = vopt.qos.catch_up;      /* the ring must hold what it replays */
     vopt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : RANT_PATTERN_BP_WAIT_US;
+    /* the value channel carries every parked observer record, the set channel parks nothing */
+    vopt.queue = opts ? opts->queue : NULL;
     sopt = vopt; sopt.qos.catch_up = 0;   /* the set channel: no replay, the same repair depth */
+    sopt.queue = NULL;
 
     v = (RantVariable*)i_rant_pat_handle_new(n, sizeof *v, &pm);
     if (!v) return NULL;
@@ -1193,6 +1406,7 @@ static RantVariable *i_rant_variable_new(RantNode *n, const char *name, const Ra
                               (uint8_t)((owner && v->allow_force) ? RANT_ATTR_FORCEABLE : 0u),
                               owner ? NULL : i_rant_var_on_value, v);
     if (!v->value) return NULL;   /* v stays pool allocated: nothing routes into it yet */
+    i_rant_topic_set_dispatch(v->value, i_rant_var_dispatch);
     if (owner)
         /* seed write_seq from the slot's continuing seqno line, so a successor definition's
            first write orders above its predecessor's last. See spec/patterns.md */
@@ -1346,6 +1560,7 @@ int rant_variable_retire(RantVariable *var){
     RantTopic *value, *set;
     if (!var) return RANT_ERR_NO_TOPIC;
     pm = var->pm; n = var->n;
+    if (i_rant_topic_busy(var->value)) return RANT_ERR_STATE;   /* its dispatched callback runs */
     r = i_rant_pat_park_channels(var->value, var->set);     /* set is NULL on a read only owner */
     if (r != 0) return r;
     acquired = i_rant_node_sys_lock(n);
@@ -1386,11 +1601,16 @@ int rant_variable_on_change(RantVariable *var, RantVariableUpdateFn on_change, v
     acquired = i_rant_node_sys_lock(var->n);
     var->on_change = on_change; var->on_change_user = user;
     if (on_change && var->has_value){
-        /* replay the current state once, right here, so a value that arrived between
-           create and register is never missed */
+        /* replay the current state once, right here or at the next dispatch, so a value
+           that arrived between create and register is never missed */
         RantVariableUpdate u;
-        i_rant_var_update_view(var, &u);
-        on_change(&u, user);
+        if (i_rant_topic_queue(var->value)){
+            i_rant_var_park(var, RANT__VAR_REC_CHANGED | RANT__VAR_REC_REPLAY, var->last_source,
+                            var->last_write_us, var->last_written_us);
+        } else {
+            i_rant_var_update_view(var, &u);
+            on_change(&u, user);
+        }
     }
     i_rant_node_sys_unlock(var->n, acquired);
     return RANT_OK;
@@ -1579,9 +1799,10 @@ static void i_rant_pat_dup_forget_peer(i_RantPatterns *pm, uint32_t peer){
 /* Fails pending calls with one synthesized outcome each: those directed at dest, else by
  * which: 0 = past now, 1 = every call, 2 = every call already on the wire. A call still
  * queued at its deadline never had a provider, so it ends NO_PROVIDER rather than
- * TIMEOUT. Callbacks run after the unlink. Returns the earliest deadline left. */
+ * TIMEOUT. Callbacks run after the unlink, or park on the handle's queue when park says
+ * so. Returns the earliest deadline left. */
 static uint64_t i_rant_func_reap(RantFunction *fn, uint64_t now, RantCallStatus fail_status,
-                                 int which, uint32_t dest){
+                                 int which, uint32_t dest, int park){
     i_RantPending **pp = &fn->pending, *p;
     uint64_t soonest = 0;
     while ((p = *pp) != NULL){
@@ -1593,12 +1814,7 @@ static uint64_t i_rant_func_reap(RantFunction *fn, uint64_t now, RantCallStatus 
             RantCallStatus st = (fail_status == RANT_CALL_TIMEOUT && p->queued_req)
                               ? RANT_CALL_NO_PROVIDER : fail_status;
             *pp = p->next;
-            {   RantResponse r; r.status = st; r.data = rant_bytes(NULL,0);
-                r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
-                r.message = i_rant_call_status_msg(st);
-                if (p->on_response) p->on_response(&r);
-            }
-            i_rant_func_free_pending(fn, p);
+            i_rant_func_fail_pending(fn, p, st, i_rant_call_status_msg(st), park);
             continue;
         }
         if (!soonest || p->deadline_us < soonest) soonest = p->deadline_us;
@@ -1614,12 +1830,7 @@ static void i_rant_func_reap_severed(RantFunction *fn, uint32_t peer){
     while ((p = *pp) != NULL){
         if (p->dest == peer && !p->queued_req && !i_rant_topic_peer_matched(fn->req, peer)){
             *pp = p->next;
-            {   RantResponse r; r.status = RANT_CALL_CANCELLED; r.data = rant_bytes(NULL,0);
-                r.schema = NULL; r.provider = 0; r.user = p->user; r.written_us = 0;
-                r.message = rant_cstr("provider retired");
-                if (p->on_response) p->on_response(&r);
-            }
-            i_rant_func_free_pending(fn, p);
+            i_rant_func_fail_pending(fn, p, RANT_CALL_CANCELLED, rant_cstr("provider retired"), 1);
             continue;
         }
         pp = &p->next;
@@ -1632,7 +1843,7 @@ static uint64_t i_rant_patterns_tick(void *user, uint64_t now_us){
     for (fn = pm->funcs; fn; fn = fn->next){
         uint64_t s;
         i_rant_func_flush_queued(fn);     /* the backstop: the interest event is the fast path */
-        s = i_rant_func_reap(fn, now_us, RANT_CALL_TIMEOUT, RANT__REAP_EXPIRED, 0);
+        s = i_rant_func_reap(fn, now_us, RANT_CALL_TIMEOUT, RANT__REAP_EXPIRED, 0, 1);
         if (s && (!soonest || s < soonest)) soonest = s;
     }
     return soonest;   /* the next timeout deadline for the poll wait cap */
@@ -1650,7 +1861,8 @@ static void i_rant_patterns_on_close(void *user){
             i_rant_node_sys_unlock(pm->n, acquired);
         }
         if (!fn->is_provider && fn->pending)
-            i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0);
+            i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0, 0);
+        i_rant_func_drop_parked(fn);
     }
     /* the drained CANCELLED replies must leave before the socket closes: no poll pass
        follows this hook */
@@ -1684,8 +1896,8 @@ static void i_rant_patterns_on_event(void *user, const RantEvent *ev){
        loss: it keeps waiting and its deadline ends it NO_PROVIDER */
     for (fn = pm->funcs; fn; fn = fn->next){
         if (fn->is_provider || !fn->pending) continue;
-        (void)i_rant_func_reap(fn, 0, RANT_CALL_PEER_LOST, RANT__REAP_EXPIRED, ev->peer);   /* directed at it */
+        (void)i_rant_func_reap(fn, 0, RANT_CALL_PEER_LOST, RANT__REAP_EXPIRED, ev->peer, 1);   /* directed at it */
         if (fn->pending && i_rant_topic_live_match_count(fn->req) == 0)
-            i_rant_func_reap(fn, 0, RANT_CALL_PEER_LOST, RANT__REAP_SENT, 0);
+            i_rant_func_reap(fn, 0, RANT_CALL_PEER_LOST, RANT__REAP_SENT, 0, 1);
     }
 }

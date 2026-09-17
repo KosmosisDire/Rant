@@ -4672,6 +4672,217 @@ static void callback_queue_checks(void){
     rant_node_close(a, 1);
 }
 
+/* The callback queue pattern phases (spec/testing.md): a provider P and a caller C, each
+ * with one queue, so every pattern callback parks and runs at a dispatch. */
+static RantQueue    *cp_pq, *cp_cq;
+static RantFunction *cp_def, *cp_tdef;
+static int      cp_req_runs, cp_req_retire_rc;
+static uint64_t cp_req_thread, cp_token;
+static int      cp_rsp_done, cp_cancel_calls, cp_prog_n, cp_prog_first_empty;
+static int      cp_change_n, cp_write_n;
+static uint32_t cp_rsp_val, cp_prog_last, cp_change_val, cp_write_val, cp_write_src;
+static RantCallStatus cp_rsp_status;
+static uint32_t cp_sum(const RantRequest *req){
+    return req->data.len >= 8 ? i_rant_le_r32(req->data.data) + i_rant_le_r32(req->data.data + 4) : 0u;
+}
+static void cp_add_handler(RantRequest *req, void *user){
+    uint8_t out[4]; (void)user;
+    cp_req_runs++;
+#ifdef RANT_THREADS
+    cp_req_thread = i_rant_plat_thread_id();
+#endif
+    cp_req_retire_rc = rant_function_retire(cp_def);   /* its own dispatched callback: refused */
+    i_rant_le_w32(out, cp_sum(req));
+    rant_request_reply(req, rant_bytes(out, 4));
+}
+static void cp_inline_handler(RantRequest *req, void *user){
+    uint8_t out[4]; (void)user;
+    i_rant_le_w32(out, cp_sum(req));
+    rant_request_reply(req, rant_bytes(out, 4));
+}
+static void cp_on_reply(const RantResponse *r){
+    cp_rsp_done++; cp_rsp_status = r->status;
+    cp_rsp_val = r->data.len >= 4 ? i_rant_le_r32(r->data.data) : 0u;
+}
+static void cp_task_handler(RantRequest *req, void *user){ (void)user; cp_token = rant_request_defer(req); }
+static void cp_on_cancel(uint64_t token, void *user){ (void)token; (void)user; cp_cancel_calls++; }
+static void cp_on_progress(const RantProgress *p){
+    if (cp_prog_n == 0) cp_prog_first_empty = (p->data.len == 0);
+    cp_prog_n++;
+    if (p->data.len >= 4) cp_prog_last = i_rant_le_r32(p->data.data);
+}
+static void cp_on_change(const RantVariableUpdate *u, void *user){
+    (void)user; cp_change_n++;
+    cp_change_val = u->value.len >= 4 ? i_rant_le_r32(u->value.data) : 0u;
+}
+static void cp_on_write(const RantVariableUpdate *u, void *user){
+    (void)user; cp_write_n++; cp_write_src = u->source;
+    cp_write_val = u->value.len >= 4 ? i_rant_le_r32(u->value.data) : 0u;
+}
+/* pumps both nodes until the queue holds a record, up to about a second */
+static uint32_t cp_wait_parked(RantNode *P, RantNode *C, RantQueue *q){
+    uint32_t waiting = 0; int t;
+    for (t = 0; t < 500; t++){ st_pump(P, C, 2); rant_queue_stats(q, &waiting, NULL); if (waiting) break; }
+    return waiting;
+}
+
+static void callback_pattern_checks(void){
+    RantAllocator pa = rant_allocator_heap(0);
+    RantAllocator ca = rant_allocator_heap(0);
+    RantNodeOpts po, co; RantNode *P=NULL, *C=NULL; RantDiscoveryAddr seed;
+    RantFunction *cadd, *ctask, *cnone, *pinl, *cinl;
+    RantVariable *pvar, *cvar;
+    uint32_t waiting, id = 0; int t, r, r2;
+    uint8_t req[8], val[4];
+    uint16_t dom = ST_DOMAIN+40;
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=dom; po.discovery.max_peers=4;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    co=po;
+    P = rant_node_open(&pa, "cq-prov", NULL, NULL, &po);
+    C = rant_node_open(&ca, "cq-call", NULL, NULL, &co);
+    ST_CHECK(P && C, "cpat: nodes open");
+    if (!(P && C)){ if(P)rant_node_close(P,0); if(C)rant_node_close(C,0); return; }
+    cp_pq = rant_node_create_queue(P); cp_cq = rant_node_create_queue(C);
+    i_rant_le_w32(val, 7);
+    cp_def  = rant_node_create_function_definition(P, "cq/add", NULL, NULL, cp_add_handler, NULL,
+                                                   &(RantFunctionOpts){ .queue = cp_pq });
+    cadd    = rant_node_create_remote_function(C, "cq/add", NULL, NULL, &(RantFunctionOpts){ .queue = cp_cq });
+    cp_tdef = rant_node_create_task_definition(P, "cq/job", NULL, NULL, NULL, cp_task_handler, NULL,
+                                               &(RantTaskOpts){ .queue = cp_pq });
+    ctask   = rant_node_create_remote_task(C, "cq/job", NULL, NULL, NULL, &(RantTaskOpts){ .queue = cp_cq });
+    cnone   = rant_node_create_remote_function(C, "cq/none", NULL, NULL,
+                                               &(RantFunctionOpts){ .queue = cp_cq, .timeout_us = 150000u });
+    pinl    = rant_node_create_function_definition(P, "cq/inl", NULL, NULL, cp_inline_handler, NULL, NULL);
+    cinl    = rant_node_create_remote_function(C, "cq/inl", NULL, NULL, &(RantFunctionOpts){ .queue = cp_cq });
+    pvar    = rant_node_create_variable_definition(P, "cq/var", NULL,
+                                                   &(RantVariableOpts){ .queue = cp_pq, .initial = rant_bytes(val, 4) });
+    cvar    = rant_node_create_remote_variable(C, "cq/var", NULL, &(RantVariableOpts){ .queue = cp_cq });
+    ST_CHECK(cp_pq && cp_cq && cp_def && cadd && cp_tdef && ctask && cnone && pinl && cinl && pvar && cvar,
+             "cpat: queues and handles created");
+    if (!(cp_pq && cp_cq && cp_def && cadd && cp_tdef && ctask && cnone && pinl && cinl && pvar && cvar)){
+        rant_node_close(C,0); rant_node_close(P,0); return;
+    }
+    rant_function_on_cancel(cp_tdef, cp_on_cancel, NULL);
+    rant_variable_on_write(pvar, cp_on_write, NULL);
+    for (t=0;t<2000 && (rant_function_match_count(cadd)==0 || rant_function_match_count(ctask)==0
+                        || rant_function_match_count(cinl)==0 || !rant_variable_get(cvar, NULL));t++)
+        st_pump(P,C,2);
+    ST_CHECK(rant_function_match_count(cadd)==1 && rant_variable_get(cvar, NULL),
+             "cpat: providers matched, the initial value cached (%d)", rant_function_match_count(cadd));
+
+    /* CP1: the request parks at the provider, the reply parks at the caller */
+    i_rant_le_w32(req,2); i_rant_le_w32(req+4,3);
+    cp_req_runs=0; cp_rsp_done=0; cp_req_retire_rc=1;
+    r = rant_function_call_async(cadd, rant_bytes(req,8), cp_on_reply, NULL, NULL);
+    waiting = cp_wait_parked(P, C, cp_pq);
+    ST_CHECK(r==RANT_OK && waiting==1 && cp_req_runs==0,
+             "cpat: request parked at the provider (waiting=%u runs=%d)", waiting, cp_req_runs);
+    r = rant_queue_dispatch(cp_pq, 0, 0);
+    ST_CHECK(r==1 && cp_req_runs==1 && cp_req_retire_rc==RANT_ERR_STATE,
+             "cpat: dispatch ran the handler, its own retire refused (r=%d rc=%d)", r, cp_req_retire_rc);
+#ifdef RANT_THREADS
+    ST_CHECK(cp_req_thread == i_rant_plat_thread_id(), "cpat: handler ran on the dispatching thread");
+#endif
+    waiting = cp_wait_parked(P, C, cp_cq);
+    ST_CHECK(waiting==1 && cp_rsp_done==0, "cpat: reply parked at the caller (waiting=%u done=%d)", waiting, cp_rsp_done);
+    r = rant_queue_dispatch(cp_cq, 0, 0);
+    ST_CHECK(r==1 && cp_rsp_done==1 && cp_rsp_status==RANT_CALL_OK && cp_rsp_val==5,
+             "cpat: dispatched reply add(2,3)=5 (r=%d st=%d val=%u)", r, cp_rsp_status, cp_rsp_val);
+
+#ifdef RANT_THREADS
+    /* CP2: the blocking call completes inline through a queued rsp channel, nothing parks */
+    {   RantResponse out;
+        rant_node_start(P);      /* the inline provider answers on its own thread */
+        i_rant_le_w32(req,4); i_rant_le_w32(req+4,5);
+        r = rant_function_call(cinl, rant_bytes(req,8), &out, 2000, NULL);
+        rant_node_stop(P);
+        rant_queue_stats(cp_cq, &waiting, NULL);
+        ST_CHECK(r==1 && out.status==RANT_CALL_OK && out.data.len==4 && i_rant_le_r32(out.data.data)==9 && waiting==0,
+                 "cpat: blocking call completes inline on a queued handle (r=%d st=%d waiting=%u)", r, out.status, waiting);
+    }
+#endif
+
+    /* CP3: a synthesized outcome parks like a delivered one */
+    cp_rsp_done=0;
+    r = rant_function_call_async(cnone, rant_bytes(NULL,0), cp_on_reply, NULL, NULL);
+    waiting = cp_wait_parked(P, C, cp_cq);
+    ST_CHECK(r==RANT_OK && waiting==1 && cp_rsp_done==0, "cpat: NO_PROVIDER outcome parked (waiting=%u)", waiting);
+    r = rant_queue_dispatch(cp_cq, 0, 0);
+    ST_CHECK(r==1 && cp_rsp_done==1 && cp_rsp_status==RANT_CALL_NO_PROVIDER,
+             "cpat: NO_PROVIDER dispatched (r=%d st=%d)", r, cp_rsp_status);
+
+    /* CP4: a task: RUNNING, progress, the cancel and the terminal outcome each park */
+    cp_token=0; cp_prog_n=0; cp_prog_first_empty=0; cp_cancel_calls=0; cp_rsp_done=0; id=0;
+    r = rant_function_call_async(ctask, rant_bytes(NULL,0), cp_on_reply, NULL,
+                                 &(RantCallOpts){ .on_progress = cp_on_progress, .id_out = &id });
+    waiting = cp_wait_parked(P, C, cp_pq);
+    r2 = rant_queue_dispatch(cp_pq, 0, 0);          /* the handler defers, RUNNING goes out */
+    ST_CHECK(r==RANT_OK && waiting==1 && r2==1 && cp_token!=0, "cpat: task request dispatched and deferred (r=%d)", r2);
+    waiting = cp_wait_parked(P, C, cp_cq);
+    ST_CHECK(waiting==1 && cp_prog_n==0, "cpat: RUNNING parked (waiting=%u)", waiting);
+    r = rant_queue_dispatch(cp_cq, 0, 0);
+    ST_CHECK(r==1 && cp_prog_n==1 && cp_prog_first_empty, "cpat: RUNNING dispatched as empty progress (n=%d)", cp_prog_n);
+    i_rant_le_w32(val, 42);
+    r = rant_function_progress(cp_tdef, cp_token, rant_bytes(val,4));
+    waiting = cp_wait_parked(P, C, cp_cq);
+    ST_CHECK(r==RANT_OK && waiting==1 && cp_prog_n==1, "cpat: progress parked (waiting=%u)", waiting);
+    r = rant_queue_dispatch(cp_cq, 0, 0);
+    ST_CHECK(r==1 && cp_prog_n==2 && cp_prog_last==42, "cpat: progress dispatched (last=%u)", cp_prog_last);
+    r = rant_function_cancel(ctask, id);
+    waiting = cp_wait_parked(P, C, cp_pq);
+    ST_CHECK(r==RANT_OK && waiting==1 && cp_cancel_calls==0 && rant_function_cancelled(cp_tdef, cp_token)==1,
+             "cpat: cancel flag set at receipt, on_cancel parked (rc=%d waiting=%u)", r, waiting);
+    r = rant_queue_dispatch(cp_pq, 0, 0);
+    ST_CHECK(r==1 && cp_cancel_calls==1, "cpat: on_cancel dispatched (%d)", cp_cancel_calls);
+    r = rant_function_complete(cp_tdef, cp_token, RANT_CALL_CANCELLED, NULL, rant_bytes(NULL,0));
+    waiting = cp_wait_parked(P, C, cp_cq);
+    r2 = rant_queue_dispatch(cp_cq, 0, 0);
+    ST_CHECK(r==RANT_OK && waiting==1 && r2==1 && cp_rsp_done==1 && cp_rsp_status==RANT_CALL_CANCELLED,
+             "cpat: terminal CANCELLED dispatched (rc=%d st=%d)", r, cp_rsp_status);
+
+    /* CP5: variables: the replay parks, the owner applies a remote write at receipt and
+       notifies at dispatch, the remote caches the new value before its own dispatch */
+    cp_change_n=0;
+    rant_variable_on_change(cvar, cp_on_change, NULL);
+    rant_queue_stats(cp_cq, &waiting, NULL);
+    ST_CHECK(waiting==1 && cp_change_n==0, "cpat: on_change replay parked (waiting=%u)", waiting);
+    r = rant_queue_dispatch(cp_cq, 0, 0);
+    ST_CHECK(r==1 && cp_change_n==1 && cp_change_val==7, "cpat: replay dispatched with the value (val=%u)", cp_change_val);
+    i_rant_le_w32(val, 8); cp_write_n=0;
+    r = rant_variable_set(cvar, rant_bytes(val,4));
+    waiting = cp_wait_parked(P, C, cp_pq);
+    {   RantBytes cur; int has = rant_variable_get(pvar, &cur);
+        ST_CHECK(r==RANT_OK && waiting==1 && cp_write_n==0 && has && cur.len==4 && i_rant_le_r32(cur.data)==8,
+                 "cpat: owner applied the write at receipt, on_write parked (waiting=%u)", waiting); }
+    r = rant_queue_dispatch(cp_pq, 0, 0);
+    ST_CHECK(r==1 && cp_write_n==1 && cp_write_val==8 && cp_write_src!=0,
+             "cpat: on_write dispatched with the write's value and source (val=%u src=%u)", cp_write_val, cp_write_src);
+    waiting = cp_wait_parked(P, C, cp_cq);
+    {   RantBytes cur; rant_variable_get(cvar, &cur);
+        ST_CHECK(waiting==1 && cp_change_n==1 && cur.len==4 && i_rant_le_r32(cur.data)==8,
+                 "cpat: remote cached 8 at receipt, on_change parked (waiting=%u)", waiting); }
+    r = rant_queue_dispatch(cp_cq, 0, 0);
+    ST_CHECK(r==1 && cp_change_n==2 && cp_change_val==8, "cpat: on_change dispatched (val=%u)", cp_change_val);
+
+    /* CP6: a retire with a parked reply answers it CANCELLED inline and drops its records */
+    i_rant_le_w32(req,1); i_rant_le_w32(req+4,1);
+    cp_rsp_done=0;
+    rant_function_call_async(cadd, rant_bytes(req,8), cp_on_reply, NULL, NULL);
+    (void)cp_wait_parked(P, C, cp_pq);
+    (void)rant_queue_dispatch(cp_pq, 0, 0);
+    waiting = cp_wait_parked(P, C, cp_cq);
+    r = rant_function_retire(cadd);
+    ST_CHECK(waiting==1 && r==RANT_OK && cp_rsp_done==1 && cp_rsp_status==RANT_CALL_CANCELLED,
+             "cpat: retire settles the parked reply CANCELLED (rc=%d done=%d st=%d)", r, cp_rsp_done, cp_rsp_status);
+    rant_queue_stats(cp_cq, &waiting, NULL);
+    ST_CHECK(waiting==0, "cpat: the retired handle's records are gone (%u)", waiting);
+
+    rant_node_close(C, 1);
+    rant_node_close(P, 1);
+}
+
 /* The function phases: a provider node and a caller node in one process
  * (spec/testing.md). */
 static volatile int   pf_reply_done;
@@ -6239,7 +6450,8 @@ static void loud_checks(void){
         rc = nobody ? rant_function_call_async(nobody, rant_bytes(NULL,0), loud_on_reply, NULL, NULL) : -99;
         ST_CHECK(rc==RANT_OK, "loud: call queued with no provider (%d)", rc);
         if (C){ rant_node_close(C,1); C = NULL; }
-        for (t=0;t<300;t++) pf_pump(A,B,1);
+        /* bounded by the clock, not by passes: a coarse timer makes a 2 ms poll take 15 */
+        { uint64_t end = i_rant_plat_now_us() + 400000u; while (i_rant_plat_now_us() < end) pf_pump(A,B,1); }
         ST_CHECK(loud_active_peers(B) == 1 && loud_reply_n == 0,
                  "loud: the unrelated peer left and the queued call still waits (peers=%d n=%d)",
                  loud_active_peers(B), loud_reply_n);
@@ -7927,6 +8139,7 @@ static int selftest_main(void){
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
     queue_checks();               /* 19d. consumer queues: take, dispatch, overwrite, park */
     callback_queue_checks();      /* 19e. callback queues: explicit queue, order, refusals */
+    callback_pattern_checks();    /* 19f. callback queues on functions, tasks and variables */
     patterns_checks();            /* 19e. functions: request, reply, defer, timeout, sync */
     metalog_checks();             /* 19e1. built-in @rant/log topics + the @rant/meta endpoint */
     dup_authority_checks();       /* 19e2. duplicate provider or owner, both rivals */

@@ -115,6 +115,26 @@ Traps pinned by the `task:` and `taskx:` selftests:
 - Directed sends once leaked on non directed topics because the lane advance no oped
   without the directed flag. Request channels are directed in every mode now.
 
+## Callback queues
+
+A handle created with `queue` in its options passes it to the channels this side
+receives on: a definition's req, a remote's rsp and prg, a variable's value channel. The
+channels keep inline delivery. The inline handler does what must happen at receipt, the
+pending bookkeeping, the running mark, the cancel flag, the variable store, the blocking
+call's completion (`i_RantPending.sync`), then parks what the user callback needs on the
+channel's ring with `i_rant_topic_park` and a record kind (`RANT__REC_*`), and the
+node's dispatch hands the record to `i_rant_func_dispatch` or `i_rant_var_dispatch` on the
+draining thread with the lock released. A delivered message parks whole and is split again
+at dispatch. A synthesized outcome (timeout, no provider, peer lost, severed, a local
+cancel) parks as `RANT__REC_OUTCOME` with the call id, status and text, and the pending
+entry moves to `RantFunction.parked`, out of the reaper's reach, until its record runs. A
+variable parks `RANT__REC_VAR`, the write's seq, forced flag, changed and replay flags and
+the value, on the value channel, so `on_write` fires per write with that write's value and
+the replay at registration fires only `on_change`. Pattern rings evict at the cap and never
+park the transport, since the state was applied already. Retire, refresh and close are
+refused while a channel's ring is busy (`i_rant_topic_busy`), and they answer the parked
+entries CANCELLED inline before the rings go.
+
 ## The reply ring
 
 An inline reply is a reentrant send. The handler runs under the node lock, so it can
@@ -153,8 +173,8 @@ Force overrides the value with a shadow source until unforce. `on_change` fires 
 the observed state actually changes (first value, different bytes, a forced flip) and
 replays the current value once at registration, which kills the create to register race.
 `on_write` fires on every applied write with no replay, because writes are events, not
-state. Both fire inline under the node lock on the thread that applied the write. Writes
-absorbed while forced fire nothing. Edge predicates would hook in at
+state. Both fire inline under the node lock on the thread that applied the write, or park
+for the variable's queue. Writes absorbed while forced fire nothing. Edge predicates would hook in at
 `i_rant_var_would_change`.
 
 A fresh remote's first write rides the send path match wait, so `RANT_ERR_NO_TOPIC`

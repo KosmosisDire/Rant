@@ -307,7 +307,7 @@ typedef uint64_t (*i_RantSysTickFn)(void *user, uint64_t now_us);     /* next de
 typedef void     (*i_RantSysCloseFn)(void *user);     /* the node is closing: settle promises */
 
 /* Creates a pattern topic: stamps the kind, prefix, directed flag and attrs, permits '@' in
- * the name, and routes deliveries to on_msg. Never queued. */
+ * the name, and routes deliveries to on_msg. opts.queue gives it a ring, see the seams below. */
 RantTopic *i_rant_node_create_pattern_topic(RantNode *n, const char *name, RantRole role,
                               const RantSchema *schema, const RantTopicOpts *opts,
                               uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
@@ -323,6 +323,21 @@ int  i_rant_topic_send_hdr(RantTopic *topic, RantBytes hdr, RantBytes data);
 int  i_rant_topic_send_to(RantTopic *topic, uint32_t to_peer, RantBytes hdr, RantBytes data);
 /* Clears a pattern topic's routing before its handle is freed. Under the node lock. */
 void i_rant_topic_clear_sys(RantTopic *topic);
+/* Callback queue seams. A pattern topic created with opts.queue keeps inline delivery: its
+ * handler does the bookkeeping, parks what the user callback needs as a record with a kind
+ * of its own, and on_dispatch gets the record back on the draining thread. A kind with the
+ * high bit set is synthetic: the body is the layer's own blob, handed back whole in
+ * msg->data with no prefix split and no schema. */
+#define I_RANT_REC_SYNTH 0x80u
+typedef void (*i_RantSysDispatchFn)(void *user, const RantMsg *msg, uint8_t kind);
+void       i_rant_topic_set_dispatch(RantTopic *topic, i_RantSysDispatchFn on_dispatch);
+RantQueue *i_rant_topic_queue(RantTopic *topic);      /* NULL = inline */
+int        i_rant_topic_busy(RantTopic *topic);       /* 1 while a dispatched callback of it runs */
+/* Parks hdr then body as one record on the topic's ring. A pattern ring never parks the
+ * transport: at the cap the oldest record goes and MSG_LOST fires. recv_us 0 = now.
+ * Lock held. RANT_ERR_STATE when the topic has no ring. */
+int        i_rant_topic_park(RantTopic *topic, uint8_t kind, uint32_t from, RantBytes hdr,
+                             RantBytes body, uint64_t written_us, uint64_t recv_us);
 /* Hands every committed but unsent datagram to the wire now, transmit only. The pattern
  * layer's retire and close flush their CANCELLED replies here. Takes the node lock. */
 void i_rant_node_flush_tx(RantNode *n);

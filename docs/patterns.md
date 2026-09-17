@@ -37,6 +37,13 @@ which returns a token for `rant_function_complete(fn, token, status, message, rs
 from any thread. A handler that returns without answering auto acks OK. Pass only the
 exact request pointer the callback received, never a copy.
 
+Every callback of a handle, the handler, `on_response`, `on_progress`, `on_cancel`,
+`on_change` and `on_write`, runs inline on the node loop's thread unless the handle was
+created with `queue` in its options. Then it runs at `rant_queue_dispatch` on the draining
+thread with the whole API available, see docs/node.md. State still applies at receipt: a
+variable's value is current before its `on_change` runs, and the blocking
+`rant_function_call` completes without a dispatch.
+
 The caller's `RantResponse` carries `status`, `data`, `schema`, `provider` (the answering
 peer), `message` (human readable outcome text, always displayable) and `written_us`.
 Statuses are `RANT_CALL_OK`, `APP_ERROR`, `NO_HANDLER`, `TIMEOUT`, `PEER_LOST`,
@@ -94,7 +101,8 @@ state actually changes (first value, different bytes, a forced flip) and replays
 current value once at registration. `rant_variable_on_write` fires on every applied write.
 Both get a `RantVariableUpdate` (value, schema, forced, write_seq, source peer with 0 =
 local, recv_us, written_us) inline on the thread that applied the write, with the usual
-callback restrictions.
+callback restrictions, or at dispatch with that write's value when the variable has a
+queue.
 
 A remote's first write waits for the owner match like a first topic send, so
 `RANT_ERR_NO_TOPIC` means the owner is really absent.
@@ -103,8 +111,10 @@ A remote's first write waits for the owner match like a first topic send, so
 
 `rant_function_retire` and `rant_variable_retire` park the entity's channels, answer every
 outstanding call CANCELLED, silence callbacks and free the handle. The handle is invalid
-after. From inside a callback the call is refused with `RANT_ERR_STATE` and the handle
-stays valid. A re created entity with the same name takes its old slots back. A second
+after. From inside a callback, or while one of the handle's queued callbacks runs on
+another thread, the call is refused with `RANT_ERR_STATE` and the handle stays valid. A
+queued handle's parked callbacks are dropped, and a parked reply is answered CANCELLED
+inline. A re created entity with the same name takes its old slots back. A second
 same name handle while the first lives is refused: the create returns `NULL` and
 `rant_last_error` says `RANT_E_NAME_COLLISION`. Retire the first.
 Complete or abandon outstanding defer tokens before retiring a definition.

@@ -173,6 +173,13 @@ process base picked from the clock so concurrent runs never join each other.
   callback are refused, a sibling retire from a callback works, a retire from outside drops
   the unrun records, another node's queue and the ninth queue are refused, and a timed
   dispatch under service threads wakes on arrival on the caller's thread.
+- Callback queues on patterns: a provider and a caller with one queue each. The request
+  parks at the provider and its handler's own retire is refused, the reply parks at the
+  caller, a blocking call completes inline through a queued channel, a NO_PROVIDER outcome
+  parks, a task's RUNNING, progress, cancel notification and terminal outcome each park
+  with the cancel flag set at receipt, a variable's replay parks, the owner applies a
+  remote write at receipt and notifies at dispatch, the remote caches before its own
+  dispatch, and a retire settles a parked reply CANCELLED and drops the records.
 - Consumer queues: the first take enables the queue and a timeout take drives the loop,
   a best effort queue overwrites oldest at the cap, a reliable queue parks by withholding
   acks so a slow take loop still receives everything in order, dispatch runs the callback

@@ -62,8 +62,8 @@ rant_function_call_async(r, req, on_response, NULL,
 rant_function_cancel(r, id);
 ```
 
-`RantCallOpts.on_progress` fires per update on the delivering thread. The RUNNING ack
-fires it once with zero length data. The blocking `rant_function_call` fires it on the
+`RantCallOpts.on_progress` fires per update where the handle's callbacks run, the loop
+thread or the handle's queue. The RUNNING ack fires it once with zero length data. The blocking `rant_function_call` fires it on the
 calling thread while it waits. Its timeout bounds only the wait for the first response,
 then it waits for the terminal outcome (a cancel from another thread is the way out).
 
@@ -75,7 +75,8 @@ request still has exactly one executor.
 
 ## The handler: quick on the poll thread, work anywhere
 
-The handler fires on the poll thread and must be quick. Either answer inline
+The handler fires on the poll thread and must be quick, unless the definition has a
+queue, where it runs at dispatch and may work in place. Either answer inline
 (`rant_request_reply` or `rant_request_fail`, exactly as a function) or defer and return.
 `rant_request_defer` implies RUNNING (`rant_request_start` sends it earlier, for example
 before a slow validation). The returned token then drives the work from any thread the
@@ -115,8 +116,8 @@ Cancel is an op on the reliable request channel, so delivery needs no ack. Wheth
 handler ACTS is unknowable until it acts, so there is no cancel response. The terminal
 status is the answer: CANCELLED means honored, a normal outcome means it ran to completion
 anyway. The definition polls `rant_function_cancelled(fn, token)` or registers the one
-`rant_function_on_cancel` slot (it fires on the poll thread, and exists so wrappers can
-be event driven).
+`rant_function_on_cancel` slot (it fires where the handle's callbacks run, and exists so
+wrappers can be event driven).
 
 The cancellable attrs bit is ON by default. A definition that will not honor cancellation
 opts out with `RantTaskOpts.no_cancel`. Remotes then refuse `rant_function_cancel` locally
@@ -170,10 +171,11 @@ No wrapper spawns threads except Python (one daemon thread per running call).
   CANCELLED. Caller: `CallAsync(req, IProgress<TPrg>, CancellationToken, provider)`
   returning a never faulting `Task<RantResponse<TRsp>>`. Cancelling the token cancels the
   remote task. Functions also gained async handler overloads.
-- Python: the handler runs on a per call daemon thread with a `TaskRequest`
-  (`.progress(x)`, `.cancelled`, `.cancel_event`). Returning completes OK, raising
-  `rant.CancelledError(msg)` completes CANCELLED, any other exception APP_ERROR. Caller:
-  `call(req, on_progress=...)` blocking, `call_async(...)` returning the id, `cancel(id)`.
+- Python: the handler runs on a per call daemon thread with the request value, or the
+  value and a `TaskContext` (`.progress(x)`, `.cancelled`, `.cancel_event`). Returning
+  completes OK, raising `rant.CancelledError(msg)` completes CANCELLED, any other
+  exception APP_ERROR. Caller: `call(req, on_progress=...)` blocking, `call_async(...)`
+  returning the id, `cancel(id)`.
 - JS and bridge: handler `async (req, ctx)` with `ctx.progress(v)` and `ctx.signal` (an
   AbortSignal, where `throwIfAborted` completes CANCELLED). Caller: `const run =
   task.call(req)`, then `run.onProgress(cb)` (null = the RUNNING ack), `await run.result`,
