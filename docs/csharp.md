@@ -14,7 +14,7 @@ the C node options under C# names, 0, false or null being the C default: `Domain
 docs/discovery.md (`SeedPeers` as "ip" or "ip:port" strings, `UnicastOnly`, `SelfIp` with
 `AdvertisePort`) and the rest. Every handler in the wrapper is a C# event: `node.OnEvent`
 carries peer lifecycle, loss and error events, optional since `LastError` records the last
-error either way, and `node.OnLog` the mesh wide log lines.
+error either way, null before any, and `node.OnLog` the mesh wide log lines.
 
 Every handle comes from a method on the node named after it: `Publisher<T>`,
 `Subscriber<T>`, `FunctionDefinition<TReq, TRsp>`, `RemoteFunction<TReq, TRsp>`,
@@ -44,10 +44,13 @@ One thread drains a queue at a time, and same name handles share the slot's queu
 applies at receipt either way: a variable reads its newest value before its `OnChange`
 runs, and `Call()` completes without a dispatch. See docs/node.md.
 
-A construction failure throws with the C reason in the message, since there is no handle
-to ask. A build without threads refuses the service thread the same way, and
-`Threading.Manual` or `Threading.Dispatch` is the way in. `Stats` reads the node's
-counters: memory, backpressure and the evicted unsent sends.
+Everything the wrapper throws is a `RantException`. A failed create, of the node or of any
+handle, carries the C reason as a `RantEvent` in `Error` and in the message. A refused
+action, such as a Dispose from a service thread callback, carries its `SendStatus`.
+`SchemaException` and `CallException` derive from it. The data path never throws: `Send`
+and `Set` return a `SendStatus`. A build without threads refuses the service thread with
+a `RantException`, and `Threading.Manual` or `Threading.Dispatch` is the way in. `Stats`
+reads the node's counters: memory, backpressure and the evicted unsent sends.
 
 ## Schemas
 
@@ -149,12 +152,18 @@ exception AppError. It works through a context that streams `Progress` and expos
 real `CancellationToken`. A completion after Dispose or Close is refused by the C and
 swallowed.
 
-`Call()` blocks, on the service thread's progress or driving a Manual node's loop, and is
-refused from a callback. `CallAsync()` returns a Task that never faults:
-inspect `Status` and `SendStatus`,
-and reading `Value` when the call did not complete Ok throws `CallException`. On a task,
+A call is loud. `Call(req)` blocks and returns the response, `await CallAsync(req)` does
+the same without blocking, and both throw `CallException` when the call did not complete
+Ok. The exception names the call and carries `Status`, `SendStatus`, `Provider` and the
+provider's text, which for a handler that threw is its exception message. `TryCall` and
+`TryCallAsync` are the quiet forms for a failure you expect: they return a
+`RantResponse<TRsp>` and never throw, so inspect `Status`, and reading its `Value` off Ok
+throws the same `CallException`. `Call()` waits on the service thread's progress or drives
+a Manual node's loop, and is refused from a service thread callback. On a task,
 `CallAsync(req, progress, cancellationToken)` fires progress per update, skipping the
-valueless RUNNING ack, and cancelling the token requests cooperative cancellation.
+valueless RUNNING ack. Cancelling the token requests cooperative cancellation, and a task
+that honors it ends the awaited call with `OperationCanceledException`, or with status
+Cancelled from `TryCallAsync`.
 
 Variables: `TryGet` reads the copied out value, `Set` returns the status, `Force` needs
 `AllowForce` in the definition's options, and `Wait` blocks until a value exists. The typed `Value` getter throws while
@@ -170,7 +179,7 @@ they outlive the poll and need no lock. `Peers()` lists every discovered peer as
 node offers, peer 0 for this one, and `Mesh()` folds the whole mesh into one `RantEntity`
 per kind and name. `Find(kind, name)` returns one or null, and `Epoch` bumps whenever the
 folded view changed. `MetaAsync(peer, sections)` decodes a peer's snapshot into a
-`RantMetaSnapshot` and never faults. The schemas on a `RantEntity` are owned copies, null
+`RantMetaSnapshot`, and throws `CallException` like any call when the peer did not answer. The schemas on a `RantEntity` are owned copies, null
 when untyped or not fetched, and `FetchDetails` on the node is what makes them arrive.
 
 `Schema.Fields` is the flat depth first field table as `SchemaField` rows, and

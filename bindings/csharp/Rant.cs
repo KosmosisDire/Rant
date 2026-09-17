@@ -1074,24 +1074,35 @@ namespace Rant
         public RantFieldAttribute(string name) { Name = name; }
     }
 
-    public class SchemaException : Exception
-    {
-        public SchemaException(string m) : base(m) { }
-    }
-
-    /// <summary>A call was refused: a non Ok SendStatus surfaced through a throwing surface
-    /// such as the Variable&lt;T&gt;.Value setter.</summary>
+    /// <summary>The library refused something, and the base of every exception it throws. A
+    /// failed create carries the C reason in Error. A refused action, such as a Dispose from
+    /// a callback or the Variable&lt;T&gt;.Value setter, carries its SendStatus.</summary>
     public class RantException : Exception
     {
-        public SendStatus Status;
-        public RantException(SendStatus status, string m) : base(m) { Status = status; }
+        /// <summary>The refused status. Ok when the failure was a create: read Error.</summary>
+        public SendStatus SendStatus;
+        /// <summary>The C reason behind a failed create, else null.</summary>
+        public RantEvent Error;
+        public RantException(SendStatus status, string m) : base(m) { SendStatus = status; }
+        public RantException(string m, RantEvent error) : base(error != null ? m + ": " + error : m)
+        { Error = error; }
     }
 
-    /// <summary>Reading RantResponse&lt;TRsp&gt;.Value when the call did not complete Ok.</summary>
-    public class CallException : Exception
+    /// <summary>A type or DSL text is not a valid schema, or a value does not fit one.</summary>
+    public class SchemaException : RantException
+    {
+        public SchemaException(string m) : base(SendStatus.Schema, m) { }
+    }
+
+    /// <summary>A call did not complete Ok: thrown by Call, CallAsync and
+    /// RantResponse&lt;TRsp&gt;.Value. The message is the provider's text or the status text.</summary>
+    public class CallException : RantException
     {
         public CallStatus Status;
-        public CallException(CallStatus status, string m) : base(m) { Status = status; }
+        /// <summary>The peer that answered, 0 when the outcome was synthesized here.</summary>
+        public uint Provider;
+        public CallException(CallStatus status, string m, SendStatus send = SendStatus.Ok, uint provider = 0)
+            : base(send, m) { Status = status; Provider = provider; }
     }
 
     // ---- schema: DSL compile, reflection, encode/decode -------------------------
@@ -1398,8 +1409,6 @@ namespace Rant
     /// body stays in Info. Absent sections leave zeros and HaveProc false.</summary>
     public sealed class RantMetaSnapshot
     {
-        public bool Valid;
-        public CallStatus Status = CallStatus.Timeout;
         public uint Provider;                                   // the peer that answered
         public IReadOnlyDictionary<string, object> Info;        // the whole decoded body
 
@@ -1421,11 +1430,13 @@ namespace Rant
 
         internal static RantMetaSnapshot FromResponse(ResponseCore r)
         {
-            var s = new RantMetaSnapshot { Status = r.Status, Provider = r.Provider };
-            if (r.Status != CallStatus.Ok || r.SchemaPtr == IntPtr.Zero) return s;
-            var top = Codec.DecodeDict(r.SchemaPtr, r.Data);
-            if (!(top.TryGetValue("info", out var io) && io is Dictionary<string, object> info)) return s;
-            s.Info = info; s.Valid = true;
+            var s = new RantMetaSnapshot { Provider = r.Provider };
+            if (r.Status != CallStatus.Ok) throw r.Failure("@rant/meta");
+            var top = r.SchemaPtr != IntPtr.Zero ? Codec.DecodeDict(r.SchemaPtr, r.Data) : null;
+            if (top == null || !(top.TryGetValue("info", out var io) && io is Dictionary<string, object> info))
+                throw new CallException(r.Status, "call '@rant/meta' answered a body with no info map",
+                                        SendStatus.Schema, r.Provider);
+            s.Info = info;
             if (info.TryGetValue("node", out var no) && no is Dictionary<string, object> node)
             {
                 s.Name = S(node, "name");
@@ -1709,7 +1720,7 @@ namespace Rant
                 Codec.FreeCStr(_discGroup); Codec.FreeCStr(_mcastIf);
                 // the node does not exist, so read the reason from the process-global slot
                 RantEvent err = LastOpenError();
-                throw new InvalidOperationException("rant_node_open failed: " + err);
+                throw new RantException("node open failed", err);
             }
             _handle = h;
             Reflection = new RantReflection(this);
@@ -1726,7 +1737,7 @@ namespace Rant
                 else if (rc != 0)
                 {
                     Close(false);
-                    throw new InvalidOperationException("service thread start failed: " + (SendStatus)rc
+                    throw new RantException((SendStatus)rc, "service thread start failed: " + (SendStatus)rc
                         + " (open with Threading.Manual and Poll() the node)");
                 }
             }
@@ -1738,7 +1749,7 @@ namespace Rant
         public RantQueue CreateQueue()
         {
             IntPtr q = Native.rant_node_create_queue(_handle);
-            if (q == IntPtr.Zero) throw new InvalidOperationException("queue create failed: " + LastError);
+            if (q == IntPtr.Zero) throw new RantException("queue create failed", LastError);
             return new RantQueue(this, q);
         }
 
@@ -1791,11 +1802,11 @@ namespace Rant
                 if (_topicsByName.TryGetValue(name, out rec))
                 {
                     if (sh != 0 && rec.SchemaHash != 0 && sh != rec.SchemaHash)
-                        throw new InvalidOperationException(
+                        throw new RantException(SendStatus.Schema,
                             "topic '" + name + "' already exists on this node with a different schema"
                             + " (dispose every handle on it to retype the name)");
                     if (wantQueue != rec.Queue)
-                        throw new InvalidOperationException(
+                        throw new RantException(SendStatus.State,
                             "topic '" + name + "' already exists on this node with a different queue"
                             + " (same name handles share one slot and its queue)");
                     Role before = RoleOf(rec);
@@ -1816,7 +1827,7 @@ namespace Rant
                 IntPtr h = Native.rant_node_create_topic(_handle, Codec.CStr(name), (int)role,
                     schema != null ? schema.Handle : IntPtr.Zero, ref co);
                 if (h == IntPtr.Zero)
-                    throw new InvalidOperationException("topic create failed: " + LastError);
+                    throw new RantException("topic '" + name + "' create failed", LastError);
                 ushort idx = Native.rant_topic_index(h);
                 if (schema != null) { _schemas.Add(schema); _topicTypes[idx] = schema.ClrType; }
                 rec = new TopicRec { Handle = h, Queue = wantQueue, SchemaHash = sh };
@@ -1866,7 +1877,8 @@ namespace Rant
                 if (r != 0)
                 {
                     Hold(rec, t.Role, 1);   // still held: the C refused from a callback
-                    throw new InvalidOperationException("topic release refused: " + (SendStatus)r);
+                    throw new RantException((SendStatus)r, "topic release refused: " + (SendStatus)r
+                        + " (a Dispose from a service thread callback is refused)");
                 }
                 t._handle = IntPtr.Zero;
             }
@@ -2119,9 +2131,16 @@ namespace Rant
             return t;
         }
 
-        /// <summary>The most recent error this node reported (also delivered via OnEvent), or
-        /// an Error event whose Error is None, printing "no error", before any.</summary>
-        public RantEvent LastError => RantEvent.FromValue(Native.rant_last_error(_handle));
+        /// <summary>The most recent error this node reported (also delivered via OnEvent), null
+        /// before any.</summary>
+        public RantEvent LastError
+        {
+            get
+            {
+                RantEvent e = RantEvent.FromValue(Native.rant_last_error(_handle));
+                return e.Error == ErrorKind.None ? null : e;
+            }
+        }
 
         // Why the most recent node open failed, from the process global slot.
         private static RantEvent LastOpenError() => RantEvent.FromValue(Native.rant_last_error(IntPtr.Zero));
@@ -2291,13 +2310,15 @@ namespace Rant
         public uint Epoch => Native.rant_node_mesh_epoch(_node.Handle);
 
         /// <summary>Fetch a peer's snapshot: a directed @rant/meta call decoded into a
-        /// RantMetaSnapshot. The Task never faults. sections is a MetaSection mask.</summary>
+        /// RantMetaSnapshot. Throws CallException when the peer did not answer Ok. sections is
+        /// a MetaSection mask.</summary>
         public async Task<RantMetaSnapshot> MetaAsync(uint peer, MetaSection sections = MetaSection.All)
         {
             // the local @rant/meta caller handle, node owned: callable, never created or
             // destroyed here, and absent when meta is disabled
             IntPtr fn = Native.rant_node_meta_function(_node.Handle);
-            if (fn == IntPtr.Zero) return new RantMetaSnapshot { Status = CallStatus.NoHandler };
+            if (fn == IntPtr.Zero)
+                throw new CallException(CallStatus.NoHandler, "call '@rant/meta' failed: meta is disabled on this node");
             byte[] req = sections == MetaSection.All
                 ? Array.Empty<byte>() : BitConverter.GetBytes((uint)sections);
             ResponseCore r = await new RemoteFunctionCore(_node, fn).CallAsync(req, peer).ConfigureAwait(false);
@@ -2708,7 +2729,7 @@ namespace Rant
             if (Fn == IntPtr.Zero)
             {
                 if (box != null) Patterns.DropBox(id);
-                throw new InvalidOperationException("function definition create failed: " + node.LastError);
+                throw new RantException("function definition create failed", node.LastError);
             }
             if (box != null) { box.Fn = Fn; node.RegisterPatternBox(id); }
             node.RetainSchema(requestSchema);
@@ -2750,7 +2771,8 @@ namespace Rant
         {
             if (Fn == IntPtr.Zero) return;
             var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc != SendStatus.Ok) throw new InvalidOperationException("retire refused: " + rc);
+            if (rc != SendStatus.Ok)
+                throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
             Fn = IntPtr.Zero;
         }
 
@@ -2773,6 +2795,17 @@ namespace Rant
         internal IntPtr SchemaPtr;
 
         public bool Ok => Status == CallStatus.Ok;
+
+        // The exception of a call that did not complete Ok, naming the call and the fix.
+        internal CallException Failure(string name)
+        {
+            string m = "call '" + name + "' failed: " + Status;
+            if (Message.Length != 0) m += " (" + Message + ")";
+            if (SendStatus == SendStatus.State)
+                m += " (refused in this state: a blocking Call from a service thread callback, use CallAsync)";
+            else if (SendStatus != SendStatus.Ok) m += " (send " + SendStatus + ")";
+            return new CallException(Status, m, SendStatus, Provider);
+        }
     }
 
     // The engine of RemoteFunction<TReq, TRsp>, and the @rant/meta caller.
@@ -2796,7 +2829,7 @@ namespace Rant
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
             if (Fn == IntPtr.Zero)
-                throw new InvalidOperationException("remote function create failed: " + node.LastError);
+                throw new RantException("remote function create failed", node.LastError);
             node.RetainSchema(requestSchema);
             node.RetainSchema(responseSchema);
             node.RegisterHandle(this);
@@ -2821,8 +2854,8 @@ namespace Rant
         }
 
         /// <summary>Blocking call: waits for the response or timeoutMs, negative = the default,
-        /// on the service thread's progress under Start() and driving the loop otherwise.
-        /// Refused from a callback. Never throws.</summary>
+        /// on the service thread's progress and driving a Manual node's loop. Refused from a
+        /// service thread callback. The outcome is the return value.</summary>
         public ResponseCore Call(byte[] request, int timeoutMs = -1, uint provider = 0)
         {
             var r = new ResponseCore();
@@ -2852,8 +2885,8 @@ namespace Rant
             return r;
         }
 
-        /// <summary>Async call: the Task completes with the outcome and never faults. The
-        /// response fires from the polling thread and continuations run off it.</summary>
+        /// <summary>Async call: the Task completes with the outcome as a value. The response
+        /// fires from the polling thread and continuations run off it.</summary>
         public Task<ResponseCore> CallAsync(byte[] request, uint provider = 0)
         {
             // A queued outcome completes on the thread the caller dispatches from, so the
@@ -2886,7 +2919,8 @@ namespace Rant
         {
             if (Fn == IntPtr.Zero) return;
             var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc != SendStatus.Ok) throw new InvalidOperationException("retire refused: " + rc);
+            if (rc != SendStatus.Ok)
+                throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
             Fn = IntPtr.Zero;
         }
 
@@ -2968,7 +3002,7 @@ namespace Rant
             if (Fn == IntPtr.Zero)
             {
                 if (box != null) { Patterns.DropBox(id); Patterns.DropBox(cancelId); }
-                throw new InvalidOperationException("task definition create failed: " + node.LastError);
+                throw new RantException("task definition create failed", node.LastError);
             }
             if (box != null)
             {
@@ -3017,7 +3051,8 @@ namespace Rant
         {
             if (Fn == IntPtr.Zero) return;
             var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc != SendStatus.Ok) throw new InvalidOperationException("retire refused: " + rc);
+            if (rc != SendStatus.Ok)
+                throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
             Fn = IntPtr.Zero;
         }
 
@@ -3061,14 +3096,14 @@ namespace Rant
                 progressSchema != null ? progressSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
             if (Fn == IntPtr.Zero)
-                throw new InvalidOperationException("remote task create failed: " + node.LastError);
+                throw new RantException("remote task create failed", node.LastError);
             node.RetainSchema(requestSchema);
             node.RetainSchema(progressSchema);
             node.RetainSchema(responseSchema);
             node.RegisterHandle(this);
         }
 
-        // Start the task: the Task completes with the terminal outcome and never faults. sink
+        // Start the task: the Task completes with the terminal outcome as a value. sink
         // fires per update, null Value for RUNNING. The token cancels through Cancel.
         internal Task<ResponseCore> CallCore(byte[] request, out uint callId, Action<ProgressCore> sink,
                                              CancellationToken cancellationToken, uint provider)
@@ -3136,7 +3171,8 @@ namespace Rant
         {
             if (Fn == IntPtr.Zero) return;
             var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc != SendStatus.Ok) throw new InvalidOperationException("retire refused: " + rc);
+            if (rc != SendStatus.Ok)
+                throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
             Fn = IntPtr.Zero;
         }
 
@@ -3188,8 +3224,8 @@ namespace Rant
                           schema != null ? schema.Handle : IntPtr.Zero, ref co);
             }
             if (Var == IntPtr.Zero)
-                throw new InvalidOperationException((definition ? "variable definition" : "remote variable")
-                    + " create failed: " + node.LastError);
+                throw new RantException((definition ? "variable definition" : "remote variable")
+                    + " create failed", node.LastError);
             node.RetainSchema(schema);
             node.RegisterHandle(this);
         }
@@ -3257,7 +3293,8 @@ namespace Rant
         {
             if (Var == IntPtr.Zero) return;
             var rc = (SendStatus)Native.rant_variable_retire(Var);
-            if (rc != SendStatus.Ok) throw new InvalidOperationException("retire refused: " + rc);
+            if (rc != SendStatus.Ok)
+                throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
             Var = IntPtr.Zero;
         }
 
@@ -3391,12 +3428,13 @@ namespace Rant
         public void Dispose() => _core.Dispose();
     }
 
-    /// <summary>A call outcome. Reading Value when the call did not complete Ok throws
-    /// CallException. Status never throws.</summary>
+    /// <summary>A call outcome as a value, from TryCall and TryCallAsync. Reading Value when
+    /// the call did not complete Ok throws CallException. Status never throws.</summary>
     public sealed class RantResponse<TRsp>
     {
         internal ResponseCore Core;
         internal Schema RspSchema;
+        internal string Name;
 
         public CallStatus Status => Core.Status;
         public bool Ok => Core.Ok;
@@ -3414,13 +3452,11 @@ namespace Rant
         {
             get
             {
-                if (!Ok)
-                    throw new CallException(Status, "call did not complete Ok: status " + Status
-                        + (Core.Message.Length != 0 ? " (" + Core.Message + ")" : "")
-                        + (Core.SendStatus != SendStatus.Ok ? " (send " + Core.SendStatus + ")" : ""));
+                if (!Ok) throw Core.Failure(Name);
                 object v;
                 if (!Patterns.TryDecode(RspSchema, Core.SchemaPtr, Core.Data, typeof(TRsp), out v))
-                    throw new CallException(Status, "response payload failed to decode");
+                    throw new CallException(Status, "call '" + Name + "' answered a payload that failed to decode as "
+                        + typeof(TRsp).Name, SendStatus.Schema, Core.Provider);
                 return (TRsp)v;
             }
         }
@@ -3433,28 +3469,42 @@ namespace Rant
     {
         private readonly RemoteFunctionCore _core;
         private readonly Schema _req, _rsp;
+        private readonly string _name;
 
         internal RemoteFunction(RantNode node, string name, FunctionOptions options,
                                 Schema requestSchema, Schema responseSchema)
         {
+            _name = name;
             _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
             _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
             _core = new RemoteFunctionCore(node, name, _req, _rsp, options);
         }
 
-        /// <summary>Blocking call: waits for the response or timeoutMs, negative = the default,
-        /// on the service thread's progress or driving a Manual node's loop. Refused from a
-        /// callback. Never throws. provider directs it at one definition by peer id, 0 =
+        /// <summary>Blocking call: returns the response, or throws CallException when the call
+        /// did not complete Ok. Waits up to timeoutMs, negative = the default. Refused from a
+        /// service thread callback. provider directs it at one definition by peer id, 0 =
         /// undirected, first answer wins.</summary>
-        public RantResponse<TRsp> Call(TReq request, int timeoutMs = -1, uint provider = 0)
-            => new RantResponse<TRsp> { Core = _core.Call(Patterns.Encode(_req, request), timeoutMs, provider), RspSchema = _rsp };
+        public TRsp Call(TReq request, int timeoutMs = -1, uint provider = 0)
+            => TryCall(request, timeoutMs, provider).Value;
 
-        /// <summary>Async call: the Task completes with the outcome and never faults, inspect
-        /// Status. Continuations run off the service thread.</summary>
-        public async Task<RantResponse<TRsp>> CallAsync(TReq request, uint provider = 0)
+        /// <summary>Blocking call whose outcome is a value: never throws on a failed call,
+        /// inspect Status.</summary>
+        public RantResponse<TRsp> TryCall(TReq request, int timeoutMs = -1, uint provider = 0)
+            => new RantResponse<TRsp> { Core = _core.Call(Patterns.Encode(_req, request), timeoutMs, provider),
+                                        RspSchema = _rsp, Name = _name };
+
+        /// <summary>Async call: the Task completes with the response, or faults with
+        /// CallException when the call did not complete Ok. Continuations run off the service
+        /// thread, or at Dispatch on a queued handle.</summary>
+        public async Task<TRsp> CallAsync(TReq request, uint provider = 0)
+            => (await TryCallAsync(request, provider).ConfigureAwait(false)).Value;
+
+        /// <summary>Async call whose outcome is a value: the Task never faults on a failed
+        /// call, inspect Status.</summary>
+        public async Task<RantResponse<TRsp>> TryCallAsync(TReq request, uint provider = 0)
         {
             ResponseCore core = await _core.CallAsync(Patterns.Encode(_req, request), provider).ConfigureAwait(false);
-            return new RantResponse<TRsp> { Core = core, RspSchema = _rsp };
+            return new RantResponse<TRsp> { Core = core, RspSchema = _rsp, Name = _name };
         }
 
         /// <summary>Definitions currently matched, 0 = no provider present.</summary>
@@ -3537,22 +3587,38 @@ namespace Rant
     {
         private readonly RemoteTaskCore _core;
         private readonly Schema _req, _prg, _rsp;
+        private readonly string _name;
 
         internal RemoteTask(RantNode node, string name, TaskOptions options,
                             Schema requestSchema, Schema progressSchema, Schema responseSchema)
         {
+            _name = name;
             _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
             _prg = Schema.For(typeof(TPrg), progressSchema, name + "_prg");
             _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
             _core = new RemoteTaskCore(node, name, _req, _prg, _rsp, options);
         }
 
-        /// <summary>Start the task: the Task completes with the terminal outcome and never
-        /// faults. progress fires per update, skipping the valueless RUNNING ack. Cancelling
-        /// the token requests cooperative cancellation, the terminal status answers.</summary>
-        public Task<RantResponse<TRsp>> CallAsync(TReq request, IProgress<TPrg> progress = null,
-                                                  CancellationToken cancellationToken = default,
-                                                  uint provider = 0)
+        /// <summary>Start the task: the Task completes with the result, or faults with
+        /// CallException when it did not complete Ok. progress fires per update, skipping the
+        /// valueless RUNNING ack. Cancelling the token requests cooperative cancellation, and a
+        /// task that honors it faults with OperationCanceledException.</summary>
+        public async Task<TRsp> CallAsync(TReq request, IProgress<TPrg> progress = null,
+                                          CancellationToken cancellationToken = default,
+                                          uint provider = 0)
+        {
+            RantResponse<TRsp> r = await TryCallAsync(request, progress, cancellationToken, provider)
+                .ConfigureAwait(false);
+            if (r.Status == CallStatus.Cancelled && cancellationToken.IsCancellationRequested)
+                throw new OperationCanceledException("task '" + _name + "' was cancelled", cancellationToken);
+            return r.Value;
+        }
+
+        /// <summary>Start the task with the terminal outcome as a value: the Task never faults
+        /// on a failed call, inspect Status. A honored cancel answers Cancelled.</summary>
+        public Task<RantResponse<TRsp>> TryCallAsync(TReq request, IProgress<TPrg> progress = null,
+                                                     CancellationToken cancellationToken = default,
+                                                     uint provider = 0)
         {
             Action<ProgressCore> sink = null;
             if (progress != null)
@@ -3574,7 +3640,7 @@ namespace Rant
         }
 
         private async Task<RantResponse<TRsp>> Wrap(Task<ResponseCore> core)
-            => new RantResponse<TRsp> { Core = await core.ConfigureAwait(false), RspSchema = _rsp };
+            => new RantResponse<TRsp> { Core = await core.ConfigureAwait(false), RspSchema = _rsp, Name = _name };
 
         /// <summary>Definitions currently matched, 0 = no provider present.</summary>
         public int MatchCount => _core.MatchCount;

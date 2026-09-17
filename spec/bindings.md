@@ -16,8 +16,10 @@ about a wrapper API, this file wins.
   `match_count` and `MatchCount`, the count of the other side, except that a C# or Python
   subscriber has none since the C exposes no publisher count on the subscribing side.
   C keeps its generic primitives.
-- A call outcome is a value, never a fault. C# `CallAsync` always completes with a
-  Response, and reading `.Value` off OK throws. JS `call()` rejects only on connection loss.
+- A call outcome is a value, never a fault, and reading `.Value` off OK throws. JS
+  `call()` rejects only on connection loss. C# is the exception: `Call` and `CallAsync`
+  return the response itself and throw `CallException` off OK, and `TryCall` and
+  `TryCallAsync` are the value forms.
 - Variable reads are local and status free. Writes return a status. C# `Value` has a
   setter that throws on a non OK status. A remote set round trips through the definition.
   The cache is authoritative only, never an optimistic echo.
@@ -129,8 +131,11 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   ServiceThread, Manual or Dispatch: Dispatch creates one `RantQueue` at open, hands it to
   every handle and to the events, and `node.Dispatch()` drains it. `RantQueue` from
   `CreateQueue()` goes into a handle's options (`Qos.Queue` on a topic) for a thread of
-  its own, and same name handles must agree on it. `CallAsync` returns a Task that never
-  faults, with continuations kept off the loop thread unless the handle is queued.
+  its own, and same name handles must agree on it. Continuations of an awaited call are
+  kept off the loop thread unless the handle is queued. Every throw is a `RantException`:
+  a failed create carries the `rant_last_error` event, `CallException` and
+  `SchemaException` derive from it, and `LastError` is null while the C reads no error. A
+  task `CallAsync` whose own token was cancelled ends in `OperationCanceledException`.
 - Typed messages by reflection: any struct or class with public fields. `[RantSchema("Name")]`
   overrides the type name, `[RantArray(N)]` marks fixed arrays, `[RantString(cap)]` is
   required on every string field, `[RantField("name")]` overrides a wire name. Fields

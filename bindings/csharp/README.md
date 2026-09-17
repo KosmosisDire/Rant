@@ -81,8 +81,9 @@ for the untyped case:
 // request/response: ONE definition on the network, callers anywhere
 var def = node.FunctionDefinition<AddReq, AddRsp>("add", q => new AddRsp { Sum = q.A + q.B });
 var fn  = other.RemoteFunction<AddReq, AddRsp>("add");
-var rsp = fn.Call(new AddReq { A = 2, B = 3 });          // blocking; rsp.Ok / rsp.Value
-var t   = fn.CallAsync(new AddReq { A = 2, B = 3 });     // Task<RantResponse<AddRsp>>, never faults
+var rsp = fn.Call(new AddReq { A = 2, B = 3 });          // blocking, throws CallException off Ok
+var sum = await fn.CallAsync(new AddReq { A = 2, B = 3 });   // the same, awaited
+var r   = fn.TryCall(new AddReq { A = 2, B = 3 });       // never throws: r.Ok / r.Status / r.Value
 
 // replicated state: ONE owner, remotes read the cached latest and push writes
 var own = node.VariableDefinition<Level>("level", new Level { Value = 5 });

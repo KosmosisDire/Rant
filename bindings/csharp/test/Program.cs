@@ -209,25 +209,42 @@ static class Program
             cli.Poll(5);
         Check("definitions discovered", addR.MatchCount > 0 && boomR.MatchCount > 0 && lateR.MatchCount > 0
               && add2R.MatchCount > 0);
-        var r2 = add2R.Call((2.5, 4.0), 3000);
-        Check("tuple request and response", r2.Ok && r2.Value == 6.5);
+        Check("tuple request and response", add2R.Call((2.5, 4.0), 3000) == 6.5);
         Check("a handle names a tuple in PascalCase", Codec.WireName("motor/speed_2d") == "MotorSpeed2d"
               && Codec.WireName("add2_req") == "Add2Req");
 
         // blocking calls
-        var r = addR.Call(new AddReq { A = 2, B = 3 }, 3000);
-        Check("blocking call Ok", r.Ok && r.Status == CallStatus.Ok);
-        Check("blocking call value", r.Ok && r.Value.Sum == 5);
+        Check("blocking call returns the value", addR.Call(new AddReq { A = 2, B = 3 }, 3000).Sum == 5);
+        var r = addR.TryCall(new AddReq { A = 2, B = 3 }, 3000);
+        Check("TryCall Ok", r.Ok && r.Status == CallStatus.Ok && r.Value.Sum == 5);
         Check("provider set", r.Ok && r.Provider != 0);
 
-        var rb = boomR.Call(new AddReq { A = 1, B = 1 }, 3000);
-        Check("thrown handler -> AppError", rb.Status == CallStatus.AppError);
+        // a failed call is loud: Call throws with the handler's text, TryCall answers a value
+        CallException boomEx = null;
+        try { boomR.Call(new AddReq { A = 1, B = 1 }, 3000); } catch (CallException e) { boomEx = e; }
+        Check("thrown handler -> Call throws AppError", boomEx != null && boomEx.Status == CallStatus.AppError
+              && boomEx.Provider != 0);
+        Check("the exception names the call and carries the handler's text",
+              boomEx != null && boomEx.Message.Contains("'boom'") && boomEx.Message.Contains("kaboom"));
+        Check("CallException is a RantException", boomEx is RantException);
+        RantException dup = null;
+        try { cli.RemoteFunction<AddReq, AddRsp>("boom"); } catch (RantException e) { dup = e; }
+        Check("a failed create throws RantException with the C reason",
+              dup != null && dup.Error != null && dup.Error.Error == ErrorKind.NameCollision);
+        Check("and LastError reads the same reason",
+              cli.LastError != null && cli.LastError.Error == ErrorKind.NameCollision);
+        var rb = boomR.TryCall(new AddReq { A = 1, B = 1 }, 3000);
+        Check("TryCall answers AppError as a value", rb.Status == CallStatus.AppError);
         bool threw = false;
         try { var _ = rb.Value; } catch (CallException) { threw = true; }
         Check("Value on !Ok throws CallException", threw);
+        var boomT = boomR.CallAsync(new AddReq { A = 1, B = 1 });
+        deadline = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < deadline && !boomT.IsCompleted) cli.Poll(5);
+        Check("CallAsync faults with CallException", boomT.IsFaulted
+              && boomT.Exception.InnerException is CallException);
 
-        var rl = lateR.Call(new AddReq { A = 20, B = 22 }, 3000);
-        Check("deferred completion", rl.Ok && rl.Value.Sum == 42);
+        Check("deferred completion", lateR.Call(new AddReq { A = 20, B = 22 }, 3000).Sum == 42);
         Check("caller count seen by definition", add.MatchCount == 1);
 
         // variable: catch_up hands the remote the initial value
@@ -278,10 +295,10 @@ static class Program
         // typed remote with no schema is the raw form.
         var never = cli.RemoteFunction<byte[], byte[]>("never-served",
                                                        new FunctionOptions { TimeoutUs = 60000000 });
-        var tc = never.CallAsync(null);
+        var tc = never.TryCallAsync(null);
         srv.Close();
         cli.Close();
-        Check("pending CallAsync settles Cancelled at Close",
+        Check("pending TryCallAsync settles Cancelled at Close",
               tc.Wait(2000) && tc.Result.Status == CallStatus.Cancelled);
         Console.WriteLine(ok ? "patterns: PASS\n" : "patterns: FAIL\n");
         return ok;
@@ -365,15 +382,14 @@ static class Program
             var seen = new List<int>();
             var t1 = xferR.CallAsync(new XferReq { Chunks = 3 },
                 new InlineProgress<XferPrg>(p => { lock (seen) seen.Add(p.Done); }));
-            Check("typed task Ok", t1.Wait(10000) && t1.Result.Ok);
-            Check("typed result decoded", t1.Result.Ok && t1.Result.Value.Total == 3);
+            Check("typed task returns the result", t1.Wait(10000) && t1.Result.Total == 3);
             lock (seen)
                 Check("typed progress in order (no RUNNING ack)",
                       seen.Count == 3 && seen[0] == 1 && seen[1] == 2 && seen[2] == 3);
 
             // raw form: the progress bytes decode with the schema, the result bytes likewise
             var infos = new List<byte[]>();
-            var t2 = xferRaw.CallAsync(reqS.Encode(new XferReq { Chunks = 2 }),
+            var t2 = xferRaw.TryCallAsync(reqS.Encode(new XferReq { Chunks = 2 }),
                 new InlineProgress<byte[]>(p => { lock (infos) infos.Add(p); }));
             Check("raw task Ok", t2.Wait(10000) && t2.Result.Status == CallStatus.Ok);
             lock (infos)
@@ -385,11 +401,14 @@ static class Program
 
             // cancellation: the token ends the handler via ITS token, caller sees Cancelled
             var cts = new CancellationTokenSource();
-            var t3 = foreverR.CallAsync(new XferReq(), null, cts.Token);
+            var t3 = foreverR.TryCallAsync(new XferReq(), null, cts.Token);
+            var t3loud = foreverR.CallAsync(new XferReq(), null, cts.Token);
             Thread.Sleep(300);   // let RUNNING land (the deadline is dropped)
             cts.Cancel();
             Check("cancel honored end to end", t3.Wait(10000)
                   && t3.Result.Status == CallStatus.Cancelled);
+            try { t3loud.Wait(10000); } catch (AggregateException) { }
+            Check("a cancelled CallAsync ends as a cancelled Task", t3loud.IsCanceled);
 
             // noCancel: the cancel request is refused by the provider's declaration and the
             // call completes anyway
@@ -397,16 +416,14 @@ static class Program
             var t4 = stubbornR.CallAsync(new XferReq(), null, cts4.Token);
             Thread.Sleep(5);
             cts4.Cancel();
-            Check("noCancel call completes anyway", t4.Wait(10000) && t4.Result.Ok
-                  && t4.Result.Value.Total == 1);
+            Check("noCancel call completes anyway", t4.Wait(10000) && t4.Result.Total == 1);
 
             // async function-handler overload round trip
             var t5 = amulR.CallAsync(new AddReq { A = 6, B = 7 });
-            Check("async function handler", t5.Wait(10000) && t5.Result.Ok
-                  && t5.Result.Value.Sum == 42);
+            Check("async function handler", t5.Wait(10000) && t5.Result.Sum == 42);
             // a blocking call under the service thread sleeps on its progress and answers
-            var rr = amulR.Call(new AddReq { A = 2, B = 3 }, 2000);
-            Check("blocking call answers under service thread", rr.Ok && rr.Value.Sum == 6);
+            Check("blocking call answers under service thread",
+                  amulR.Call(new AddReq { A = 2, B = 3 }, 2000).Sum == 6);
         }
         finally
         {
@@ -765,7 +782,7 @@ static class Program
         t.ContinueWith(x =>
         {
             doneId = Thread.CurrentThread.ManagedThreadId;
-            sum = x.Result.Ok ? x.Result.Value.Sum : -1;
+            sum = x.IsFaulted ? -1 : x.Result.Sum;
         }, TaskContinuationOptions.ExecuteSynchronously);
         deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline && doneId == 0) { Drain(); Thread.Sleep(5); }
@@ -874,6 +891,7 @@ static class Program
         var b = new RantNode("db", Local(50, Threading.Manual));
         try
         {
+            Check("LastError is null on a clean node", a.LastError == null);
             var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 4 };
             int n1 = 0, n2 = 0;
             var pub = a.Publisher<Level>("shared", qos);
@@ -904,7 +922,7 @@ static class Program
             s2.Dispose();
             bool retyped = false;
             try { b.Subscriber<AddReq>("shared", qos: qos); retyped = true; }
-            catch (InvalidOperationException) { }
+            catch (RantException) { }
             Check("the last dispose retires the slot, the name retypes", retyped);
             pub.Dispose();
             Check("a disposed publisher refuses", pub.Send(new Level { Value = 3 }) == SendStatus.NoTopic);
