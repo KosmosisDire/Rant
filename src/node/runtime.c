@@ -267,16 +267,6 @@ static void i_rant_node_unlock(RantNode *n, int acquired){ (void)n; (void)acquir
 static void i_rant_node_kick(RantNode *n){ (void)n; }
 #endif /* RANT_THREADS */
 
-/* The kick a send owes: only when the transport has a datagram to hand out or a held one
-   to retry. The waker costs tens of microseconds, an idle publisher must not pay it. */
-static void i_rant_node_kick_tx(RantNode *n){
-#ifdef RANT_THREADS
-    if (n->tx_hold_len || rant_transport_tx_pending(n->transport)) i_rant_node_kick(n);
-#else
-    (void)n;
-#endif
-}
-
 /* error reporting: one emit path stamps user_data, keeps the last error and hands on */
 
 /* one past the highest defined topic index, the bound over handles[] (holes are NULL) */
@@ -792,6 +782,35 @@ static int i_rant_node_tx(RantNode *n, uint32_t to, const uint8_t *buf, size_t l
         }
     }
     return 1;
+}
+
+/* The one TX drain: retries the held datagram, then pulls until the transport is empty.
+ * The core already consumed a pulled datagram, so a full socket parks it in tx_hold. */
+static void i_rant_node_tx_drain(RantNode *n){
+    uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t out_len;
+    if (n->tx_hold_len && i_rant_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
+        n->tx_hold_len = 0;
+    if (n->tx_hold_len) return;
+    while (rant_transport_poll_send(n->transport, &to, buf, sizeof buf, &out_len, i_rant_plat_now_us())){
+        if (!i_rant_node_tx(n, to, buf, out_len)){
+            memcpy(n->tx_hold, buf, out_len);
+            n->tx_hold_len = out_len; n->tx_hold_peer = to;
+            return;         /* the TX buffer is full: the next pass retries */
+        }
+    }
+}
+
+/* What a send owes its commit: where another thread runs the loop the sender writes the
+ * socket itself, a lone thread batches at its poll, a callback leaves it to its pass. */
+static void i_rant_node_send_tx(RantNode *n, int acquired){
+#ifdef RANT_THREADS
+    if (acquired && (n->svc_running || n->pollers_sleeping) && n->fd != RANT_SOCK_BAD)
+        i_rant_node_tx_drain(n);
+    /* a full socket or a callback's commit is left to the poller: cut its sleep short */
+    if (n->tx_hold_len || rant_transport_tx_pending(n->transport)) i_rant_node_kick(n);
+#else
+    (void)n; (void)acquired;
+#endif
 }
 
 #ifdef RANT_SHM
@@ -1587,7 +1606,7 @@ static int i_rant_node_gather_done(RantNode *n, uint64_t now);       /* defined 
 /* One poll tick under the node lock: deferred grows, the wait, discovery's tick, RX drain,
  * TX flush. The one poll body. outer = 1 lets the wait drop the lock. See spec/node.md. */
 static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
-    uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t out_len; uint64_t now;
+    uint8_t buf[RANT_DGRAM_MAX]; uint64_t now;
     i_RantPollfd pfd[5]; int nfds = 0, wait_ms, poll_rc;
     int disc_slot = 0, disc_n = 0;
 #ifdef RANT_THREADS
@@ -1683,18 +1702,8 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
         }
         n->next_detail_us = sent ? now + n->announce_us : 0;
     }
-    /* the core already consumed any held datagram, so retry it before pulling new */
-    if (n->tx_hold_len && i_rant_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
-        n->tx_hold_len = 0;
-    if (!n->tx_hold_len)
-        while (rant_transport_poll_send(n->transport,&to,buf,sizeof buf,&out_len,now)){
-            if (!i_rant_node_tx(n, to, buf, out_len)){
-                memcpy(n->tx_hold, buf, out_len);
-                n->tx_hold_len = out_len; n->tx_hold_peer = to;
-                break;          /* the TX buffer is full: yield this tick */
-            }
-            now=i_rant_plat_now_us();
-        }
+    i_rant_node_tx_drain(n);
+    now=i_rant_plat_now_us();
 
     /* latch the post open gather the moment it settles, so a later create's replay events
        cannot reset the quiet clock and make a first send re wait */
@@ -2084,7 +2093,7 @@ int rant_topic_send(RantTopic *topic, RantBytes data, const RantSendOpts *opts){
     acquired = i_rant_node_lock(topic->n);
     r = i_rant_node_do_send(topic->n, topic->index, data,
                             opts ? opts->capture_us : 0u, acquired);
-    i_rant_node_kick_tx(topic->n);             /* flush the commit now, not at the next tick */
+    i_rant_node_send_tx(topic->n, acquired);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
@@ -2094,7 +2103,7 @@ int i_rant_topic_send_hdr(RantTopic *topic, RantBytes hdr, RantBytes data){
     if (!topic) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_lock(topic->n);
     r = i_rant_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 0, 0, acquired);
-    i_rant_node_kick_tx(topic->n);
+    i_rant_node_send_tx(topic->n, acquired);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
@@ -2104,16 +2113,10 @@ uint64_t i_rant_topic_seqno(RantTopic *topic){
 }
 
 void i_rant_node_flush_tx(RantNode *n){
-    uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t out_len;
     int acquired;
     if (!n || n->fd == RANT_SOCK_BAD) return;
     acquired = i_rant_node_lock(n);
-    if (n->tx_hold_len && i_rant_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
-        n->tx_hold_len = 0;
-    if (!n->tx_hold_len)
-        while (rant_transport_poll_send(n->transport, &to, buf, sizeof buf, &out_len,
-                                        i_rant_plat_now_us()))
-            if (!i_rant_node_tx(n, to, buf, out_len)) break;     /* TX full: best effort */
+    i_rant_node_tx_drain(n);
     i_rant_node_unlock(n, acquired);
 }
 
@@ -2159,7 +2162,7 @@ int i_rant_topic_send_to(RantTopic *topic, uint32_t to_peer, RantBytes hdr, Rant
     if (!topic) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_lock(topic->n);
     r = i_rant_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 1, to_peer, acquired);
-    i_rant_node_kick_tx(topic->n);
+    i_rant_node_send_tx(topic->n, acquired);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }

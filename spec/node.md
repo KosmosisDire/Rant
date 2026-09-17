@@ -60,8 +60,17 @@ strict prefix of it.
   service thread wakes about once a second, and the service loop is capped at 250 ms so a
   lost wakeup is bounded.
 - The waker is a self connected loopback UDP socket, the one self pipe pollable on both
-  Windows and POSIX. Mutating entry points kick it (coalesced) so a send hits the wire in
-  microseconds. A waker open failure degrades the open (kicks no op, next tick latency).
+  Windows and POSIX. Mutating entry points kick it (coalesced) so the change is serviced
+  now. A waker open failure degrades the open (kicks no op, next tick latency).
+- A send transmits on the caller's thread. `i_rant_node_send_tx` runs the one TX drain
+  (`i_rant_node_tx_drain`, shared with the poll body and `i_rant_node_flush_tx`) under the
+  lock the send already holds whenever another thread runs the loop (a service thread or
+  a sleeping poller), so there is no handoff, no waker datagram and no wait for a TX
+  pass. A full socket parks the datagram in `tx_hold` and kicks the poller to retry. A
+  send from a callback leaves the drain to the pass that called it. A single threaded
+  program keeps the batch at its poll, where one datagram carries many submessages. The
+  price of the inline drain is that batching: a tight loop of small sends tops out near
+  450k a second where the handoff reached 750k with a deep history.
   `pollers_sleeping` is a counter, since a flag lost kicks with several pollers.
 - Reentrancy is an owner thread id check, zeroed before release. From callbacks, send and
   read only queries are legal. Poll, create topic, set role, drain, start, stop and close

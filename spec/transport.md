@@ -35,9 +35,9 @@ reliable is matched on it.
 
 A send with zero matched writers skips the grow, the memcpy and the commit unless the
 topic retains history (reliable with `catch_up` above 0). The match count is O(1) off a
-cached counter. The send path kicks the waker only when it committed something
-(`rant_transport_tx_pending`): the waker is a loopback send that costs about 36 us on
-Windows, and an idle publisher used to pay it once per poller sleep.
+cached counter. The send path kicks the waker only when something is still pending after
+its own drain (`rant_transport_tx_pending`, or a held datagram): the waker is a loopback
+send that costs about 36 us on Windows. See spec/node.md for the inline drain.
 
 The poll wait is capped at `next_deadline_us`, the earliest armed timer, fed at the arm
 sites. Immediate acks are deliberately not tracked, so the no loss hot path keeps no

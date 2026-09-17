@@ -4269,8 +4269,8 @@ static void threaded_checks(void){
             while (rant_node_publisher_match_count(w, 0) == 0 && i_rant_plat_now_us() < end)
                 sw_sleep_ms(5); }
 
-          /* 21. 64 back-to-back sends, keep_last 4: the unsent guard must let every
-             one reach the wire (each send waits at most one kicked TX pass) */
+          /* 21. 64 back-to-back sends, keep_last 4: every one must reach the wire, since
+             each send transmits before it returns */
           for (i=0;i<64;i++) rant_node_send(w, 0, payload, sizeof payload);
           { uint64_t end = i_rant_plat_now_us() + 3000000u;
             while (th_recv < 64 && i_rant_plat_now_us() < end) sw_sleep_ms(5); }
