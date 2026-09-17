@@ -109,7 +109,6 @@ callers define `<P>_SANS_IO`:
 | `RANT_HB_SWEEP_US` | 25000 | period of the heartbeat timer sweep |
 | `RANT_HB_TAIL_US` | 20000 | tail heartbeat delay until a peer's round trip is measured |
 | `RANT_RTO_MIN_US` | 2000 | floor of every timer derived from the round trip |
-| `RANT_UNSENT_WAIT_US` | 20000 | threaded mode, max wait for a poller before a send may overwrite unsent history |
 | `RANT_MATCH_WAIT_MS` | 1000 | default first send match wait |
 | `RANT_TOPIC_NAME_MAX` | 64 | max topic name bytes |
 | `RANT_QUEUE_CAP` | 1 MB | default per topic consumer queue cap |

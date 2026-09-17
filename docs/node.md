@@ -18,10 +18,10 @@ Poll, create topic, set role, drain, start, stop and close are refused with
 `RANT_ERR_STATE` (or NULL or 0). Nothing is corrupted.
 
 Flow control needs no poll cadence. A send that would overwrite unacked reliable history
-sleeps, bounded by `qos.backpressure_wait_us`. A send that would overwrite history not yet
-handed to the wire waits one TX pass, bounded by `RANT_UNSENT_WAIT_US`. If it still must
-evict, KEEP_LAST proceeds and a `RANT_E_EVICTED_UNSENT` error fires.
-`rant_node_evicted_unsent` counts them.
+sleeps, bounded by `qos.backpressure_wait_us`, 0 = never. No other send waits. With a
+service thread a send writes the socket before it returns. When the socket is full and the
+next send must overwrite history that never left, KEEP_LAST proceeds and a
+`RANT_E_EVICTED_UNSENT` error fires. `rant_node_evicted_unsent` counts them.
 
 Reflection views (the names, addresses and schemas the `rant_node_*_next` walks return)
 are bracketed with `rant_node_lock` and `rant_node_unlock` when a poller runs on another

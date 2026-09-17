@@ -47,10 +47,11 @@ which fire at their timer instead of up to a sweep period later.
 ## Flow control
 
 A reliable send that would overwrite unacked history waits up to
-`qos.backpressure_wait_us`. In threaded mode a send that would overwrite history not yet
-handed to the wire waits one TX pass, bounded by `RANT_UNSENT_WAIT_US`. If it still must
-evict, KEEP_LAST proceeds and `RANT_E_EVICTED_UNSENT` fires. Evicting sent but unacked
-history is ordinary KEEP_LAST and fires no event.
+`qos.backpressure_wait_us`. No other send waits. A send that must overwrite history not
+yet handed to the wire proceeds under KEEP_LAST and `RANT_E_EVICTED_UNSENT` fires. A lane
+under a subscriber's rate cap is not counted: it holds samples back on purpose and
+decimates to the newest. Evicting sent but unacked history is ordinary KEEP_LAST and
+fires no event.
 
 A best effort reader on a reliable topic is fire and forget: out of flow control, no
 heartbeats, no waiting for acks.

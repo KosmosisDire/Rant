@@ -78,13 +78,14 @@ strict prefix of it.
   would replay interest into the proxy mid delivery, stop would self join. A callback that
   sends to another node deadlocks (plain lock acquisition both ways). Forbidden in docs,
   not enforced.
-- Backpressure: senders sleep on the node condvar, re stamping the lock owner after
-  reacquire, and the work pass tail broadcasts when waiters exist. Two predicates: unacked
-  reliable history (bounded by `qos.backpressure_wait_us`) and unsent history
-  (`rant_transport_send_would_evict_unsent`, bounded by `RANT_UNSENT_WAIT_US`). The
-  unsent wait breaks early after one completed work pass only when a datagram is held in
-  `tx_hold` (socket bound, so evict). With no hold another sender refilled the ring, so it
-  re arms and keeps waiting. `RANT_E_EVICTED_UNSENT` fires only after the send commits.
+- Backpressure: the one send wait. A send that would overwrite unacked reliable history
+  waits up to `qos.backpressure_wait_us` on the shared skeleton, asleep on the node condvar
+  when a service thread runs (the work pass tail broadcasts when waiters exist) and
+  pumping otherwise. It does not kick: it waits for acks, which wake the poller by
+  themselves, and a kick per wake made the two threads spin. There is no unsent wait.
+  Unsent history at send time means a full socket, so KEEP_LAST proceeds and
+  `RANT_E_EVICTED_UNSENT` fires after the send commits. A rate capped lane is exempt from
+  `rant_transport_send_would_evict_unsent`, since it holds samples back on purpose.
 - The blocking waits (match wait, send backpressure, topic drain, node settle, queue
   wait) share one `i_rant_node_wait_until` skeleton: predicate, periodic hook, outer flag.
   Invariants it carries: waiter accounting, re derive arena pointers after any wait, exit

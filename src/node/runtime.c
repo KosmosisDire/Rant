@@ -129,7 +129,6 @@ struct RantNode {
     uint32_t      pollers_sleeping; /* under mu: pollers in or headed into the unlocked wait */
     uint8_t       wake_signaled;  /* under mu: a burst coalesces into one waker datagram */
     uint8_t       user_locked;    /* the public rant_node_lock is held */
-    uint64_t      work_seq;       /* completed work passes, the unsent wait predicate */
     volatile uint8_t  lock_held;  /* the owner reentrancy check, written by the owner only */
     volatile uint64_t lock_owner;
 #endif
@@ -1576,12 +1575,6 @@ static void i_rant_node_rx_drain(RantNode *n, i_RantSock fd, uint64_t deadline){
     }
 }
 
-/* threaded mode: the longest a send waits for a poller to hand unsent history to the
- * wire before overwriting it. One kicked pass normally clears it in microseconds. */
-#ifndef RANT_UNSENT_WAIT_US
-#define RANT_UNSENT_WAIT_US 20000u
-#endif
-
 /* Caps a wait at the transport's next timer, discovery's next announce and the patterns
  * tick, so each fires on time with no traffic. Lock held, pure compute. */
 static int i_rant_node_wait_ms(RantNode *n, int timeout_ms){
@@ -1713,7 +1706,6 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
     if (n->sys_tick) n->sys_tick_next = n->sys_tick(n->sys_user, i_rant_plat_now_us());
 
 #ifdef RANT_THREADS
-    n->work_seq++;
     if (n->cv_waiters) i_rant_plat_cond_broadcast(&n->cv);     /* acks or TX may have progressed */
 #endif
 }
@@ -1847,41 +1839,7 @@ static int i_rant_node_match_wait(RantNode *n, uint16_t topic_index, RantTopic *
     return c.matched;
 }
 
-#ifdef RANT_THREADS
-/* The threaded flow control wait's predicate: done when neither eviction looms. Unacked
- * history is bounded by qos.backpressure_wait_us, unsent history by RANT_UNSENT_WAIT_US. */
-typedef struct {
-    uint16_t index;
-    uint64_t rel_deadline;      /* 0 = no reliable bound */
-    uint64_t unsent_deadline;
-    uint64_t seq0;              /* the work_seq snapshot, the completed pass test */
-    int      waited;            /* at least one sleep happened, gates the stats */
-} i_RantSendWait;
-
-static int i_rant_node_send_wait_done(RantNode *n, void *ctx, uint64_t now, uint64_t *deadline){
-    i_RantSendWait *c = (i_RantSendWait*)ctx;
-    int evict_unacked = c->rel_deadline && rant_transport_send_would_evict(n->transport, c->index);
-    int evict_unsent  = rant_transport_send_would_evict_unsent(n->transport, c->index, NULL, NULL);
-    (void)now;
-    *deadline = evict_unacked ? (c->rel_deadline > c->unsent_deadline ? c->rel_deadline
-                                                                     : c->unsent_deadline)
-                              : c->unsent_deadline;
-    if (!evict_unacked && !evict_unsent) return 1;
-    if (!evict_unacked && n->work_seq != c->seq0){
-        if (n->tx_hold_len) return 1;
-        c->seq0 = n->work_seq;
-    }
-    return 0;
-}
-
-/* the sleep is what the backpressure stats measure, so arm them where sleeping is decided */
-static void i_rant_node_send_wait_tick(RantNode *n, void *ctx, uint64_t now){
-    ((i_RantSendWait*)ctx)->waited = 1;
-    i_rant_node_wait_kick(n, ctx, now);
-}
-#endif /* RANT_THREADS */
-
-/* The unthreaded pump's predicate: done once the send no longer evicts unacked history.
+/* The backpressure wait's predicate: done once the send no longer evicts unacked history.
  * It also samples the in pump probe on a timer, after a tick and before the re check. */
 typedef struct {
     uint16_t index;
@@ -1962,34 +1920,10 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
     }
 
 #ifdef RANT_THREADS
-    if (matched && n->svc_running){
-        guarded = 1;
-        /* threaded: wait on the condvar for the poller's progress. A service thread that
-           stops under us ends the wait, there is no poller left */
-        if (may_wait){
-            i_RantSendWait c; i_RantWait w = { 0 };
-            uint64_t t0 = i_rant_plat_now_us();
-            c.index = topic_index;
-            c.rel_deadline = (q && q->backpressure_wait_us) ? t0 + q->backpressure_wait_us : 0;
-            c.unsent_deadline = t0 + RANT_UNSENT_WAIT_US;
-            c.seq0 = n->work_seq;
-            c.waited = 0;
-            w.done = i_rant_node_send_wait_done; w.periodic = i_rant_node_send_wait_tick;
-            w.ctx = &c;
-            w.pump_ms = 1;   /* a pump is unreachable here, bounded regardless */
-            i_rant_node_wait_until(n, &w);     /* every outcome proceeds: KEEP_LAST applies */
-            if (c.waited){
-                n->backpressure_total_us += i_rant_plat_now_us() - t0;
-                n->backpressure_wait_count++;
-            }
-            /* the poller may have relocated the arena while we slept */
-            q = rant_transport_topic_qos(n->transport, topic_index);
-            matched = rant_transport_publisher_match_count(n->transport, topic_index);
-        }
-    } else
+    if (matched && n->svc_running) guarded = 1;   /* sends transmit inline: unsent means a full socket */
 #endif
-    /* no service thread: the bounded backpressure pump runs the loop until a slow reader
-       acks or the wait elapses, then sends anyway */
+    /* the bounded backpressure wait: until a slow reader acks or the wait elapses, then send
+       anyway. It sleeps on the service thread's progress when one runs and pumps otherwise */
     if (matched && may_wait && q && q->backpressure_wait_us && rant_transport_send_would_evict(n->transport, topic_index)){
         i_RantPumpWait c = { 0 }; i_RantWait w = { 0 };
         c.index = topic_index;
