@@ -5467,6 +5467,24 @@ static void patterns_checks(void){
                rant_node_evicted_unsent(P) - ev0);
       rant_variable_on_write(bo, NULL, NULL); rant_variable_on_write(ba, NULL, NULL); }
 
+    { /* a variable is state: a burst far past the ring never waits on a reader that is not
+         acking, and the reader still ends on the newest value (spec/patterns.md) */
+      RantVariable *lo, *la; uint8_t b[4]; RantBytes cur; uint64_t t0, el; uint32_t i2;
+      lo = rant_node_create_variable_definition(P, "lvar", NULL, NULL);
+      la = rant_node_create_remote_variable(C, "lvar", NULL, NULL);
+      ST_CHECK(lo && la, "var: latest pair created");
+      for (t=0;t<2000 && rant_variable_match_count(lo)==0;t++) pf_pump(P,C,2);
+      t0 = i_rant_plat_now_us();
+      for (i2=0;i2<200;i2++){ i_rant_le_w32(b,1000u+i2); rant_variable_set(lo, rant_bytes(b,4)); }
+      el = i_rant_plat_now_us() - t0;
+      ST_CHECK(el < 500000u, "var: 200 writes past a silent reader never wait (%.1f ms)", el/1000.0);
+      for (t=0;t<2000;t++){ pf_pump(P,C,2);
+          if (rant_variable_get(la, &cur) && cur.len>=4 && i_rant_le_r32(cur.data)==1199u) break; }
+      { int have = rant_variable_get(la, &cur);
+        ST_CHECK(have && cur.len>=4 && i_rant_le_r32(cur.data)==1199u,
+                 "var: the reader ends on the newest value (%u)",
+                 (have && cur.len>=4) ? i_rant_le_r32(cur.data) : 0u); } }
+
     { /* provider side reply burst: an inline reply is a reentrant send, so the rsp ring is the
          only thing between a batch drained in one pass and lost replies (spec/testing.md) */
       uint8_t req[4]; int i2; uint32_t expect_sum, ev0;

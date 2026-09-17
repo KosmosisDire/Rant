@@ -25,8 +25,14 @@ and settled. Do not relitigate them.
   force both make optimism wrong. `get()` answers what the system's value is.
 - Multi writer stays legal on the wire (an HMI, the explorer and failover need it). The
   one authority contract is watched, not refused.
-- Backpressure is on by default for every pattern channel (`RANT_PATTERN_BP_WAIT_US`).
-  There is no "off" spelling for it on a pattern channel, an open design question.
+- Backpressure is on by default for the function and task channels
+  (`RANT_PATTERN_BP_WAIT_US`), where every message is a call, a reply or an update.
+  There is no "off" spelling for it there, an open design question. A variable is state,
+  so its channels default to no wait: a write can only evict a value it supersedes, and
+  reliable repair plus `catch_up` still land the newest value on every reader. What a
+  slow reader can miss is intermediate writes, so `on_write` there is not every write.
+  With a wait, one reader that is alive but never acks would block every write for the
+  full bound. `backpressure_wait_us` on the variable opts turns the wait on.
   Reliability and latching stay sealed. `catch_up` and `keep_last` are exposed.
 - Vocabulary: DEFINITION is where the body or storage lives, REMOTE is a reference to one
   on another node. You CALL a function, the definition handles a REQUEST and sends a

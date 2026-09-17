@@ -1382,8 +1382,9 @@ static RantVariable *i_rant_variable_new(RantNode *n, const char *name, const Ra
     vopt.qos.keep_last = (opts && opts->keep_last) ? opts->keep_last : 0u;
     if (vopt.qos.keep_last && vopt.qos.keep_last < vopt.qos.catch_up)
         vopt.qos.keep_last = vopt.qos.catch_up;      /* the ring must hold what it replays */
-    vopt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
-                                                                         : RANT_PATTERN_BP_WAIT_US;
+    /* no wait by default: a write only ever evicts a value it supersedes, and reliable
+       repair still lands the newest on every reader. See spec/patterns.md */
+    vopt.qos.backpressure_wait_us = opts ? opts->backpressure_wait_us : 0u;
     /* the value channel carries every parked observer record, the set channel parks nothing */
     vopt.queue = opts ? opts->queue : NULL;
     sopt = vopt; sopt.qos.catch_up = 0;   /* the set channel: no replay, the same repair depth */

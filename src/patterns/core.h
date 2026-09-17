@@ -207,7 +207,7 @@ typedef struct {
     uint16_t    catch_up;            /* the value channel's catch_up, 0 = 1 */
     uint16_t    keep_last;           /* both channels' history depth, the repair window for a burst of
                                       writes, 0 = 10. Raised to catch_up. See spec/patterns.md */
-    uint32_t  backpressure_wait_us;/* 0 = RANT_PATTERN_BP_WAIT_US */
+    uint32_t  backpressure_wait_us;/* a write pauses this long for a slow reader, 0 = never */
     uint8_t   reflect_from_mesh;   /* a NULL schema takes the owner's from the mesh, and refresh
                                       re types the handle when that moves */
     RantQueue *queue;              /* on_change and on_write park here and run on
