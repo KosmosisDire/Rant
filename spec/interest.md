@@ -180,7 +180,16 @@ create's own replay cannot reset the quiet clock. A topic that retains history (
 with `catch_up` above 0) is exempt. A topic nobody advertises interest in proceeds at
 once, and the converged state is memoized per topology epoch (bumped on PEER_UP, PEER_DOWN,
 PEER_INTEREST, create and set role) so steady state costs one compare. Entries with no
-verdict storage are not counted, since they never resolve. A wait that cannot happen
+verdict storage are not counted, since they never resolve.
+
+The wait bridges our own coming up, never a peer's. It is anchored at the topic's last
+create, role change or retype (`came_up_us`) and ends `match_wait_ms` after it, however
+many sends fall inside. Past that window the topic counts as converged whatever the
+peers do, so a subscriber that appears, restarts or never resolves an hour into a run
+cannot block a send. A subscriber that joins later and wants what it missed uses
+`catch_up`. A disabled wait keeps the default window for the diagnostic.
+
+A wait that cannot happen
 (disabled, or a reentrant send) or that times out proceeds and fires
 `RANT_E_UNMATCHED_SEND`. `rant_topic_ready` shares the exact predicate. A variable
 accessor's first write rides the same wait without the send and without the error. The

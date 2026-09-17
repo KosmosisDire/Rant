@@ -228,6 +228,9 @@ process base picked from the clock so concurrent runs never join each other.
   across identical re creation, incompatible and compatible retypes, untyped subscribers,
   rival same name publishers, late joiners and transient peers. The plateau is judged
   against a warmed baseline after the one time allocations.
+- Match wait window (Windows): a publisher that never receives a candidate's DETAIL_RESP
+  waits out one window on its first send, then no send waits, and a subscriber that
+  appears after the window never blocks a send.
 - Match wait: a sample committed after our side matched but before the peer verified us
   heals through reliable repair once its verdict lands, so delivery is writer
   authoritative. A first send waits for an already present subscriber. A disabled wait

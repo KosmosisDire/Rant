@@ -7002,6 +7002,61 @@ static void matchwait_checks(void){
       if (B) rant_node_close(B,1);
       rant_allocator_reset(&aa); rant_allocator_reset(&ba);
     }
+
+    /* (a2) THE WINDOW: A never receives B's DETAIL_RESPs, so B stays a candidate forever. The
+       wait bridges A's own coming up only: one window after the create, then no send waits,
+       and a subscriber that appears later never blocks a send at all. */
+    { const uint16_t MW_PORT2 = (uint16_t)(40000u + (st_domain_base + 1u) % 20000u);
+      RantAllocator aa = rant_allocator_heap(0);
+      RantAllocator ba = rant_allocator_heap(0);
+      RantNodeOpts ao, bo; RantNode *A, *B; RantTopic *poison=NULL, *late=NULL;
+      memset(&bo,0,sizeof bo); bo.domain=ST_DOMAIN+13; bo.disable_shm=1; bo.discovery.max_peers=4;
+      bo.discovery.announce_interval_us=200000;
+      bo.net.multicast_interface="127.0.0.1"; bo.net.seed_peers=&seed; bo.net.n_seed_peers=1;
+      ao=bo; ao.net.data_port=MW_PORT2; ao.match_wait_ms=300;
+      mw_unmatched=0;
+      B = rant_node_open(&ba, "mw-wb", mw_on_message, mw_on_event, &bo);
+      if (B) (void)rant_node_create_topic(B, "mw-poison", RANT_SUB_ONLY, NULL, NULL);
+      if (B) rant_node_start(B);
+      g_tx_block_detail_resp_port = MW_PORT2;
+      A = rant_node_open(&aa, "mw-wa", NULL, mw_on_event, &ao);
+      ST_CHECK(A && B, "matchwait: window pair up (is port %d free?)", (int)MW_PORT2);
+      if (A && B){
+          uint64_t t0, first, worst = 0;
+          poison = rant_node_create_topic(A, "mw-poison", RANT_PUB_ONLY, NULL, NULL);
+          late   = rant_node_create_topic(A, "mw-late", RANT_PUB_ONLY, NULL, NULL);
+          t0 = i_rant_plat_now_us();
+          (void)rant_topic_send(poison, rant_bytes("x",1), NULL);
+          first = i_rant_plat_now_us() - t0;
+          ST_CHECK(first >= 100000u && first < 600000u,
+                   "matchwait: the first send waits out the window once (%.0f ms)", first/1000.0);
+          for (t=0;t<5;t++){
+              uint64_t s0 = i_rant_plat_now_us(), dt;
+              (void)rant_topic_send(poison, rant_bytes("x",1), NULL);
+              dt = i_rant_plat_now_us() - s0;
+              if (dt > worst) worst = dt;
+              rant_node_poll(A, 2);
+          }
+          ST_CHECK(worst < 50000u, "matchwait: no later send waits on the unresolved peer (worst %.1f ms)",
+                   worst/1000.0);
+          ST_CHECK(rant_topic_match_count(poison)==0, "matchwait: the peer never resolved (%d)",
+                   rant_topic_match_count(poison));
+          /* a subscriber to mw-late appears long after A created it */
+          (void)rant_node_create_topic(B, "mw-late", RANT_SUB_ONLY, NULL, NULL);
+          { uint64_t end = i_rant_plat_now_us() + 500000u;
+            while (i_rant_plat_now_us() < end) rant_node_poll(A, 2); }    /* A hears the candidate */
+          t0 = i_rant_plat_now_us();
+          (void)rant_topic_send(late, rant_bytes("x",1), NULL);
+          first = i_rant_plat_now_us() - t0;
+          ST_CHECK(first < 50000u, "matchwait: a late subscriber never blocks a send (%.1f ms)",
+                   first/1000.0);
+      }
+      g_tx_block_detail_resp_port = 0;
+      if (B) rant_node_stop(B);
+      if (A) rant_node_close(A,1);
+      if (B) rant_node_close(B,1);
+      rant_allocator_reset(&aa); rant_allocator_reset(&ba);
+    }
 #endif
 
 #ifdef RANT_THREADS

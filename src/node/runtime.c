@@ -71,6 +71,7 @@ struct RantTopic {
     uint64_t  tx_msgs, tx_bytes;         /* committed by our sends */
     uint64_t  rx_msgs, rx_bytes;         /* delivered to us, parked excluded */
     uint32_t  resolve_epoch;             /* match_epoch at the last convergence, 0 = never */
+    uint64_t  came_up_us;                /* our last create, role change or retype: the match wait's anchor */
     uint8_t   prefix_bytes;              /* pattern header bytes split into .header, 0 = plain */
     uint8_t   prefix_string;             /* [u8 len][bytes] follows the prefix on a response kind */
     uint8_t   kind;                      /* RantTopicKind */
@@ -1369,6 +1370,7 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
        kind so every creator of the kind splits alike */
     h->prefix_string = (uint8_t)(kind == RANT_KIND_FUNC_RSP || kind == RANT_KIND_TASK_RSP);
     h->role = (uint8_t)role;
+    h->came_up_us = i_rant_plat_now_us();
     h->sys_on_message = sys_msg; h->sys_msg_user = sys_user;
     {   /* the stable name copy, queued views must not point into the arena */
         size_t nl = strlen(name);
@@ -1794,10 +1796,20 @@ static int i_rant_node_gather_done(RantNode *n, uint64_t now){
     return 1;
 }
 
+/* The match wait bridges our own coming up, never a peer's: it ends this long after the
+ * topic's last create, role change or retype. A disabled wait keeps the default window. */
+static uint64_t i_rant_node_match_window_us(RantNode *n){
+    return n->match_wait_us ? n->match_wait_us : (uint64_t)RANT_MATCH_WAIT_MS * 1000u;
+}
+
 /* Would a send now race a forming match: 1 while the gather is unsettled or verdicts are
  * in flight, else 0, memoized against the topology epoch. Lock held. */
 static int i_rant_node_topic_unsettled(RantNode *n, RantTopic *h, uint64_t now){
     if (h->resolve_epoch == n->match_epoch) return 0;   /* converged at this topology */
+    if (now - h->came_up_us >= i_rant_node_match_window_us(n)){   /* a peer's coming up never waits */
+        h->resolve_epoch = n->match_epoch;
+        return 0;
+    }
     if (!i_rant_node_gather_done(n, now)) return 1;
     if (i_rant_node_core_topic_unresolved(n->core, h->index) > 0) return 1;
     h->resolve_epoch = n->match_epoch;
@@ -1826,7 +1838,7 @@ static int i_rant_node_match_wait_done(RantNode *n, void *ctx, uint64_t now, uin
 static int i_rant_node_match_wait(RantNode *n, uint16_t topic_index, RantTopic *h, int loud){
     i_RantMatchWait c; i_RantWait w = { 0 };
     c.h = h; c.index = topic_index; c.matched = 0;
-    c.deadline = i_rant_plat_now_us() + n->match_wait_us;
+    c.deadline = h->came_up_us + n->match_wait_us;   /* the window, however many sends fall in it */
     w.done = i_rant_node_match_wait_done; w.ctx = &c;
     w.cv_cap_us = 50000u;   /* re check the clock: gather settling is partly time driven */
     w.pump_ms   = 1;        /* a nested tick: the lock stays held */
@@ -2232,6 +2244,7 @@ int rant_topic_set_role(RantTopic *topic, RantRole role){
     r = rant_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
     if (r == 0){
         topic->role = (uint8_t)role;
+        topic->came_up_us = i_rant_plat_now_us();
         i_rant_node_readvertise(topic->n);     /* a role flip may raise fresh candidates */
     }
     i_rant_node_unlock(topic->n, acquired);
@@ -2363,6 +2376,7 @@ int i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reli
     if (rc != 0) return rc == -4 ? RANT_ERR_OOM : RANT_ERR_STATE;
     i_rant_node_core_topic_rebound(n->core, idx);
     i_rant_node_core_set_topic_schema(n->core, idx, topic->schema);
+    topic->came_up_us = i_rant_plat_now_us();
     i_rant_node_readvertise(n);
     return RANT_OK;
 }
