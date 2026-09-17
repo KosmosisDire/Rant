@@ -34,7 +34,7 @@ static const char NOTE[]    = "a long unbounded note well over sixteen bytes";
 static const float SAMPLES[] = { 1.5f, -2.25f, 3.75f };
 
 /* build and send one message. false if a setter was refused or the send failed */
-static bool send_one(rant::Topic& pub, const rant::Schema& schema, uint32_t seq) {
+static bool send_one(rant::Publisher<rant::Bytes>& pub, const rant::Schema& schema, uint32_t seq) {
     rant::MessageBuilder s(schema);
     rant::MapWriter mw;
     mw.put_uint("battery", 87).put_int("signed", -5)
@@ -201,9 +201,9 @@ static bool patterns_leg() {
     chk("patterns: remotes created", rf_add.valid() && rf_chk.valid() && rf_defer.valid());
 
     chk("patterns: definition discovered", wait_for(4000,
-        [&] { return rf_add.has_definition() && rf_chk.has_definition() && rf_defer.has_definition(); }, &b));
+        [&] { return rf_add.match_count() > 0 && rf_chk.match_count() > 0 && rf_defer.match_count() > 0; }, &b));
     /* settle B so the rsp lanes from A to B are formed before the first blocking
-     * call, since has_definition proves only the req direction */
+     * call, since match_count proves only the req direction */
     chk("patterns: settle", b.settle(4000));
 
     /* blocking round trip (memcpy-path structs both ways) */
@@ -242,7 +242,7 @@ static bool patterns_leg() {
     chk("patterns: async 1+2=3", wait_for(3000, [&] { return async_done.load(); }, &b)
         && async_sum == 3);
 
-    chk("patterns: caller_count >= 1", def_add.caller_count() >= 1);
+    chk("patterns: definition match_count >= 1", def_add.match_count() >= 1);
 
     /* variables */
     rant::VariableOptions<Speed> vo;
@@ -263,7 +263,7 @@ static bool patterns_leg() {
     chk("var: unforce accepted", vd.unforce() == rant::SendStatus::Ok);
     chk("var: unforce restores absorbed set", wait_for(3000,
         [&] { auto v = rv.get(); return !rv.forced() && v && v->v == 50; }, &b));
-    chk("var: has_definition/remote_count", rv.has_definition() && vd.remote_count() >= 1);
+    chk("var: match_count both sides", rv.match_count() > 0 && vd.match_count() >= 1);
 
     /* variable events: on_change replays + dedups, on_write counts every write */
     std::atomic<int> vchg{ 0 }, vwr{ 0 }; std::atomic<int64_t> vlast{ 0 };
@@ -292,24 +292,30 @@ static bool patterns_leg() {
     chk("codec: flat send", pf.send(Flat{ 7, 2.5f }) == rant::SendStatus::Ok);
     chk("codec: memcpy-path round trip", wait_for(3000, [&] { return flat_ok.load(); }, &b));
 
-    /* typed pub sub, loop path: a padded struct plus a string, via the typed take() */
+    /* typed pub sub, loop path: a padded struct plus a string, with the two argument handler
+       that sees the envelope beside the value */
+    std::atomic<bool> padded_got{ false };
+    Padded      padded_seen{};
+    std::string padded_pub, padded_topic;
     rant::Publisher<Padded>    pp(a, "padded", rel);
-    rant::Subscriber<Padded> sp(b, "padded", rel);
+    rant::Subscriber<Padded> sp(b, "padded", [&](const Padded& v, const rant::MessageView& m) {
+        padded_seen  = v;
+        padded_pub   = std::string(m.publisher_name());
+        padded_topic = std::string(m.topic_name());
+        padded_got   = true;
+    }, rel);
     chk("codec: padded pair created", pp.valid() && sp.valid());
-    (void)sp.take(0);   /* switch to queued delivery before anything arrives */
-    chk("codec: padded matched", wait_for(4000, [&] { return pp.match_count() > 0; }, &b));
+    chk("codec: padded matched", wait_for(4000, [&] { return pp.match_count() > 0 && pp.ready(); }, &b));
     Padded out{};
     out.a = 9; out.b = 0x11223344u; out.c = 777; out.d = -3.5;
     chk("codec: string assign", out.tag.assign("robot"));
     chk("codec: string over-cap refused", !out.tag.assign("well over seven"));
     chk("codec: padded send", pp.send(out) == rant::SendStatus::Ok);
-    auto tm = sp.take(3000);
-    chk("codec: loop-path take round trip", tm.has_value()
-        && tm->value().a == 9 && tm->value().b == 0x11223344u
-        && tm->value().c == 777 && tm->value().d == -3.5
-        && tm->value().tag.view() == "robot");
-    chk("codec: taken envelope", tm.has_value() && tm->publisher_name() == "PA"
-        && tm->topic_name() == "padded");
+    chk("codec: loop-path round trip", wait_for(3000, [&] { return padded_got.load(); }, &b)
+        && padded_seen.a == 9 && padded_seen.b == 0x11223344u
+        && padded_seen.c == 777 && padded_seen.d == -3.5
+        && padded_seen.tag.view() == "robot");
+    chk("codec: envelope beside the value", padded_pub == "PA" && padded_topic == "padded");
 
     /* typed pub sub, schema hash mismatch: a subset subscriber, rebase decode */
     std::atomic<bool> tele_ok{ false };
@@ -532,7 +538,6 @@ static bool stdtypes_leg() {
             !rant::is_nil(u1) && std::memcmp(u1.bytes, u2.bytes, 16) != 0
             && (u1.bytes[6] & 0xF0u) == 0x40u);
         chk("std: now() is Unix-epoch microseconds", rant::now().us > 1600000000000000LL);
-        chk("std: duration helpers", rant::seconds_of(rant::milliseconds(1500)) == 1.5);
     }
     a.stop();
     return g_failures == fails_at_entry;
@@ -589,17 +594,17 @@ static bool value_root_leg() {
     chk("root: string send", ps.send(std::string("a bare unbounded string")) == rant::SendStatus::Ok);
     chk("root: string round trip", wait_for(3000, [&] { return got == "a bare unbounded string"; }, &b));
 
-    /* std::array: a fixed array root, taken through the queue */
+    /* std::array: a fixed array root */
+    std::atomic<bool> a3_got{ false };
+    std::array<float, 3> a3_seen{};
     rant::Publisher<std::array<float, 3>>    pa3(a, "xyz", rel);
-    rant::Subscriber<std::array<float, 3>> sa3(b, "xyz", rel);
-    (void)sa3.take(0);                                  /* queued delivery */
+    rant::Subscriber<std::array<float, 3>> sa3(b, "xyz",
+        [&](const std::array<float, 3>& v) { a3_seen = v; a3_got = true; }, rel);
     chk("root: array pair created", pa3.valid() && sa3.valid());
-    chk("root: array matched", wait_for(4000, [&] { return pa3.match_count() > 0; }, &b));
+    chk("root: array matched", wait_for(4000, [&] { return pa3.match_count() > 0 && pa3.ready(); }, &b));
     chk("root: array send", pa3.send(std::array<float, 3>{ 1.5f, 2.5f, -3.f }) == rant::SendStatus::Ok);
-    {   auto tm = sa3.take(3000);
-        chk("root: array take round trip", tm.has_value() && tm->value()[0] == 1.5f
-            && tm->value()[2] == -3.f);
-    }
+    chk("root: array round trip", wait_for(3000, [&] { return a3_got.load(); }, &b)
+        && a3_seen[0] == 1.5f && a3_seen[2] == -3.f);
 
     /* a variable whose type is a bare double */
     rant::VariableOptions<double> vo;
@@ -619,8 +624,8 @@ static bool value_root_leg() {
     if (f64) {
         std::atomic<int> hits{ 0 };
         double seen = 0;
-        rant::Topic dp(a, "dyn", rant::Role::PubOnly, &*f64, rel);
-        rant::Subscriber<> ds(b, "dyn", &*f64,
+        rant::Publisher<rant::Bytes>  dp(a, "dyn", &*f64, rel);
+        rant::Subscriber<rant::Bytes> ds(b, "dyn", &*f64,
             [&](const rant::MessageView& m) { seen = m.get_f64(""); hits++; }, rel);
         chk("root: dynamic pair created", dp.valid() && ds.valid());
         chk("root: dynamic matched", wait_for(4000, [&] { return dp.match_count() > 0 && dp.ready(); }, &b));
@@ -811,7 +816,7 @@ static bool tasks_leg() {
     rant::RemoteTask<MoveReq, MoveProgress, MoveRsp> rt_fixed(b, "fixed");
     chk("task: remotes created", rt_move.valid() && rt_fixed.valid());
     chk("task: definition discovered", wait_for(4000,
-        [&] { return rt_move.has_definition() && rt_fixed.has_definition(); }, &b));
+        [&] { return rt_move.match_count() > 0 && rt_fixed.match_count() > 0; }, &b));
     chk("task: settle", b.settle(4000));
 
     /* blocking call with progress: the handler defers to a test thread that streams typed
@@ -935,7 +940,165 @@ static bool tasks_leg() {
     return g_failures == fails_at_entry;
 }
 
-int main() {
+/* leg 8: what each codec path costs, run as `rant_cpp_test bench`. The codec alone first
+ * with no node, then one message at a time end to end on loopback with both nodes polled
+ * from this thread, and a C node pair on the same footing as the reference. */
+
+static std::atomic<int> g_bench_recv{ 0 };
+static void bench_c_message(const rant::detail::RantMsg*) { g_bench_recv++; }
+
+template <class F> static double ns_per(int n, F&& f) {
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < n; i++) f();
+    return std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() / n;
+}
+
+/* send, then pump until the message lands, n times. Microseconds per message, negative
+ * when a send was refused (-1) or a message never arrived (-2). */
+template <class Send, class Pump> static double us_per_round_trip(int n, Send&& send, Pump&& pump) {
+    g_bench_recv = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < n; i++) {
+        if (!send()) return -1;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (g_bench_recv.load() <= i) {
+            pump();
+            if (std::chrono::steady_clock::now() > deadline) return -2;
+        }
+    }
+    return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / n;
+}
+
+static bool bench_leg() {
+    bool ok = true;
+    size_t sink = 0;   /* keeps the optimizer from dropping an encode or decode */
+    std::vector<uint8_t> scratch;
+
+    Flat flat{ 7, 2.5f }, flat_out{};
+    Padded padded{}, padded_out{};
+    padded.a = 9; padded.b = 0x11223344u; padded.c = 777; padded.d = -3.5; padded.tag.assign("robot");
+    narrow::Chunk chunk, chunk_out;
+    chunk.seq = 7; chunk.samples = { 1.5f, -2.5f, 8.75f }; chunk.note = "tail";
+    const rant::Schema* ps = rant::priv::schema_of<Padded>();
+    if (!ps) { std::printf("bench: no Padded schema\n"); return false; }
+
+    const int N = 200000;
+    std::printf("bench: codec only, ns per operation, %d each\n", N);
+    std::printf("  %-36s %10s %10s\n", "path", "encode", "decode");
+    auto row = [](const char* name, double a, double b) { std::printf("  %-36s %10.1f %10.1f\n", name, a, b); };
+    {
+        rant::Bytes w = rant::priv::encode(flat, scratch);
+        row("typed memcpy (Flat)",
+            ns_per(N, [&] { sink += rant::priv::encode(flat, scratch).size(); }),
+            ns_per(N, [&] { sink += rant::priv::decode(flat_out, w, nullptr); }));
+    }
+    {
+        std::vector<uint8_t> keep;
+        rant::Bytes w = rant::priv::encode(padded, keep);
+        row("typed loop (Padded, string<7>)",
+            ns_per(N, [&] { sink += rant::priv::encode(padded, scratch).size(); }),
+            ns_per(N, [&] { sink += rant::priv::decode(padded_out, w, nullptr); }));
+    }
+    {
+        std::vector<uint8_t> keep;
+        rant::Bytes w = rant::priv::encode(chunk, keep);
+        row("typed tails (Chunk, f32[] string)",
+            ns_per(N, [&] { sink += rant::priv::encode(chunk, scratch).size(); }),
+            ns_per(N, [&] { sink += rant::priv::decode(chunk_out, w, nullptr); }));
+    }
+    {
+        rant::MessageBuilder one(*ps);
+        one.set_uint("a", 9).set_uint("b", 0x11223344u).set_uint("c", 777).set_f64("d", -3.5).set_string("tag", "robot");
+        rant::Bytes w = one.bytes();
+        row("dynamic (MessageBuilder, FieldView)",
+            ns_per(N, [&] {
+                rant::MessageBuilder mb(*ps);
+                mb.set_uint("a", 9).set_uint("b", 0x11223344u).set_uint("c", 777).set_f64("d", -3.5).set_string("tag", "robot");
+                sink += mb.bytes().size();
+            }),
+            ns_per(N, [&] {   /* the C accessors FieldView forwards to, since a view only exists in a handler */
+                rant::detail::RantBytes d = rant::detail::rant_bytes(w.data(), w.size());
+                const rant::detail::RantSchema* sc = ps->raw();
+                sink += (size_t)(rant::detail::rant_get_uint(d, sc, "a") + rant::detail::rant_get_uint(d, sc, "b")
+                                 + rant::detail::rant_get_uint(d, sc, "c") + (uint64_t)rant::detail::rant_get_f64(d, sc, "d")
+                                 + rant::detail::rant_get_string(d, sc, "tag").len);
+            }));
+    }
+
+    const int M = 2000;
+    std::printf("bench: loopback, one message at a time, both nodes polled here, us per message, %d each\n", M);
+    auto line = [&](const char* name, double us) {
+        std::printf("  %-36s %10.1f%s\n", name, us, us < 0 ? "  (failed)" : "");
+        if (us < 0) ok = false;
+    };
+
+    {   /* the C reference: two C nodes, a typed topic, a C callback that only counts */
+        rant::detail::RantNodeOpts co{};
+        co.domain = 50;
+        co.net.multicast_interface = "127.0.0.1";
+        rant::detail::RantAllocator ca = rant::detail::rant_allocator_heap(0);
+        rant::detail::RantAllocator cb = rant::detail::rant_allocator_heap(0);
+        rant::detail::RantNode* na = rant::detail::rant_node_open(&ca, "CA", nullptr, nullptr, &co);
+        rant::detail::RantNode* nb = rant::detail::rant_node_open(&cb, "CB", bench_c_message, nullptr, &co);
+        auto fs = rant::Schema::compile("Flat { a: u32, b: f32 }");
+        rant::detail::RantTopicOpts to{};
+        rant::detail::RantTopic* ta = na && fs ? rant::detail::rant_node_create_topic(na, "flat", rant::detail::RANT_PUB_ONLY, fs->raw(), &to) : nullptr;
+        rant::detail::RantTopic* tb = nb && fs ? rant::detail::rant_node_create_topic(nb, "flat", rant::detail::RANT_SUB_ONLY, fs->raw(), &to) : nullptr;
+        auto pump = [&] { rant::detail::rant_node_poll(na, 0); rant::detail::rant_node_poll(nb, 0); };
+        bool matched = ta && tb && wait_for(4000, [&] { pump(); return rant::detail::rant_topic_match_count(ta) > 0 && rant::detail::rant_topic_ready(ta) == 1; });
+        line("C (reference)", matched ? us_per_round_trip(M,
+            [&] { return rant::detail::rant_topic_send(ta, rant::detail::rant_bytes(&flat, sizeof flat), nullptr) == (int)rant::SendStatus::Ok; },
+            pump) : -1.0);
+        if (na) rant::detail::rant_node_close(na, 1);
+        if (nb) rant::detail::rant_node_close(nb, 1);
+    }
+
+    rant::NodeOptions opts;
+    opts.domain = 49;
+    opts.multicast_interface = "127.0.0.1";
+    auto on_evt = [](const rant::Event& e) { if (e.is_error()) std::printf("event(bench): %s\n", e.to_string().c_str()); };
+    rant::Node a("BA", {}, on_evt, opts);
+    rant::Node b("BB", {}, on_evt, opts);
+    if (!a.valid() || !b.valid()) { std::printf("bench: nodes failed\n"); return false; }
+    auto pump = [&] { a.poll(0); b.poll(0); };
+    auto matched = [&](auto& pub) { return wait_for(4000, [&] { pump(); return pub.match_count() > 0 && pub.ready(); }); };
+
+    {
+        rant::Publisher<Flat> pub(a, "b/flat");
+        rant::Subscriber<Flat> sub(b, "b/flat", [](const Flat&) { g_bench_recv++; });
+        line("typed memcpy (Flat)", matched(pub) ? us_per_round_trip(M,
+            [&] { return pub.send(flat) == rant::SendStatus::Ok; }, pump) : -1.0);
+    }
+    {
+        rant::Publisher<Padded> pub(a, "b/padded");
+        rant::Subscriber<Padded> sub(b, "b/padded", [](const Padded&) { g_bench_recv++; });
+        line("typed loop (Padded, string<7>)", matched(pub) ? us_per_round_trip(M,
+            [&] { return pub.send(padded) == rant::SendStatus::Ok; }, pump) : -1.0);
+    }
+    {
+        rant::Publisher<narrow::Chunk> pub(a, "b/chunk");
+        rant::Subscriber<narrow::Chunk> sub(b, "b/chunk", [](const narrow::Chunk&) { g_bench_recv++; });
+        line("typed tails (Chunk, f32[] string)", matched(pub) ? us_per_round_trip(M,
+            [&] { return pub.send(chunk) == rant::SendStatus::Ok; }, pump) : -1.0);
+    }
+    {
+        rant::Publisher<rant::Bytes>  pub(a, "b/dyn", ps);
+        rant::Subscriber<rant::Bytes> sub(b, "b/dyn", ps, [&](const rant::MessageView& v) {
+            sink += (size_t)(v.get_uint("a") + v.get_uint("b") + v.get_uint("c") + (uint64_t)v.get_f64("d") + v.get_string("tag").size());
+            g_bench_recv++;
+        });
+        line("dynamic (MessageBuilder, FieldView)", matched(pub) ? us_per_round_trip(M, [&] {
+                rant::MessageBuilder mb(*ps);
+                mb.set_uint("a", 9).set_uint("b", 0x11223344u).set_uint("c", 777).set_f64("d", -3.5).set_string("tag", "robot");
+                return pub.send(mb) == rant::SendStatus::Ok;
+            }, pump) : -1.0);
+    }
+    std::printf("bench: %s (sink %zu)\n", ok ? "PASS" : "FAIL", sink);
+    return ok;
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "bench") == 0) return bench_leg() ? 0 : 2;
 #if defined(__cpp_exceptions)
   try {
 #endif
@@ -955,12 +1118,12 @@ int main() {
     };
 
     rant::Node a("A", {}, on_evt("A"), opts);
-    rant::Node b("B", on_msg, on_evt("B"), opts);
+    rant::Node b("B", {}, on_evt("B"), opts);
     if (!a.valid() || !b.valid()) { std::printf("FAIL: node construction\n"); return 1; }
 
-    auto pub = rant::Topic(a, "t", rant::Role::PubOnly, &*schema, { rant::Reliability::Reliable });
-    auto sub = b.create_topic("t", rant::Role::SubOnly, &*schema, { rant::Reliability::Reliable });
-    (void)sub;
+    rant::Publisher<rant::Bytes>  pub(a, "t", &*schema, { rant::Reliability::Reliable });
+    rant::Subscriber<rant::Bytes> sub(b, "t", &*schema, on_msg, { rant::Reliability::Reliable });
+    if (!pub.valid() || !sub.valid()) { std::printf("FAIL: topic construction\n"); return 1; }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     uint32_t seq = 0;
@@ -986,7 +1149,7 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     if (!g.received || g.note != NOTE) { std::printf("FAIL: threaded delivery\n"); return 3; }
     a.stop(); b.stop();
-    std::printf("PASS: threaded delivery via start() (evicted_unsent=%u)\n", a.evicted_unsent());
+    std::printf("PASS: threaded delivery via start() (evicted_unsent=%u)\n", a.stats().evicted_unsent);
 
     /* patterns + typed codec leg */
     std::printf("patterns leg:\n");

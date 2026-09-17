@@ -31,31 +31,31 @@ clang++, clang-cl and MSVC.
 ## A node
 
 ```cpp
-rant::Node node("robot1",
-    [](const rant::MessageView& m){ /* every delivery */ },
+rant::Node node("robot1", {},
     [](const rant::Event& e){ std::fprintf(stderr, "%s\n", e.to_string().c_str()); },
     { .domain = 7 });
-rant::Topic chat(node, "chat", rant::Role::PubSub, nullptr,
-                 { .reliability = rant::Reliability::Reliable });
+rant::Qos reliable{ rant::Reliability::Reliable };
+rant::Publisher<rant::Bytes>  out(node, "chat", nullptr, reliable);
+rant::Subscriber<rant::Bytes> in(node, "chat", nullptr,
+    [](const rant::MessageView& m){ /* every delivery on chat */ }, reliable);
 node.start();
-chat.send("hello");
+out.send("hello");
 ```
 
-The message handler may be empty, since typed subscribers and pattern handles carry their
-own. The event handler is required. Options are plain structs mirroring the C ones, and
-all zero means every default. `Qos::queue_bytes`, `Qos::max_rate_hz` and
+The node's message handler may be empty, since every subscriber and pattern handle carries
+its own. The event handler is required. Options are plain structs mirroring the C ones,
+and all zero means every default. `Qos::queue_bytes`, `Qos::max_rate_hz` and
 `Qos::no_timestamp` are the C fields of the same meaning.
 
 Every failed constructor throws `rant::Error`, which carries the error kind, the OS errno
 of a socket fault and the formatted text as `what()`. With `-fno-exceptions` nothing
-throws: the object is not `valid()` and `Node::last_open_error()` holds the text. Data
-path results are `SendStatus` and the status enums in both modes.
+throws: the object is not `valid()` and `node.last_error()` holds the text. Data path
+results are `SendStatus` and the status enums in both modes.
 
 `poll(timeout_ms)` runs one loop tick, or `start()` runs the C service thread and
 `stop()` joins it. `settle()` blocks until discovery and matching have converged, call it
 after creating the topics. From inside a handler, sends and read only queries are
-allowed, and poll, topic create, set_role, drain and stop are refused with
-`SendStatus::State`. `dispatch_all()` drains every queued topic on the calling thread.
+allowed, and poll, create, drain and stop are refused with `SendStatus::State`.
 
 Memory is configured on `NodeOptions::memory`: a buffer plus size means static mode, where
 the node draws all its memory from the buffer, never grows, and turns the shared memory
@@ -64,10 +64,16 @@ path off. A typed topic copies its schema into that buffer, so pair it with the
 
 ## Topics and messages
 
-`Topic(node, name, role, schema, qos)` creates a topic or shares the same name slot with
-a widened role. A live same name topic with a different schema refuses, so `retire()` the
-old one first to retype a name. After a successful retire every handle sharing the slot is
-invalid and the next construction of the name creates fresh.
+Every handle is a template over its message type, and `rant::Bytes` as the type argument
+is the raw form: `Publisher<rant::Bytes>(node, name, schema, qos)` sends a `MessageBuilder`
+or any bytes, `Subscriber<rant::Bytes>(node, name, schema, handler, qos)` delivers a
+`MessageView` that reads fields by name. A null schema means untyped bytes. A publisher
+and a subscriber of the same name share one topic slot with a widened role. A live same
+name topic with a different schema refuses, so `retire()` the old one first to retype a
+name. After a successful retire every handle sharing the slot is invalid and the next
+construction of the name creates fresh. `match_count()` on any handle counts the matched
+counterparts, and `drain(timeout_ms)` on a publisher waits until every reader has acked,
+the flush before close.
 
 `Bytes` is a non owning view. It constructs from `std::string_view`, `std::string`, a C
 string or any contiguous range of byte sized elements, and converts to `string_view`,
@@ -77,14 +83,9 @@ pass their raw bytes with `Bytes(ptr, len)`.
 `Schema::compile(text)` returns an empty optional on error and fills an optional error
 string. `MessageBuilder` sets fields by name or dotted path, grows for variable fields,
 and refuses an over cap value by flipping `ok()` to false rather than truncating. Reads go
-through `FieldView`, the surface shared by `MessageView`, `Message<>`, `Request<>` and
-`ResponseView<>`, so a typed read looks the same everywhere.
-
-`take()` and `dispatch()` switch a topic to queued delivery, as in docs/node.md. A
-`Message<>` from `take()` owns its envelope but its data views point into the ring and
-stay valid until the next take or dispatch on that topic. A typed `Message<T>` owns the
-decoded value. Handlers run by `dispatch()` execute on the calling thread without the
-node lock and may use the full API.
+through `FieldView`, the surface shared by `MessageView`, `Request<rant::Bytes>` and
+`ResponseView<rant::Bytes>`, so a typed read looks the same everywhere. Every handler
+fires on the polling thread, and the views it receives are valid for the callback only.
 
 A map field is written with `MapWriter` and read with `MapReader`, thin layers over the C
 map codec. `MapReader::to_map()` decodes the whole tree into an owning `MapDict` of
@@ -143,9 +144,9 @@ names the type, and `RANT_STD_ALIAS(T, R)` names a type that copies as `R`.
 
 The typed handles are `FunctionDefinition<Req, Rsp>`, `RemoteFunction<Req, Rsp>`,
 `TaskDefinition<Req, Prg, Rsp>`, `RemoteTask<Req, Prg, Rsp>`, `VariableDefinition<T>` and
-`RemoteVariable<T>`. Each has an untyped `<>` twin over `Bytes`, used by the bridge and
-the explorer. Every handle is thin and non owning: the entity lives in the node until
-close.
+`RemoteVariable<T>`. With `rant::Bytes` as every type argument the same handle is the raw
+form over DSL schemas, used by the bridge. Every handle is thin and non owning: the entity
+lives in the node until close.
 
 A function handler is either `Rsp(const Req&)`, where the return value is the reply, or
 `void(const Req&, Request<Rsp>&)`, which replies, fails or defers explicitly. Returning
@@ -166,7 +167,7 @@ definition.
 A blocking `call()` waits on the service thread's progress under `start()` and drives
 the node loop otherwise. From a callback it is refused with `SendStatus::State`, so use
 `call_async()` there. A
-`Response<>` owns its payload, and `message()` is the provider's text or the default
+`Response` owns its payload, and `message()` is the provider's text or the default
 status text on any non OK outcome. On a task, the timeout bounds only the wait for the
 first response, `CallOptions::id_out` receives the call id at commit so another thread
 can `cancel()`, and `cancel()` answers `BadRole` when the provider declared no cancel
@@ -195,8 +196,9 @@ are valid for the callback only. Call it once per level from setup.
 `meta_request(peer, handler, sections)` sends a directed `@rant/meta` call and decodes the
 reply into an owning `MetaSnapshot`: the node and proc scalars are pulled out and the whole
 body stays in `info` as a `MapDict`. `sections` is a mask of `MetaSection` bits, 0 for all.
-`meta()` is the raw caller handle for anything else.
 
 `peers()`, `entities(peer)` and `mesh()` return owned snapshots, as in docs/reflection.md.
 An `Entity` name is the hash placeholder until the peer's details arrive.
-`mesh_generation()` bumps on every reflected change, so a UI re walks only when it moved.
+`mesh_epoch()` bumps on every reflected change, so a UI re walks only when it moved.
+`stats()` is the node's own counters: memory, the reliable send waits and the sends that
+evicted never sent history.

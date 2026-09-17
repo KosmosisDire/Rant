@@ -55,11 +55,13 @@ int main(int argc, char** argv) {
 #if defined(__cpp_exceptions)
   try {
 #endif
-    rant::Node node(name ? name : std::string_view{}, handle_message, handle_event);
-    if (!node.valid()) { std::fprintf(stderr, "node: %s\n", rant::Node::last_open_error().c_str()); return 1; }
+    rant::Node node(name ? name : std::string_view{}, {}, handle_event);
+    if (!node.valid()) { std::fprintf(stderr, "node: %s\n", node.last_error().c_str()); return 1; }
 
-    rant::Topic chat(node, "chat", rant::Role::PubSub, &*schema,
-                     { rant::Reliability::Reliable });
+    /* a publisher and a subscriber on the same name share one topic slot */
+    rant::Qos reliable{ rant::Reliability::Reliable };
+    rant::Publisher<rant::Bytes>  chat(node, "chat", &*schema, reliable);
+    rant::Subscriber<rant::Bytes> incoming(node, "chat", &*schema, handle_message, reliable);
     node.start();   /* background poll thread. Sends and creates are thread safe now */
 
     std::printf("typed chat on topic 'chat'. type a line to publish; ctrl-d/z to quit.\n");

@@ -33,7 +33,8 @@
 #if defined(__cpp_exceptions)
 #include <stdexcept>
 #endif
-#if defined(__has_include) && __has_include(<span>)
+#if defined(__has_include) && __has_include(<span>) && \
+    (__cplusplus >= 202002L || (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L))
 #include <span>
 #endif
 
@@ -125,29 +126,29 @@ static_assert((int)EntityKind::Task == detail::RANT_ENTITY_TASK, "entity enum dr
 #endif
 static_assert((int)LogLevel::Info == detail::RANT_LOG_INFO, "log-level enum drift");
 
-/* forward decls */
+/* forward decls. Every handle is a template over the message type, and the type argument
+ * rant::Bytes is the raw form that carries a DSL schema and reads through MessageView. */
 class Node;
-class Topic;
 class MessageView;
 class Event;
 class Schema;
-template <class T = void> class Message;
-template <class Req = void, class Rsp = void> class FunctionDefinition;
-template <class Req = void, class Rsp = void> class RemoteFunction;
-template <class Req = void, class Prg = void, class Rsp = void> class TaskDefinition;
-template <class Req = void, class Prg = void, class Rsp = void> class RemoteTask;
-template <class T = void> class VariableDefinition;
-template <class T = void> class RemoteVariable;
+namespace priv { class TopicCore; }
+template <class Req, class Rsp> class FunctionDefinition;
+template <class Req, class Rsp> class RemoteFunction;
+template <class Req, class Prg, class Rsp> class TaskDefinition;
+template <class Req, class Prg, class Rsp> class RemoteTask;
+template <class T> class VariableDefinition;
+template <class T> class RemoteVariable;
 class VariableUpdate;
-template <class T = void> class Publisher;
-template <class T = void> class Subscriber;
-template <class Rsp = void> class Request;
-template <class Rsp = void> class Deferred;
-template <class Prg = void, class Rsp = void> class TaskRequest;
-template <class Prg = void, class Rsp = void> class PendingTask;
-template <class Prg = void> class ProgressView;
-template <class Rsp = void> class Response;
-template <class Rsp = void> class ResponseView;
+template <class T> class Publisher;
+template <class T> class Subscriber;
+template <class Rsp> class Request;
+template <class Rsp> class Deferred;
+template <class Prg, class Rsp> class TaskRequest;
+template <class Prg, class Rsp> class PendingTask;
+template <class Prg> class ProgressView;
+template <class Rsp> class Response;
+template <class Rsp> class ResponseView;
 
 /* The one exception type, thrown by failed constructors only. Carries the error kind, the
  * OS errno of a socket fault and the formatted text. Never thrown under -fno-exceptions. */
@@ -283,7 +284,7 @@ struct NodeOptions {
     bool                     fetch_details        = false;   /* fetch every peer topic's schema */
     int32_t                  match_wait_ms        = 0;   /* 0 = 1 s, negative = drop loudly */
     /* networking (all optional) */
-    /* built in observability, all on by default (Node::log, Node::on_log, Node::meta) */
+    /* built in observability, all on by default (Node::log, Node::on_log, Node::meta_request) */
     bool                     disable_logs         = false; /* strip the @rant/log/{error,warn,info}
                                                               topics (saves their history memory) */
     bool                     disable_meta         = false; /* do not host the @rant/meta endpoint */
@@ -340,9 +341,9 @@ struct CallOptions {
     uint32_t* id_out   = nullptr;   /* receives the call id at commit (before any wait): the
                                        handle for RemoteTask::cancel from another thread */
 };
-/* VariableOptions<T> for the typed definition, VariableOptions<> the untyped twin whose
+/* VariableOptions<T> for the typed definition, VariableOptions<Bytes> the raw twin whose
  * initial value is raw Bytes. */
-template <class T = void> struct VariableOptions {
+template <class T> struct VariableOptions {
     std::optional<T> initial{};              /* the value before any set */
     bool     read_only            = false;   /* no set channel: remote sets get BadRole */
     bool     allow_force          = false;   /* permit force (local + remote) */
@@ -350,7 +351,7 @@ template <class T = void> struct VariableOptions {
     uint16_t keep_last            = 0;   /* both channels' repair window, 0 = 10 */
     uint32_t backpressure_wait_us = 0;       /* 0 = 1s */
 };
-template <> struct VariableOptions<void> {
+template <> struct VariableOptions<Bytes> {
     Bytes    initial{};
     bool     read_only            = false;
     bool     allow_force          = false;
@@ -674,7 +675,7 @@ inline MapDict MapReader::to_map() const {
 }
 
 /* A mutable message buffer bound to a Schema. Set fields by name or dotted path, then pass
- * it to Topic::send. Variable fields grow the buffer, an over cap value flips ok() false. */
+ * it to Publisher<Bytes>::send. Variable fields grow the buffer, an over cap value flips ok() false. */
 class MessageBuilder {
 public:
     explicit MessageBuilder(const Schema& s) : schema_(s.raw()), buf_(detail::rant_schema_msg_min(s.raw())) {
@@ -742,7 +743,7 @@ private:
 };
 
 /* The shared read surface over payload bytes and a schema, derived by MessageView,
- * Message<>, Request<> and ResponseView<>. Reads are meaningful only when has_schema(). */
+ * Request<Bytes> and ResponseView<Bytes>. Reads are meaningful only when has_schema(). */
 class FieldView {
 public:
     Bytes            data() const { return { d_.data, d_.len }; }
@@ -779,9 +780,6 @@ public:
     std::string_view publisher_name() const { return { msg_->publisher_name.data,  msg_->publisher_name.len  }; }
     uint32_t         publisher_id()   const { return msg_->publisher_id; }
     std::string_view topic_name()     const { return { msg_->topic_name.data, msg_->topic_name.len }; }
-    uint16_t         topic_index()    const { return msg_->topic_index; }
-    /* the pattern-header bytes in front of the payload ({NULL,0} on a plain topic) */
-    Bytes            header()         const { return { msg_->header.data, msg_->header.len }; }
     /* node monotonic us when the poll RECEIVED it (queued: at enqueue), so paced
      * consumers measure true arrival times, never their own cadence */
     uint64_t         recv_us()        const { return msg_->recv_us; }
@@ -885,27 +883,6 @@ struct LogLine {
     uint64_t         recv_us = 0;
     uint64_t         written_us = 0;
     std::string_view text;
-};
-
-/* A message popped from a consumer queue. Message<> owns the envelope while its views point
- * into the ring until the next take or dispatch. Message<T> owns the decoded T outright. */
-template <> class Message<void> : public FieldView {
-public:
-    Message() = default;
-    bool valid() const noexcept { return ok_; }
-    explicit operator bool() const noexcept { return ok_; }
-    std::string_view publisher_name() const { return { m_.publisher_name.data,  m_.publisher_name.len  }; }
-    uint32_t         publisher_id()   const { return m_.publisher_id; }
-    std::string_view topic_name()     const { return { m_.topic_name.data, m_.topic_name.len }; }
-    uint16_t         topic_index()    const { return m_.topic_index; }
-    Bytes            header()         const { return { m_.header.data, m_.header.len }; }
-    uint64_t         recv_us()        const { return m_.recv_us; }   /* arrival stamp */
-    uint64_t         written_us()        const { return m_.written_us; }   /* source stamp */
-private:
-    void bind() { d_ = m_.data; s_ = m_.schema; ok_ = true; }
-    detail::RantMsg m_{};
-    bool ok_ = false;
-    friend class Topic;
 };
 
 /* The RANT_SCHEMA reflection and the typed codec. RANT_SCHEMA specializes rant::reflect<T>,
@@ -1022,9 +999,6 @@ inline bool operator<(Timestamp a, Timestamp b) { return a.us < b.us; }
 inline Duration  operator-(Timestamp a, Timestamp b) { return Duration{ a.us - b.us }; }
 inline Timestamp operator+(Timestamp t, Duration d) { return Timestamp{ t.us + d.us }; }
 inline bool operator==(Duration a, Duration b) { return a.us == b.us; }
-inline Duration milliseconds(int64_t ms) { return Duration{ ms * 1000 }; }
-inline Duration seconds(double s) { return Duration{ (int64_t)(s * 1000000.0) }; }
-inline double seconds_of(Duration d) { return (double)d.us / 1000000.0; }
 /* 0xRRGGBBAA both ways, the order you read in CSS */
 inline Color color_from_hex(uint32_t rgba) {
     return Color{ (uint8_t)(rgba >> 24), (uint8_t)(rgba >> 16), (uint8_t)(rgba >> 8), (uint8_t)rgba };
@@ -1694,17 +1668,19 @@ template <class T> bool decode(T& out, Bytes data, const detail::RantSchema* sch
 
 }   /* namespace priv */
 
-/* The untyped topic with an explicit role and Bytes payloads, the base of Publisher<T> and
- * Subscriber<T>. Thin and non owning. Same name constructions share the slot. */
-class Topic {
+namespace priv {
+
+/* The name slot under Publisher<Bytes> and Subscriber<Bytes>: one C topic per name, its
+ * role widened as handles join. Thin and non owning. */
+class TopicCore {
 public:
-    Topic() = default;
+    TopicCore() = default;
     /* Create (or share) a topic on `node`. Throws rant::Error on failure (with
      * -fno-exceptions: check valid()). schema is copied into the node. */
-    Topic(Node& node, std::string_view name, Role role = Role::PubSub,
-          const Schema* schema = nullptr, const Qos& qos = {});
+    TopicCore(Node& node, std::string_view name, Role role = Role::PubSub,
+              const Schema* schema = nullptr, const Qos& qos = {});
     /* The same, typed by the mesh (see reflect_from_mesh). */
-    Topic(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos = {});
+    TopicCore(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos = {});
 
     bool valid() const noexcept { return ch_ != nullptr; }
     /* A reflect_from_mesh topic: re read the mesh and re type in place if what it took has
@@ -1721,11 +1697,6 @@ public:
         return static_cast<SendStatus>(
             detail::rant_topic_send(ch_, detail::rant_bytes(data.data(), data.size()), &o));
     }
-    SendStatus set_role(Role r) {
-        if (!ch_) return SendStatus::NoTopic;
-        return static_cast<SendStatus>(
-            detail::rant_topic_set_role(ch_, static_cast<detail::RantRole>(r)));
-    }
     /* Retire the topic so the name can be re created with another schema (docs/topics.md).
      * Every handle sharing the slot is invalid after Ok. Refused with State from a callback. */
     SendStatus retire();
@@ -1736,11 +1707,6 @@ public:
     int match_count() const {
         if (!ch_) return 0;
         return detail::rant_topic_match_count(ch_);
-    }
-    /* Unresolved candidate matches right now. 0 = matching has converged for every known peer. */
-    int pending_count() const {
-        if (!ch_) return 0;
-        return detail::rant_topic_pending_count(ch_);
     }
     /* 1 when a send would not wait: a subscriber is matched, or matching has converged
      * so there is nobody to wait for. The async form of the send-path match wait. */
@@ -1755,30 +1721,6 @@ public:
         return detail::rant_topic_drain(ch_, timeout_ms) == 1;
     }
 
-    /* The consumer queue. The first take or dispatch switches the topic to queued delivery,
-     * consumed by one thread of your choosing (docs/node.md). */
-
-    /* Pop the next queued message. timeout_ms 0 = just check, positive = wait that long,
-     * negative = wait indefinitely. An empty optional = nothing arrived in time. */
-    std::optional<Message<>> take(int timeout_ms = 0) {
-        Message<> t;
-        if (!ch_ || detail::rant_topic_take(ch_, &t.m_, timeout_ms) != 1) return std::nullopt;
-        t.bind();
-        return t;
-    }
-    /* Drain the queue by running the node's handler on the calling thread, oldest first, up to
-     * max_msgs (0 = all), waiting like take. These handlers run without the node lock. */
-    int dispatch(int max_msgs = 0, int timeout_ms = 0) {
-        if (!ch_) return 0;
-        return detail::rant_topic_dispatch(ch_, max_msgs, timeout_ms);
-    }
-    struct QueueStats { uint32_t messages = 0, bytes = 0, capacity = 0, dropped = 0; };
-    QueueStats queue_stats() const {
-        QueueStats s;
-        if (ch_) detail::rant_topic_queue_stats(ch_, &s.messages, &s.bytes, &s.capacity, &s.dropped);
-        return s;
-    }
-
     /* Cumulative traffic counters (always on): messages/bytes this node committed to the
      * topic (tx) and delivered from it (rx). Also carried in the @rant/meta snapshot. */
     struct Counts { uint64_t tx_msgs = 0, tx_bytes = 0, rx_msgs = 0, rx_bytes = 0; };
@@ -1789,20 +1731,21 @@ public:
     }
 
 private:
-    Topic(Node& node, std::string_view name, Role role, const Schema* schema, const Qos& qos, bool reflect);
+    TopicCore(Node& node, std::string_view name, Role role, const Schema* schema, const Qos& qos, bool reflect);
 
-    explicit Topic(detail::RantTopic* c, void* impl = nullptr) : ch_(c), impl_(impl) {}
     detail::RantTopic* ch_ = nullptr;
     void* impl_ = nullptr;   /* the owning Node::Impl (Node is incomplete here), so
                                 retire() can forget the wrapper's name-cache entry */
-    friend class Node;
+    friend class ::rant::Node;
 };
+
+}   /* namespace priv */
 
 #ifndef RANT_NO_PATTERNS
 
 /* A parked function reply from Request::defer. Movable and single shot, completed from any
  * thread. Dropping it leaves the caller to its timeout. */
-template <> class Deferred<void> {
+template <> class Deferred<Bytes> {
 public:
     Deferred() = default;
     Deferred(Deferred&& o) noexcept : fn_(o.fn_), token_(o.token_) { o.fn_ = nullptr; o.token_ = 0; }
@@ -1843,7 +1786,7 @@ private:
 
 /* The untyped request seen by a function handler, valid for the callback only. Reply once,
  * or defer() and complete later. Returning without a reply acknowledges Ok empty. */
-template <> class Request<void> : public FieldView {
+template <> class Request<Bytes> : public FieldView {
 public:
     std::string_view function_name() const { return { rq_->function_name.data, rq_->function_name.len }; }
     uint32_t         caller()        const { return rq_->caller; }
@@ -1859,7 +1802,7 @@ public:
         detail::rant_request_fail(rq_, m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
     }
     /* Park the reply and return now. The Deferred completes the call later from any thread. */
-    Deferred<> defer() { return Deferred<>(fn_, detail::rant_request_defer(rq_)); }
+    Deferred<Bytes> defer() { return Deferred<Bytes>(fn_, detail::rant_request_defer(rq_)); }
 
 private:
     Request(detail::RantRequest* rq, detail::RantFunction* fn)
@@ -1871,7 +1814,7 @@ private:
 
 /* A deferred task call in flight from TaskRequest::defer, movable into any thread the app
  * owns. The verb contract is in docs/cpp.md and docs/tasks.md. */
-template <> class PendingTask<void, void> {
+template <> class PendingTask<Bytes, Bytes> {
 public:
     PendingTask() = default;
     PendingTask(PendingTask&& o) noexcept : fn_(o.fn_), token_(o.token_) { o.fn_ = nullptr; o.token_ = 0; }
@@ -1923,9 +1866,9 @@ private:
     template <class A, class B> friend class TaskRequest;
 };
 
-/* The untyped request seen by a task handler: Request<> plus the task verbs. Answer inline,
+/* The untyped request seen by a task handler: Request<Bytes> plus the task verbs. Answer inline,
  * or start() and defer() and return. Returning with nothing answers AppError. */
-template <> class TaskRequest<void, void> : public FieldView {
+template <> class TaskRequest<Bytes, Bytes> : public FieldView {
 public:
     std::string_view task_name()   const { return { rq_->function_name.data, rq_->function_name.len }; }
     uint32_t         caller()      const { return rq_->caller; }
@@ -1941,7 +1884,7 @@ public:
     /* send RUNNING to the caller now, idempotent. defer() implies it */
     SendStatus start() { return static_cast<SendStatus>(detail::rant_request_start(rq_)); }
     /* park the call and return now: the returned PendingTask carries it to completion */
-    PendingTask<> defer() { return PendingTask<>(fn_, detail::rant_request_defer(rq_)); }
+    PendingTask<Bytes, Bytes> defer() { return PendingTask<Bytes, Bytes>(fn_, detail::rant_request_defer(rq_)); }
 
 private:
     TaskRequest(detail::RantRequest* rq, detail::RantFunction* fn)
@@ -1951,9 +1894,9 @@ private:
     template <class A, class B, class C> friend class TaskDefinition;
 };
 
-/* An owning function call outcome from RemoteFunction<>::call. send_status() carries a
+/* An owning function call outcome from RemoteFunction<Bytes, Bytes>::call. send_status() carries a
  * synchronous refusal when the call never launched. */
-template <> class Response<void> {
+template <> class Response<Bytes> {
 public:
     Response() = default;
     CallStatus status()      const { return st_; }
@@ -1980,8 +1923,8 @@ private:
     template <class A, class B, class C> friend class RemoteTask;
 };
 
-/* ResponseView<> (untyped): the async outcome, valid for the callback only. */
-template <> class ResponseView<void> : public FieldView {
+/* ResponseView<Bytes> (untyped): the async outcome, valid for the callback only. */
+template <> class ResponseView<Bytes> : public FieldView {
 public:
     CallStatus status()   const { return static_cast<CallStatus>(r_->status); }
     bool       ok()       const { return r_->status == detail::RANT_CALL_OK; }
@@ -2001,7 +1944,7 @@ private:
 
 /* One progress update for a task caller's on_progress, valid for the callback only. The
  * RUNNING ack fires it once with has_value() false, and field reads need has_value(). */
-template <> class ProgressView<void> : public FieldView {
+template <> class ProgressView<Bytes> : public FieldView {
 public:
     uint32_t call_id()    const { return p_->call_id; }
     uint32_t provider()   const { return p_->provider; }   /* the peer working the call */
@@ -2019,10 +1962,10 @@ namespace priv {
 /* one in flight async call's callbacks, owned by the registry until the one terminal
  * outcome fires. Task progress never frees it. */
 struct AsyncBox {
-    std::function<void(const ResponseView<>&)> cb;
+    std::function<void(const ResponseView<Bytes>&)> cb;
     std::mutex*                mu;     /* the node Impl's registry lock */
     std::unordered_set<void*>* live;   /* the node Impl's outstanding-box set */
-    std::function<void(const ProgressView<>&)> on_progress;   /* task calls only */
+    std::function<void(const ProgressView<Bytes>&)> on_progress;   /* task calls only */
 };
 }
 
@@ -2110,10 +2053,10 @@ struct MetaSnapshot {
         }
         return s;
     }
-    static MetaSnapshot decode(const Response<>& r) {
+    static MetaSnapshot decode(const Response<Bytes>& r) {
         return decode(r.status(), r.provider(), r.data(), r.raw_schema());
     }
-    static MetaSnapshot decode(const ResponseView<>& r) {
+    static MetaSnapshot decode(const ResponseView<Bytes>& r) {
         return decode(r.status(), r.provider(), r.data(), r.raw_schema());
     }
 };
@@ -2187,37 +2130,12 @@ public:
     bool valid() const noexcept { return impl_ != nullptr && impl_->node != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* Why the most recent construction failed (also what a thrown rant::Error carries):
-       the formatted one-line reason, and its machine-readable ErrorKind. */
-    static std::string last_open_error() {
-        detail::RantEvent e = detail::rant_last_error(nullptr);
-        char b[192]; return detail::rant_event_str(&e, b, sizeof b);
-    }
-    static ErrorKind last_open_error_kind() {
-        return static_cast<ErrorKind>(detail::rant_last_error(nullptr).error);
-    }
-
     Node(Node&&) noexcept = default;
     Node& operator=(Node&&) noexcept = default;
     Node(const Node&) = delete;
     Node& operator=(const Node&) = delete;
     ~Node() = default;   /* teardown lives in Impl::~Impl so a move assign tears down too. It stops
                             the service thread and closes with a BYE */
-
-    /* Rebind a handler set at construction. Rarely needed. */
-    Node& on_message(MessageHandler h) { if (impl_) impl_->on_msg = std::move(h);   return *this; }
-    Node& on_event  (EventHandler   h) { if (impl_ && h) impl_->on_event = std::move(h); return *this; }
-
-    /* Create or share a topic, the same as the Topic constructor. */
-    Topic create_topic(std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos = {});
-    Topic create_topic(std::string_view name, Role role = Role::PubSub,
-                       const Schema* schema = nullptr, const Qos& qos = {});
-
-    /* Recover an already-created topic handle by its creation index. */
-    Topic topic(uint16_t index) const {
-        if (!valid()) return Topic();
-        return Topic(detail::rant_node_topic(impl_->node, index), impl_.get());
-    }
 
     /* One loop tick: discovery, receive, timers and queued sends. Blocks up to timeout_ms in
      * the socket wait, 0 = non blocking. Refused while start() runs. */
@@ -2237,26 +2155,6 @@ public:
     bool settle(int timeout_ms = -1) {
         return valid() && detail::rant_node_settle(impl_->node, timeout_ms) == 1;
     }
-
-    /* Dispatch every queued topic on the calling thread, waiting up to timeout_ms for any to
-     * hold data. The one liner for a frame paced consumer. */
-    int dispatch(int max_msgs = 0, int timeout_ms = 0) {
-        if (!valid()) return 0;
-        return detail::rant_node_dispatch(impl_->node, max_msgs, timeout_ms);
-    }
-
-    /* The number of known peers, allocation free (safe from any callback). */
-    uint16_t peer_count() const {
-        if (!valid()) return 0;
-        uint16_t count = 0;
-        LockGuard guard(impl_->node);
-        detail::RantIter it; std::memset(&it, 0, sizeof it);
-        detail::RantPeerInfo p;
-        while (detail::rant_node_peers_next(impl_->node, &it, &p)) count++;
-        return count;
-    }
-
-    static constexpr uint32_t Self = 0;   /* the peer id that means this node */
 
     /* "Who is here": every discovered peer, a copied snapshot. */
     std::vector<Peer> peers() const {
@@ -2285,9 +2183,9 @@ public:
         return out;
     }
 
-    /* "What a node offers": the entities one node advertises, Self for this one. An
+    /* "What a node offers": the entities one node advertises, peer 0 for this one. An
      * observer-grade call: it copies every schema. */
-    std::vector<Entity> entities(uint32_t peer = Self) const {
+    std::vector<Entity> entities(uint32_t peer = 0) const {
         std::vector<Entity> out;
         if (!valid()) return out;
         LockGuard guard(impl_->node);
@@ -2322,21 +2220,23 @@ public:
     /* Bumps on every reflected change anywhere in the mesh: re-walk iff it moved. */
     uint32_t mesh_epoch() const { return valid() ? detail::rant_node_mesh_epoch(impl_->node) : 0; }
 
-    struct MemoryStats { size_t in_use = 0, peak = 0; uint64_t alloc_calls = 0; };
-    MemoryStats memory_stats() const {
-        MemoryStats s;
-        if (valid()) detail::rant_node_mem_stats(impl_->node, &s.in_use, &s.peak, &s.alloc_calls);
+    /* This node's own counters: memory, the reliable send waits, and the sends that evicted
+     * never sent history after the bounded wait (the send burst indicator). */
+    struct Stats {
+        size_t   memory_in_use = 0, memory_peak = 0;
+        uint64_t alloc_calls = 0;
+        uint64_t backpressure_waited_us = 0;
+        uint32_t backpressure_waited_sends = 0;
+        uint32_t evicted_unsent = 0;
+    };
+    Stats stats() const {
+        Stats s;
+        if (!valid()) return s;
+        detail::rant_node_mem_stats(impl_->node, &s.memory_in_use, &s.memory_peak, &s.alloc_calls);
+        detail::rant_node_backpressure_stats(impl_->node, &s.backpressure_waited_us, &s.backpressure_waited_sends);
+        s.evicted_unsent = detail::rant_node_evicted_unsent(impl_->node);
         return s;
     }
-    struct BackpressureStats { uint64_t waited_us = 0; uint32_t waited_sends = 0; };
-    BackpressureStats backpressure_stats() const {
-        BackpressureStats b;
-        if (valid()) detail::rant_node_backpressure_stats(impl_->node, &b.waited_us, &b.waited_sends);
-        return b;
-    }
-    /* Sends that evicted never-sent history after the bounded wait (the
-     * ErrorKind::EvictedUnsent count): the send-burst/overload indicator. */
-    uint32_t evicted_unsent() const { return valid() ? detail::rant_node_evicted_unsent(impl_->node) : 0; }
 
     /* The most recent error this node reported (also delivered via on_event): the
      * formatted one-line message, and its machine-readable ErrorKind. */
@@ -2356,9 +2256,6 @@ public:
             impl_->node, static_cast<detail::RantLogLevel>(level),
             text.data(), static_cast<int>(text.size())));
     }
-    SendStatus log_error(std::string_view t) { return log(LogLevel::Error, t); }
-    SendStatus log_warn (std::string_view t) { return log(LogLevel::Warn,  t); }
-    SendStatus log_info (std::string_view t) { return log(LogLevel::Info,  t); }
 
     /* printf style overloads with the C log API's bounded formatting: truncated at
      * RANT_LOG_MAX, and a formatting failure publishes an empty line. */
@@ -2371,26 +2268,6 @@ public:
         if (len < 0) len = 0;
         if (len >= static_cast<int>(sizeof text)) len = static_cast<int>(sizeof text) - 1;
         return log(level, std::string_view(text, static_cast<size_t>(len)));
-    }
-    template <class... Args>
-    SendStatus log_error(const char* fmt, Args&&... args) {
-        return log(LogLevel::Error, fmt, std::forward<Args>(args)...);
-    }
-    template <class... Args>
-    SendStatus log_warn(const char* fmt, Args&&... args) {
-        return log(LogLevel::Warn, fmt, std::forward<Args>(args)...);
-    }
-    template <class... Args>
-    SendStatus log_info(const char* fmt, Args&&... args) {
-        return log(LogLevel::Info, fmt, std::forward<Args>(args)...);
-    }
-
-    /* This node's own handle for a level's log topic (invalid Topic when disabled):
-     * widen its role and read it like any topic, or use on_log below. */
-    Topic log_topic(LogLevel level) {
-        if (!valid()) return Topic();
-        return Topic(detail::rant_node_log_topic(impl_->node,
-                     static_cast<detail::RantLogLevel>(level)), impl_.get());
     }
 
     /* Subscribe to a level's mesh wide log stream: every other node's lines, decoded to a
@@ -2424,9 +2301,6 @@ public:
     }
 
 #ifndef RANT_NO_PATTERNS
-    /* The local @rant/meta caller handle, invalid when meta is disabled. Direct it at a peer
-     * id to fetch that peer's snapshot. Most callers want meta_request. */
-    RemoteFunction<> meta();
     /* Fetch a peer's snapshot: a directed @rant/meta call decoded into an owning MetaSnapshot.
      * cb fires once on the polling thread. sections is a MetaSection mask, 0 = all. */
     SendStatus meta_request(uint32_t peer, std::function<void(const MetaSnapshot&)> cb,
@@ -2435,6 +2309,10 @@ public:
 
 private:
     struct TopicRec { detail::RantTopic* ch; uint8_t bits; uint64_t schema_hash; };
+#ifndef RANT_NO_PATTERNS
+    /* the local @rant/meta caller handle behind meta_request, invalid when meta is disabled */
+    RemoteFunction<Bytes, Bytes> meta();
+#endif
 
     struct Impl {
         detail::RantNode*          node = nullptr;
@@ -2605,7 +2483,7 @@ private:
         return true;
     }
 
-    friend class Topic;
+    friend class priv::TopicCore;
     template <class A, class B> friend class FunctionDefinition;
     template <class A, class B> friend class RemoteFunction;
     template <class A, class B, class C> friend class TaskDefinition;
@@ -2618,15 +2496,15 @@ private:
 
 /* Create, or share the same name slot with a widened role. A live same name topic with a
  * different schema refuses, since two modules disagreeing is a bug. retire() first. */
-inline Topic::Topic(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos)
-    : Topic(node, name, role, nullptr, qos, /*reflect=*/true) {}
+inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos)
+    : TopicCore(node, name, role, nullptr, qos, /*reflect=*/true) {}
 
-inline Topic::Topic(Node& node, std::string_view name, Role role,
-                    const Schema* schema, const Qos& qos) : Topic(node, name, role, schema, qos, false) {}
+inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
+                                  const Schema* schema, const Qos& qos) : TopicCore(node, name, role, schema, qos, false) {}
 
-inline Topic::Topic(Node& node, std::string_view name, Role role,
-                    const Schema* schema, const Qos& qos, bool reflect) {
-    if (!node.valid()) { priv::raise_msg("rant::Topic: node is not valid"); return; }
+inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
+                                  const Schema* schema, const Qos& qos, bool reflect) {
+    if (!node.valid()) { priv::raise_msg("rant topic create: node is not valid"); return; }
     Node::Impl* impl = node.impl_.get();
     std::lock_guard<std::mutex> g(impl->create_mu);
     std::string nm(name);
@@ -2635,7 +2513,7 @@ inline Topic::Topic(Node& node, std::string_view name, Role role,
     auto it = impl->topics.find(nm);
     if (it != impl->topics.end()) {
         if (sh && it->second.schema_hash && sh != it->second.schema_hash) {
-            priv::raise_msg("rant::Topic: same-name topic already exists with a different schema"
+            priv::raise_msg("rant topic create: the name already exists with a different schema"
                             " (retire() it to retype the name)");
             return;
         }
@@ -2653,13 +2531,13 @@ inline Topic::Topic(Node& node, std::string_view name, Role role,
     co.reflect_from_mesh = reflect ? 1 : 0;
     ch_ = detail::rant_node_create_topic(impl->node, nm.c_str(),
               static_cast<detail::RantRole>(role), schema ? schema->raw() : nullptr, &co);
-    if (!ch_) { priv::raise_last(impl->node, "rant::Topic create"); return; }
+    if (!ch_) { priv::raise_last(impl->node, "rant topic create"); return; }
     impl->topics.emplace(std::move(nm), Node::TopicRec{ ch_, priv::role_bits(role), sh });
 }
 
 /* Retire: on success the C handle is freed, the name cache entry and this topic's wrapper
  * subscriptions are forgotten, and every handle sharing the slot goes invalid. */
-inline SendStatus Topic::retire() {
+inline SendStatus priv::TopicCore::retire() {
     if (!ch_) return SendStatus::NoTopic;
     Node::Impl* impl = static_cast<Node::Impl*>(impl_);
     if (!impl) {   /* no registry back-pointer (default-constructed edge): C-level only */
@@ -2682,23 +2560,15 @@ inline SendStatus Topic::retire() {
     return SendStatus::Ok;
 }
 
-inline Topic Node::create_topic(std::string_view name, Role role,
-                                const Schema* schema, const Qos& qos) {
-    return Topic(*this, name, role, schema, qos);
-}
-inline Topic Node::create_topic(std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos) {
-    return Topic(*this, name, role, reflect_from_mesh, qos);
-}
-
 #ifndef RANT_NO_PATTERNS
 
 /* ====================== FUNCTIONS (untyped cores) =========================== */
 
 /* The untyped implementation side of a function. One reply per call, one definition per
  * name on the network. Thin and non owning, the function lives in the node until close. */
-template <> class FunctionDefinition<void, void> {
+template <> class FunctionDefinition<Bytes, Bytes> {
 public:
-    using Handler = std::function<void(Request<>&)>;
+    using Handler = std::function<void(Request<Bytes>&)>;
 
     FunctionDefinition() = default;
     /* handler == {} answers every call CallStatus::NoHandler (a declared stub). */
@@ -2748,7 +2618,7 @@ public:
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
     /* callers currently matched to this definition */
-    int caller_count() const { return fn_ ? detail::rant_function_match_count(fn_) : 0; }
+    int match_count() const { return fn_ ? detail::rant_function_match_count(fn_) : 0; }
     /* Retire the definition: park its channels and release the name for a successor. The
      * handle is empty after. Refused with State from a callback, and it stays valid then. */
     SendStatus retire() {
@@ -2765,7 +2635,7 @@ private:
     };
     static void tramp(detail::RantRequest* rq, void* user) {
         Box* b = static_cast<Box*>(user);
-        Request<> r(rq, b->fn.load());
+        Request<Bytes> r(rq, b->fn.load());
 #if defined(__cpp_exceptions)
         try { b->h(r); }
         catch (...) { detail::rant_request_fail(rq, "handler threw", detail::rant_bytes(nullptr, 0)); }
@@ -2777,8 +2647,8 @@ private:
     template <class A, class B> friend class FunctionDefinition;
 };
 
-/* RemoteFunction<> (untyped): a reference to a definition on another node. */
-template <> class RemoteFunction<void, void> {
+/* RemoteFunction<Bytes, Bytes> (untyped): a reference to a definition on another node. */
+template <> class RemoteFunction<Bytes, Bytes> {
 public:
     RemoteFunction() = default;
     RemoteFunction(Node& n, std::string_view name,
@@ -2819,8 +2689,8 @@ public:
     /* Blocking call: waits for the response or timeout_ms, negative = the default, on the
      * service thread's progress under start() and driving the loop otherwise. Refused with
      * State from a callback, use call_async there. */
-    Response<> call(Bytes req, int timeout_ms = -1, const CallOptions& opts = {}) {
-        Response<> r;
+    Response<Bytes> call(Bytes req, int timeout_ms = -1, const CallOptions& opts = {}) {
+        Response<Bytes> r;
         if (!fn_) { r.ss_ = SendStatus::NoTopic; return r; }
         detail::RantResponse out;
         std::memset(&out, 0, sizeof out);
@@ -2842,11 +2712,11 @@ public:
     }
     /* Async form: returns once the request is committed. on_response fires once with the
      * outcome on the polling thread. */
-    SendStatus call_async(Bytes req, std::function<void(const ResponseView<>&)> on_response,
+    SendStatus call_async(Bytes req, std::function<void(const ResponseView<Bytes>&)> on_response,
                           const CallOptions& opts = {}) {
         if (!fn_) return SendStatus::NoTopic;
         priv::AsyncBox* box = new priv::AsyncBox{ std::move(on_response),
-                                                  &impl_->reg_mu, &impl_->async_live };
+                                                  &impl_->reg_mu, &impl_->async_live, {} };
         {
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->async_live.insert(box);
@@ -2863,8 +2733,8 @@ public:
         return static_cast<SendStatus>(rc);
     }
 
+    /* definitions currently matched, 0 = nobody provides the name yet */
     int  match_count()    const { return fn_ ? detail::rant_function_match_count(fn_) : 0; }
-    bool has_definition() const { return match_count() > 0; }
     /* Retire the remote: park its channels and release the name. Every outstanding call
      * completes Cancelled. The handle is empty after. Refused with State from a callback. */
     SendStatus retire() {
@@ -2885,7 +2755,7 @@ private:
             box->live->erase(box);
         }
         if (box->cb) {
-            ResponseView<> rv(r);
+            ResponseView<Bytes> rv(r);
 #if defined(__cpp_exceptions)
             try { box->cb(rv); } catch (...) {}   /* never unwind into the C poll */
 #else
@@ -2900,14 +2770,14 @@ private:
     friend class Node;
 };
 
-/* Node::meta / meta_request: out-of-line so RemoteFunction<> is a complete type here. */
-inline RemoteFunction<> Node::meta() {
-    if (!valid()) return RemoteFunction<>();
-    return RemoteFunction<>(detail::rant_node_meta_function(impl_->node), impl_.get());
+/* Node::meta / meta_request: out-of-line so RemoteFunction<Bytes, Bytes> is a complete type here. */
+inline RemoteFunction<Bytes, Bytes> Node::meta() {
+    if (!valid()) return RemoteFunction<Bytes, Bytes>();
+    return RemoteFunction<Bytes, Bytes>(detail::rant_node_meta_function(impl_->node), impl_.get());
 }
 inline SendStatus Node::meta_request(uint32_t peer,
                                      std::function<void(const MetaSnapshot&)> cb, uint32_t sections) {
-    RemoteFunction<> m = meta();
+    RemoteFunction<Bytes, Bytes> m = meta();
     if (!m.valid()) return SendStatus::NoTopic;
     uint8_t buf[4]; Bytes req;   /* the mask lives on the stack: call_async commits it now */
     if (sections) {
@@ -2915,7 +2785,7 @@ inline SendStatus Node::meta_request(uint32_t peer,
         buf[2] = (uint8_t)(sections >> 16); buf[3] = (uint8_t)(sections >> 24);
         req = Bytes(buf, 4);
     }
-    return m.call_async(req, [cb = std::move(cb)](const ResponseView<>& r) {
+    return m.call_async(req, [cb = std::move(cb)](const ResponseView<Bytes>& r) {
         cb(MetaSnapshot::decode(r));
     }, CallOptions{ peer });
 }
@@ -2932,9 +2802,9 @@ struct TaskCall {
 
 /* The untyped implementation side of a task (docs/tasks.md). The handler fires on the poll
  * thread and must be quick: answer inline or defer to a PendingTask. One definition per name. */
-template <> class TaskDefinition<void, void, void> {
+template <> class TaskDefinition<Bytes, Bytes, Bytes> {
 public:
-    using Handler = std::function<void(TaskRequest<>&)>;
+    using Handler = std::function<void(TaskRequest<Bytes, Bytes>&)>;
 
     TaskDefinition() = default;
     /* handler == {} answers every call CallStatus::NoHandler (a declared stub). */
@@ -2991,7 +2861,7 @@ public:
     bool valid() const noexcept { return fn_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
     /* callers currently matched to this definition */
-    int caller_count() const { return fn_ ? detail::rant_function_match_count(fn_) : 0; }
+    int match_count() const { return fn_ ? detail::rant_function_match_count(fn_) : 0; }
 
     /* Cancel notification, one slot, {} clears. Fires on the poll thread with the cancelled
      * call's defer token. Optional, since polling PendingTask::cancelled is complete alone. */
@@ -3025,7 +2895,7 @@ private:
     };
     static void tramp(detail::RantRequest* rq, void* user) {
         Box* b = static_cast<Box*>(user);
-        TaskRequest<> r(rq, b->fn.load());
+        TaskRequest<Bytes, Bytes> r(rq, b->fn.load());
 #if defined(__cpp_exceptions)
         try { b->h(r); }
         catch (...) {   /* a no-op if the handler already deferred: one answer per call */
@@ -3050,9 +2920,9 @@ private:
 
 /* The untyped reference to a task definition elsewhere. A request is always directed at
  * one provider. The timeout bounds only the first response, cancel() is the tool after. */
-template <> class RemoteTask<void, void, void> {
+template <> class RemoteTask<Bytes, Bytes, Bytes> {
 public:
-    using ProgressHandler = std::function<void(const ProgressView<>&)>;
+    using ProgressHandler = std::function<void(const ProgressView<Bytes>&)>;
 
     RemoteTask() = default;
     RemoteTask(Node& n, std::string_view name, const Schema* req_schema = nullptr,
@@ -3096,9 +2966,9 @@ public:
     /* Blocking call: waits for the terminal outcome, with on_progress on this thread, on
      * the service thread's progress under start() and driving the loop otherwise. Refused
      * from a callback. id_out allows a cancel(). */
-    Response<> call(Bytes req, ProgressHandler on_progress = {}, int timeout_ms = -1,
+    Response<Bytes> call(Bytes req, ProgressHandler on_progress = {}, int timeout_ms = -1,
                     const CallOptions& opts = {}) {
-        Response<> r;
+        Response<Bytes> r;
         if (!fn_) { r.ss_ = SendStatus::NoTopic; return r; }
         detail::RantResponse out;
         std::memset(&out, 0, sizeof out);
@@ -3125,7 +2995,7 @@ public:
     /* Async form: returns once committed, with the call id for cancel(). on_progress fires
      * per update and on_response once, on the polling thread, which frees the call state. */
     TaskCall call_async(Bytes req, ProgressHandler on_progress,
-                        std::function<void(const ResponseView<>&)> on_response,
+                        std::function<void(const ResponseView<Bytes>&)> on_response,
                         const CallOptions& opts = {}) {
         TaskCall tc;
         if (!fn_) return tc;
@@ -3163,8 +3033,8 @@ public:
         return static_cast<SendStatus>(detail::rant_function_cancel(fn_, call_id));
     }
 
+    /* definitions currently matched, 0 = nobody provides the name yet */
     int  match_count()    const { return fn_ ? detail::rant_function_match_count(fn_) : 0; }
-    bool has_definition() const { return match_count() > 0; }
     /* Retire the remote. Every outstanding call completes Cancelled. The handle is empty
      * after, and refused with State from a callback. */
     SendStatus retire() {
@@ -3177,7 +3047,7 @@ public:
 private:
     static void blocking_progress_tramp(const detail::RantProgress* p) {
         ProgressHandler* h = static_cast<ProgressHandler*>(p->user);
-        ProgressView<> pv(p);
+        ProgressView<Bytes> pv(p);
 #if defined(__cpp_exceptions)
         try { (*h)(pv); } catch (...) {}   /* never unwind into the C poll */
 #else
@@ -3186,7 +3056,7 @@ private:
     }
     static void async_progress_tramp(const detail::RantProgress* p) {
         priv::AsyncBox* box = static_cast<priv::AsyncBox*>(p->user);
-        ProgressView<> pv(p);
+        ProgressView<Bytes> pv(p);
 #if defined(__cpp_exceptions)
         try { box->on_progress(pv); } catch (...) {}
 #else
@@ -3200,7 +3070,7 @@ private:
             box->live->erase(box);
         }
         if (box->cb) {
-            ResponseView<> rv(r);
+            ResponseView<Bytes> rv(r);
 #if defined(__cpp_exceptions)
             try { box->cb(rv); } catch (...) {}   /* never unwind into the C poll */
 #else
@@ -3233,23 +3103,23 @@ public:
     const detail::RantSchema* raw_schema() const { return u_->schema; }
 
 private:
-    friend class VariableDefinition<void>;
+    friend class VariableDefinition<Bytes>;
     explicit VariableUpdate(const detail::RantVariableUpdate* u) : u_(u) {}
     const detail::RantVariableUpdate* u_;
 };
 
-/* VariableDefinition<> (untyped): this node holds the authoritative value. */
-template <> class VariableDefinition<void> {
+/* VariableDefinition<Bytes> (untyped): this node holds the authoritative value. */
+template <> class VariableDefinition<Bytes> {
 public:
     VariableDefinition() = default;
     VariableDefinition(Node& n, std::string_view name, const Schema* schema,
-                       const VariableOptions<>& o = {}) {
+                       const VariableOptions<Bytes>& o = {}) {
         if (!n.valid()) { priv::raise_msg("rant::VariableDefinition: node is not valid"); return; }
         create(n, name, schema, o, /*definition=*/true, false);
     }
     /* The same, typed by the mesh (see reflect_from_mesh). */
     VariableDefinition(Node& n, std::string_view name, reflect_from_mesh_t,
-                       const VariableOptions<>& o = {}) {
+                       const VariableOptions<Bytes>& o = {}) {
         if (!n.valid()) { priv::raise_msg("rant::VariableDefinition: node is not valid"); return; }
         create(n, name, nullptr, o, /*definition=*/true, true);
     }
@@ -3288,8 +3158,8 @@ public:
         return static_cast<SendStatus>(detail::rant_variable_unforce(var_));
     }
     bool forced() const { return var_ && detail::rant_variable_forced(var_) == 1; }
-    /* remotes currently matched to this definition */
-    int remote_count() const { return var_ ? detail::rant_variable_match_count(var_) : 0; }
+    /* the handles matched to this one: remotes at a definition, the definition at a remote */
+    int match_count() const { return var_ ? detail::rant_variable_match_count(var_) : 0; }
 
     /* Observe. on_change replays the current value at registration and fires on every state
      * change, on_write on every applied write, both inline on the applying thread. {} clears. */
@@ -3331,7 +3201,7 @@ protected:
         }
     }
     void create(Node& n, std::string_view name, const Schema* schema,
-                const VariableOptions<>& o, bool definition, bool reflect) {
+                const VariableOptions<Bytes>& o, bool definition, bool reflect) {
         std::string nm(name);
         detail::RantVariableOpts co;
         std::memset(&co, 0, sizeof co);
@@ -3360,32 +3230,31 @@ protected:
 
 /* The untyped accessor of a value owned elsewhere: reads see the cached latest, writes go
  * over the set channel with no response. */
-template <> class RemoteVariable<void> : public VariableDefinition<void> {
+template <> class RemoteVariable<Bytes> : public VariableDefinition<Bytes> {
 public:
     RemoteVariable() = default;
     RemoteVariable(Node& n, std::string_view name, const Schema* schema,
-                   const VariableOptions<>& o = {}) {
+                   const VariableOptions<Bytes>& o = {}) {
         if (!n.valid()) { priv::raise_msg("rant::RemoteVariable: node is not valid"); return; }
         create(n, name, schema, o, /*definition=*/false, false);
     }
     /* The same, typed by the mesh (see reflect_from_mesh). */
     RemoteVariable(Node& n, std::string_view name, reflect_from_mesh_t,
-                   const VariableOptions<>& o = {}) {
+                   const VariableOptions<Bytes>& o = {}) {
         if (!n.valid()) { priv::raise_msg("rant::RemoteVariable: node is not valid"); return; }
         create(n, name, nullptr, o, /*definition=*/false, true);
     }
     /* Block (driving the node loop) until a value exists or timeout_ms elapses. */
     bool wait(int timeout_ms) { return var_ && detail::rant_variable_wait(var_, timeout_ms) == 1; }
-    bool has_definition() const { return remote_count() > 0; }
-    int  match_count()    const { return remote_count(); }
 };
 
 #endif /* !RANT_NO_PATTERNS */
 
-/* ====================== PUB/SUB (untyped cores) ============================= */
+/* ====================== PUB/SUB (raw cores) ================================ */
 
-/* Publisher<> (untyped): the publish-side handle over a (possibly shared) topic. */
-template <> class Publisher<void> {
+/* Publisher<Bytes>: the raw publish side. schema is the DSL schema the bytes follow, or
+ * null for untyped bytes. Send a MessageBuilder or any Bytes. */
+template <> class Publisher<Bytes> {
 public:
     Publisher() = default;
     Publisher(Node& n, std::string_view name, const Schema* schema = nullptr,
@@ -3395,25 +3264,27 @@ public:
     bool valid() const noexcept { return t_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
+    /* capture is when the data was true, as against when it was sent. The default is
+     * unstated, which costs no wire bytes. */
     SendStatus send(Bytes data, Timestamp capture = {}) { return t_.send(data, capture); }
+    /* subscribers currently matched */
     int  match_count()      const { return t_.match_count(); }
-    int  pending_count()    const { return t_.pending_count(); }
+    /* true when a send would not wait: a subscriber is matched or matching has converged */
     bool ready()            const { return t_.ready(); }
-    SendStatus retire()           { return t_.retire(); }   /* see Topic::retire */
-    Topic& topic()                { return t_; }
+    /* wait until every reader has acked, the flush before close. false = timeout_ms passed */
+    bool drain(int timeout_ms)    { return t_.drain(timeout_ms); }
+    /* free the name for another schema. Every handle sharing the name goes invalid */
+    SendStatus retire()           { return t_.retire(); }
 
 private:
-    Topic t_;
+    priv::TopicCore t_;
 };
 
-/* The untyped subscribe side. A handler fires per message on the polling thread, or
- * consume with take() and dispatch() on a thread of your choosing. */
-template <> class Subscriber<void> {
+/* Subscriber<Bytes>: the raw subscribe side. The handler fires per message on the polling
+ * thread with a MessageView that reads fields by name through the schema. */
+template <> class Subscriber<Bytes> {
 public:
     Subscriber() = default;
-    Subscriber(Node& n, std::string_view name, const Schema* schema = nullptr,
-               const Qos& qos = {})
-        : t_(n, name, Role::SubOnly, schema, qos) {}
     Subscriber(Node& n, std::string_view name, const Schema* schema,
                Node::MessageHandler on_message, const Qos& qos = {})
         : t_(n, name, Role::SubOnly, schema, qos) {
@@ -3423,13 +3294,13 @@ public:
     bool valid() const noexcept { return t_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
-    std::optional<Message<>> take(int timeout_ms = 0) { return t_.take(timeout_ms); }
-    int dispatch(int max_msgs = 0, int timeout_ms = 0) { return t_.dispatch(max_msgs, timeout_ms); }
-    SendStatus retire() { return t_.retire(); }   /* see Topic::retire */
-    Topic& topic() { return t_; }
+    /* publishers currently matched */
+    int  match_count()  const { return t_.match_count(); }
+    /* free the name for another schema. Every handle sharing the name goes invalid */
+    SendStatus retire()       { return t_.retire(); }
 
 private:
-    static void add_handler(Node& n, Topic& t, Node::MessageHandler h) {
+    static void add_handler(Node& n, priv::TopicCore& t, Node::MessageHandler h) {
         Node::Impl* impl = n.impl_.get();
         std::lock_guard<std::mutex> g(impl->reg_mu);
         auto& slot = impl->sub_handlers[t.index()];
@@ -3438,42 +3309,20 @@ private:
         nv->push_back(std::move(h));
         slot = std::move(nv);
     }
-    Topic t_;
+    priv::TopicCore t_;
     template <class A> friend class Subscriber;
 };
 
-/* Typed sugar: thin template layers over the untyped cores using the RANT_SCHEMA codec.
+/* Typed sugar: thin template layers over the Bytes cores using the RANT_SCHEMA codec.
  * Every handle stays thin and non owning. */
-
-/* Message<T>: an owning taken message (decoded value + copied envelope). */
-template <class T> class Message {
-public:
-    Message() = default;
-    const T& value()      const { return v_; }
-    const T& operator*()  const { return v_; }
-    const T* operator->() const { return &v_; }
-    std::string_view publisher_name() const { return pub_; }
-    uint32_t         publisher_id()   const { return pid_; }
-    std::string_view topic_name()     const { return topic_; }
-    uint16_t         topic_index()    const { return idx_; }
-    uint64_t         recv_us()        const { return recv_; }
-    uint64_t         written_us()        const { return written_; }
-private:
-    T           v_{};
-    std::string pub_, topic_;
-    uint32_t    pid_ = 0;
-    uint16_t    idx_ = 0;
-    uint64_t    recv_ = 0, written_ = 0;
-    template <class U> friend class Subscriber;
-};
 
 #ifndef RANT_NO_PATTERNS
 
 /* The typed view of a request inside a full form function handler. Wraps the untyped
- * Request<> for the callback lifetime and adds the typed reply. */
+ * Request<Bytes> for the callback lifetime and adds the typed reply. */
 template <class Rsp> class Request {
 public:
-    explicit Request(Request<>& core) : core_(core) {}
+    explicit Request(Request<Bytes>& core) : core_(core) {}
     Bytes            data()          const { return core_.data(); }
     uint32_t         caller()        const { return core_.caller(); }
     std::string_view caller_name()   const { return core_.caller_name(); }
@@ -3490,14 +3339,14 @@ public:
     Deferred<Rsp> defer()     { return Deferred<Rsp>(core_.defer()); }
 
 private:
-    Request<>& core_;
+    Request<Bytes>& core_;
 };
 
 /* Deferred<Rsp>: the typed parked reply. */
 template <class Rsp> class Deferred {
 public:
     Deferred() = default;
-    Deferred(Deferred<>&& core) : core_(std::move(core)) {}
+    Deferred(Deferred<Bytes>&& core) : core_(std::move(core)) {}
     Deferred(Deferred&&) noexcept = default;
     Deferred& operator=(Deferred&&) noexcept = default;
     bool valid() const noexcept { return core_.valid(); }
@@ -3508,7 +3357,7 @@ public:
     }
     bool fail(std::string_view message = {}) { return core_.fail(message); }
 private:
-    Deferred<> core_;
+    Deferred<Bytes> core_;
 };
 
 /* Response<Rsp>: the owning typed call outcome. value() is meaningful when ok(). */
@@ -3520,7 +3369,7 @@ public:
     uint32_t   provider()    const { return provider_; }
     SendStatus send_status() const { return ss_; }
     uint64_t   written_us()     const { return written_; }
-    /* human-readable outcome text (owned): see Response<>::message */
+    /* human-readable outcome text (owned): see Response<Bytes>::message */
     std::string_view message() const { return message_; }
     const Rsp& value()       const { return v_; }
     const Rsp& operator*()   const { return v_; }
@@ -3543,7 +3392,7 @@ public:
     bool       ok()         const { return st_ == CallStatus::Ok; }
     uint32_t   provider()   const { return provider_; }
     uint64_t   written_us()    const { return written_; }
-    /* human-readable outcome text (a view, callback lifetime): see ResponseView<>::message */
+    /* human-readable outcome text (a view, callback lifetime): see ResponseView<Bytes>::message */
     std::string_view message() const { return message_; }
     const Rsp& value()      const { return v_; }
     const Rsp& operator*()  const { return v_; }
@@ -3570,18 +3419,18 @@ public:
         const Schema* rq = priv::schema_of<Req>();
         const Schema* rs = priv::schema_of<Rsp>();
         if (!rq || !rs) { priv::raise_msg("rant::FunctionDefinition: RANT_SCHEMA compile failed"); return; }
-        core_ = FunctionDefinition<>(n, name, rq, rs, adapt(std::forward<H>(handler)), o);
+        core_ = FunctionDefinition<Bytes, Bytes>(n, name, rq, rs, adapt(std::forward<H>(handler)), o);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
-    int caller_count() const { return core_.caller_count(); }
+    int match_count() const { return core_.match_count(); }
     SendStatus retire() { return core_.retire(); }
 
 private:
     template <class H>
-    static typename FunctionDefinition<>::Handler adapt(H&& h) {
+    static typename FunctionDefinition<Bytes, Bytes>::Handler adapt(H&& h) {
         if constexpr (std::is_invocable_v<std::decay_t<H>&, const Req&, Request<Rsp>&>) {
-            return [f = std::forward<H>(h)](Request<>& u) mutable {
+            return [f = std::forward<H>(h)](Request<Bytes>& u) mutable {
                 Req q{};
                 if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
                 Request<Rsp> tr(u);
@@ -3591,7 +3440,7 @@ private:
             static_assert(std::is_convertible_v<
                               std::invoke_result_t<std::decay_t<H>&, const Req&>, Rsp>,
                           "simple function handler must return Rsp");
-            return [f = std::forward<H>(h)](Request<>& u) mutable {
+            return [f = std::forward<H>(h)](Request<Bytes>& u) mutable {
                 Req q{};
                 if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
                 Rsp r = f(q);
@@ -3604,7 +3453,7 @@ private:
             return {};
         }
     }
-    FunctionDefinition<> core_;
+    FunctionDefinition<Bytes, Bytes> core_;
 };
 
 /* RemoteFunction<Req,Rsp>: the typed caller side. */
@@ -3615,15 +3464,15 @@ public:
         const Schema* rq = priv::schema_of<Req>();
         const Schema* rs = priv::schema_of<Rsp>();
         if (!rq || !rs) { priv::raise_msg("rant::RemoteFunction: RANT_SCHEMA compile failed"); return; }
-        core_ = RemoteFunction<>(n, name, rq, rs, o);
+        core_ = RemoteFunction<Bytes, Bytes>(n, name, rq, rs, o);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* Blocking call, see RemoteFunction<>::call. Decodes into the owning Response. */
+    /* Blocking call, see RemoteFunction<Bytes, Bytes>::call. Decodes into the owning Response. */
     Response<Rsp> call(const Req& req, int timeout_ms = -1, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        Response<> ur = core_.call(priv::encode(req, s), timeout_ms, opts);
+        Response<Bytes> ur = core_.call(priv::encode(req, s), timeout_ms, opts);
         Response<Rsp> r;
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
@@ -3635,7 +3484,7 @@ public:
                           const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
         return core_.call_async(priv::encode(req, s),
-            [cb = std::move(cb)](const ResponseView<>& uv) {
+            [cb = std::move(cb)](const ResponseView<Bytes>& uv) {
                 ResponseView<Rsp> tv;
                 tv.st_ = uv.status(); tv.provider_ = uv.provider(); tv.written_ = uv.written_us();
                 tv.message_ = uv.message();
@@ -3645,18 +3494,17 @@ public:
     }
 
     int  match_count()    const { return core_.match_count(); }
-    bool has_definition() const { return core_.has_definition(); }
     SendStatus retire() { return core_.retire(); }
 
 private:
-    RemoteFunction<> core_;
+    RemoteFunction<Bytes, Bytes> core_;
 };
 
-/* The typed view of a request inside a task handler. Wraps the untyped TaskRequest<> for
+/* The typed view of a request inside a task handler. Wraps the untyped TaskRequest<Bytes, Bytes> for
  * the callback lifetime and adds the typed verbs. */
 template <class Prg, class Rsp> class TaskRequest {
 public:
-    explicit TaskRequest(TaskRequest<>& core) : core_(core) {}
+    explicit TaskRequest(TaskRequest<Bytes, Bytes>& core) : core_(core) {}
     Bytes            data()        const { return core_.data(); }
     uint32_t         caller()      const { return core_.caller(); }
     std::string_view caller_name() const { return core_.caller_name(); }
@@ -3674,14 +3522,14 @@ public:
     PendingTask<Prg, Rsp> defer() { return PendingTask<Prg, Rsp>(core_.defer()); }
 
 private:
-    TaskRequest<>& core_;
+    TaskRequest<Bytes, Bytes>& core_;
 };
 
 /* PendingTask<Prg,Rsp>: the typed deferred task (see the untyped core's contract). */
 template <class Prg, class Rsp> class PendingTask {
 public:
     PendingTask() = default;
-    PendingTask(PendingTask<>&& core) : core_(std::move(core)) {}
+    PendingTask(PendingTask<Bytes, Bytes>&& core) : core_(std::move(core)) {}
     PendingTask(PendingTask&&) noexcept = default;
     PendingTask& operator=(PendingTask&&) noexcept = default;
     bool valid() const noexcept { return core_.valid(); }
@@ -3705,7 +3553,7 @@ public:
     }
 
 private:
-    PendingTask<> core_;
+    PendingTask<Bytes, Bytes> core_;
 };
 
 /* The typed progress update, valid for the callback. value() is meaningful only when
@@ -3741,27 +3589,27 @@ public:
         const Schema* pg = priv::schema_of<Prg>();
         const Schema* rs = priv::schema_of<Rsp>();
         if (!rq || !pg || !rs) { priv::raise_msg("rant::TaskDefinition: RANT_SCHEMA compile failed"); return; }
-        core_ = TaskDefinition<>(n, name, rq, pg, rs, adapt(std::forward<H>(handler)), o);
+        core_ = TaskDefinition<Bytes, Bytes, Bytes>(n, name, rq, pg, rs, adapt(std::forward<H>(handler)), o);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
-    int caller_count() const { return core_.caller_count(); }
+    int match_count() const { return core_.match_count(); }
     void on_cancel(std::function<void(uint64_t token)> h) { core_.on_cancel(std::move(h)); }
     SendStatus retire() { return core_.retire(); }
 
 private:
     template <class H>
-    static typename TaskDefinition<>::Handler adapt(H&& h) {
+    static typename TaskDefinition<Bytes, Bytes, Bytes>::Handler adapt(H&& h) {
         static_assert(std::is_invocable_v<std::decay_t<H>&, const Req&, TaskRequest<Prg, Rsp>&>,
                       "task handler must be void(const Req&, rant::TaskRequest<Prg,Rsp>&)");
-        return [f = std::forward<H>(h)](TaskRequest<>& u) mutable {
+        return [f = std::forward<H>(h)](TaskRequest<Bytes, Bytes>& u) mutable {
             Req q{};
             if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
             TaskRequest<Prg, Rsp> tr(u);
             f(q, tr);
         };
     }
-    TaskDefinition<> core_;
+    TaskDefinition<Bytes, Bytes, Bytes> core_;
 };
 
 /* RemoteTask<Req,Prg,Rsp>: the typed caller side. */
@@ -3775,16 +3623,16 @@ public:
         const Schema* pg = priv::schema_of<Prg>();
         const Schema* rs = priv::schema_of<Rsp>();
         if (!rq || !pg || !rs) { priv::raise_msg("rant::RemoteTask: RANT_SCHEMA compile failed"); return; }
-        core_ = RemoteTask<>(n, name, rq, pg, rs, o);
+        core_ = RemoteTask<Bytes, Bytes, Bytes>(n, name, rq, pg, rs, o);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* Blocking call, see RemoteTask<>::call. on_progress fires typed while it waits. */
+    /* Blocking call, see RemoteTask<Bytes, Bytes, Bytes>::call. on_progress fires typed while it waits. */
     Response<Rsp> call(const Req& req, ProgressHandler on_progress = {},
                        int timeout_ms = -1, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        Response<> ur = core_.call(priv::encode(req, s), adapt_progress(std::move(on_progress)),
+        Response<Bytes> ur = core_.call(priv::encode(req, s), adapt_progress(std::move(on_progress)),
                                    timeout_ms, opts);
         Response<Rsp> r;
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
@@ -3793,13 +3641,13 @@ public:
         if (ur.ok()) (void)priv::decode(r.v_, ur.data(), ur.raw_schema());
         return r;
     }
-    /* Async form (see RemoteTask<>::call_async): returns the send status + call id. */
+    /* Async form (see RemoteTask<Bytes, Bytes, Bytes>::call_async): returns the send status + call id. */
     TaskCall call_async(const Req& req, ProgressHandler on_progress,
                         std::function<void(const ResponseView<Rsp>&)> on_response,
                         const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
         return core_.call_async(priv::encode(req, s), adapt_progress(std::move(on_progress)),
-            [cb = std::move(on_response)](const ResponseView<>& uv) {
+            [cb = std::move(on_response)](const ResponseView<Bytes>& uv) {
                 if (!cb) return;
                 ResponseView<Rsp> tv;
                 tv.st_ = uv.status(); tv.provider_ = uv.provider(); tv.written_ = uv.written_us();
@@ -3808,17 +3656,16 @@ public:
                 cb(tv);
             }, opts);
     }
-    /* Cancel the outstanding call (see RemoteTask<>::cancel). */
+    /* Cancel the outstanding call (see RemoteTask<Bytes, Bytes, Bytes>::cancel). */
     SendStatus cancel(uint32_t call_id) { return core_.cancel(call_id); }
 
     int  match_count()    const { return core_.match_count(); }
-    bool has_definition() const { return core_.has_definition(); }
     SendStatus retire() { return core_.retire(); }
 
 private:
-    static RemoteTask<>::ProgressHandler adapt_progress(ProgressHandler h) {
+    static RemoteTask<Bytes, Bytes, Bytes>::ProgressHandler adapt_progress(ProgressHandler h) {
         if (!h) return {};
-        return [f = std::move(h)](const ProgressView<>& up) mutable {
+        return [f = std::move(h)](const ProgressView<Bytes>& up) mutable {
             ProgressView<Prg> tp;
             tp.call_id_ = up.call_id(); tp.provider_ = up.provider();
             tp.written_ = up.written_us(); tp.recv_ = up.recv_us();
@@ -3827,7 +3674,7 @@ private:
             f(tp);
         };
     }
-    RemoteTask<> core_;
+    RemoteTask<Bytes, Bytes, Bytes> core_;
 };
 
 /* VariableDefinition<T>: the typed authoritative value. */
@@ -3838,11 +3685,11 @@ public:
         const Schema* sc = priv::schema_of<T>();
         if (!sc) { priv::raise_msg("rant::VariableDefinition: RANT_SCHEMA compile failed"); return; }
         std::vector<uint8_t> scratch;
-        VariableOptions<> uo;
+        VariableOptions<Bytes> uo;
         if (o.initial) uo.initial = priv::encode(*o.initial, scratch);
         uo.read_only = o.read_only; uo.allow_force = o.allow_force;
         uo.catch_up = o.catch_up; uo.backpressure_wait_us = o.backpressure_wait_us;
-        core_ = VariableDefinition<>(n, name, sc, uo);
+        core_ = VariableDefinition<Bytes>(n, name, sc, uo);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3859,65 +3706,6 @@ public:
     SendStatus force(const T& v) { std::vector<uint8_t> s; return core_.force(priv::encode(v, s)); }
     SendStatus unforce()         { return core_.unforce(); }
     bool forced()          const { return core_.forced(); }
-    int  remote_count()    const { return core_.remote_count(); }
-
-    /* Observe, see the untyped core for the contract. Handler forms: void(const T&) or
-     * void(const T&, const VariableUpdate&). nullptr clears. */
-    template <class H, class = std::enable_if_t<
-        std::is_invocable_v<std::decay_t<H>&, const T&> ||
-        std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
-    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h))); }
-    template <class H, class = std::enable_if_t<
-        std::is_invocable_v<std::decay_t<H>&, const T&> ||
-        std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
-    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h))); }
-    void on_change(std::nullptr_t) { core_.on_change({}); }
-    void on_write (std::nullptr_t) { core_.on_write({}); }
-    SendStatus retire() { return core_.retire(); }
-
-private:
-    template <class H>
-    static std::function<void(const VariableUpdate&)> adapt(H&& h) {
-        return [f = std::forward<H>(h)](const VariableUpdate& u) mutable {
-            T v{};
-            if (!priv::decode(v, u.value(), u.raw_schema())) return;
-            if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>)
-                f(v, u);
-            else
-                f(v);
-        };
-    }
-    VariableDefinition<> core_;
-};
-
-/* RemoteVariable<T>: the typed accessor of a value owned elsewhere. */
-template <class T> class RemoteVariable {
-public:
-    RemoteVariable() = default;
-    RemoteVariable(Node& n, std::string_view name, const VariableOptions<T>& o = {}) {
-        const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("rant::RemoteVariable: RANT_SCHEMA compile failed"); return; }
-        VariableOptions<> uo;
-        uo.catch_up = o.catch_up; uo.backpressure_wait_us = o.backpressure_wait_us;
-        core_ = RemoteVariable<>(n, name, sc, uo);
-    }
-    bool valid() const noexcept { return core_.valid(); }
-    explicit operator bool() const noexcept { return valid(); }
-
-    std::optional<T> get() const {
-        auto b = core_.get();
-        if (!b) return std::nullopt;
-        T v{};
-        if (!priv::decode(v, Bytes(b->data(), b->size()), nullptr)) return std::nullopt;
-        return v;
-    }
-    /* Block (driving the node loop) until a value exists or timeout_ms elapses. */
-    bool wait(int timeout_ms)    { return core_.wait(timeout_ms); }
-    SendStatus set(const T& v)   { std::vector<uint8_t> s; return core_.set(priv::encode(v, s)); }
-    SendStatus force(const T& v) { std::vector<uint8_t> s; return core_.force(priv::encode(v, s)); }
-    SendStatus unforce()         { return core_.unforce(); }
-    bool forced()          const { return core_.forced(); }
-    bool has_definition()  const { return core_.has_definition(); }
     int  match_count()     const { return core_.match_count(); }
 
     /* Observe, see the untyped core for the contract. Handler forms: void(const T&) or
@@ -3946,7 +3734,65 @@ private:
                 f(v);
         };
     }
-    RemoteVariable<> core_;
+    VariableDefinition<Bytes> core_;
+};
+
+/* RemoteVariable<T>: the typed accessor of a value owned elsewhere. */
+template <class T> class RemoteVariable {
+public:
+    RemoteVariable() = default;
+    RemoteVariable(Node& n, std::string_view name, const VariableOptions<T>& o = {}) {
+        const Schema* sc = priv::schema_of<T>();
+        if (!sc) { priv::raise_msg("rant::RemoteVariable: RANT_SCHEMA compile failed"); return; }
+        VariableOptions<Bytes> uo;
+        uo.catch_up = o.catch_up; uo.backpressure_wait_us = o.backpressure_wait_us;
+        core_ = RemoteVariable<Bytes>(n, name, sc, uo);
+    }
+    bool valid() const noexcept { return core_.valid(); }
+    explicit operator bool() const noexcept { return valid(); }
+
+    std::optional<T> get() const {
+        auto b = core_.get();
+        if (!b) return std::nullopt;
+        T v{};
+        if (!priv::decode(v, Bytes(b->data(), b->size()), nullptr)) return std::nullopt;
+        return v;
+    }
+    /* Block (driving the node loop) until a value exists or timeout_ms elapses. */
+    bool wait(int timeout_ms)    { return core_.wait(timeout_ms); }
+    SendStatus set(const T& v)   { std::vector<uint8_t> s; return core_.set(priv::encode(v, s)); }
+    SendStatus force(const T& v) { std::vector<uint8_t> s; return core_.force(priv::encode(v, s)); }
+    SendStatus unforce()         { return core_.unforce(); }
+    bool forced()          const { return core_.forced(); }
+    int  match_count()     const { return core_.match_count(); }
+
+    /* Observe, see the untyped core for the contract. Handler forms: void(const T&) or
+     * void(const T&, const VariableUpdate&). nullptr clears. */
+    template <class H, class = std::enable_if_t<
+        std::is_invocable_v<std::decay_t<H>&, const T&> ||
+        std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
+    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h))); }
+    template <class H, class = std::enable_if_t<
+        std::is_invocable_v<std::decay_t<H>&, const T&> ||
+        std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
+    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h))); }
+    void on_change(std::nullptr_t) { core_.on_change({}); }
+    void on_write (std::nullptr_t) { core_.on_write({}); }
+    SendStatus retire() { return core_.retire(); }
+
+private:
+    template <class H>
+    static std::function<void(const VariableUpdate&)> adapt(H&& h) {
+        return [f = std::forward<H>(h)](const VariableUpdate& u) mutable {
+            T v{};
+            if (!priv::decode(v, u.value(), u.raw_schema())) return;
+            if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>)
+                f(v, u);
+            else
+                f(v);
+        };
+    }
+    RemoteVariable<Bytes> core_;
 };
 
 #endif /* !RANT_NO_PATTERNS */
@@ -3958,7 +3804,7 @@ public:
     Publisher(Node& n, std::string_view name, const Qos& qos = {}) {
         const Schema* sc = priv::schema_of<T>();
         if (!sc) { priv::raise_msg("rant::Publisher: RANT_SCHEMA compile failed"); return; }
-        core_ = Publisher<>(n, name, sc, qos);
+        core_ = Publisher<Bytes>(n, name, sc, qos);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3968,54 +3814,32 @@ public:
         return core_.send(priv::encode(v, s), capture);
     }
     int  match_count()   const { return core_.match_count(); }
-    int  pending_count() const { return core_.pending_count(); }
     bool ready()         const { return core_.ready(); }
-    SendStatus retire()        { return core_.retire(); }   /* see Topic::retire */
-    Topic& topic()             { return core_.topic(); }
+    bool drain(int timeout_ms) { return core_.drain(timeout_ms); }
+    SendStatus retire()        { return core_.retire(); }
 
 private:
-    Publisher<> core_;
+    Publisher<Bytes> core_;
 };
 
 /* The typed subscribe side. Handler forms: void(const T&) or void(const T&, const
- * MessageView&), or consume with the typed take(). */
+ * MessageView&), fired per message on the polling thread with the decoded value. */
 template <class T> class Subscriber {
 public:
     Subscriber() = default;
-    Subscriber(Node& n, std::string_view name, const Qos& qos = {}) {
-        const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
-        core_ = Subscriber<>(n, name, sc, qos);
-    }
     template <class H, class = std::enable_if_t<
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>>>
     Subscriber(Node& n, std::string_view name, H&& handler, const Qos& qos = {}) {
         const Schema* sc = priv::schema_of<T>();
         if (!sc) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
-        core_ = Subscriber<>(n, name, sc, adapt(std::forward<H>(handler)), qos);
+        core_ = Subscriber<Bytes>(n, name, sc, adapt(std::forward<H>(handler)), qos);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* Pop + decode the next queued message into an OWNING Message<T> (envelope copied,
-     * so it outlives the next take). timeout_ms as Topic::take. */
-    std::optional<Message<T>> take(int timeout_ms = 0) {
-        auto um = core_.take(timeout_ms);
-        if (!um) return std::nullopt;
-        Message<T> m;
-        if (!priv::decode(m.v_, um->data(), um->raw_schema())) return std::nullopt;
-        m.pub_     = std::string(um->publisher_name());
-        m.topic_   = std::string(um->topic_name());
-        m.pid_     = um->publisher_id();
-        m.idx_     = um->topic_index();
-        m.recv_    = um->recv_us();
-        m.written_ = um->written_us();
-        return m;
-    }
-    int dispatch(int max_msgs = 0, int timeout_ms = 0) { return core_.dispatch(max_msgs, timeout_ms); }
-    SendStatus retire() { return core_.retire(); }   /* see Topic::retire */
-    Topic& topic() { return core_.topic(); }
+    int  match_count() const { return core_.match_count(); }
+    SendStatus retire()      { return core_.retire(); }
 
 private:
     template <class H>
@@ -4029,7 +3853,7 @@ private:
                 f(v);
         };
     }
-    Subscriber<> core_;
+    Subscriber<Bytes> core_;
 };
 
 }   /* namespace rant */
