@@ -23,9 +23,9 @@ class Tick:
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0   # 0 = run forever
     iface = sys.argv[2] if len(sys.argv) > 2 else None
-    node = rant.Node("py-publisher", multicast_interface=iface)   # default iface, domain 0
+    node = rant.Node("py-publisher", multicast_interface=iface, threading=rant.Threading.MANUAL)
     # keep_last deep enough that a small per-loop burst is not evicted before it flushes.
-    ch = rant.Topic[Tick](node, "tick", role=rant.Role.PUB_ONLY, keep_last=64)
+    ch = node.publisher("tick", Tick, keep_last=64)
     print("publishing 'tick' at %d Hz on the default interface, domain 0 (Ctrl+C to stop)" % HZ)
     print("schema: " + " ".join(rant.dsl(Tick).split()))
 
@@ -46,7 +46,7 @@ def main():
             node.poll(0)                                   # non-blocking: flush the burst + service RX
             if now - last_report >= 1.0:
                 rate = (seq - last_seq) / (now - last_report)
-                print("seq=%d  rate=%.0f Hz  subscribers=%d" % (seq, rate, ch.match_count()))
+                print("seq=%d  rate=%.0f Hz  subscribers=%d" % (seq, rate, ch.match_count))
                 last_report, last_seq = now, seq
             if seconds and now - start >= seconds:
                 break

@@ -2,9 +2,11 @@
 patterns and the standard types. Exit 0 = pass (spec/testing.md)."""
 import enum as _enum
 import os
+import subprocess
 import sys
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field
 from typing import Annotated
 
@@ -84,6 +86,7 @@ def round_trip():
         check("over-cap raises", False)
     except rant.SchemaError:
         check("over-cap raises", True)
+    check("SchemaError is a rant.Error", issubclass(rant.SchemaError, rant.Error))
     print("variable-kinds round-trip: " + ("PASS\n" if ok else "FAIL\n"))
     return ok
 
@@ -127,7 +130,7 @@ def std_types():
 
     f3 = rant.Schema("Float3")
     check("Float3 compiles by name alone, golden hash", f3.hash == HASH_FLOAT3)
-    check("Float3 is 12 message bytes", f3.size == 12)
+    check("Float3 is 12 message bytes", len(f3.encode({})) == 12)
     check("the mirror dataclass IS that type", rant.Schema(rant.types.Float3).hash == HASH_FLOAT3)
 
     # a name narrows: an anonymous field of the same shape reads a Transform field, never
@@ -145,7 +148,8 @@ def std_types():
     text = " ".join(rant.dsl(Track).split())
     check("the reflected schema spells the names, not the shapes",
           text == "Track { at: Transform, when: Timestamp, tag: Color, id: Uuid, velocity: Float3 }")
-    check("its message is the sum of the wire shapes (88+8+4+16+12)", sch.size == 128)
+    check("its message is the sum of the wire shapes (88+8+4+16+12)",
+          len(sch.encode(Track())) == 128)
 
     t = Track(at=rant.types.Transform(translation=rant.types.Double3(4.5, -1.25, 9.0)),
               when=rant.types.now(), tag=rant.types.Color(0x11, 0x22, 0x33, 0xFF),
@@ -197,24 +201,26 @@ def video_types():
           == rant.Schema("Clip { cover: Image, live: ExternalVideoStream }").hash)
 
     got = {}
-    a = rant.Node("VidA", on_event=on_event("VidA"), domain=45, multicast_interface=IFACE)
-    b = rant.Node("VidB", on_event=on_event("VidB"), domain=45, multicast_interface=IFACE)
+    a = rant.Node("VidA", on_event=on_event("VidA"), domain=45, multicast_interface=IFACE,
+                  threading=rant.Threading.MANUAL)
+    b = rant.Node("VidB", on_event=on_event("VidB"), domain=45, multicast_interface=IFACE,
+                  threading=rant.Threading.MANUAL)
     try:
-        pub = rant.Publisher[rant.types.Image](a, "frame", reliable=True, keep_last=4)
-        rant.Subscriber[rant.types.Image](b, "frame", lambda i: got.setdefault("img", i),
-                                          reliable=True, keep_last=4)
+        pub = a.publisher("frame", rant.types.Image, reliable=True, keep_last=4)
+        b.subscriber("frame", rant.types.Image, lambda i: got.setdefault("img", i),
+                     reliable=True, keep_last=4)
         stream = rant.types.ExternalVideoStream(kind=rant.types.VideoStreamKind.Rtsp,
                                           codec=rant.types.VideoCodec.H264,
                                           width=1920, height=1080,
                                           url="rtsp://cam.local/main", name="front door")
-        vd = rant.VariableDefinition[rant.types.ExternalVideoStream](a, "stream", initial=stream)
-        rv = rant.RemoteVariable[rant.types.ExternalVideoStream](b, "stream")
+        vd = a.variable_definition("stream", rant.types.ExternalVideoStream, initial=stream)
+        rv = b.remote_variable("stream", rant.types.ExternalVideoStream)
         check("handles created", all(h is not None for h in (pub, vd, rv)))
         deadline = time.time() + 8.0
-        while time.time() < deadline and (pub.match_count() == 0 or rv.get() is None):
+        while time.time() < deadline and (pub.match_count == 0 or rv.get() is None):
             a.poll(0.001)
             b.poll(0.001)
-        check("image pair matched", pub.match_count() == 1)
+        check("image pair matched", pub.match_count == 1)
 
         pixels = bytes((i * 7) & 0xFF for i in range(384))
         img = rant.types.Image(width=32, height=4, stride=96,
@@ -257,9 +263,11 @@ def value_roots():
     check("f32[] dsl", rant.dsl(list[rant.f32]) == "f32[]\n")
     check("string(16) dsl", rant.dsl(rant.string(16)) == "string<16>\n")
     check("bare root reflects as one anonymous field",
-          rant.Schema(rant.f64).field_count == 1
+          len(rant.Schema(rant.f64).fields) == 1
           and rant.Schema(rant.f64).name == ""
-          and rant.Schema(rant.f64).fields()[0].name == "")
+          and rant.Schema(rant.f64).fields[0].name == "")
+    check("enum variants read back",
+          rant.Schema(Mode).enum_variants(0) == [("IDLE", 0), ("RUN", 1), ("FAULT", 2)])
     for src, value in ((bool, True), (rant.u8, 200), (rant.i32, -7),
                        (rant.f32, 1.5), (rant.f64, -2.25), (int, 5), (float, 0.5),
                        (bool, False), (rant.string(16), "capped"), (str, "unbounded"),
@@ -287,6 +295,146 @@ def value_roots():
     return ok
 
 
+def lifecycle():
+    """A node runs from construction and closes itself: threaded delivery with no poll, the
+    last reference dropped, and interpreter exit, each seen as a bye by a watcher."""
+    print("lifecycle leg: domain 47, loopback")
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    seen = []
+    changed = threading.Condition()
+
+    def watch(e):
+        if e.kind in (rant.EventKind.PEER_UP, rant.EventKind.PEER_DOWN):
+            with changed:
+                seen.append((e.kind, e.peer_name))
+                changed.notify_all()
+
+    def saw(kind, name, timeout):
+        with changed:
+            return changed.wait_for(lambda: (kind, name) in seen, timeout)
+
+    watcher = rant.Node("watcher", on_event=watch, domain=47, multicast_interface=IFACE)
+    try:
+        check("service thread by default", watcher.threading == rant.Threading.SERVICE_THREAD)
+        check("poll refused under the service thread",
+              watcher.poll(0) == rant.SendStatus.STATE)
+
+        got = threading.Event()
+        watcher.subscriber("twist", Twist, lambda t: got.set(), reliable=True)
+
+        def open_and_drop():
+            n = rant.Node("dropped", on_event=lambda e: None, domain=47,
+                          multicast_interface=IFACE)
+            p = n.publisher("twist", Twist, reliable=True)
+            deadline = time.time() + 8.0
+            while time.time() < deadline and p.match_count == 0:
+                time.sleep(0.005)
+            p.send(Twist(dx=1.0))
+            check("threaded delivery with no poll", got.wait(3.0))
+            return weakref.ref(n)
+        ref = open_and_drop()
+        check("the dropped node is collected", ref() is None)
+        check("the dropped node said bye", saw(rant.EventKind.PEER_DOWN, "dropped", 3.0))
+
+        child = ("import sys, time; sys.path.insert(0, %r); import rant; "
+                 "n = rant.Node('exiting', on_event=lambda e: None, domain=47, "
+                 "multicast_interface=%r); "
+                 "n.subscriber('flag', bool, lambda v: None); time.sleep(1.5)"
+                 % (_HERE, IFACE))
+        r = subprocess.run([sys.executable, "-c", child], timeout=30)
+        check("exit with a live node returns 0", r.returncode == 0)
+        check("the exiting node said bye", saw(rant.EventKind.PEER_DOWN, "exiting", 3.0))
+    finally:
+        watcher.close()
+    print("lifecycle: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
+def handles():
+    """Same name handles on one node share the topic slot, close releases one hold and the
+    last close retires the name. Plus the reflection walks and the log write."""
+    print("handles leg: two nodes, domain 48, loopback")
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    got = []
+    a = rant.Node("HA", on_event=lambda e: None, domain=48, multicast_interface=IFACE,
+                  fetch_details=True)
+    b = rant.Node("HB", on_event=lambda e: None, domain=48, multicast_interface=IFACE)
+    try:
+        p = a.publisher("shared", Twist, reliable=True)
+        s = a.subscriber("shared", Twist, lambda t: None, reliable=True)
+        try:
+            a.publisher("shared", Pose)
+            check("a different schema on a live name is refused", False)
+        except rant.Error:
+            check("a different schema on a live name is refused", True)
+        b.subscriber("shared", Twist, lambda t: got.append(t), reliable=True)
+        fn = a.function_definition("double", lambda q: Twist(dx=q.dx * 2), Twist, Twist)
+        deadline = time.time() + 8.0
+        while time.time() < deadline and p.match_count == 0:
+            time.sleep(0.005)
+        check("publisher matched the peer's subscriber", p.match_count == 1)
+        check("the sibling subscriber closes", s.close())
+        check("close is idempotent", s.close())
+        check("the publisher still sends", p.send(Twist(dx=3.0)) == rant.SendStatus.OK)
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not got:
+            time.sleep(0.005)
+        check("and the peer still receives", bool(got) and abs(got[0].dx - 3.0) < 1e-6)
+        check("counts show the send", p.counts.tx_msgs >= 1)
+        check("the last handle closes", p.close())
+        check("a closed handle answers NO_TOPIC", p.send(Twist()) == rant.SendStatus.NO_TOPIC)
+        p2 = a.publisher("shared", Pose)
+        check("the name carries another schema after the last close", p2.name == "shared")
+
+        # reflection: the peer, this node's entities, the folded mesh and one lookup
+        peers = a.reflection.peers()
+        check("the peer is listed active",
+              any(x.name == "HB" and x.active for x in peers))
+        mine = a.reflection.entities()
+        check("this node's entities carry the function",
+              any(e.kind == rant.EntityKind.FUNCTION and e.name == "double" and e.provides
+                  for e in mine))
+        found = a.reflection.find(rant.EntityKind.TOPIC, "shared")
+        check("find folds the topic", found is not None and found.kind == rant.EntityKind.TOPIC)
+        check("the folded schema is an owned copy",
+              found is not None and found.schema is not None
+              and found.schema.hash == rant.Schema(Pose).hash)
+        check("mesh lists what find found",
+              any(e.name == "shared" for e in a.reflection.mesh()))
+        check("epoch is a counter", isinstance(a.reflection.epoch, int))
+        check("the function definition closes", fn.close())
+
+        check("log writes", a.log(rant.LogLevel.INFO, "hello") == rant.SendStatus.OK)
+        handler = lambda line: None
+        check("on_log binds and returns the handler", a.on_log(handler) is handler)
+        st = a.stats
+        check("stats is one snapshot", st.mem_in_use > 0 and st.alloc_calls > 0)
+        # the Pose publisher against HB's Twist subscriber is the mismatch it records, once
+        # HB's interest has come back
+        deadline = time.time() + 5.0
+        while time.time() < deadline and a.last_error.error == rant.ErrorKind.NONE:
+            time.sleep(0.005)
+        check("last_error is the schema mismatch",
+              a.last_error.error == rant.ErrorKind.SCHEMA_MISMATCH)
+    finally:
+        a.close()
+        b.close()
+    print("handles: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
 def value_roots_live():
     """Two nodes, bare-typed topics and a bare-typed variable, over loopback."""
     print("bare-root live leg: two nodes, domain 44, loopback")
@@ -298,26 +446,29 @@ def value_roots_live():
         ok = ok and cond
 
     got = {}
-    a = rant.Node("VA", on_event=lambda e: None, domain=44, multicast_interface=IFACE)
-    b = rant.Node("VB", on_event=lambda e: None, domain=44, multicast_interface=IFACE)
+    a = rant.Node("VA", on_event=lambda e: None, domain=44, multicast_interface=IFACE,
+                  threading=rant.Threading.MANUAL)
+    b = rant.Node("VB", on_event=lambda e: None, domain=44, multicast_interface=IFACE,
+                  threading=rant.Threading.MANUAL)
     try:
-        pub_flag = rant.Publisher[bool](a, "flag", reliable=True, keep_last=4)
-        sub_flag = rant.Topic[bool](b, "flag", role=rant.Role.SUB_ONLY, reliable=True, keep_last=4)
-        pub_note = rant.Publisher[str](a, "note", reliable=True, keep_last=4)
-        sub_note = rant.Topic[str](b, "note", role=rant.Role.SUB_ONLY, reliable=True, keep_last=4)
-        b.on_message(lambda m: got.setdefault(m.topic_name, m.value))
-        vd = rant.VariableDefinition[rant.f64](a, "gain", initial=1.25)
-        rv = rant.RemoteVariable[rant.f64](b, "gain")
+        pub_flag = a.publisher("flag", bool, reliable=True, keep_last=4)
+        sub_flag = b.subscriber("flag", bool, lambda v, m: got.setdefault(m.topic_name, v),
+                                reliable=True, keep_last=4)
+        pub_note = a.publisher("note", str, reliable=True, keep_last=4)
+        sub_note = b.subscriber("note", str, lambda v, m: got.setdefault(m.topic_name, v),
+                                reliable=True, keep_last=4)
+        vd = a.variable_definition("gain", rant.f64, initial=1.25)
+        rv = b.remote_variable("gain", rant.f64)
         check("handles created", all(h is not None for h in
                                     (pub_flag, sub_flag, pub_note, sub_note, vd, rv)))
         deadline = time.time() + 8.0
-        while time.time() < deadline and (pub_flag.match_count() == 0
-                                          or pub_note.match_count() == 0
+        while time.time() < deadline and (pub_flag.match_count == 0
+                                          or pub_note.match_count == 0
                                           or rv.get() is None):
             a.poll(0.001)
             b.poll(0.001)
         check("bare topics matched",
-              pub_flag.match_count() == 1 and pub_note.match_count() == 1)
+              pub_flag.match_count == 1 and pub_note.match_count == 1)
         check("bare variable replicated the initial", rv.get() == 1.25)
         pub_flag.send(True)
         pub_note.send("a bare unbounded string")
@@ -374,36 +525,32 @@ def patterns():
 
     # definitions on srv: the simple form, a raiser giving APP_ERROR, and a full form that
     # defers and completes off thread
-    add = rant.FunctionDefinition[AddReq, AddRsp](srv, "add",
-                                                  lambda q: AddRsp(sum=q.a + q.b))
+    add = srv.function_definition("add", lambda q: AddRsp(sum=q.a + q.b), AddReq, AddRsp)
 
     def _boom(q):
         raise RuntimeError("kaboom")   # noqa: the traceback print is expected
-    rant.FunctionDefinition[AddReq, AddRsp](srv, "boom", _boom)
+    srv.function_definition("boom", _boom, AddReq, AddRsp)
 
     def _late(q, request):
         d = request.defer()
         threading.Timer(0.05, lambda: d.complete(AddRsp(sum=q.a + q.b))).start()
-    rant.FunctionDefinition[AddReq, AddRsp](srv, "late", _late)
+    srv.function_definition("late", _late, AddReq, AddRsp)
 
-    lvl_def = rant.VariableDefinition[Level](srv, "level", initial=Level(value=5),
-                                             allow_force=True)
+    lvl_def = srv.variable_definition("level", Level, initial=Level(value=5), allow_force=True)
 
-    srv.start()   # the service thread owns srv's loop, handlers fire on it
-
-    # remotes on cli (manual poll: blocking calls drive cli's loop themselves)
-    add_r = rant.RemoteFunction[AddReq, AddRsp](cli, "add")
-    boom_r = rant.RemoteFunction[AddReq, AddRsp](cli, "boom")
-    late_r = rant.RemoteFunction[AddReq, AddRsp](cli, "late")
-    lvl = rant.RemoteVariable[Level](cli, "level")
+    # remotes on cli, whose service thread delivers while this thread waits
+    add_r = cli.remote_function("add", AddReq, AddRsp)
+    boom_r = cli.remote_function("boom", AddReq, AddRsp)
+    late_r = cli.remote_function("late", AddReq, AddRsp)
+    lvl = cli.remote_variable("level", Level)
 
     deadline = time.time() + 8.0
-    while time.time() < deadline and not (add_r.match_count() > 0
-                                          and boom_r.match_count() > 0
-                                          and late_r.match_count() > 0):
-        cli.poll(0.005)
-    check("definitions discovered", add_r.match_count() > 0 and boom_r.match_count() > 0
-          and late_r.match_count() > 0)
+    while time.time() < deadline and not (add_r.match_count > 0
+                                          and boom_r.match_count > 0
+                                          and late_r.match_count > 0):
+        time.sleep(0.005)
+    check("definitions discovered", add_r.match_count > 0 and boom_r.match_count > 0
+          and late_r.match_count > 0)
 
     # blocking calls
     r = add_r.call(AddReq(a=2, b=3), 3.0)
@@ -422,17 +569,17 @@ def patterns():
 
     rl = late_r.call(AddReq(a=20, b=22), 3.0)
     check("deferred completion", rl.ok and rl.value.sum == 42)
-    check("caller count seen by definition", add.match_count() == 1)
+    check("caller count seen by definition", add.match_count == 1)
 
     # variable: catch_up hands the remote the initial value
     check("variable wait", lvl.wait(3.0))
     v = lvl.get()
     check("initial value", v is not None and v.value == 5)
-    check("owner matched", lvl.match_count() > 0)
+    check("owner matched", lvl.match_count > 0)
     check("remote set accepted", lvl.set(Level(value=9)) == rant.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
-        cli.poll(0.005)
+        time.sleep(0.005)
     check("set round-trips to the remote", (v := lvl.get()) is not None and v.value == 9)
     check("definition applied it", (v := lvl_def.get()) is not None and v.value == 9)
 
@@ -440,19 +587,21 @@ def patterns():
     check("force", lvl_def.force(Level(value=99)) == rant.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 99):
-        cli.poll(0.005)
+        time.sleep(0.005)
     check("forced value visible remotely", (v := lvl.get()) is not None and v.value == 99)
-    check("remote sees forced()", lvl.forced())
+    check("remote sees forced", lvl.forced)
     check("unforce", lvl_def.unforce() == rant.SendStatus.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
-        cli.poll(0.005)
+        time.sleep(0.005)
     check("unforce restores the latest set",
-          (v := lvl.get()) is not None and v.value == 9 and not lvl.forced())
+          (v := lvl.get()) is not None and v.value == 9 and not lvl.forced)
 
     # variable events: on_change dedups + replays at registration, on_write counts
     # every applied write
-    chg, wr = [], []
+    chg, wr, rchg = [], [], []
+    lvl.on_change(lambda v: rchg.append(v.value))
+    check("remote on_change replays the cache", bool(rchg) and rchg[0] == 9)
     lvl_def.on_change(lambda v, u: chg.append((v.value, u.forced, u.source)))
     check("on_change replays current at registration", len(chg) == 1 and chg[0][0] == 9)
     lvl_def.on_write(lambda v: wr.append(v.value))
@@ -462,19 +611,15 @@ def patterns():
     check("new set accepted", lvl_def.set(Level(value=12)) == rant.SendStatus.OK)
     check("change fires inline with the new value",
           len(chg) == 2 and chg[1][0] == 12 and chg[1][2] == 0 and len(wr) == 2)
-    rchg = []
-    lvl.on_change(lambda v: rchg.append(v.value))
-    check("remote on_change replays the cache", bool(rchg) and rchg[0] == 9)
     deadline = time.time() + 5.0
     while time.time() < deadline and (not rchg or rchg[-1] != 12):
-        cli.poll(0.005)
+        time.sleep(0.005)
     check("remote change arrives", bool(rchg) and rchg[-1] == 12)
     lvl_def.on_change(None)
     lvl_def.on_write(None)
     lvl.on_change(None)
 
-    # async form: start cli's service thread, wait for the callback
-    cli.start()
+    # async form: the response fires on cli's service thread
     done = threading.Event()
     async_rsp = []
 
@@ -488,10 +633,9 @@ def patterns():
     # a blocking call under the service thread sleeps on its progress and answers
     rr = add_r.call(AddReq(a=1, b=2), 2.0)
     check("blocking call answers under service thread", rr.ok and rr.value.sum == 3)
-    cli.stop()
 
     # a call still pending at close gets exactly one CANCELLED outcome, never hangs
-    never = rant.RemoteFunction(cli, "never-served", timeout=60.0)
+    never = cli.remote_function("never-served", timeout=60.0)
     cancelled = []
     cdone = threading.Event()
 
@@ -537,47 +681,44 @@ def tasks():
                     domain=46, multicast_interface=IFACE, max_topics=32)
     cli = rant.Node("tcli", on_event=on_event("tcli"),
                     domain=46, multicast_interface=IFACE, max_topics=32)
+    mcli = rant.Node("tmcli", on_event=on_event("tmcli"), domain=46,
+                     multicast_interface=IFACE, max_topics=32, threading=rant.Threading.MANUAL)
     try:
         # work: streams progress then returns a result
-        def _work(task):
+        def _work(req, task):
             total = 0
-            for i in range(task.value.count):
+            for i in range(req.count):
                 total += i + 1
                 task.progress(JobPrg(done=i + 1))
             return JobRsp(total=total)
-        work = rant.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "work", _work)
+        work = srv.task_definition("work", _work, JobReq, JobPrg, JobRsp)
 
         # grind: runs until cancelled, honors the cancel
-        def _grind(task):
+        def _grind(req, task):
             task.progress(JobPrg(done=0))
             if not task.cancel_event.wait(8.0) or not task.cancelled:
                 return JobRsp(total=-1)   # cancel never arrived: a visible failure
             raise rant.CancelledError("stopped")
-        rant.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "grind", _grind)
+        srv.task_definition("grind", _grind, JobReq, JobPrg, JobRsp)
 
-        # rigid: declares no_cancel, completes regardless
-        def _rigid(task):
-            task.progress(JobPrg(done=1))
+        # rigid: declares no_cancel, completes regardless with the one argument form
+        def _rigid(req):
             time.sleep(0.3)
             return JobRsp(total=7)
-        rant.TaskDefinition[JobReq, JobPrg, JobRsp](srv, "rigid", _rigid,
-                                                    no_cancel=True)
+        srv.task_definition("rigid", _rigid, JobReq, JobPrg, JobRsp, no_cancel=True)
 
-        srv.start()   # the service thread owns srv's loop, workers spawn off it
-
-        work_r = rant.RemoteTask[JobReq, JobPrg, JobRsp](cli, "work")
-        grind_r = rant.RemoteTask[JobReq, JobPrg, JobRsp](cli, "grind")
-        rigid_r = rant.RemoteTask[JobReq, JobPrg, JobRsp](cli, "rigid")
+        # progress and responses fire on cli's service thread
+        work_r = cli.remote_task("work", JobReq, JobPrg, JobRsp)
+        grind_r = cli.remote_task("grind", JobReq, JobPrg, JobRsp)
+        rigid_r = cli.remote_task("rigid", JobReq, JobPrg, JobRsp)
 
         deadline = time.time() + 8.0
-        while time.time() < deadline and not (work_r.match_count() > 0
-                                              and grind_r.match_count() > 0
-                                              and rigid_r.match_count() > 0):
-            cli.poll(0.005)
-        check("definitions discovered", work_r.match_count() > 0
-              and grind_r.match_count() > 0 and rigid_r.match_count() > 0)
-
-        cli.start()   # async legs: progress + responses fire on cli's service thread
+        while time.time() < deadline and not (work_r.match_count > 0
+                                              and grind_r.match_count > 0
+                                              and rigid_r.match_count > 0):
+            time.sleep(0.005)
+        check("definitions discovered", work_r.match_count > 0
+              and grind_r.match_count > 0 and rigid_r.match_count > 0)
 
         # async round trip: RUNNING ack first, then the values in order, terminal OK
         prog, rsps = [], []
@@ -628,23 +769,26 @@ def tasks():
         check("rigid completes anyway",
               ndone.wait(5.0) and nrsps[0].ok and nrsps[0].value.total == 7)
 
-        cli.stop()   # the blocking form drives the loop itself
-
-        # blocking call with on_progress firing on the calling thread
+        # a MANUAL node's blocking call drives its loop, so progress fires on the calling thread
+        mwork_r = mcli.remote_task("work", JobReq, JobPrg, JobRsp)
+        deadline = time.time() + 8.0
+        while time.time() < deadline and mwork_r.match_count == 0:
+            mcli.poll(0.005)
         bprog, bthread = [], []
 
         def bprg(v):
             bprog.append(None if v is None else v.done)
             bthread.append(threading.current_thread() is threading.main_thread())
-        br = work_r.call(JobReq(count=2), on_progress=bprg, timeout=3.0)
+        br = mwork_r.call(JobReq(count=2), on_progress=bprg, timeout=3.0)
         check("blocking task ok", br.ok and br.value.total == 3)
         check("blocking progress on the calling thread, in order",
               bprog == [None, 1, 2] and all(bthread))
 
-        check("caller count seen by the definition", work.match_count() == 1)
+        check("caller count seen by the definition", work.match_count == 2)
     finally:
         srv.close()
         cli.close()
+        mcli.close()
     print("tasks: " + ("PASS\n" if ok else "FAIL\n"))
     return ok
 
@@ -653,9 +797,9 @@ got = threading.Event()
 received = []
 
 
-def on_message(m):
-    received.append(m)
-    print("recv: [%s] from %s -> %r" % (m.topic_name, m.publisher_name, m.value))
+def on_pose(pose, m):
+    received.append(pose)
+    print("recv: [%s] from %s -> %r" % (m.topic_name, m.publisher_name, pose))
     got.set()
 
 
@@ -671,18 +815,18 @@ def main():
     if not std_types():
         return 1
     print("opening nodes...")
-    sub = rant.Node("sub", on_message=on_message, on_event=on_event("sub"),
-                    domain=DOMAIN, multicast_interface=IFACE)
+    sub = rant.Node("sub", on_event=on_event("sub"),
+                    domain=DOMAIN, multicast_interface=IFACE, threading=rant.Threading.MANUAL)
     pub = rant.Node("pub", on_event=on_event("pub"),
-                    domain=DOMAIN, multicast_interface=IFACE)
+                    domain=DOMAIN, multicast_interface=IFACE, threading=rant.Threading.MANUAL)
 
-    rant.Topic[Pose](sub, "pose", role=rant.Role.SUB_ONLY, reliable=True, keep_last=8)
-    pubch = rant.Topic[Pose](pub, "pose", role=rant.Role.PUB_ONLY, reliable=True, keep_last=8)
+    subch = sub.subscriber("pose", Pose, on_pose, reliable=True, keep_last=8)
+    pubch = pub.publisher("pose", Pose, reliable=True, keep_last=8)
 
     sent = Pose(stamp=7, x=1.5, y=-2.5, uuid=b"\x01\x02\x03\x04",
                 frame="map", tags=["fast", "ok"], vel=Twist(dx=0.5, dy=0.25))
 
-    # Single-threaded: drive both nodes by polling them in the loop (no start()).
+    # MANUAL: drive both nodes by polling them in the loop.
     deadline = time.time() + 8.0
     while time.time() < deadline and not got.is_set():
         pubch.send(sent)
@@ -691,7 +835,7 @@ def main():
 
     ok = got.is_set()
     if ok:
-        r = received[0].value
+        r = received[0]
         ok = (isinstance(r, Pose) and r.stamp == 7 and abs(r.x - 1.5) < 1e-9
               and abs(r.y + 2.5) < 1e-9 and bytes(r.uuid) == b"\x01\x02\x03\x04"
               and r.frame == "map" and list(r.tags) == ["fast", "ok"]
@@ -710,34 +854,19 @@ def main():
         except rant.SchemaError:
             print("PASS: over-cap string refused")
 
-    # threaded: both nodes on their service threads, sent from this thread, delivered
-    # with no poll() anywhere
-    if ok:
-        if not pub.start() or not sub.start():
-            print("FAIL: start")
-            ok = False
-        elif pub.poll(0) != rant.SendStatus.STATE:
-            print("FAIL: poll not refused while started")
-            ok = False
-        else:
-            got.clear()
-            sent.stamp = 8
-            pubch.send(sent)
-            ok = got.wait(3.0) and received[-1].value.stamp == 8
-            print("PASS: threaded delivery via start() (evicted_unsent=%d)" % pub.stats.evicted_unsent()
-                  if ok else "FAIL: threaded delivery")
-            pub.stop()
-            sub.stop()
-
     pub.close()
     sub.close()
 
     # A handle outliving its node answers NO_TOPIC instead of touching freed memory.
     if ok:
-        ok = (pubch.send(sent) == rant.SendStatus.NO_TOPIC and pubch.match_count() == 0
-              and pubch.take() is None and pubch.name == "pose" and pub.name == "pub")
+        ok = (pubch.send(sent) == rant.SendStatus.NO_TOPIC and pubch.match_count == 0
+              and subch.take() is None and pubch.name == "pose" and pub.name == "pub")
         print("PASS: handle after close" if ok else "FAIL: handle after close")
 
+    if ok:
+        ok = lifecycle()
+    if ok:
+        ok = handles()
     if ok:
         ok = value_roots_live()
     if ok:

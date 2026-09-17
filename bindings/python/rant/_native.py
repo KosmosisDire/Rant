@@ -271,9 +271,10 @@ class RantFunctionOpts(Structure):
         ("backpressure_wait_us", c_uint32),
         ("timeout_us", c_uint32),
         ("keep_last", c_uint16),
+        ("reflect_from_mesh", c_uint8),
         ("multi", c_uint8),
-    ]
         ("queue", c_void_p),
+    ]
 
 
 class RantVariableOpts(Structure):
@@ -284,9 +285,9 @@ class RantVariableOpts(Structure):
         ("catch_up", c_uint16),
         ("keep_last", c_uint16),
         ("backpressure_wait_us", c_uint32),
-    ]
         ("reflect_from_mesh", c_uint8),
         ("queue", c_void_p),
+    ]
 
 
 class RantVariableUpdate(Structure):
@@ -313,9 +314,9 @@ class RantTaskOpts(Structure):
         ("timeout_us", c_uint32),
         ("backpressure_wait_us", c_uint32),
         ("keep_last", c_uint16),
-    ]
         ("reflect_from_mesh", c_uint8),
         ("queue", c_void_p),
+    ]
 
 
 class RantProgress(Structure):
@@ -344,6 +345,59 @@ class RantCallOpts(Structure):
     ]
 
 
+# the reflection walks of src/node/core.h: one zero initialized iterator per walk
+
+class RantIter(Structure):
+    _fields_ = [("a", c_uint32), ("b", c_uint32), ("c", c_uint16), ("d", c_uint16)]
+
+
+class RantPeerInfo(Structure):
+    _fields_ = [
+        ("id", c_uint32),
+        ("uuid", c_uint8 * 16),
+        ("name", RantStringView),
+        ("address", RantStringView),
+        ("liveness", c_int),
+        ("last_heard_us", c_uint64),
+        ("epoch", c_uint32),
+        ("catching_up", c_uint8),
+        ("fragment_size", c_uint16),
+        ("rtt_us", c_uint32),
+        ("rtt_jitter_us", c_uint32),
+        ("rtt_min_us", c_uint32),
+        ("rtt_samples", c_uint32),
+    ]
+
+
+class RantEntityInfo(Structure):
+    _fields_ = [
+        ("kind", c_int),
+        ("name", RantStringView),
+        ("hash", c_uint32),
+        ("provides", c_uint8),
+        ("consumes", c_uint8),
+        ("reliable", c_uint8),
+        ("writable", c_uint8),
+        ("forceable", c_uint8),
+        ("cancellable", c_uint8),
+        ("exclusive", c_uint8),
+        ("multi", c_uint8),
+        ("incomplete", c_uint8),
+        ("conflict", c_uint8),
+        ("providers", c_uint16),
+        ("consumers", c_uint16),
+        ("provider", c_uint32),
+        ("from_", RantStringView),
+        ("schema", c_void_p),
+        ("schema_hash", c_uint64),
+        ("rsp_schema", c_void_p),
+        ("rsp_schema_hash", c_uint64),
+        ("progress_schema", c_void_p),
+        ("progress_schema_hash", c_uint64),
+        ("generation", c_uint64),
+    ]
+
+
 RANT_ALLOCATOR_PAGE = 64 * 1024     # RANT_ALLOCATOR_PAGE default
 
 MsgFn = CFUNCTYPE(None, POINTER(RantMsg))
@@ -368,15 +422,13 @@ def bind(lib):
     F("rant_node_poll", [c_void_p, c_int], c_int)
     F("rant_node_close", [c_void_p, c_int], c_int)
     F("rant_node_start", [c_void_p], c_int)
-    F("rant_node_stop", [c_void_p], c_int)
-    F("rant_node_is_started", [c_void_p], c_int)
     F("rant_node_evicted_unsent", [c_void_p], c_uint32)
     F("rant_node_create_topic", [c_void_p, c_char_p, c_int, c_void_p,
                                    POINTER(RantTopicOpts)], c_void_p)
-    F("rant_node_topic", [c_void_p, c_uint16], c_void_p)
     F("rant_topic_send", [c_void_p, RantBytes, POINTER(RantSendOpts)], c_int)
     F("rant_topic_set_role", [c_void_p, c_int], c_int)
     F("rant_topic_retire", [c_void_p], c_int)
+    F("rant_topic_refresh", [c_void_p], c_int)
     F("rant_topic_index", [c_void_p], c_uint16)
     F("rant_topic_match_count", [c_void_p], c_int)
     F("rant_topic_drain", [c_void_p, c_int], c_int)
@@ -397,9 +449,15 @@ def bind(lib):
     F("rant_event_str", [POINTER(RantEvent), c_char_p, c_size_t], c_char_p)
     F("rant_node_settle", [c_void_p, c_int], c_int)
     F("rant_topic_ready", [c_void_p], c_int)
-    F("rant_topic_pending_count", [c_void_p], c_int)
     F("rant_node_lock", [c_void_p], None)
     F("rant_node_unlock", [c_void_p], None)
+    # reflection
+    F("rant_node_peers_next", [c_void_p, POINTER(RantIter), POINTER(RantPeerInfo)], c_int)
+    F("rant_node_entities_next", [c_void_p, c_uint32, POINTER(RantIter),
+                                  POINTER(RantEntityInfo)], c_int)
+    F("rant_node_mesh_next", [c_void_p, POINTER(RantIter), POINTER(RantEntityInfo)], c_int)
+    F("rant_node_mesh_find", [c_void_p, c_int, c_char_p, POINTER(RantEntityInfo)], c_int)
+    F("rant_node_mesh_epoch", [c_void_p], c_uint32)
     # patterns: functions / variables
     F("rant_node_create_function_definition", [c_void_p, c_char_p, c_void_p,
                                                c_void_p, ReqFn, c_void_p,
@@ -410,6 +468,7 @@ def bind(lib):
     F("rant_function_call_async", [c_void_p, RantBytes, RspFn, c_void_p, c_void_p], c_int)
     F("rant_function_match_count", [c_void_p], c_int)
     F("rant_function_retire", [c_void_p], c_int)
+    F("rant_function_refresh", [c_void_p], c_int)
     F("rant_request_reply", [POINTER(RantRequest), RantBytes], None)
     F("rant_request_fail", [POINTER(RantRequest), c_char_p, RantBytes], None)
     F("rant_request_defer", [POINTER(RantRequest)], c_uint64)
@@ -437,12 +496,13 @@ def bind(lib):
     F("rant_variable_wait", [c_void_p, c_int], c_int)
     F("rant_variable_match_count", [c_void_p], c_int)
     F("rant_variable_retire", [c_void_p], c_int)
+    F("rant_variable_refresh", [c_void_p], c_int)
     F("rant_variable_on_change", [c_void_p, VarFn, c_void_p], c_int)
     F("rant_variable_on_write", [c_void_p, VarFn, c_void_p], c_int)
     # serialize / schema
     F("rant_schema_compile", [AllocFn, c_void_p, c_char_p, POINTER(c_char_p)], c_void_p)
     F("rant_schema_free", [c_void_p, AllocFn, c_void_p], None)
-    F("rant_schema_wire", [c_void_p], RantBytes)
+    F("rant_schema_copy", [c_void_p, AllocFn, c_void_p], c_void_p)
     F("rant_schema_hash", [c_void_p], c_uint64)
     F("rant_schema_name", [c_void_p], RantStringView)
     F("rant_schema_print", [c_void_p, c_char_p, c_size_t], c_uint32)
@@ -453,7 +513,6 @@ def bind(lib):
     F("rant_std_recognize_field", [c_void_p, c_uint16, AllocFn, c_void_p], c_int)
     F("rant_std_recognize_elem", [c_void_p, c_uint16, AllocFn, c_void_p], c_int)
     F("rant_timestamp_now", [], c_int64)
-    F("rant_schema_size", [c_void_p], c_uint32)
     F("rant_schema_field_count", [c_void_p], c_uint16)
     F("rant_schema_field_at", [c_void_p, c_uint16, POINTER(RantSchemaFieldInfo)], c_int)
     F("rant_schema_field_index", [c_void_p, c_char_p], c_int)

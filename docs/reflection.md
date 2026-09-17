@@ -58,4 +58,5 @@ automatic, because a retire is visible to peers, so the app picks the moment.
 `rant_schema_copy` gives an owned copy of any node owned schema.
 
 The same walks are in every binding: C++ `Peer` and `Entity`, C# `RantPeer` and `RantEntity`
-(docs/csharp.md), and the bridge's `peers` op.
+(docs/csharp.md), Python `Peer` and `Entity` on `node.reflection` (docs/python.md), and the
+bridge's `peers` op.

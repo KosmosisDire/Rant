@@ -18,10 +18,10 @@ class Pose:
     x:     rant.f64 = 0.0
     frame: rant.string(16) = ""
 
-node = rant.Node("robot1", on_message=lambda m: print(m.value), domain=7)
-pose = rant.Topic[Pose](node, "pose", reliable=True)
-node.start()
+node = rant.Node("robot1", domain=7)
+pose = node.publisher("pose", Pose, reliable=True)
 pose.send(Pose(stamp=1, x=1.0, frame="map"))
+node.subscriber("pose", Pose, lambda p: print(p))
 ```
 
 The guide is docs/python.md in the repository: https://github.com/KosmosisDire/Rant

@@ -21,17 +21,17 @@ count = 0
 last = Tick()
 
 
-def on_message(msg):
+def on_tick(tick):
     global count, last
     count += 1
-    last = msg.value                     # the decoded Tick: standard types and all
+    last = tick                          # the decoded Tick: standard types and all
 
 
 def main():
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0
     iface = sys.argv[2] if len(sys.argv) > 2 else None
-    node = rant.Node("py-subscriber", on_message=on_message, multicast_interface=iface)
-    rant.Topic[Tick](node, "tick", role=rant.Role.SUB_ONLY)
+    node = rant.Node("py-subscriber", multicast_interface=iface, threading=rant.Threading.MANUAL)
+    node.subscriber("tick", Tick, on_tick)
     print("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)")
 
     start = time.perf_counter()

@@ -13,8 +13,8 @@ about a wrapper API, this file wins.
   Task form. JS has no callAsync, the Promise is it.
 - Match queries in C++ are side named: the remote side exposes a bool `has_definition`,
   the definition side `caller_count` or `remote_count`. Python and C# spell every one
-  `match_count` and `MatchCount`, the count of the other side, except that a C#
-  `Subscriber<T>` has none since the C exposes no publisher count on the subscribing side.
+  `match_count` and `MatchCount`, the count of the other side, except that a C# or Python
+  subscriber has none since the C exposes no publisher count on the subscribing side.
   C keeps its generic primitives.
 - A call outcome is a value, never a fault. C# `CallAsync` always completes with a
   Response, and reading `.Value` off OK throws. JS `call()` rejects only on connection loss.
@@ -27,9 +27,11 @@ about a wrapper API, this file wins.
 - Node open takes `(name, on_message, on_event, opts)`. `on_message` is nullable, since
   typed subscribers and pattern handles carry their own handlers. `on_event` is validated
   non null by every wrapper so the first diagnostics are never missed. Setter methods
-  exist only for later rebinding. C# is the exception: `new RantNode(name, NodeOptions)`
-  has no node level message handler, subscribers carry every one, and events are the
-  optional `OnEvent` C# event since `LastError` records the last diagnostic either way.
+  exist only for later rebinding. C# and Python are the exception: `new RantNode(name,
+  NodeOptions)` and `Node(name, **options)` have no node level message handler and
+  subscribers carry every one. C# events are the optional `OnEvent` C# event since
+  `LastError` records the last diagnostic either way, and Python's optional `on_event`
+  keyword prints to stderr when unset.
 - Handlers come in two forms: payload only, or payload plus message envelope. C# has one:
   every handler is a C# event (`OnMessage`, `OnChange`, `OnWrite`, `OnEvent`, `OnLog`)
   whose delegate takes the value and the envelope, discarded with `_` when unwanted.
@@ -169,12 +171,19 @@ and install off and the one `SKBUILD` rule copies the library next to the packag
 wheel is `py3-none-<platform>`, since ctypes needs no Python ABI, so one wheel per
 platform serves every interpreter.
 
-- Constructors not factories: `Node(name=None, *, on_message, on_event, **options)`,
-  `Topic(node, name, schema=None, *, role=PUBSUB, **qos)`, `Topic[T](...)`,
-  `Schema(source)` from DSL text or a class. Options are keyword only and spelled out, no
-  option dataclasses. Durations and timeouts are float seconds (`_ms` and `_us` convert),
-  timestamps stay integer microseconds. Variables are methods only. Handlers are arity
-  dispatched.
+- `Node(name=None, *, on_event, **options)` plus a factory method per handle named after
+  it, as C#: `node.publisher(name, schema, **options)`, `node.subscriber(name, schema,
+  handler, **options)`, `node.function_definition(name, handler, req, rsp, **options)`
+  and so on. The handle classes exist for annotations (`rant.Publisher[Pose]`) and are
+  never constructed by the user. `Schema(source)` compiles DSL text, a class or a bare
+  type. Options are keyword only and spelled out, no option objects. Durations and
+  timeouts are float seconds (`_ms` and `_us` convert), timestamps stay integer
+  microseconds. Every handle has `close()`, which returns False where C# would throw, and
+  same name topic handles share one slot with a hold count per role. Queries with no
+  argument are properties (`match_count`, `ready`, `forced`, `counts`, `stats`,
+  `last_error`), actions are methods. Variables are methods only. Handlers are arity
+  dispatched and single: a subscriber's in the factory, `on_change`, `on_write` and
+  `on_log` rebinding.
 - Any annotated class is a schema, no decorator needed. Field types: `rant.u8` to
   `rant.f64`, `rant.string(cap)`, `rant.<t>[N]`, a nested class, plain int, float and
   bool, `str` (VSTR), `list[...]` (VARR), `dict` (MAP), or a bare `IntEnum`.
@@ -189,4 +198,5 @@ platform serves every interpreter.
 - The map body is built and parsed in pure Python.
 - Task handlers run on a daemon thread per call. Raising `rant.CancelledError` completes
   CANCELLED.
-- Gaps: no `seed_peers`, no peer reflection.
+- `node.reflection` carries the walks as `Peer` and `Entity` dataclasses whose schemas
+  are `rant_schema_copy` owned copies freed by the `Schema` finalizer.
