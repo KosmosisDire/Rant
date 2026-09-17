@@ -159,7 +159,8 @@ process base picked from the clock so concurrent runs never join each other.
 - BURST: 64 back to back best effort sends from one thread all reach the wire.
 - CAPPED: a `keep_last` 1 publisher at 1 kHz against a `max_rate_hz` 50 subscriber. No send
   may wait for the capped lane's tick, the subscriber stays paced and nothing counts as
-  evicted unsent.
+  evicted unsent. A lone held back sample after a quiet spell must leave at the 20 ms
+  tick, which pins the kick a send owes a timer it armed.
 - HOSTILE (Windows): transport sends forced to would block. The first pass parks one
   datagram in `tx_hold`, past that the burst overwrites truly unsent history, which must
   surface as RANT_EVICTED_UNSENT so every send is delivered or accounted.

@@ -128,6 +128,7 @@ struct RantNode {
     volatile uint8_t svc_stop;    /* stop requested, the service loop exits on it */
     uint8_t       svc_joining;    /* under mu: one stopper owns the join, others wait on cv */
     uint32_t      pollers_sleeping; /* under mu: pollers in or headed into the unlocked wait */
+    uint64_t      sleep_until_us; /* under mu: the earliest wake those pollers planned */
     uint8_t       wake_signaled;  /* under mu: a burst coalesces into one waker datagram */
     uint8_t       user_locked;    /* the public rant_node_lock is held */
     volatile uint8_t  lock_held;  /* the owner reentrancy check, written by the owner only */
@@ -806,8 +807,13 @@ static void i_rant_node_send_tx(RantNode *n, int acquired){
 #ifdef RANT_THREADS
     if (acquired && (n->svc_running || n->pollers_sleeping) && n->fd != RANT_SOCK_BAD)
         i_rant_node_tx_drain(n);
-    /* a full socket or a callback's commit is left to the poller: cut its sleep short */
-    if (n->tx_hold_len || rant_transport_tx_pending(n->transport)) i_rant_node_kick(n);
+    /* a full socket or a callback's commit is left to the poller, and so is a timer this
+       send armed ahead of the poller's planned wake (its wait rounds up a millisecond) */
+    {   uint64_t next = rant_transport_next_deadline_us(n->transport);
+        if (n->tx_hold_len || rant_transport_tx_pending(n->transport)
+            || (next && n->pollers_sleeping && next + 1000u <= n->sleep_until_us))
+            i_rant_node_kick(n);
+    }
 #else
     (void)n; (void)acquired;
 #endif
@@ -1649,6 +1655,9 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
     if (outer){
         /* the wait runs unlocked so a sender on another thread is never blocked behind
            it. pollers_sleeping is a counter, several threads may poll the same node */
+        {   uint64_t until = i_rant_plat_now_us() + (uint64_t)wait_ms * 1000u;
+            if (!n->pollers_sleeping || until < n->sleep_until_us) n->sleep_until_us = until;
+        }
         n->pollers_sleeping++;
         i_rant_node_unlock_raw(n);
         poll_rc = i_rant_plat_poll(pfd, nfds, wait_ms);

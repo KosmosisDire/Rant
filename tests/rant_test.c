@@ -4353,6 +4353,23 @@ static void threaded_checks(void){
                    th_recv);
           ST_CHECK(rant_node_evicted_unsent(w) == 0, "capped: a held back sample is not an eviction (%u)",
                    rant_node_evicted_unsent(w));
+          /* a lone held back sample leaves at the lane's 20 ms tick: the send that armed the
+             tick must wake the service thread, which otherwise sleeps out its older plan */
+          { uint64_t worst_gap = 0; int pair;
+            for (pair=0;pair<3;pair++){
+                unsigned long r0; uint64_t t0, dt;
+                sw_sleep_ms(300);
+                r0 = th_recv;
+                rant_node_send(w, 0, payload, sizeof payload); sw_sleep_ms(1);
+                rant_node_send(w, 0, payload, sizeof payload);
+                t0 = i_rant_plat_now_us();
+                while (th_recv < r0 + 2 && i_rant_plat_now_us() - t0 < 1000000u) sw_sleep_ms(1);
+                dt = i_rant_plat_now_us() - t0;
+                if (th_recv < r0 + 2) dt = 1000000u;
+                if (dt > worst_gap) worst_gap = dt;
+            }
+            ST_CHECK(worst_gap < 100000u, "capped: a held back sample leaves at its tick (worst %.0f ms)",
+                     worst_gap/1000.0); }
           rant_node_close(r, 1); rant_node_close(w, 1);
       }
     }

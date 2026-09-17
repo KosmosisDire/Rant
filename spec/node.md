@@ -67,6 +67,10 @@ strict prefix of it.
   lock the send already holds whenever another thread runs the loop (a service thread or
   a sleeping poller), so there is no handoff, no waker datagram and no wait for a TX
   pass. A full socket parks the datagram in `tx_hold` and kicks the poller to retry. A
+  send can also arm a transport timer (a rate capped lane's tick, a tail heartbeat) ahead
+  of the wake the sleeping poller planned. `sleep_until_us` records that plan, and the
+  send kicks when the new deadline lands a millisecond or more before it, or the timer
+  would fire up to the 250 ms cap late. A
   send from a callback leaves the drain to the pass that called it. A single threaded
   program keeps the batch at its poll, where one datagram carries many submessages. The
   price of the inline drain is that batching: a tight loop of small sends tops out near
