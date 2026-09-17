@@ -181,6 +181,30 @@ if(RANT_BUILD_TOOLS)
   # SHM-disabled test build (matches the rant_test_noshm in the tree).
   rant_program(rant_test_noshm tests/rant_test.c)
   target_compile_definitions(rant_test_noshm PRIVATE RANT_NO_SHM)
+
+  # The C++ wrapper test and example, when this machine has a C++ compiler. Each compiles
+  # the C++ anchor itself, the way a consumer of the single header does.
+  include(CheckLanguage)
+  check_language(CXX)
+  if(CMAKE_CXX_COMPILER)
+    enable_language(CXX)
+    function(rant_cpp_program name src)
+      add_executable(${name} "${src}" "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.cpp")
+      target_compile_features(${name} PRIVATE cxx_std_17)
+      target_link_libraries(${name} PRIVATE rant rant_platform)
+      add_dependencies(${name} rant_dist)
+    endfunction()
+    rant_cpp_program(rant_cpp_test    bindings/cpp/test.cpp)
+    rant_cpp_program(rant_cpp_example bindings/cpp/example.cpp)
+  endif()
+
+  # ctest runs the same checks CLAUDE.md asks for by hand.
+  enable_testing()
+  add_test(NAME rant_test       COMMAND rant_test selftest)
+  add_test(NAME rant_test_noshm COMMAND rant_test_noshm selftest)
+  if(TARGET rant_cpp_test)
+    add_test(NAME rant_cpp_test COMMAND rant_cpp_test)
+  endif()
 endif()
 
 # 4. The packages, into dist/. unity_package needs nothing installed, nuget_package needs
