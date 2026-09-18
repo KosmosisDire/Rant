@@ -179,8 +179,9 @@ Force overrides the value with a shadow source until unforce. `on_change` fires 
 the observed state actually changes (first value, different bytes, a forced flip) and
 replays the current value once at registration, which kills the create to register race.
 `on_write` fires on every applied write with no replay, because writes are events, not
-state. Both fire inline under the node lock on the thread that applied the write, or park
-for the variable's queue. Writes absorbed while forced fire nothing. Edge predicates would hook in at
+state. Both fire inline on the thread that applied the write with the node lock released
+(spec/node.md), or park for the variable's queue. The update views the store, so a write
+from another thread waits for the observer to return. Writes absorbed while forced fire nothing. Edge predicates would hook in at
 `i_rant_var_would_change`.
 
 A fresh remote's first write rides the send path match wait, so `RANT_ERR_NO_TOPIC`

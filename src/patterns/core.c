@@ -205,6 +205,7 @@ typedef struct i_RantDefer {
 struct RantFunction {
     RantNode         *n;
     i_RantPatterns *pm;
+    volatile uint32_t cb_out;         /* its handlers out with the lock released, retire waits on 0 */
     struct RantFunction *next;        /* the manager list */
     RantTopic        *req;            /* provider SUB_ONLY, caller PUB_ONLY */
     RantTopic        *rsp;            /* provider PUB_ONLY, caller SUB_ONLY, directed */
@@ -284,7 +285,11 @@ static void i_rant_func_cancel_op(RantFunction *fn, const RantMsg *msg){
     if (!fn->on_cancel) return;
     if (i_rant_topic_queue(fn->req)){ i_rant_func_park_msg(fn->req, RANT__REC_CANCEL_OP, msg); return; }
     d->cancel_notified = 1;
-    fn->on_cancel((uint64_t)(uintptr_t)d, fn->on_cancel_user);
+    {   i_RantCallbackScope cs;
+        i_rant_node_sys_callback_begin(fn->n, &cs, &fn->cb_out);
+        fn->on_cancel((uint64_t)(uintptr_t)d, fn->on_cancel_user);
+        i_rant_node_sys_callback_end(fn->n, &cs, &fn->cb_out);
+    }
 }
 
 /* dispatch: on_cancel for a parked CANCEL op, once, if the defer is still live */
@@ -315,8 +320,12 @@ static void i_rant_func_run_request(RantFunction *fn, const RantMsg *msg){
     r.pub.written_us    = msg->written_us;
     r.fn = fn; r.call_id = i_rant_le_r32(msg->header.data); r.replied = 0; r.started = 0;
     r.caller_lo = fn->is_task ? i_rant_pat_peer_lo(msg->node, msg->publisher_id) : 0;
-    if (fn->on_request) fn->on_request(&r.pub, fn->on_request_user);
-    else {   /* no handler: NO_HANDLER with no text, the caller fills the default */
+    if (fn->on_request){
+        i_RantCallbackScope cs;
+        i_rant_node_sys_callback_begin(fn->n, &cs, &fn->cb_out);
+        fn->on_request(&r.pub, fn->on_request_user);
+        i_rant_node_sys_callback_end(fn->n, &cs, &fn->cb_out);
+    } else {   /* no handler: NO_HANDLER with no text, the caller fills the default */
         i_rant_func_send_reply(fn, r.pub.caller, r.call_id, RANT_CALL_NO_HANDLER, NULL, rant_bytes(NULL,0));
         r.replied = 1;
     }
@@ -427,7 +436,11 @@ static void i_rant_func_on_progress(void *user, const RantMsg *msg){
     pr.data = msg->data; pr.schema = msg->schema;
     pr.written_us = msg->written_us; pr.recv_us = msg->recv_us;
     pr.user = p->progress_user;
-    p->on_progress(&pr);
+    {   RantProgressFn cb = p->on_progress; i_RantCallbackScope cs;
+        i_rant_node_sys_callback_begin(fn->n, &cs, &fn->cb_out);
+        cb(&pr);
+        i_rant_node_sys_callback_end(fn->n, &cs, &fn->cb_out);
+    }
 }
 
 /* dispatch: a parked progress update or RUNNING for a call still known here */
@@ -469,7 +482,11 @@ static void i_rant_func_on_response(void *user, const RantMsg *msg){
             pr.written_us = msg->written_us; pr.recv_us = msg->recv_us;
             pr.user = p->progress_user;
             i_rant_func_mark_running(p);
-            p->on_progress(&pr);
+            {   RantProgressFn cb = p->on_progress; i_RantCallbackScope cs;
+                i_rant_node_sys_callback_begin(fn->n, &cs, &fn->cb_out);
+                cb(&pr);
+                i_rant_node_sys_callback_end(fn->n, &cs, &fn->cb_out);
+            }
         } else i_rant_func_mark_running(p);
         return;
     }
@@ -491,7 +508,12 @@ static void i_rant_func_on_response(void *user, const RantMsg *msg){
               ? rant_string((const char*)msg->header.data + RANT__FN_PREFIX + 1u,
                             msg->header.len - (RANT__FN_PREFIX + 1u))
               : i_rant_call_status_msg(r.status);
-    if (p->on_response) p->on_response(&r);
+    if (p->on_response){
+        i_RantCallbackScope cs;
+        i_rant_node_sys_callback_begin(fn->n, &cs, &fn->cb_out);
+        p->on_response(&r);
+        i_rant_node_sys_callback_end(fn->n, &cs, &fn->cb_out);
+    }
     i_rant_func_free_pending(fn, p);
 }
 
@@ -812,6 +834,7 @@ int rant_function_retire(RantFunction *fn){
         i_rant_node_sys_unlock(n, acquired);
         return RANT_ERR_STATE;
     }
+    i_rant_node_sys_settle(n, &fn->cb_out);       /* an inline handler out on another thread */
     /* live deferred calls answer CANCELLED while the channels are still up, and the
        replies must flush to the wire before the park below tears the lanes down */
     i_rant_func_drain_defers(fn, "provider retired");
@@ -856,6 +879,7 @@ int rant_function_refresh(RantFunction *fn){
     if (!acquired || i_rant_topic_busy(fn->req) || i_rant_topic_busy(fn->rsp) || i_rant_topic_busy(fn->prg)){
         i_rant_node_sys_unlock(n, acquired); return RANT_ERR_STATE;
     }
+    i_rant_node_sys_settle(n, &fn->cb_out);
     i_rant_func_drain_defers(fn, "provider re-typed");
     while (fn->pending) i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0, 0);
     i_rant_func_drop_parked(fn);
@@ -1179,6 +1203,8 @@ RantFunction *rant_node_meta_function(RantNode *n){
 struct RantVariable {
     RantNode         *n;
     i_RantPatterns *pm;
+    volatile uint32_t cb_out;      /* its observers out with the lock released: a store write and
+                                      retire wait on 0, since the update views the store */
     struct RantVariable *next;     /* the manager list */
     RantTopic        *value;   /* owner PUB_ONLY, accessor SUB_ONLY */
     RantTopic        *set;     /* owner SUB_ONLY, accessor PUB_ONLY, NULL = a read only owner */
@@ -1258,8 +1284,12 @@ static void i_rant_var_notify(RantVariable *v, int changed, uint32_t source, uin
         return;
     }
     i_rant_var_update_view(v, &u);
-    if (v->on_write)             v->on_write(&u, v->on_write_user);
-    if (changed && v->on_change) v->on_change(&u, v->on_change_user);
+    {   i_RantCallbackScope cs;
+        i_rant_node_sys_callback_begin(v->n, &cs, &v->cb_out);
+        if (v->on_write)             v->on_write(&u, v->on_write_user);
+        if (changed && v->on_change) v->on_change(&u, v->on_change_user);
+        i_rant_node_sys_callback_end(v->n, &cs, &v->cb_out);
+    }
 }
 
 /* dispatch: the parked write with the value it carried, the observers as they are now */
@@ -1300,6 +1330,7 @@ static void i_rant_var_publish_locked(RantVariable *v){
 static void i_rant_var_owner_apply(RantVariable *v, RantBytes val, uint32_t source,
                                    uint64_t when_us, uint64_t written_us){
     int changed;
+    i_rant_node_sys_settle(v->n, &v->cb_out);
     if (v->forced){ i_rant_buf_put(v->n, &v->shadow, &v->shadow_len, &v->shadow_cap, val); return; }
     changed = i_rant_var_would_change(v, val, 0);
     if (!i_rant_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, val)) return;
@@ -1313,6 +1344,7 @@ static void i_rant_var_owner_force(RantVariable *v, RantBytes val, uint32_t sour
                                    uint64_t when_us, uint64_t written_us){
     int changed;
     if (!v->allow_force) return;
+    i_rant_node_sys_settle(v->n, &v->cb_out);
     changed = i_rant_var_would_change(v, val, 1);
     if (!v->forced)   /* entering force: save the current source into the shadow */
         i_rant_buf_put(v->n, &v->shadow, &v->shadow_len, &v->shadow_cap, rant_bytes(v->store, v->store_len));
@@ -1324,6 +1356,7 @@ static void i_rant_var_owner_force(RantVariable *v, RantBytes val, uint32_t sour
 static void i_rant_var_owner_unforce(RantVariable *v, uint32_t source, uint64_t when_us,
                                      uint64_t written_us){
     if (!v->forced) return;
+    i_rant_node_sys_settle(v->n, &v->cb_out);
     v->forced = 0;
     i_rant_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, rant_bytes(v->shadow, v->shadow_len));
     v->write_seq++;
@@ -1353,6 +1386,7 @@ static void i_rant_var_on_value(void *user, const RantMsg *msg){
     if (v->has_value && msg->publisher_id == v->last_source
         && (int32_t)(seq_in - v->write_seq) < 0) return;
     forced_in = (msg->header.data[0] & RANT__VAR_FLAG_FORCED) ? 1 : 0;
+    i_rant_node_sys_settle(v->n, &v->cb_out);
     changed = i_rant_var_would_change(v, msg->data, forced_in);
     if (i_rant_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, msg->data)){
         v->has_value = 1;
@@ -1565,6 +1599,7 @@ int rant_variable_retire(RantVariable *var){
     r = i_rant_pat_park_channels(var->value, var->set);     /* set is NULL on a read only owner */
     if (r != 0) return r;
     acquired = i_rant_node_sys_lock(n);
+    i_rant_node_sys_settle(n, &var->cb_out);      /* an observer out on another thread */
     i_rant_pat_clear_channels(var->value, var->set);
     if (pm){ i_rant_pat_unlink((void**)&pm->vars, var, offsetof(RantVariable, next)); pm->auth_dirty = 1; }
     value = var->value; set = var->set;   /* outlive var, see phase 3 */

@@ -4196,6 +4196,19 @@ static void th_slow_on_message(const RantMsg *m){
     sw_sleep_ms(30);
 }
 static void th_echo_on_message(const RantMsg *m){ if (m->topic_index == 2) th_echo_recv++; }
+/* a slow function handler on the service thread, and a caller thread driving it */
+static volatile unsigned long th_fn_runs, th_fn_ok;
+static void th_slow_on_request(RantRequest *rq, void *user){
+    (void)user; th_fn_runs++; sw_sleep_ms(30); rant_request_reply(rq, rant_bytes("ok", 2));
+}
+static void th_caller(void *arg){
+    int k;
+    for (k=0;k<10;k++){
+        RantResponse rsp;
+        if (rant_function_call((RantFunction*)arg, rant_bytes("q",1), &rsp, 2000, NULL) == 1
+            && rsp.status == RANT_CALL_OK) th_fn_ok++;
+    }
+}
 /* a create from a third thread while the handler is out: it waits, then succeeds */
 static volatile RantTopic *th_late_topic; static volatile uint64_t th_late_us;
 static void th_late_creator(void *arg){
@@ -4432,6 +4445,30 @@ static void threaded_checks(void){
           ST_CHECK(th_slow_create_refused, "unlocked: a create from inside the handler is refused");
           ST_CHECK(th_late_topic != NULL, "unlocked: a create from a third thread succeeds (%.1f ms)",
                    th_late_us/1000.0);
+          /* the same for a pattern handler: a 30 ms function body on w, called from a thread
+             on r, while w keeps sending at 1 kHz from this thread */
+          { RantFunction *def = rant_node_create_function_definition(w, "th/fn", NULL, NULL, th_slow_on_request, NULL, NULL);
+            RantFunction *rem = rant_node_create_remote_function(r, "th/fn", NULL, NULL, NULL);
+            i_RantThread caller; uint64_t fworst = 0;
+            th_fn_runs = 0; th_fn_ok = 0;
+            end = i_rant_plat_now_us() + 5000000u;
+            while (def && rem && rant_function_match_count(rem) == 0 && i_rant_plat_now_us() < end) sw_sleep_ms(5);
+            ST_CHECK(def && rem && rant_function_match_count(rem) == 1, "unlocked: function pair matched");
+            i_rant_plat_thread_start(&caller, th_caller, rem);
+            end = i_rant_plat_now_us() + 600000u;
+            while (i_rant_plat_now_us() < end){
+                uint64_t t0 = i_rant_plat_now_us(), dt;
+                rant_node_send(w, 0, payload, sizeof payload);
+                dt = i_rant_plat_now_us() - t0;
+                if (dt > fworst) fworst = dt;
+                sw_sleep_ms(1);
+            }
+            i_rant_plat_thread_join(&caller);
+            ST_CHECK(th_fn_ok == 10 && th_fn_runs == 10, "unlocked: ten calls answered through the slow handler (%lu ok, %lu runs)",
+                     th_fn_ok, th_fn_runs);
+            ST_CHECK(fworst < 10000u, "unlocked: no send waited for the function handler (worst %.1f ms)", fworst/1000.0);
+            if (rem) rant_function_retire(rem);
+            if (def) rant_function_retire(def); }
           sw_sleep_ms(100);
           ST_CHECK(th_echo_recv == th_slow_runs * 8 && rant_node_evicted_unsent(w) == 0,
                    "unlocked: a burst from inside the handler all left on a depth 1 topic (%lu of %lu, evicted %u)",

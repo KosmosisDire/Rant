@@ -85,7 +85,12 @@ strict prefix of it.
   arena or the lanes (create, set role, retire, retype, start, stop, the queue setup) and
   the one poll body wait in `i_rant_node_callbacks_settle` until no callback is out on
   another thread, so a foreign poll or a pump never enters the receive path behind a
-  paused delivery. `on_event` and the patterns layer's callbacks still run under the lock.
+  paused delivery. The patterns layer brackets its inline callbacks the same way through
+  `i_rant_node_sys_callback_begin` and `end` (request, response, progress and cancel
+  handlers, `on_write` and `on_change`), each handle counting its own callbacks out, so
+  its retire waits on that count and a variable's store writers wait on it too, since the
+  update the observer holds views the store. Synthesized outcomes at retire, close and
+  timeout, and `on_event`, still run under the lock.
   A queue dispatch releases the lock through the same bracket unmarked, so a dispatch
   thread keeps the full API.
 - Reentrancy is the callback thread stamp above, and the owner thread id for a nested
@@ -95,8 +100,8 @@ strict prefix of it.
   interest into the proxy mid delivery, stop would self join. A send from a marked
   handler writes the socket itself like any other sender, since the paused pass already
   allows a send there, so a burst inside a handler never overwrites itself whatever the
-  depth. A send from `on_event` or a not yet bracketed patterns callback commits and
-  leaves the write to the pass that fired it.
+  depth. A send from `on_event` or a synthesized outcome commits and leaves the write to
+  the pass that fired it.
 - Backpressure: the one send wait. A send that would overwrite unacked reliable history
   waits up to `qos.backpressure_wait_us` on the shared skeleton, asleep on the node condvar
   when a service thread runs (the work pass tail broadcasts when waiters exist) and

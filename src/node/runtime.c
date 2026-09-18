@@ -263,7 +263,6 @@ static void i_rant_node_unlock(RantNode *n, int acquired){
 /* Brackets user code: mu is released while it runs, so a send on another thread never
    waits for a handler. mark = 1 stamps the thread as a callback thread (inline delivery),
    0 leaves it a plain thread (a queue dispatch, full API). Nesting saves and restores. */
-typedef struct { uint64_t prev_thread; uint32_t prev_depth; uint8_t released, marked; } i_RantCallbackScope;
 static void i_rant_node_callback_begin(RantNode *n, i_RantCallbackScope *s, int mark){
     uint64_t self = i_rant_plat_thread_id();
     memset(s, 0, sizeof *s);
@@ -273,9 +272,10 @@ static void i_rant_node_callback_begin(RantNode *n, i_RantCallbackScope *s, int 
     i_rant_node_unlock_raw(n);
     s->released = 1;
 }
-static void i_rant_node_callback_end(RantNode *n, i_RantCallbackScope *s){
+static void i_rant_node_callback_end(RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out){
     if (!s->released) return;
     i_rant_node_lock_raw(n);
+    if (out) (*out)--;                 /* before the broadcast, so a settle on it wakes done */
     if (s->marked){
         n->cb_out--;
         n->cb_thread = s->prev_thread; n->cb_depth = s->prev_depth;
@@ -299,25 +299,28 @@ static void i_rant_node_cv_wait(RantNode *n, uint64_t timeout_us){
     n->lock_held = 1;
 }
 /* Entry points that move the arena or the lanes wait here until no inline callback is
-   out on another thread. Lock held on entry and exit. */
-static void i_rant_node_callbacks_settle(RantNode *n){
+   out on another thread, or until a handle's own count (out) drops. Lock held throughout. */
+static void i_rant_node_settle_on(RantNode *n, const volatile uint32_t *out){
     uint64_t self = i_rant_plat_thread_id();
-    while (n->cb_out && n->cb_thread != self){
+    while ((out ? *out : n->cb_out) && n->cb_thread != self){
         n->cv_waiters++;
         i_rant_node_cv_wait(n, 100000u);
         n->cv_waiters--;
     }
 }
+static void i_rant_node_callbacks_settle(RantNode *n){ i_rant_node_settle_on(n, NULL); }
 #else
 static int  i_rant_node_lock(RantNode *n){ (void)n; return 1; }
 static void i_rant_node_unlock(RantNode *n, int acquired){ (void)n; (void)acquired; }
 static void i_rant_node_kick(RantNode *n){ (void)n; }
-typedef struct { uint8_t marked; } i_RantCallbackScope;
 static void i_rant_node_callback_begin(RantNode *n, i_RantCallbackScope *s, int mark){
-    s->marked = (uint8_t)mark; if (mark) n->cb_out++;
+    memset(s, 0, sizeof *s); s->marked = (uint8_t)mark; if (mark) n->cb_out++;
 }
-static void i_rant_node_callback_end(RantNode *n, i_RantCallbackScope *s){ if (s->marked) n->cb_out--; }
+static void i_rant_node_callback_end(RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out){
+    if (out) (*out)--; if (s->marked) n->cb_out--;
+}
 static void i_rant_node_callbacks_settle(RantNode *n){ (void)n; }
+static void i_rant_node_settle_on(RantNode *n, const volatile uint32_t *out){ (void)n; (void)out; }
 #endif /* RANT_THREADS */
 
 /* error reporting: one emit path stamps user_data, keeps the last error and hands on */
@@ -715,7 +718,7 @@ static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from,
         i_RantCallbackScope cs;
         i_rant_node_callback_begin(n, &cs, 1);
         n->user_on_message(&m);
-        i_rant_node_callback_end(n, &cs);
+        i_rant_node_callback_end(n, &cs, NULL);
     }
     return 0;
 }
@@ -2193,6 +2196,16 @@ uint64_t i_rant_node_wall_us(RantNode *n){ (void)n; return i_rant_plat_wall_us()
  * on unlock: every mutating path kicks at its own layer, and read only ops must not wake. */
 int  i_rant_node_sys_lock    (RantNode *n){ return i_rant_node_lock(n); }
 void i_rant_node_sys_unlock(RantNode *n, int acquired){ i_rant_node_unlock(n, acquired); }
+/* the handle count rises before the release and falls after the retake, so a settle on
+   it wakes to a settled state */
+void i_rant_node_sys_callback_begin(RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out){
+    if (out) (*out)++;
+    i_rant_node_callback_begin(n, s, 1);
+}
+void i_rant_node_sys_callback_end(RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out){
+    i_rant_node_callback_end(n, s, out);
+}
+void i_rant_node_sys_settle(RantNode *n, const volatile uint32_t *out){ i_rant_node_settle_on(n, out); }
 int  i_rant_node_sys_poll    (RantNode *n, int timeout_ms){ return rant_node_poll(n, timeout_ms); }
 
 /* The patterns layer's blocking wait: the node's wait skeleton, so it sleeps on the
@@ -2928,7 +2941,7 @@ static int i_rant_topic_dispatch_locked(RantNode *n, RantTopic *h, int max_msgs,
             {   i_RantCallbackScope cs;
                 i_rant_node_callback_begin(n, &cs, 0);
                 n->user_on_message(&m);
-                i_rant_node_callback_end(n, &cs);
+                i_rant_node_callback_end(n, &cs, NULL);
             }
             q->busy = 0;
         }
@@ -3070,7 +3083,7 @@ int rant_queue_dispatch(RantQueue *g, int max_callbacks, int timeout_ms){
             {   i_RantCallbackScope cs;
                 i_rant_node_callback_begin(n, &cs, 0);
                 if (!h) n->on_event(&e); else if (sys) sys(h->sys_msg_user, &m, kind); else n->user_on_message(&m);
-                i_rant_node_callback_end(n, &cs);
+                i_rant_node_callback_end(n, &cs, NULL);
             }
         }
         q->busy = 0;

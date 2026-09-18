@@ -367,6 +367,13 @@ uint64_t i_rant_node_wall_us    (RantNode *n);
  * by this thread. sys_unlock never kicks. sys_poll drives one loop tick. */
 int      i_rant_node_sys_lock    (RantNode *n);
 void     i_rant_node_sys_unlock(RantNode *n, int acquired);
+/* Brackets user code run with the node lock released on a marked callback thread. out
+ * counts the handle's callbacks out, so a writer of its state can wait on it. */
+typedef struct { uint64_t prev_thread; uint32_t prev_depth; uint8_t released, marked; } i_RantCallbackScope;
+void     i_rant_node_sys_callback_begin(RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out);
+void     i_rant_node_sys_callback_end  (RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out);
+/* Waits until *out (NULL: any marked callback) is 0 on another thread. Lock held. */
+void     i_rant_node_sys_settle(RantNode *n, const volatile uint32_t *out);
 int      i_rant_node_sys_poll    (RantNode *n, int timeout_ms);
 /* Blocks until done says so or its deadline passes, under the node lock, on the service
  * thread's progress when one runs and by pumping the loop otherwise. done runs under the
