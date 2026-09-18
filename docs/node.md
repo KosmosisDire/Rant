@@ -15,7 +15,9 @@ Drive a node one of two ways:
 
 Inside `on_message` or `on_event` you may call `rant_topic_send` and read only queries.
 Poll, create topic, set role, drain, start, stop and close are refused with
-`RANT_ERR_STATE` (or NULL or 0). Nothing is corrupted.
+`RANT_ERR_STATE` (or NULL or 0). Nothing is corrupted. A topic handler does not hold the
+node lock while it runs, so a send from another thread never waits for it, and a create
+or close from another thread waits until the handler returns.
 
 Flow control needs no poll cadence. A send that would overwrite unacked reliable history
 sleeps, bounded by `qos.backpressure_wait_us`, 0 = never. No other send waits. With a

@@ -4185,6 +4185,26 @@ static void th_echo_a_on_msg(const RantMsg *m){ (void)m; th_echo_replies++; }
 
 /* phase 24: hammer a reliable topic until told to stop */
 static volatile int th_hammer_stop;
+/* a slow inline handler: 30 ms of work, plus a create from inside, which stays refused */
+static volatile unsigned long th_slow_runs, th_echo_recv; static volatile int th_slow_create_refused;
+static void th_slow_on_message(const RantMsg *m){
+    uint8_t b[8]; int k;
+    th_slow_runs++;
+    if (!rant_node_create_topic(m->node, "th/inside", RANT_PUB_ONLY, NULL, NULL)) th_slow_create_refused = 1;
+    /* a burst from inside the handler on a depth 1 topic: each send must leave before the next */
+    for (k=0;k<8;k++){ memset(b, k, sizeof b); rant_node_send(m->node, 2, b, sizeof b); }
+    sw_sleep_ms(30);
+}
+static void th_echo_on_message(const RantMsg *m){ if (m->topic_index == 2) th_echo_recv++; }
+/* a create from a third thread while the handler is out: it waits, then succeeds */
+static volatile RantTopic *th_late_topic; static volatile uint64_t th_late_us;
+static void th_late_creator(void *arg){
+    uint64_t t0;
+    sw_sleep_ms(215);                 /* lands inside a handler run */
+    t0 = i_rant_plat_now_us();
+    th_late_topic = rant_node_create_topic((RantNode*)arg, "th/late", RANT_PUB_ONLY, NULL, NULL);
+    th_late_us = i_rant_plat_now_us() - t0;
+}
 static void th_hammer(void *arg){
     uint8_t buf[8]; memset(buf, 0x77, sizeof buf);
     while (!th_hammer_stop) rant_topic_send((RantTopic*)arg, rant_bytes(buf, sizeof buf), NULL);
@@ -4370,6 +4390,52 @@ static void threaded_checks(void){
             }
             ST_CHECK(worst_gap < 100000u, "capped: a held back sample leaves at its tick (worst %.0f ms)",
                      worst_gap/1000.0); }
+          rant_node_close(r, 1); rant_node_close(w, 1);
+      }
+    }
+
+    /* 22c. UNLOCKED HANDLER: a 30 ms inline handler on the service thread must not delay a
+       send on another thread of the same node. A create from a third thread waits for the
+       handler and succeeds, a create from inside the handler stays refused. */
+    { RantTopicDef cw[3], cr[3]; RantNodeOpts o; RantNode *w, *r; uint8_t payload[16];
+      memset(payload, 0, sizeof payload);
+      memset(cw, 0, sizeof cw);
+      cw[0].name = "th/fast"; cw[0].role = RANT_PUB_ONLY; cw[0].qos.keep_last = 1; cw[0].qos.max_message_bytes = 32;
+      cw[1].name = "th/slow"; cw[1].role = RANT_SUB_ONLY; cw[1].qos.keep_last = 4; cw[1].qos.max_message_bytes = 32;
+      cw[2].name = "th/echo"; cw[2].role = RANT_PUB_ONLY; cw[2].qos.keep_last = 1; cw[2].qos.max_message_bytes = 32;
+      memcpy(cr, cw, sizeof cw); cr[0].role = RANT_SUB_ONLY; cr[1].role = RANT_PUB_ONLY; cr[2].role = RANT_SUB_ONLY;
+      memset(&o, 0, sizeof o);
+      o.domain = ST_DOMAIN+14; o.disable_shm = 1; o.discovery.max_peers = 4; o.max_topics = 8;
+      w = test_node_open(dummy, 0, "th-upub", th_slow_on_message, th_on_event, o, cw, 3);
+      r = test_node_open(dummy, 0, "th-usub", th_echo_on_message, th_on_event, o, cr, 3);
+      ST_CHECK(w && r, "unlocked: nodes open");
+      if (w && r){
+          i_RantThread creator; uint64_t worst = 0, next_slow, end;
+          th_slow_runs = 0; th_echo_recv = 0; th_slow_create_refused = 0; th_late_topic = NULL; th_late_us = 0;
+          rant_node_start(w); rant_node_start(r);
+          end = i_rant_plat_now_us() + 5000000u;
+          while ((rant_node_publisher_match_count(w, 0) == 0 || rant_node_publisher_match_count(r, 1) == 0
+                  || rant_node_publisher_match_count(w, 2) == 0) && i_rant_plat_now_us() < end) sw_sleep_ms(5);
+          i_rant_plat_thread_start(&creator, th_late_creator, w);
+          end = i_rant_plat_now_us() + 1000000u; next_slow = 0;
+          while (i_rant_plat_now_us() < end){
+              uint64_t t0 = i_rant_plat_now_us(), dt;
+              if (t0 >= next_slow){ rant_node_send(r, 1, payload, sizeof payload); next_slow = t0 + 50000u; }
+              rant_node_send(w, 0, payload, sizeof payload);
+              dt = i_rant_plat_now_us() - t0;
+              if (dt > worst) worst = dt;
+              sw_sleep_ms(1);
+          }
+          i_rant_plat_thread_join(&creator);
+          ST_CHECK(th_slow_runs >= 10, "unlocked: the slow handler ran (%lu times)", th_slow_runs);
+          ST_CHECK(worst < 10000u, "unlocked: no send waited for the handler (worst %.1f ms)", worst/1000.0);
+          ST_CHECK(th_slow_create_refused, "unlocked: a create from inside the handler is refused");
+          ST_CHECK(th_late_topic != NULL, "unlocked: a create from a third thread succeeds (%.1f ms)",
+                   th_late_us/1000.0);
+          sw_sleep_ms(100);
+          ST_CHECK(th_echo_recv == th_slow_runs * 8 && rant_node_evicted_unsent(w) == 0,
+                   "unlocked: a burst from inside the handler all left on a depth 1 topic (%lu of %lu, evicted %u)",
+                   th_echo_recv, th_slow_runs * 8, rant_node_evicted_unsent(w));
           rant_node_close(r, 1); rant_node_close(w, 1);
       }
     }

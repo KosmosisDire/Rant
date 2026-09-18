@@ -919,7 +919,7 @@ int rant_function_call(RantFunction *fn, RantBytes req, RantResponse *out, int t
     i_RantSyncCtx ctx; i_RantCallWait cw; int acquired, r; uint32_t id;
     if (!fn) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_sys_lock(fn->n);
-    if (!acquired) return RANT_ERR_STATE;      /* from a callback: can neither pump nor sleep */
+    if (!acquired){ i_rant_node_sys_unlock(fn->n, acquired); return RANT_ERR_STATE; }   /* from a callback */
     i_rant_node_sys_unlock(fn->n, acquired);
     ctx.fn = fn; ctx.done = 0; ctx.status = RANT_CALL_TIMEOUT; ctx.schema = NULL; ctx.len = 0;
     ctx.provider = 0; ctx.written_us = 0;

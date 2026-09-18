@@ -133,7 +133,13 @@ struct RantNode {
     uint8_t       user_locked;    /* the public rant_node_lock is held */
     volatile uint8_t  lock_held;  /* the owner reentrancy check, written by the owner only */
     volatile uint64_t lock_owner;
+    /* an inline callback runs with mu released. cb_thread is the thread out in one (it
+       alone writes it), cb_depth its nested calls that took mu back. See spec/node.md */
+    volatile uint64_t cb_thread;
+    uint32_t      cb_depth;
 #endif
+    uint32_t      cb_out;          /* marked callbacks out right now: setup calls wait on 0,
+                                      and a send from one writes the socket itself */
     /* the in pump probe sampled inside the backpressure wait */
     RantPumpProbeFn pump_probe;
     void          *pump_probe_user;
@@ -236,15 +242,45 @@ static void i_rant_node_unlock_raw(RantNode *n){
     n->lock_held = 0;
     i_rant_plat_mutex_unlock(&n->mu);
 }
-/* The reentrant aware entry lock: 1 = this call acquired mu, 0 = the calling thread
-   already held it (a callback, or the pump's nested poll) and proceeds without waiting. */
+/* The reentrant aware entry lock: 1 = this call acquired mu, 0 = a call from inside a
+   callback or the pump's nested poll, which proceeds without waiting and never pumps. A
+   callback thread takes mu back for the call, since mu is released while it is out. */
 static int i_rant_node_lock(RantNode *n){
-    if (n->lock_held && n->lock_owner == i_rant_plat_thread_id()) return 0;
+    uint64_t self = i_rant_plat_thread_id();
+    if (n->lock_held && n->lock_owner == self){
+        if (n->cb_thread == self) n->cb_depth++;
+        return 0;
+    }
     i_rant_node_lock_raw(n);
+    if (n->cb_thread == self){ n->cb_depth = 1; return 0; }
     return 1;
 }
 static void i_rant_node_unlock(RantNode *n, int acquired){
-    if (acquired) i_rant_node_unlock_raw(n);
+    if (acquired){ i_rant_node_unlock_raw(n); return; }
+    if (n->cb_thread == i_rant_plat_thread_id() && n->cb_depth && --n->cb_depth == 0)
+        i_rant_node_unlock_raw(n);
+}
+/* Brackets user code: mu is released while it runs, so a send on another thread never
+   waits for a handler. mark = 1 stamps the thread as a callback thread (inline delivery),
+   0 leaves it a plain thread (a queue dispatch, full API). Nesting saves and restores. */
+typedef struct { uint64_t prev_thread; uint32_t prev_depth; uint8_t released, marked; } i_RantCallbackScope;
+static void i_rant_node_callback_begin(RantNode *n, i_RantCallbackScope *s, int mark){
+    uint64_t self = i_rant_plat_thread_id();
+    memset(s, 0, sizeof *s);
+    if (!(n->lock_held && n->lock_owner == self) || n->user_locked) return;
+    s->prev_thread = n->cb_thread; s->prev_depth = n->cb_depth;
+    if (mark){ n->cb_thread = self; n->cb_depth = 0; n->cb_out++; s->marked = 1; }
+    i_rant_node_unlock_raw(n);
+    s->released = 1;
+}
+static void i_rant_node_callback_end(RantNode *n, i_RantCallbackScope *s){
+    if (!s->released) return;
+    i_rant_node_lock_raw(n);
+    if (s->marked){
+        n->cb_out--;
+        n->cb_thread = s->prev_thread; n->cb_depth = s->prev_depth;
+        if (n->cv_waiters) i_rant_plat_cond_broadcast(&n->cv);   /* a settle may be waiting */
+    }
 }
 /* With mu held, before unlocking: cut the pollers' wait short so the change is serviced
    now. One datagram wakes every sleeping poller, and a burst coalesces to one per sleep. */
@@ -262,10 +298,26 @@ static void i_rant_node_cv_wait(RantNode *n, uint64_t timeout_us){
     n->lock_owner = i_rant_plat_thread_id();
     n->lock_held = 1;
 }
+/* Entry points that move the arena or the lanes wait here until no inline callback is
+   out on another thread. Lock held on entry and exit. */
+static void i_rant_node_callbacks_settle(RantNode *n){
+    uint64_t self = i_rant_plat_thread_id();
+    while (n->cb_out && n->cb_thread != self){
+        n->cv_waiters++;
+        i_rant_node_cv_wait(n, 100000u);
+        n->cv_waiters--;
+    }
+}
 #else
 static int  i_rant_node_lock(RantNode *n){ (void)n; return 1; }
 static void i_rant_node_unlock(RantNode *n, int acquired){ (void)n; (void)acquired; }
 static void i_rant_node_kick(RantNode *n){ (void)n; }
+typedef struct { uint8_t marked; } i_RantCallbackScope;
+static void i_rant_node_callback_begin(RantNode *n, i_RantCallbackScope *s, int mark){
+    s->marked = (uint8_t)mark; if (mark) n->cb_out++;
+}
+static void i_rant_node_callback_end(RantNode *n, i_RantCallbackScope *s){ if (s->marked) n->cb_out--; }
+static void i_rant_node_callbacks_settle(RantNode *n){ (void)n; }
 #endif /* RANT_THREADS */
 
 /* error reporting: one emit path stamps user_data, keeps the last error and hands on */
@@ -659,7 +711,12 @@ static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from,
     m.written_us = written_us;
     m.capture_us = capture_us;
     if (h && h->sys_on_message) h->sys_on_message(h->sys_msg_user, &m);    /* the patterns layer */
-    else n->user_on_message(&m);
+    else {
+        i_RantCallbackScope cs;
+        i_rant_node_callback_begin(n, &cs, 1);
+        n->user_on_message(&m);
+        i_rant_node_callback_end(n, &cs);
+    }
     return 0;
 }
 static int i_rant_node_on_message(void *u, uint16_t topic_index, uint32_t from, RantBytes data){
@@ -801,12 +858,13 @@ static void i_rant_node_tx_drain(RantNode *n){
     }
 }
 
-/* What a send owes its commit: where another thread runs the loop the sender writes the
- * socket itself, a lone thread batches at its poll, a callback leaves it to its pass. */
+/* What a send owes its commit: the sender writes the socket itself where another thread
+ * runs the loop and from inside a marked handler. Else the pass batches. See spec/node.md */
 static void i_rant_node_send_tx(RantNode *n, int acquired){
 #ifdef RANT_THREADS
-    if (acquired && (n->svc_running || n->pollers_sleeping) && n->fd != RANT_SOCK_BAD)
-        i_rant_node_tx_drain(n);
+    int own = acquired ? (n->svc_running || n->pollers_sleeping)
+                       : (n->cb_out && n->cb_thread == i_rant_plat_thread_id());
+    if (own && n->fd != RANT_SOCK_BAD) i_rant_node_tx_drain(n);
     /* a full socket or a callback's commit is left to the poller, and so is a timer this
        send armed ahead of the poller's planned wake (its wait rounds up a millisecond) */
     {   uint64_t next = rant_transport_next_deadline_us(n->transport);
@@ -815,7 +873,8 @@ static void i_rant_node_send_tx(RantNode *n, int acquired){
             i_rant_node_kick(n);
     }
 #else
-    (void)n; (void)acquired;
+    (void)acquired;
+    if (n->cb_out && n->fd != RANT_SOCK_BAD) i_rant_node_tx_drain(n);
 #endif
 }
 
@@ -1264,8 +1323,10 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
     acquired = i_rant_node_lock(n);
     if (!acquired){   /* from a callback: a grow would move the arena mid delivery */
         i_rant_node_create_fail(n, RANT_E_STATE, name, 0, 0);
+        i_rant_node_unlock(n, acquired);
         return NULL;
     }
+    i_rant_node_callbacks_settle(n);
     if (!name[0] || strlen(name) > RANT_TOPIC_NAME_MAX){
         i_rant_node_create_fail(n, RANT_E_BAD_NAME, name, 0, 1);
         i_rant_node_unlock(n, acquired); return NULL;
@@ -1614,6 +1675,7 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
     int waker_slot = -1;
 #endif
 
+    i_rant_node_callbacks_settle(n);     /* never two threads inside the receive path */
     /* a peer was refused last tick for lack of slots: grow now, between ticks */
     if (n->grow_pending){
         uint16_t want = n->max_peers < 0x8000u ? (uint16_t)(n->max_peers*2u) : 0xFFFFu;
@@ -2139,7 +2201,7 @@ int i_rant_node_sys_wait(RantNode *n, i_RantSysWaitFn done, void *ctx){
     i_RantWait w = { 0 }; int acquired, r;
     if (!n) return -1;
     acquired = i_rant_node_lock(n);
-    if (!acquired) return -1;       /* from a callback: can neither pump nor sleep */
+    if (!acquired){ i_rant_node_unlock(n, acquired); return -1; }   /* from a callback: can neither pump nor sleep */
     w.done = done; w.ctx = ctx;
     w.pump_ms = 5;                  /* the manual mode tick, as the callers pumped before */
     w.pump_after_svc = 1;           /* a service thread stopping under us finishes with the pump */
@@ -2239,8 +2301,10 @@ int rant_topic_set_role(RantTopic *topic, RantRole role){
     acquired = i_rant_node_lock(topic->n);
     if (!acquired){
         /* from a callback: the replay would rematch the reader proxy mid delivery, refuse loudly */
+        i_rant_node_unlock(topic->n, acquired);
         return RANT_ERR_STATE;
     }
+    i_rant_node_callbacks_settle(topic->n);
     if (topic->q && topic->q->busy){    /* its own dispatched callback is running somewhere */
         i_rant_node_unlock(topic->n, acquired);
         return RANT_ERR_STATE;
@@ -2265,7 +2329,8 @@ int rant_topic_retire(RantTopic *topic){
     if (!topic) return RANT_ERR_NO_TOPIC;
     n = topic->n;
     acquired = i_rant_node_lock(n);
-    if (!acquired) return RANT_ERR_STATE;     /* from a callback: lanes are live mid delivery */
+    if (!acquired){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* from a callback: lanes are live */
+    i_rant_node_callbacks_settle(n);
     if (topic->sys_on_message                       /* a pattern channel: retire its handle */
         || i_rant_node_is_log_topic(n, topic->index)
         || (n->n_builtin && topic->index >= n->builtin_lo
@@ -2363,6 +2428,7 @@ uint32_t rant_node_mesh_epoch(RantNode *n){
 int i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reliability){
     RantNode *n = topic->n; RantTopicDef def; RantSchema *copy = NULL; uint16_t idx = topic->index;
     uint32_t rb; int rc;
+    i_rant_node_callbacks_settle(n);
     if (schema){
         RantBytes w = rant_schema_wire(schema);
         copy = rant_schema_parse(w.data, w.len, i_rant_node_alloc, n);
@@ -2397,7 +2463,7 @@ int rant_topic_refresh(RantTopic *topic){
     if (!topic->reflect) return RANT_ERR_ROLE;
     n = topic->n;
     acquired = i_rant_node_lock(n);
-    if (!acquired) return RANT_ERR_STATE;     /* from a callback: lanes are live mid delivery */
+    if (!acquired){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* from a callback: lanes are live */
     if (i_rant_node_core_reflect_pick(n->core, RANT_ENTITY_TOPIC, topic->name, 0,
                                       rant_role_pubs(topic->role), &ms, &rel, &gen)
         && gen != topic->generation){
@@ -2699,7 +2765,7 @@ int rant_topic_drain(RantTopic *topic, int timeout_ms){
     if (!topic) return 0;
     n = topic->n;
     acquired = i_rant_node_lock(n);
-    if (!acquired) return 0;   /* from a callback: can neither pump nor wait */
+    if (!acquired){ i_rant_node_unlock(n, acquired); return 0; }   /* from a callback: can neither pump nor wait */
     c.index = topic->index;
     c.deadline = i_rant_plat_now_us() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000u;
     w.done = i_rant_node_drain_wait_done; w.periodic = i_rant_node_wait_kick; w.ctx = &c;
@@ -2783,7 +2849,7 @@ int rant_node_settle(RantNode *n, int timeout_ms){
     i_RantSettleWait c; i_RantWait w = { 0 }; int acquired, settled;
     if (!n) return 0;
     acquired = i_rant_node_lock(n);
-    if (!acquired){ return 0; }   /* from a callback: can neither pump nor wait */
+    if (!acquired){ i_rant_node_unlock(n, acquired); return 0; }   /* from a callback: can neither pump nor wait */
     c.start = i_rant_plat_now_us();
     c.last_solicit = 0;
     c.deadline = c.start + (timeout_ms >= 0 ? (uint64_t)timeout_ms * 1000u
@@ -2859,14 +2925,11 @@ static int i_rant_topic_dispatch_locked(RantNode *n, RantTopic *h, int max_msgs,
         q->viewing = 1;
         if (n->user_on_message){
             q->busy = 1;
-#ifdef RANT_THREADS
-            if (acquired){
-                i_rant_node_unlock_raw(n);
+            {   i_RantCallbackScope cs;
+                i_rant_node_callback_begin(n, &cs, 0);
                 n->user_on_message(&m);
-                i_rant_node_lock_raw(n);
-            } else
-#endif
-            n->user_on_message(&m);
+                i_rant_node_callback_end(n, &cs);
+            }
             q->busy = 0;
         }
         i_rant_node_queue_release(n, h, q);
@@ -2937,6 +3000,7 @@ RantQueue *rant_node_create_queue(RantNode *n){
     RantQueue *q; int acquired;
     if (!n) return NULL;
     acquired = i_rant_node_lock(n);
+    if (acquired) i_rant_node_callbacks_settle(n);
     if (!acquired || n->n_queues >= RANT_QUEUES_MAX){
         i_rant_node_create_fail(n, RANT_E_STATE, NULL, 0, 1);
         i_rant_node_unlock(n, acquired); return NULL;
@@ -2979,7 +3043,7 @@ int rant_queue_dispatch(RantQueue *g, int max_callbacks, int timeout_ms){
     if (!g) return RANT_ERR_STATE;
     n = g->n;
     acquired = i_rant_node_lock(n);
-    if (!acquired) return RANT_ERR_STATE;          /* from an inline callback */
+    if (!acquired){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* from an inline callback */
     if (g->busy){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* nested, or another thread */
     if (!i_rant_queue_any(n, g) && timeout_ms != 0 && acquired)
         i_rant_node_queue_wait(n, NULL, g, timeout_ms);
@@ -3003,14 +3067,11 @@ int rant_queue_dispatch(RantQueue *g, int max_callbacks, int timeout_ms){
         }
         q->viewing = 1; q->busy = 1;           /* busy: retire of this handle is refused meanwhile */
         if (run){
-#ifdef RANT_THREADS
-            if (acquired){
-                i_rant_node_unlock_raw(n);
+            {   i_RantCallbackScope cs;
+                i_rant_node_callback_begin(n, &cs, 0);
                 if (!h) n->on_event(&e); else if (sys) sys(h->sys_msg_user, &m, kind); else n->user_on_message(&m);
-                i_rant_node_lock_raw(n);
-            } else
-#endif
-            { if (!h) n->on_event(&e); else if (sys) sys(h->sys_msg_user, &m, kind); else n->user_on_message(&m); }
+                i_rant_node_callback_end(n, &cs);
+            }
         }
         q->busy = 0;
         if (h) i_rant_node_queue_release(n, h, q);
@@ -3026,6 +3087,7 @@ int rant_node_set_event_queue(RantNode *n, RantQueue *q){
     int acquired;
     if (!n) return RANT_ERR_STATE;
     acquired = i_rant_node_lock(n);
+    if (acquired) i_rant_node_callbacks_settle(n);
     if (!acquired || (q && q->n != n) || (n->event_q && n->event_q->busy)){
         i_rant_node_unlock(n, acquired); return RANT_ERR_STATE;
     }
@@ -3103,7 +3165,8 @@ int rant_node_start(RantNode *n){
     int acquired;
     if (!n) return RANT_ERR_STATE;
     acquired = i_rant_node_lock(n);
-    if (!acquired) return RANT_ERR_STATE;                 /* from a callback */
+    if (!acquired){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* from a callback */
+    i_rant_node_callbacks_settle(n);
     if (n->svc_running){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }
     n->svc_stop = 0;
     n->svc_running = 1;
@@ -3125,7 +3188,8 @@ int rant_node_stop(RantNode *n){
     int acquired;
     if (!n) return RANT_ERR_STATE;
     acquired = i_rant_node_lock(n);
-    if (!acquired) return RANT_ERR_STATE;                 /* from a callback (it is the service) */
+    if (!acquired){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* from a callback, it is the service */
+    i_rant_node_callbacks_settle(n);
     if (n->svc_joining){
         /* another thread owns the join: wait for it rather than join twice. Counted as
            a cv waiter so its broadcasts land */

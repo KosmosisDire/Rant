@@ -166,6 +166,10 @@ process base picked from the clock so concurrent runs never join each other.
   surface as RANT_EVICTED_UNSENT so every send is delivered or accounted.
 - WAKER: an idle started pair delivers a single send within milliseconds, not at the next
   announce capped wakeup.
+- UNLOCKED HANDLER: a 30 ms inline handler on the service thread while another thread
+  sends at 1 kHz on the same node. No send may wait for the handler, a create from a
+  third thread waits for the handler and succeeds, one from inside stays refused, and a
+  burst of eight sends from inside the handler on a depth 1 topic all arrive.
 - REENTRANT: a callback echo works, and create, set_role and a foreign poll refuse loudly.
   The ring must be deeper than the request burst, since a reentrant send never waits for
   a TX pass.

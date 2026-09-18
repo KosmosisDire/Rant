@@ -76,12 +76,27 @@ strict prefix of it.
   price of the inline drain is that batching: a tight loop of small sends tops out near
   450k a second where the handoff reached 750k with a deep history.
   `pollers_sleeping` is a counter, since a flag lost kicks with several pollers.
-- Reentrancy is an owner thread id check, zeroed before release. From callbacks, send and
-  read only queries are legal. Poll, create topic, set role, drain, start, stop and close
-  are refused with `RANT_ERR_STATE`: create would relocate the arena mid receive, set role
-  would replay interest into the proxy mid delivery, stop would self join. A callback that
-  sends to another node deadlocks (plain lock acquisition both ways). Forbidden in docs,
-  not enforced.
+- A plain topic `on_message` runs with the lock released (`i_rant_node_callback_begin`
+  and `end`), so a send on another thread never waits for a handler. The thread is
+  stamped `cb_thread` while it is out and `cb_out` counts such callbacks. A call the
+  handler makes takes the lock back for its duration (`cb_depth` counts the nesting) and
+  still gets `acquired = 0`, so it keeps the callback rules: no wait, no pump, and the
+  refusals below. A refused nested call must still unlock. Entry points that move the
+  arena or the lanes (create, set role, retire, retype, start, stop, the queue setup) and
+  the one poll body wait in `i_rant_node_callbacks_settle` until no callback is out on
+  another thread, so a foreign poll or a pump never enters the receive path behind a
+  paused delivery. `on_event` and the patterns layer's callbacks still run under the lock.
+  A queue dispatch releases the lock through the same bracket unmarked, so a dispatch
+  thread keeps the full API.
+- Reentrancy is the callback thread stamp above, and the owner thread id for a nested
+  call that already holds the lock. From callbacks, send and read only queries are legal.
+  Poll, create topic, set role, drain, start, stop and close are refused with
+  `RANT_ERR_STATE`: create would relocate the arena mid receive, set role would replay
+  interest into the proxy mid delivery, stop would self join. A send from a marked
+  handler writes the socket itself like any other sender, since the paused pass already
+  allows a send there, so a burst inside a handler never overwrites itself whatever the
+  depth. A send from `on_event` or a not yet bracketed patterns callback commits and
+  leaves the write to the pass that fired it.
 - Backpressure: the one send wait. A send that would overwrite unacked reliable history
   waits up to `qos.backpressure_wait_us` on the shared skeleton, asleep on the node condvar
   when a service thread runs (the work pass tail broadcasts when waiters exist) and
