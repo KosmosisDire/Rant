@@ -127,8 +127,6 @@ void           rant_discovery_replay_peers(RantDiscoveryState *st);
 void           rant_discovery_set_meta(RantDiscoveryState *st, RantBytes meta);
 /* The version our announces advertise, 0 if none. Detail responses are stamped with it. */
 uint32_t       rant_discovery_meta_version(const RantDiscoveryState *st);
-/* Sets the advertised locator port. 0 = none, peers then use the discovery port. */
-void           rant_discovery_set_data_port(RantDiscoveryState *st, uint16_t port);
 /* Our own subnets, for locator ranking. Re callable when the interface set changes. A
  * zero mask is ignored. */
 void           rant_discovery_set_local_subnets(RantDiscoveryState *st,

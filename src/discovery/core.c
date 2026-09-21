@@ -718,14 +718,6 @@ uint32_t rant_discovery_meta_version(const RantDiscoveryState *st){
     return st ? st->self_meta_version : 0;
 }
 
-void rant_discovery_set_data_port(RantDiscoveryState *st, uint16_t port){
-    if (!st || st->cfg.data_port == port) return;
-    st->cfg.data_port = port;            /* the port rides the blob, so bump and re send it */
-    st->self_meta_version++;
-    st->self_blob_resend = RANT_DISCOVERY_BLOB_RESEND;
-    st->next_announce_us = 0;
-}
-
 void rant_discovery_set_local_subnets(RantDiscoveryState *st, const RantDiscoverySubnet *nets, uint8_t n){
     uint8_t i, k = 0;
     if (!st) return;

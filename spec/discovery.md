@@ -35,10 +35,8 @@ datagram arrived whole and a NULL data pointer when the OS truncated it.
 Unicast discovery traffic leaves the DATA socket (`rant_discovery_set_tx_fd`). Group sends
 stay on the multicast socket. So each announce is identity plus return path in one
 datagram. Per peer unicast goes to one port: the peer's data port once its blob named
-one, else the discovery port. A discovery only instance (no transport socket, such as the
-explorer's capture layer) binds its own unicast receive socket on an ephemeral port and
-advertises it, because sharing the discovery port with same host nodes handed unicast
-replies to an arbitrary socket.
+one, else the discovery port. Discovery always runs inside a node, so the locator it
+advertises is the node's data socket and it owns no unicast socket of its own.
 
 ## Wire format
 

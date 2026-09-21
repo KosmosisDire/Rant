@@ -1629,8 +1629,8 @@ static int i_rant_node_gather_done(RantNode *n, uint64_t now);       /* defined 
  * TX flush. The one poll body. outer = 1 lets the wait drop the lock. See spec/node.md. */
 static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
     uint8_t buf[RANT_DGRAM_MAX]; uint64_t now;
-    i_RantPollfd pfd[5]; int nfds = 0, wait_ms, poll_rc;
-    int disc_slot = 0, disc_n = 0;
+    i_RantPollfd pfd[3]; int nfds = 0, wait_ms, poll_rc;
+    int disc_slot;
 #ifdef RANT_THREADS
     int waker_slot = -1;
 #endif
@@ -1666,12 +1666,10 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
         pfd[nfds].fd = n->waker.fd; pfd[nfds].events = RANT_POLLIN; nfds++;
     }
 #endif
-    {   /* discovery's sockets join the wait so an announce cuts a long sleep short. The
-           fds are stable by value: a grow relocates structs, never sockets */
-        i_RantSock dfds[2]; int i;
-        disc_slot = nfds; disc_n = rant_discovery_pollfds(n->discovery, dfds);
-        for (i = 0; i < disc_n; i++){ pfd[nfds].fd = dfds[i]; pfd[nfds].events = RANT_POLLIN; nfds++; }
-    }
+    /* discovery's socket joins the wait so an announce cuts a long sleep short. The fd is
+       stable by value: a grow relocates structs, never sockets */
+    disc_slot = nfds;
+    pfd[nfds].fd = rant_discovery_fd(n->discovery); pfd[nfds].events = RANT_POLLIN; nfds++;
 
 #ifdef RANT_THREADS
     if (outer){
@@ -1706,9 +1704,7 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
 
     /* the discovery tick off this wait's readiness. A failed wait leaves revents zeroed,
        so the clock driven work still runs */
-    rant_discovery_service(n->discovery,
-                           disc_n > 0 && (pfd[disc_slot].revents & RANT_POLLIN) != 0,
-                           disc_n > 1 && (pfd[disc_slot + 1].revents & RANT_POLLIN) != 0);
+    rant_discovery_service(n->discovery, (pfd[disc_slot].revents & RANT_POLLIN) != 0);
     if (pfd[0].revents & RANT_POLLIN)
         i_rant_node_rx_drain(n, n->fd, i_rant_plat_now_us() + RANT_RX_BUDGET_US);
 

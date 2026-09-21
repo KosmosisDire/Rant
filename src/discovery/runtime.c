@@ -11,9 +11,7 @@
 struct RantDiscovery {
     RantDiscoveryState *core;
     i_RantSock              fd;
-    i_RantSock              tx_fd;         /* unicast TX leaves here: the node's data socket, the own
-                                            unicast_fd, else fd */
-    i_RantSock              unicast_fd;    /* our unicast RX port, RANT_SOCK_BAD with a data_port */
+    i_RantSock              tx_fd;         /* unicast TX leaves here: the node's data socket, else fd */
     i_RantIface            ifs[RANT_DISCOVERY_MAX_SUBNETS];    /* joined and announced out of */
     uint8_t                n_ifs;          /* 0 = none usable, the OS picks */
     uint8_t                pinned;         /* explicit multicast_interface, never rescanned */
@@ -105,13 +103,7 @@ void rant_discovery_replay(RantDiscovery *d){
     if (d) rant_discovery_replay_peers(d->core);
 }
 
-int rant_discovery_pollfds(RantDiscovery *d, i_RantSock out[2]){
-    int n = 0;
-    if (!d) return 0;
-    out[n++] = d->fd;
-    if (d->unicast_fd != RANT_SOCK_BAD) out[n++] = d->unicast_fd;
-    return n;
-}
+i_RantSock rant_discovery_fd(RantDiscovery *d){ return d ? d->fd : RANT_SOCK_BAD; }
 
 /* The up, non loopback interfaces. Loopback is the fallback for a host with nothing else
  * up, never a member of the normal set. 0 only when the platform cannot enumerate. */
@@ -338,7 +330,6 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryCo
     i_rant_plat_set_nonblock(fd);     /* the drain's last recv must return would block */
     i_rant_plat_suppress_connreset(fd);     /* a dead peer's ICMP bounce must not disrupt RX */
 
-    d->unicast_fd = RANT_SOCK_BAD;
     d->if_scan_us = i_rant_plat_now_us() + RANT_DISCOVERY_IF_SCAN_US;
     d->discovery_port = discovery_port;
     d->max_peers = c.max_peers;
@@ -348,22 +339,6 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryCo
         if (seed_count > RANT_DISCOVERY_MAX_SEEDS) seed_count = RANT_DISCOVERY_MAX_SEEDS;
         for (k=0;k<seed_count;k++) d->seeds[k] = net->seed_peers[k];
         d->n_seeds = seed_count;
-    }
-
-    /* No locator (a discovery only instance): bind an own unicast RX port and advertise it,
-       so a same host reply reaches this process, not the shared port's arbitrary owner. */
-    if (c.data_port == 0){
-        i_RantSock uc = i_rant_plat_udp_open();
-        if (uc != RANT_SOCK_BAD){
-            uint16_t uport = i_rant_plat_bind(uc, 0, 0, 0) ? i_rant_plat_local_port(uc) : 0;
-            if (uport){
-                i_rant_plat_set_nonblock(uc);
-                i_rant_plat_suppress_connreset(uc);     /* same as above */
-                d->unicast_fd = uc;
-                d->tx_fd = uc;   /* a reply to the arrival source then reaches this process */
-                rant_discovery_set_data_port(d->core, uport);
-            } else i_rant_plat_close(uc);
-        }
     }
     return d;
 }
@@ -417,15 +392,12 @@ static int i_rant_discovery_rt_drain(RantDiscovery *d, i_RantSock fd, RantDiscov
 
 /* One service pass with no wait. The node folds discovery into its one wait and calls
  * this every pass. */
-int rant_discovery_service(RantDiscovery *d, int fd_readable, int unicast_readable){
+int rant_discovery_service(RantDiscovery *d, int fd_readable){
     RantAddr to;
     uint64_t now;
     int got = 0, exact; size_t n_bytes;
     if (!d) return 0;
     if (fd_readable) got |= i_rant_discovery_rt_drain(d, d->fd, RANT_DISCOVERY_VIA_DISCOVERY);
-    /* our own unicast port is the port we advertise, so it is the DATA channel */
-    if (unicast_readable && d->unicast_fd != RANT_SOCK_BAD)
-        got |= i_rant_discovery_rt_drain(d, d->unicast_fd, RANT_DISCOVERY_VIA_DATA);
 
     now = i_rant_plat_now_us();
     if (!d->pinned && now >= d->if_scan_us){    /* pick up an interface that came up since open */
@@ -472,6 +444,5 @@ void rant_discovery_close(RantDiscovery *d, int send_bye){
     }
     rant_discovery_destroy(d->core);
     i_rant_plat_close(d->fd);
-    if (d->unicast_fd != RANT_SOCK_BAD) i_rant_plat_close(d->unicast_fd);
     i_rant_plat_cleanup();
 }

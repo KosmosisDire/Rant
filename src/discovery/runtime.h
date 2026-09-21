@@ -53,11 +53,11 @@ void         rant_discovery_set_tx_fd(RantDiscovery *d, i_RantSock fd);
 void         rant_discovery_advertise(RantDiscovery *d, RantBytes meta);
 /* Re applies every peer's interest. Call after changing our own advertised meta. */
 void         rant_discovery_replay(RantDiscovery *d);
-/* The receive sockets, 1 or 2, for the caller's wait. Stable across a migrate. */
-int          rant_discovery_pollfds(RantDiscovery *d, i_RantSock out[2]);
-/* One service pass with no wait. Pass each fd's readability in pollfds order. Call it
- * every pass, the clock driven work needs no readable fd. */
-int          rant_discovery_service(RantDiscovery *d, int fd_readable, int unicast_readable);
+/* The receive socket, for the caller's wait. Stable across a migrate. */
+i_RantSock   rant_discovery_fd(RantDiscovery *d);
+/* One service pass with no wait. Pass the fd's readability. Call it every pass, the
+ * clock driven work needs no readable fd. */
+int          rant_discovery_service(RantDiscovery *d, int fd_readable);
 
 /* uuid */
 /* A random RFC 9562 v4 uuid. 0 if there is no entropy source. */
