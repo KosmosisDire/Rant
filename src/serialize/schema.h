@@ -60,29 +60,6 @@ typedef struct {
     uint32_t     elem_size; /* ARR and VARR: bytes of one element, else 0 */
 } RantSchemaFieldInfo;
 
-/* One enum option. */
-typedef struct {
-    int64_t     value;
-    const char *name;     /* NUL terminated builder input, at most 255 bytes */
-} RantEnumVariant;
-
-/* The builder grows its wire buffer through the hook as fields are added. finish returns
- * the compiled schema, or NULL after any latched error. Always finish a begun builder. */
-typedef struct {
-    RantAllocFn alloc; void *user;
-    uint8_t *buf;
-    size_t   cap;
-    size_t   len;                                /* wire bytes written so far */
-    int      err;                                /* 0 ok, nonzero latches failure */
-    uint8_t  value_root;                         /* a bare root: 1 awaits its type, 2 written */
-    uint8_t  raw_type;                           /* internal: type bytes only, no header */
-    uint16_t base_depth;                         /* the struct depth the root sits at */
-    uint16_t arr_depth;                          /* the open array element depth, 0xFFFF = none */
-    uint16_t depth;                              /* open structs, 1 = a struct root only */
-    size_t   count_pos[RANT_SCHEMA_MAX_DEPTH]; /* wire offset of each open struct's nfields byte */
-    uint16_t field_count[RANT_SCHEMA_MAX_DEPTH];
-} RantSchemaBuilder;
-
 /* Compiles DSL text, pasted verbatim on the writer and every reader. The DSL is in
  * docs/stdtypes.md and spec/schema.md. NULL on error, with *err at the offending character. */
 RANT_API RantSchema *rant_schema_compile(RantAllocFn alloc, void *user, const char *text, const char **err);
@@ -91,52 +68,6 @@ RANT_API RantSchema *rant_schema_compile(RantAllocFn alloc, void *user, const ch
 RANT_API RantSchema *rant_schema_compile_env(RantAllocFn alloc, void *user, const char *text,
                                              const RantSchema *const *env, size_t n_env,
                                              const char **err);
-
-RANT_API RantSchemaBuilder rant_schema_begin(RantAllocFn alloc, void *user, const char *root_name);
-/* A bare type root: add exactly one field with an empty name, then finish. */
-RANT_API RantSchemaBuilder rant_schema_begin_value(RantAllocFn alloc, void *user);
-/* A named alias root, like Uuid = u8[16]: one empty named field, then finish. */
-RANT_API RantSchemaBuilder rant_schema_begin_alias(RantAllocFn alloc, void *user, const char *name);
-/* A fixed scalar field. */
-RANT_API void          rant_schema_field(RantSchemaBuilder *b, const char *name, RantSchemaTypeKind kind);
-/* A fixed array of count scalars. */
-RANT_API void          rant_schema_field_array(RantSchemaBuilder *b, const char *name,
-                                             RantSchemaTypeKind elem_scalar, uint16_t count);
-/* A capped string, cap at least 1. */
-RANT_API void          rant_schema_field_string(RantSchemaBuilder *b, const char *name, uint16_t cap);
-/* A fixed array of count capped strings. */
-RANT_API void          rant_schema_field_string_array(RantSchemaBuilder *b, const char *name,
-                                                    uint16_t cap, uint16_t count);
-/* A variable string. Any depth outside an array element. */
-RANT_API void          rant_schema_field_var_string(RantSchemaBuilder *b, const char *name);
-/* A variable array of scalars. */
-RANT_API void          rant_schema_field_var_array(RantSchemaBuilder *b, const char *name,
-                                                 RantSchemaTypeKind elem_scalar);
-/* A variable array of capped strings. */
-RANT_API void          rant_schema_field_var_string_array(RantSchemaBuilder *b, const char *name,
-                                                        uint16_t cap);
-/* A self describing map. Write it with RantMapWriter, read it with rant_map_get. */
-RANT_API void          rant_schema_field_map(RantSchemaBuilder *b, const char *name);
-/* A named integer with an integer backing and n options, n at most 65535. Latches an
- * error on a non integer backing or a value that does not fit it. */
-RANT_API void          rant_schema_field_enum(RantSchemaBuilder *b, const char *name,
-                                            RantSchemaTypeKind backing,
-                                            const RantEnumVariant *variants, uint16_t n);
-/* A field of a compiled named type. type need not outlive the call. */
-RANT_API void          rant_schema_field_named(RantSchemaBuilder *b, const char *name,
-                                             const RantSchema *type);
-/* An array of a named type, variable when count is 0. The element must be fixed. */
-RANT_API void          rant_schema_field_named_array(RantSchemaBuilder *b, const char *name,
-                                                   const RantSchema *type, uint16_t count);
-/* Opens a nested struct. Add its fields, then end_struct. */
-RANT_API void          rant_schema_begin_struct(RantSchemaBuilder *b, const char *name);
-/* An array of anonymous structs, variable when count is 0. Add the element's fields,
- * then end_struct. The element must be fixed. */
-RANT_API void          rant_schema_begin_struct_array(RantSchemaBuilder *b, const char *name,
-                                                    uint16_t count);
-RANT_API void          rant_schema_end_struct(RantSchemaBuilder *b);
-/* Closes the root, compiles, and returns the schema. NULL on any latched error. */
-RANT_API RantSchema *rant_schema_finish(RantSchemaBuilder *b);
 
 /* Compiles received wire, bounds checked. NULL on an overrun or a version mismatch. The
  * bytes are copied in. */

@@ -1,9 +1,21 @@
-/* The text side: the builder, the printer and the DSL parser. */
+/* The text side: the type writer, the printer and the DSL parser. */
 #include "internal.h"
 
-/* the builder */
+/* The type writer: the growing buffer of wire type bytes that the parser fills. It holds a
+ * type on its own, with no schema header, and a failure latches in err. */
+typedef struct {
+    RantAllocFn alloc; void *user;
+    uint8_t *buf;
+    size_t   cap;
+    size_t   len;                                /* wire bytes written so far */
+    int      err;                                /* 0 ok, nonzero latches failure */
+    uint16_t depth;                              /* open structs */
+    size_t   count_pos[RANT_SCHEMA_MAX_DEPTH]; /* wire offset of each open struct's nfields byte */
+    uint16_t field_count[RANT_SCHEMA_MAX_DEPTH];
+} i_RantSchemaBuilder;
+
 /* room for extra more bytes, growing the wire buffer through the hook */
-static int i_rant_schema_builder_reserve(RantSchemaBuilder *b, size_t extra){
+static int i_rant_schema_builder_reserve(i_RantSchemaBuilder *b, size_t extra){
     size_t newcap; uint8_t *nb;
     if (b->err) return 0;
     if (b->len + extra <= b->cap) return 1;
@@ -17,16 +29,16 @@ static int i_rant_schema_builder_reserve(RantSchemaBuilder *b, size_t extra){
     b->buf = nb; b->cap = newcap;
     return 1;
 }
-static void i_rant_schema_builder_put(RantSchemaBuilder *b, uint8_t v){
+static void i_rant_schema_builder_put(i_RantSchemaBuilder *b, uint8_t v){
     if (!i_rant_schema_builder_reserve(b, 1)) return;
     b->buf[b->len++] = v;
 }
-static void i_rant_schema_builder_put_u16(RantSchemaBuilder *b, uint16_t v){
+static void i_rant_schema_builder_put_u16(i_RantSchemaBuilder *b, uint16_t v){
     if (!i_rant_schema_builder_reserve(b, 2)) return;
     i_rant_le_w16(b->buf + b->len, v); b->len += 2;
 }
 /* raw bytes, a compiled type encoding from elsewhere */
-static void i_rant_schema_builder_put_raw(RantSchemaBuilder *b, const void *src, size_t len){
+static void i_rant_schema_builder_put_raw(i_RantSchemaBuilder *b, const void *src, size_t len){
     if (!len) return;
     if (!src){ b->err = -6; return; }
     if (!i_rant_schema_builder_reserve(b, len)) return;
@@ -34,14 +46,14 @@ static void i_rant_schema_builder_put_raw(RantSchemaBuilder *b, const void *src,
     b->len += len;
 }
 /* bytes little endian bytes of v, an enum option's backing sized value */
-static void i_rant_schema_builder_put_le(RantSchemaBuilder *b, uint64_t v, uint32_t bytes){
+static void i_rant_schema_builder_put_le(i_RantSchemaBuilder *b, uint64_t v, uint32_t bytes){
     uint32_t i;
     if (!i_rant_schema_builder_reserve(b, bytes)) return;
     for (i = 0; i < bytes; i++) b->buf[b->len++] = (uint8_t)(v >> (8 * i));
 }
-static void i_rant_schema_builder_put_name(RantSchemaBuilder *b, const char *name){
+static void i_rant_schema_builder_put_name(i_RantSchemaBuilder *b, const char *name){
     size_t n = 0, i; if (name) while (name[n]) n++;
-    if (b->depth == 0 && (b->raw_type || b->value_root)){   /* the root carries no field name */
+    if (b->depth == 0){                                  /* a type on its own carries no field name */
         if (n) b->err = -4;
         return;
     }
@@ -50,26 +62,16 @@ static void i_rant_schema_builder_put_name(RantSchemaBuilder *b, const char *nam
     b->buf[b->len++] = (uint8_t)n;
     for (i = 0; i < n; i++) b->buf[b->len++] = (uint8_t)name[i];
 }
-/* count a field on the innermost open struct. A bare or alias root takes exactly one type */
-static void i_rant_schema_builder_count(RantSchemaBuilder *b){
+/* count a field on the innermost open struct. A type on its own counts nothing */
+static void i_rant_schema_builder_count(i_RantSchemaBuilder *b){
     uint16_t *c;
-    if (b->err) return;
-    if (b->depth > 0){
-        c = &b->field_count[b->depth - 1];
-        if (*c >= 255){ b->err = -5; return; }   /* nfields is a u8 */
-        (*c)++;
-        return;
-    }
-    if (b->value_root){
-        if (b->value_root == 2){ b->err = -3; return; }   /* a bare root holds one type */
-        b->value_root = 2;
-        return;
-    }
-    if (b->raw_type) return;                     /* a standalone type body */
-    b->err = -3;                                 /* no open struct */
+    if (b->err || b->depth == 0) return;
+    c = &b->field_count[b->depth - 1];
+    if (*c >= 255){ b->err = -5; return; }       /* nfields is a u8 */
+    (*c)++;
 }
 /* open a struct type: [STRUCT][nfields placeholder], push a nesting level */
-static void i_rant_schema_builder_open_struct(RantSchemaBuilder *b){
+static void i_rant_schema_builder_open_struct(i_RantSchemaBuilder *b){
     if (b->err) return;
     if (b->depth >= RANT_SCHEMA_MAX_DEPTH){ b->err = -2; return; }
     i_rant_schema_builder_put(b, (uint8_t)RANT_STRUCT);
@@ -79,124 +81,22 @@ static void i_rant_schema_builder_open_struct(RantSchemaBuilder *b){
     b->depth++;
 }
 
-RantSchemaBuilder rant_schema_begin(RantAllocFn alloc, void *user, const char *root_name){
-    RantSchemaBuilder b;
+static void i_rant_schema_builder_close_struct(i_RantSchemaBuilder *b){
+    if (b->err) return;
+    if (b->depth == 0){ b->err = -3; return; }      /* no open struct */
+    b->depth--;
+    b->buf[b->count_pos[b->depth]] = (uint8_t)b->field_count[b->depth];
+}
+
+static i_RantSchemaBuilder i_rant_schema_builder_begin(RantAllocFn alloc, void *user){
+    i_RantSchemaBuilder b;
     memset(&b, 0, sizeof b);
-    b.alloc = alloc; b.user = user; b.arr_depth = 0xFFFFu; b.base_depth = 1;
-    if (!alloc){ b.err = -1; return b; }
-    b.cap = 64u;
-    b.buf = (uint8_t *)alloc(user, NULL, b.cap);
-    if (!b.buf){ b.err = -1; b.cap = 0; return b; }
-    i_rant_schema_builder_put(&b, (uint8_t)RANT_SCHEMA_WIRE_VERSION);
-    i_rant_schema_builder_put_name(&b, root_name);
-    i_rant_schema_builder_open_struct(&b);                /* the root is a struct, depth 1 */
-    return b;
-}
-
-/* the shared head of a bare type root: [version][root_namelen][root_name] */
-static RantSchemaBuilder i_rant_schema_begin_bare(RantAllocFn alloc, void *user,
-                                                  const char *name){
-    RantSchemaBuilder b; size_t n = 0, i;
-    memset(&b, 0, sizeof b);
-    b.alloc = alloc; b.user = user; b.arr_depth = 0xFFFFu;
-    if (name) while (name[n]) n++;
-    if (!alloc || n > 255){ b.err = -1; return b; }
-    b.cap = 64u;
-    b.buf = (uint8_t *)alloc(user, NULL, b.cap);
-    if (!b.buf){ b.err = -1; b.cap = 0; return b; }
-    b.value_root = 1;                                  /* depth stays 0: no struct is open */
-    i_rant_schema_builder_put(&b, (uint8_t)RANT_SCHEMA_WIRE_VERSION);
-    i_rant_schema_builder_put(&b, (uint8_t)n);
-    for (i = 0; i < n; i++) i_rant_schema_builder_put(&b, (uint8_t)name[i]);
-    return b;
-}
-
-RantSchemaBuilder rant_schema_begin_value(RantAllocFn alloc, void *user){
-    return i_rant_schema_begin_bare(alloc, user, NULL);
-}
-
-RantSchemaBuilder rant_schema_begin_alias(RantAllocFn alloc, void *user, const char *name){
-    RantSchemaBuilder b = i_rant_schema_begin_bare(alloc, user, name);
-    if (!b.err && (!name || !name[0])) b.err = -4;     /* an alias needs a name */
-    return b;
-}
-
-/* a standalone type encoding with no header and no field name: the DSL's definition arena */
-static RantSchemaBuilder i_rant_schema_begin_raw(RantAllocFn alloc, void *user){
-    RantSchemaBuilder b;
-    memset(&b, 0, sizeof b);
-    b.alloc = alloc; b.user = user; b.arr_depth = 0xFFFFu; b.raw_type = 1;
+    b.alloc = alloc; b.user = user;
     if (!alloc){ b.err = -1; return b; }
     b.cap = 64u;
     b.buf = (uint8_t *)alloc(user, NULL, b.cap);
     if (!b.buf){ b.err = -1; b.cap = 0; }
     return b;
-}
-
-void rant_schema_field(RantSchemaBuilder *b, const char *name, RantSchemaTypeKind kind){
-    if (!b || b->err) return;
-    if (rant_schema_scalar_size(kind) == 0){ b->err = -6; return; }    /* fixed scalars only */
-    i_rant_schema_builder_count(b); i_rant_schema_builder_put_name(b, name); i_rant_schema_builder_put(b, (uint8_t)kind);
-}
-
-void rant_schema_field_array(RantSchemaBuilder *b, const char *name,
-                             RantSchemaTypeKind elem_scalar, uint16_t count){
-    if (!b || b->err) return;
-    if (rant_schema_scalar_size(elem_scalar) == 0){ b->err = -6; return; }    /* scalars only */
-    i_rant_schema_builder_count(b); i_rant_schema_builder_put_name(b, name);
-    i_rant_schema_builder_put(b, (uint8_t)RANT_ARR); i_rant_schema_builder_put_u16(b, count);
-    i_rant_schema_builder_put(b, (uint8_t)elem_scalar);
-}
-
-void rant_schema_field_string(RantSchemaBuilder *b, const char *name, uint16_t cap){
-    if (!b || b->err) return;
-    if (cap == 0){ b->err = -6; return; }
-    i_rant_schema_builder_count(b); i_rant_schema_builder_put_name(b, name);
-    i_rant_schema_builder_put(b, (uint8_t)RANT_STR); i_rant_schema_builder_put_u16(b, cap);
-}
-
-void rant_schema_field_string_array(RantSchemaBuilder *b, const char *name,
-                                    uint16_t cap, uint16_t count){
-    if (!b || b->err) return;
-    if (cap == 0){ b->err = -6; return; }
-    i_rant_schema_builder_count(b); i_rant_schema_builder_put_name(b, name);
-    i_rant_schema_builder_put(b, (uint8_t)RANT_ARR); i_rant_schema_builder_put_u16(b, count);
-    i_rant_schema_builder_put(b, (uint8_t)RANT_STR); i_rant_schema_builder_put_u16(b, cap);
-}
-
-/* variable kinds may sit at any struct depth but never inside an array element */
-static int i_rant_schema_builder_var_ok(RantSchemaBuilder *b){
-    if (b->err) return 0;
-    if (b->arr_depth != 0xFFFFu){ b->err = -8; return 0; }
-    return 1;
-}
-
-void rant_schema_field_var_string(RantSchemaBuilder *b, const char *name){
-    if (!b || !i_rant_schema_builder_var_ok(b)) return;
-    i_rant_schema_builder_count(b); i_rant_schema_builder_put_name(b, name);
-    i_rant_schema_builder_put(b, (uint8_t)RANT_VSTR);
-}
-
-void rant_schema_field_var_array(RantSchemaBuilder *b, const char *name,
-                                 RantSchemaTypeKind elem_scalar){
-    if (!b || !i_rant_schema_builder_var_ok(b)) return;
-    if (rant_schema_scalar_size(elem_scalar) == 0){ b->err = -6; return; }    /* scalars only */
-    i_rant_schema_builder_count(b); i_rant_schema_builder_put_name(b, name);
-    i_rant_schema_builder_put(b, (uint8_t)RANT_VARR); i_rant_schema_builder_put(b, (uint8_t)elem_scalar);
-}
-
-void rant_schema_field_var_string_array(RantSchemaBuilder *b, const char *name, uint16_t cap){
-    if (!b || !i_rant_schema_builder_var_ok(b)) return;
-    if (cap == 0){ b->err = -6; return; }
-    i_rant_schema_builder_count(b); i_rant_schema_builder_put_name(b, name);
-    i_rant_schema_builder_put(b, (uint8_t)RANT_VARR);
-    i_rant_schema_builder_put(b, (uint8_t)RANT_STR); i_rant_schema_builder_put_u16(b, cap);
-}
-
-void rant_schema_field_map(RantSchemaBuilder *b, const char *name){
-    if (!b || !i_rant_schema_builder_var_ok(b)) return;
-    i_rant_schema_builder_count(b); i_rant_schema_builder_put_name(b, name);
-    i_rant_schema_builder_put(b, (uint8_t)RANT_MAP);
 }
 
 /* the root type bytes of a compiled schema, past [version][namelen][name] */
@@ -210,134 +110,29 @@ static int i_rant_schema_root_type(const RantSchema *t, const uint8_t **bytes, s
     return 1;
 }
 
-/* emit [NAMED][len][name] plus the referenced schema's root type */
-static void i_rant_schema_put_named(RantSchemaBuilder *b, const RantSchema *type){
-    const uint8_t *tb; size_t tl;
-    if (b->err) return;
-    if (!type || !type->name.len || type->name.len > 255 ||
-        !i_rant_schema_root_type(type, &tb, &tl)){ b->err = -6; return; }
-    i_rant_schema_builder_put(b, (uint8_t)RANT_NAMED);
-    i_rant_schema_builder_put(b, (uint8_t)type->name.len);
-    i_rant_schema_builder_put_raw(b, type->name.data, type->name.len);
-    i_rant_schema_builder_put_raw(b, tb, tl);
-}
-
-void rant_schema_field_named(RantSchemaBuilder *b, const char *name, const RantSchema *type){
-    if (!b || b->err) return;
-    i_rant_schema_builder_count(b); i_rant_schema_builder_put_name(b, name);
-    i_rant_schema_put_named(b, type);
-}
-
-void rant_schema_field_named_array(RantSchemaBuilder *b, const char *name,
-                                   const RantSchema *type, uint16_t count){
-    if (!b || b->err) return;
-    if (count == 0 && !i_rant_schema_builder_var_ok(b)) return;
-    i_rant_schema_builder_count(b); i_rant_schema_builder_put_name(b, name);
-    if (count){
-        i_rant_schema_builder_put(b, (uint8_t)RANT_ARR);
-        i_rant_schema_builder_put_u16(b, count);
-    } else {
-        i_rant_schema_builder_put(b, (uint8_t)RANT_VARR);
-    }
-    i_rant_schema_put_named(b, type);
-}
-
-/* Streaming enum construction, shared with the DSL so it never buffers the option list:
- * open writes the head and returns the count placeholder, add appends, finish backpatches. */
-static size_t i_rant_schema_field_enum_open(RantSchemaBuilder *b, const char *name,
-                                            RantSchemaTypeKind backing){
+/* Streaming enum construction, so the parser never buffers the option list: open writes
+ * the head and returns the count placeholder, add appends, finish backpatches. */
+static size_t i_rant_schema_builder_enum_open(i_RantSchemaBuilder *b, RantSchemaTypeKind backing){
     size_t count_pos;
-    i_rant_schema_builder_count(b);
-    i_rant_schema_builder_put_name(b, name);
     i_rant_schema_builder_put(b, (uint8_t)RANT_ENUM);
     i_rant_schema_builder_put(b, (uint8_t)backing);
     count_pos = b->len;
     i_rant_schema_builder_put_u16(b, 0);                 /* n, backpatched by finish */
     return count_pos;
 }
-static void i_rant_schema_field_enum_add(RantSchemaBuilder *b, RantSchemaTypeKind backing,
-                                         int64_t value, const char *name, size_t name_len){
+static void i_rant_schema_builder_enum_add(i_RantSchemaBuilder *b, RantSchemaTypeKind backing,
+                                           int64_t value, const char *name, size_t name_len){
     size_t i;
-    if (!b || b->err) return;
+    if (b->err) return;
     if (name_len > 255){ b->err = -4; return; }
     i_rant_schema_builder_put_le(b, (uint64_t)value, rant_schema_scalar_size(backing));
     if (!i_rant_schema_builder_reserve(b, 1 + name_len)) return;
     b->buf[b->len++] = (uint8_t)name_len;
     for (i = 0; i < name_len; i++) b->buf[b->len++] = (uint8_t)name[i];
 }
-static void i_rant_schema_field_enum_finish(RantSchemaBuilder *b, size_t count_pos, uint16_t count){
-    if (!b || b->err) return;
+static void i_rant_schema_builder_enum_finish(i_RantSchemaBuilder *b, size_t count_pos, uint16_t count){
+    if (b->err) return;
     i_rant_le_w16(b->buf + count_pos, count);
-}
-
-void rant_schema_field_enum(RantSchemaBuilder *b, const char *name, RantSchemaTypeKind backing,
-                            const RantEnumVariant *variants, uint16_t n){
-    size_t count_pos; uint16_t i;
-    if (!b || b->err) return;
-    if (rant_schema_scalar_size(backing) == 0 || !i_rant_enum_backing_ok((uint8_t)backing)){
-        b->err = -6; return;                           /* integer backings only */
-    }
-    count_pos = i_rant_schema_field_enum_open(b, name, backing);
-    for (i = 0; i < n; i++){
-        int64_t v = variants ? variants[i].value : 0;
-        const char *vn = variants ? variants[i].name : NULL;
-        size_t vl = 0; if (vn) while (vn[vl]) vl++;
-        if (!i_rant_enum_val_fits((uint8_t)backing, v)){ b->err = -6; return; }
-        i_rant_schema_field_enum_add(b, backing, v, vn, vl);
-    }
-    i_rant_schema_field_enum_finish(b, count_pos, n);
-}
-
-void rant_schema_begin_struct(RantSchemaBuilder *b, const char *name){
-    if (!b || b->err) return;
-    if (b->value_root && b->depth == 0){ b->err = -3; return; }  /* struct roots use begin */
-    i_rant_schema_builder_count(b);                   /* a field of the parent */
-    i_rant_schema_builder_put_name(b, name);
-    i_rant_schema_builder_open_struct(b);
-}
-
-void rant_schema_begin_struct_array(RantSchemaBuilder *b, const char *name, uint16_t count){
-    if (!b || b->err) return;
-    if (count == 0 && !i_rant_schema_builder_var_ok(b)) return;
-    if (b->arr_depth != 0xFFFFu){ b->err = -8; return; }   /* one array level only */
-    i_rant_schema_builder_count(b);
-    i_rant_schema_builder_put_name(b, name);
-    if (count){
-        i_rant_schema_builder_put(b, (uint8_t)RANT_ARR);
-        i_rant_schema_builder_put_u16(b, count);
-    } else {
-        i_rant_schema_builder_put(b, (uint8_t)RANT_VARR);
-    }
-    i_rant_schema_builder_open_struct(b);
-    if (!b->err) b->arr_depth = b->depth;           /* this level is an array element */
-}
-
-void rant_schema_end_struct(RantSchemaBuilder *b){
-    if (!b || b->err) return;
-    if (b->depth <= b->base_depth){ b->err = -3; return; }   /* the root closes in finish */
-    if (b->arr_depth == b->depth) b->arr_depth = 0xFFFFu;
-    b->depth--;
-    b->buf[b->count_pos[b->depth]] = (uint8_t)b->field_count[b->depth];
-}
-
-RantSchema *rant_schema_finish(RantSchemaBuilder *b){
-    RantSchema *s = NULL;
-    int closed = b && !b->err &&
-                 (b->value_root ? (b->depth == 0 && b->value_root == 2)   /* the one bare type */
-                                : b->depth == 1);            /* else an unbalanced begin and end */
-    if (closed){
-        size_t need; uint8_t *nb; uint32_t total = 0, nvar = 0;
-        if (!b->value_root)
-            b->buf[b->count_pos[0]] = (uint8_t)b->field_count[0]; /* backpatch the count */
-        i_rant_schema_wire_fields(b->buf, b->len, &total, &nvar);
-        need = b->len + 7u + sizeof(RantSchema)
-             + (size_t)(total ? total - 1u : 0u) * sizeof(i_Field);
-        nb = (uint8_t *)b->alloc(b->user, b->buf, need);      /* room for the handle */
-        if (nb){ b->buf = nb; b->cap = need; s = i_rant_schema_compile(b->buf, b->len, b->cap); }
-    }
-    if (!s && b && b->buf) b->alloc(b->user, b->buf, 0);      /* free on any failure */
-    if (b) b->buf = NULL;                                     /* owned by s now, or freed */
-    return s;
 }
 
 /* spelling types back as DSL text */
@@ -597,7 +392,7 @@ typedef struct { const char *p; const char *err; } i_RantDsl;
  * plus an index. A definition compiles in its own scratch builder before it is appended. */
 #define I_RANT_DSL_MAX_DEFS 64u
 typedef struct {
-    RantSchemaBuilder arena;
+    i_RantSchemaBuilder arena;
     struct { uint32_t noff, toff, tlen; uint8_t nlen; } e[I_RANT_DSL_MAX_DEFS];
     uint16_t n;
     uint16_t rec;                                  /* standard type expansion depth */
@@ -665,7 +460,7 @@ static int i_rant_dsl_enum_value(i_RantDsl *d, int64_t *out){
     return 1;
 }
 /* enum<uN> { Name [= value], ... } after the word enum was read. Streams the options. */
-static void i_rant_dsl_enum(i_RantDsl *d, RantSchemaBuilder *b, const char *name){
+static void i_rant_dsl_enum(i_RantDsl *d, i_RantSchemaBuilder *b){
     char wname[256]; RantSchemaTypeKind backing; size_t count_pos; uint16_t count = 0; int64_t next = 0;
     i_rant_dsl_ws(d);
     if (!i_rant_dsl_expect(d, '<')) return;
@@ -678,7 +473,7 @@ static void i_rant_dsl_enum(i_RantDsl *d, RantSchemaBuilder *b, const char *name
     if (!i_rant_dsl_expect(d, '>')) return;
     i_rant_dsl_ws(d);
     if (!i_rant_dsl_expect(d, '{')) return;
-    count_pos = i_rant_schema_field_enum_open(b, name, backing);
+    count_pos = i_rant_schema_builder_enum_open(b, backing);
     for (;;){
         char vname[256]; int64_t v;
         i_rant_dsl_ws(d);
@@ -690,18 +485,18 @@ static void i_rant_dsl_enum(i_RantDsl *d, RantSchemaBuilder *b, const char *name
             if (!i_rant_dsl_enum_value(d, &v)) return;
         } else v = next;
         if (!i_rant_enum_val_fits((uint8_t)backing, v)){ i_rant_dsl_fail(d, d->p); return; }
-        i_rant_schema_field_enum_add(b, backing, v, vname, strlen(vname));
+        i_rant_schema_builder_enum_add(b, backing, v, vname, strlen(vname));
         count++; next = v + 1;
         i_rant_dsl_ws(d);
         if (*d->p == ',') d->p++;                        /* an optional separator */
     }
     if (!i_rant_dsl_expect(d, '}')) return;
-    i_rant_schema_field_enum_finish(b, count_pos, count);
+    i_rant_schema_builder_enum_finish(b, count_pos, count);
 }
 
-static void i_rant_dsl_field_type(i_RantDsl *d, RantSchemaBuilder *b, i_RantDefs *defs,
+static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *defs,
                                   const char *name);
-static void i_rant_dsl_fields(i_RantDsl *d, RantSchemaBuilder *b, i_RantDefs *defs);
+static void i_rant_dsl_fields(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *defs);
 
 /* records a named type: its name bytes then its compiled type, both in the arena */
 static int i_rant_defs_add_bytes(i_RantDefs *defs, const char *name, size_t nlen,
@@ -732,10 +527,10 @@ static int i_rant_defs_find(i_RantDefs *defs, const char *name, uint32_t *toff, 
 
 /* compiles one type spelling, a standard library entry or any type text, as a definition */
 static int i_rant_defs_add_text(i_RantDefs *defs, const char *name, const char *text){
-    RantSchemaBuilder sb; i_RantDsl sd; int ok = 0;
+    i_RantSchemaBuilder sb; i_RantDsl sd; int ok = 0;
     if (defs->rec >= 8u) return 0;                       /* the roster is acyclic, but be sure */
     defs->rec++;
-    sb = i_rant_schema_begin_raw(defs->arena.alloc, defs->arena.user);
+    sb = i_rant_schema_builder_begin(defs->arena.alloc, defs->arena.user);
     sd.p = text; sd.err = NULL;
     i_rant_dsl_field_type(&sd, &sb, defs, "");
     i_rant_dsl_ws(&sd);
@@ -768,8 +563,8 @@ static int i_rant_dsl_ref(i_RantDefs *defs, const char *name, uint32_t *toff, ui
 }
 
 /* turns the type just written at b->buf[head..len) into an array of itself by splicing
- * the array head in front of it, since the count follows the body in the text */
-static void i_rant_dsl_splice_array(RantSchemaBuilder *b, size_t head, uint16_t count,
+ * the array head in front of it */
+static void i_rant_dsl_splice_array(i_RantSchemaBuilder *b, size_t head, uint16_t count,
                                     int variable){
     size_t extra = variable ? 1u : 3u, tail;
     if (b->err) return;
@@ -799,103 +594,72 @@ static int i_rant_dsl_suffix(i_RantDsl *d, uint16_t *count, int *variable){
     return 1;
 }
 
-/* Name, Name[N] or Name[]: a reference to an already resolved named type */
-static void i_rant_dsl_emit_ref(i_RantDsl *d, RantSchemaBuilder *b, i_RantDefs *defs,
-                                const char *name, const char *tname,
-                                uint32_t toff, uint32_t tlen){
-    uint16_t cnt; int variable, arr;
-    size_t nlen = strlen(tname);
-    arr = i_rant_dsl_suffix(d, &cnt, &variable);
-    if (d->err) return;
-    if (arr && variable && !i_rant_schema_builder_var_ok(b)) return;
-    i_rant_schema_builder_count(b);
-    i_rant_schema_builder_put_name(b, name);
-    if (arr){
-        if (variable) i_rant_schema_builder_put(b, (uint8_t)RANT_VARR);
-        else { i_rant_schema_builder_put(b, (uint8_t)RANT_ARR); i_rant_schema_builder_put_u16(b, cnt); }
+/* The type whose leading word is in tname, with at pointing at it for errors */
+static void i_rant_dsl_word_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *defs,
+                                 const char *tname, const char *at){
+    RantSchemaTypeKind k; uint16_t cap; uint32_t toff, tlen; size_t nlen;
+    if (strcmp(tname, "map") == 0){
+        i_rant_schema_builder_put(b, (uint8_t)RANT_MAP);
+        return;
     }
+    if (strcmp(tname, "enum") == 0){
+        i_rant_dsl_enum(d, b);
+        return;
+    }
+    if (strcmp(tname, "string") == 0){                   /* string or string<cap> */
+        i_rant_dsl_ws(d);
+        if (*d->p != '<'){ i_rant_schema_builder_put(b, (uint8_t)RANT_VSTR); return; }
+        d->p++;
+        i_rant_dsl_ws(d);
+        if (!i_rant_dsl_count(d, &cap)) return;
+        i_rant_dsl_ws(d);
+        if (!i_rant_dsl_expect(d, '>')) return;
+        i_rant_schema_builder_put(b, (uint8_t)RANT_STR);
+        i_rant_schema_builder_put_u16(b, cap);
+        return;
+    }
+    if (i_rant_dsl_kind(tname, &k)){
+        i_rant_schema_builder_put(b, (uint8_t)k);
+        return;
+    }
+    if (!i_rant_dsl_ref(defs, tname, &toff, &tlen)){ i_rant_dsl_fail(d, at); return; }   /* a named type */
+    nlen = strlen(tname);
     i_rant_schema_builder_put(b, (uint8_t)RANT_NAMED);
     i_rant_schema_builder_put(b, (uint8_t)nlen);
     i_rant_schema_builder_put_raw(b, tname, nlen);
     i_rant_schema_builder_put_raw(b, defs->arena.buf + toff, tlen);
 }
 
-/* One type whose leading word is already in tname, with at pointing at it for errors:
- * whatever follows plus the field it defines. A bare root passes name "". */
-static void i_rant_dsl_word_type(i_RantDsl *d, RantSchemaBuilder *b, i_RantDefs *defs,
-                                 const char *name, const char *tname, const char *at){
-    RantSchemaTypeKind k = RANT_U8;
-    int is_str = 0, has_cap = 0; uint16_t str_cap = 0;
-    uint16_t cnt; int variable;
-    if (strcmp(tname, "map") == 0){
-        rant_schema_field_map(b, name);
-        return;
-    }
-    if (strcmp(tname, "enum") == 0){
-        i_rant_dsl_enum(d, b, name);
-        return;
-    }
-    if (strcmp(tname, "string") == 0){                   /* string or string<cap> */
-        is_str = 1;
-        i_rant_dsl_ws(d);
-        if (*d->p == '<'){
-            d->p++; has_cap = 1;
-            i_rant_dsl_ws(d);
-            if (!i_rant_dsl_count(d, &str_cap)) return;
-            i_rant_dsl_ws(d);
-            if (!i_rant_dsl_expect(d, '>')) return;
-        }
-    } else if (!i_rant_dsl_kind(tname, &k)){               /* a named type */
-        uint32_t toff, tlen;
-        if (!i_rant_dsl_ref(defs, tname, &toff, &tlen)){ i_rant_dsl_fail(d, at); return; }
-        i_rant_dsl_emit_ref(d, b, defs, name, tname, toff, tlen);
-        return;
-    }
-    if (i_rant_dsl_suffix(d, &cnt, &variable)){
-        if (d->err) return;
-        if (is_str && !has_cap){ i_rant_dsl_fail(d, at); return; }    /* string[] is ragged */
-        if (variable){
-            if (is_str) rant_schema_field_var_string_array(b, name, str_cap);
-            else        rant_schema_field_var_array(b, name, k);
-        } else {
-            if (is_str) rant_schema_field_string_array(b, name, str_cap, cnt);
-            else        rant_schema_field_array(b, name, k, cnt);
-        }
-    } else if (d->err){
-        return;
-    } else if (is_str){
-        if (has_cap) rant_schema_field_string(b, name, str_cap);
-        else         rant_schema_field_var_string(b, name);
-    } else {
-        rant_schema_field(b, name, k);
-    }
-}
-
-static void i_rant_dsl_field_type(i_RantDsl *d, RantSchemaBuilder *b, i_RantDefs *defs,
+/* One type plus the field it defines. The count follows the body in the text, so an array
+ * suffix wraps what was just written. A type on its own passes name "". */
+static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *defs,
                                   const char *name){
-    char tname[256]; const char *at;
+    char tname[256]; const char *at; size_t head; uint16_t cnt; int variable; uint8_t kind;
     i_rant_dsl_ws(d);
-    if (*d->p == '{'){                                   /* a struct, or an array of them */
-        size_t head; uint16_t cnt; int variable;
+    at = d->p;
+    i_rant_schema_builder_count(b);
+    i_rant_schema_builder_put_name(b, name);
+    head = b->len;
+    if (*d->p == '{'){
         d->p++;
-        i_rant_schema_builder_count(b);
-        i_rant_schema_builder_put_name(b, name);
-        head = b->len;
         i_rant_schema_builder_open_struct(b);
         i_rant_dsl_fields(d, b, defs);
         if (!i_rant_dsl_expect(d, '}')) return;
-        rant_schema_end_struct(b);
-        if (i_rant_dsl_suffix(d, &cnt, &variable) && !d->err)
-            i_rant_dsl_splice_array(b, head, cnt, variable);
-        return;
+        i_rant_schema_builder_close_struct(b);
+    } else {
+        if (!i_rant_dsl_ident(d, tname)) return;
+        i_rant_dsl_word_type(d, b, defs, tname, at);
     }
-    at = d->p;
-    if (!i_rant_dsl_ident(d, tname)) return;
-    i_rant_dsl_word_type(d, b, defs, name, tname, at);
+    if (d->err || b->err || head >= b->len) return;
+    kind = b->buf[head];
+    if (kind == RANT_MAP || kind == RANT_ENUM) return;   /* never an array element */
+    if (!i_rant_dsl_suffix(d, &cnt, &variable) || d->err) return;
+    if (kind == RANT_VSTR){ i_rant_dsl_fail(d, at); return; }    /* string[] is ragged */
+    i_rant_dsl_splice_array(b, head, cnt, variable);
 }
 
 /* the fields of one struct body, up to and not consuming the closing brace */
-static void i_rant_dsl_fields(i_RantDsl *d, RantSchemaBuilder *b, i_RantDefs *defs){
+static void i_rant_dsl_fields(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *defs){
     char name[256];
     for (;;){
         i_rant_dsl_ws(d);
@@ -913,9 +677,9 @@ static void i_rant_dsl_fields(i_RantDsl *d, RantSchemaBuilder *b, i_RantDefs *de
 /* Name = type: compiles the body on its own, then keeps it, or verifies it matches an
  * existing or reserved definition of the same name exactly. */
 static void i_rant_dsl_def(i_RantDsl *d, i_RantDefs *defs, const char *name){
-    RantSchemaBuilder sb; uint32_t toff = 0, tlen = 0; int ok = 0, exists;
+    i_RantSchemaBuilder sb; uint32_t toff = 0, tlen = 0; int ok = 0, exists;
     exists = i_rant_dsl_ref(defs, name, &toff, &tlen);
-    sb = i_rant_schema_begin_raw(defs->arena.alloc, defs->arena.user);
+    sb = i_rant_schema_builder_begin(defs->arena.alloc, defs->arena.user);
     i_rant_dsl_field_type(d, &sb, defs, "");
     if (!d->err && !sb.err && sb.len){
         if (exists)                                      /* redefining is fine if identical */
@@ -930,7 +694,7 @@ static void i_rant_dsl_def(i_RantDsl *d, i_RantDefs *defs, const char *name){
 RantSchema *rant_schema_compile_env(RantAllocFn alloc, void *user, const char *text,
                                     const RantSchema *const *env, size_t n_env,
                                     const char **err){
-    i_RantDsl d; i_RantDefs defs; RantSchemaBuilder root;
+    i_RantDsl d; i_RantDefs defs; i_RantSchemaBuilder root;
     RantSchema *s = NULL;
     char rootbuf[256];
     const char *rname = NULL; size_t rnlen = 0;
@@ -941,8 +705,8 @@ RantSchema *rant_schema_compile_env(RantAllocFn alloc, void *user, const char *t
     if (!alloc || !text) return NULL;
     memset(&defs, 0, sizeof defs);
     defs.env = env; defs.n_env = n_env;
-    defs.arena = i_rant_schema_begin_raw(alloc, user);
-    root = i_rant_schema_begin_raw(alloc, user);
+    defs.arena = i_rant_schema_builder_begin(alloc, user);
+    root = i_rant_schema_builder_begin(alloc, user);
     d.p = text; d.err = NULL;
     if (defs.arena.err || root.err) i_rant_dsl_fail(&d, text);
 
@@ -963,7 +727,7 @@ RantSchema *rant_schema_compile_env(RantAllocFn alloc, void *user, const char *t
             i_rant_schema_builder_open_struct(&root);
             i_rant_dsl_fields(&d, &root, &defs);
             if (!i_rant_dsl_expect(&d, '}')) break;
-            rant_schema_end_struct(&root);
+            i_rant_schema_builder_close_struct(&root);
             rnlen = strlen(rootbuf); rname = rootbuf;
             is_struct = 1;
         } else {                                         /* a bare type, maybe a reference */

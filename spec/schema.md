@@ -166,9 +166,13 @@ base   := scalar | 'string' ('<' cap '>')? | 'map' | 'enum' '<' scalar '>' '{' o
 ```
 
 A type word that is not a built in resolves against the text's own definitions, then the
-environment schemas, then the standard library, and emits as a NAMED type. The parser is
-a thin front end over the builder, so every structural limit (name lengths, 255 fields
-per struct, nesting depth) is the builder's. A text holds at most 64 definitions and a
+environment schemas, then the standard library, and emits as a NAMED type. Text is the
+one way to make a schema. The parser writes wire type bytes through an internal type
+writer, which holds the limits it can see while writing (name lengths, 255 fields per
+struct, nesting depth). An array suffix follows its element in the text, so the parser
+writes the element first and then splices the array head in front of it. Every other rule
+is checked once, when the finished bytes go through `rant_schema_parse`, the same check a
+peer's bytes get. A text holds at most 64 definitions and a
 standard type expands at most 8 levels deep. Enum values may be omitted and then count up
 from the previous one, starting at 0. A bare reference as the root (`Uuid`) is an alias
 root.
@@ -184,6 +188,6 @@ the index based ones take it as an argument. A field's type encoding is kept as 
 offset and length, so two fields have the same type exactly when the bytes agree.
 
 The compiled block is the wire bytes, an 8 aligned handle and the field table. Statements
-compile into their own scratch builder first and are appended to one definition arena,
+compile into their own scratch writer first and are appended to one definition arena,
 so resolving a reference mid definition never interleaves bytes. `rant_schema_print`
 hoists at most 48 named type definitions, beyond that the tail spells by reference.

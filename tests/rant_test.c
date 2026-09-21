@@ -2249,24 +2249,12 @@ static void schema_dsl_checks(void){
         "    tagCount: u8,\n"
         "    velocity: { dx: f32, dy: f32 }\n"
         "}";
-    RantSchema *txt, *built;
+    RantSchema *txt;
     txt = rant_schema_compile(rant_allocator_alloc, &ma, POSE, NULL);
     ST_CHECK(txt != NULL, "schema-dsl: compiles");
-    {   RantSchemaBuilder b = rant_schema_begin(rant_allocator_alloc, &ma, "Pose");
-        rant_schema_field(&b, "stamp", RANT_U64);
-        rant_schema_field(&b, "x", RANT_F64);
-        rant_schema_field(&b, "y", RANT_F64);
-        rant_schema_field_array(&b, "uuid", RANT_U8, 16);
-        rant_schema_field(&b, "tagCount", RANT_U8);
-        rant_schema_begin_struct(&b, "velocity");
-        rant_schema_field(&b, "dx", RANT_F32);
-        rant_schema_field(&b, "dy", RANT_F32);
-        rant_schema_end_struct(&b);
-        built = rant_schema_finish(&b);
-    }
-    ST_CHECK(built != NULL, "schema-dsl: builder twin builds");
-    ST_CHECK(txt && built && rant_schema_hash(txt) == rant_schema_hash(built),
-             "schema-dsl: text and builder produce the same wire (same hash)");
+    /* pinned: the wire of a nested struct plus a fixed array must never drift */
+    ST_CHECK(txt && rant_schema_hash(txt) == 0xf9a92ce466a346fdULL,
+             "schema-dsl: Pose canonical hash %016llx", (unsigned long long)(txt ? rant_schema_hash(txt) : 0));
     schema_print_roundtrip(&ma, txt, "Pose (nested struct + array)");
     if (txt){
         RantSchemaFieldInfo fi;
@@ -2325,20 +2313,11 @@ static void schema_dsl_checks(void){
     {   /* strings: string<cap> and string<cap>[N] are fixed slots of [u16 len][cap bytes] */
         static const char TAGGED[] =
             "Tagged { id: u32, name: string<12>, labels: string<8>[3], meta: { note: string<4> } }";
-        RantSchema *ts, *twin;
+        RantSchema *ts;
         ts = rant_schema_compile(rant_allocator_alloc, &ma, TAGGED, NULL);
         ST_CHECK(ts != NULL, "schema-dsl: strings compile");
-        {   RantSchemaBuilder b = rant_schema_begin(rant_allocator_alloc, &ma, "Tagged");
-            rant_schema_field(&b, "id", RANT_U32);
-            rant_schema_field_string(&b, "name", 12);
-            rant_schema_field_string_array(&b, "labels", 8, 3);
-            rant_schema_begin_struct(&b, "meta");
-            rant_schema_field_string(&b, "note", 4);
-            rant_schema_end_struct(&b);
-            twin = rant_schema_finish(&b);
-        }
-        ST_CHECK(twin && ts && rant_schema_hash(ts) == rant_schema_hash(twin),
-                 "schema-dsl: string text and builder produce the same wire (same hash)");
+        ST_CHECK(ts && rant_schema_hash(ts) == 0x36a9acceb68c37c9ULL,
+                 "schema-dsl: Tagged canonical hash %016llx", (unsigned long long)(ts ? rant_schema_hash(ts) : 0));
         schema_print_roundtrip(&ma, ts, "Tagged (capped strings + string array)");
         if (ts){
             RantSchemaFieldInfo fi;
@@ -2401,20 +2380,11 @@ static void schema_dsl_checks(void){
            are unaffected */
         static const char VDSL[] =
             "Var { id: u32, note: string, samples: f32[], labels: string<6>[], extras: map, tail: u8 }";
-        RantSchema *vs, *twin;
+        RantSchema *vs;
         vs = rant_schema_compile(rant_allocator_alloc, &ma, VDSL, NULL);
         ST_CHECK(vs != NULL, "schema-var: compiles");
-        {   RantSchemaBuilder b = rant_schema_begin(rant_allocator_alloc, &ma, "Var");
-            rant_schema_field(&b, "id", RANT_U32);
-            rant_schema_field_var_string(&b, "note");
-            rant_schema_field_var_array(&b, "samples", RANT_F32);
-            rant_schema_field_var_string_array(&b, "labels", 6);
-            rant_schema_field_map(&b, "extras");
-            rant_schema_field(&b, "tail", RANT_U8);
-            twin = rant_schema_finish(&b);
-        }
-        ST_CHECK(twin && vs && rant_schema_hash(vs) == rant_schema_hash(twin),
-                 "schema-var: text and builder produce the same wire (same hash)");
+        ST_CHECK(vs && rant_schema_hash(vs) == 0x1c5e7551f4343dbfULL,
+                 "schema-var: Var canonical hash %016llx", (unsigned long long)(vs ? rant_schema_hash(vs) : 0));
         schema_print_roundtrip(&ma, vs, "Var (variable string/array/map)");
         if (vs){
             RantSchemaFieldInfo fi;
@@ -2666,13 +2636,8 @@ static void schema_advert_checks(void){
     int t, pose_ok=0, raw_ok=0;
     const i_RantDiscoveryPeerView *peers; uint16_t n_peers=0;
 
-    {   RantSchemaBuilder b = rant_schema_begin(rant_allocator_alloc, &ma, "Pose");
-        rant_schema_field(&b, "x", RANT_F64);
-        rant_schema_field(&b, "y", RANT_F64);
-        rant_schema_field_array(&b, "tags", RANT_U8, 16);
-        sch = rant_schema_finish(&b);
-    }
-    ST_CHECK(sch!=NULL, "announce: schema builds");
+    sch = rant_schema_compile(rant_allocator_alloc, &ma, "Pose { x: f64, y: f64, tags: u8[16] }", NULL);
+    ST_CHECK(sch!=NULL, "announce: schema compiles");
     if (!sch) return;
 
     memset(&co,0,sizeof co); co.qos.keep_last=4;
@@ -2830,15 +2795,11 @@ static void be_on_message(const RantMsg *msg){
     be_label[k] = '\0';
 }
 static RantSchema *be_build_schema(RantAllocator *a){
-    static char be_names[BE_N][16];
-    static RantEnumVariant be_vs[BE_N];
-    RantSchemaBuilder b; int i;
-    for (i=0;i<BE_N;i++){ sprintf(be_names[i], "job_%04d", i);
-                          be_vs[i].value=i; be_vs[i].name=be_names[i]; }
-    b = rant_schema_begin(rant_allocator_alloc, a, "Jobs");
-    rant_schema_field(&b, "id", RANT_U32);
-    rant_schema_field_enum(&b, "job", RANT_U16, be_vs, BE_N);
-    return rant_schema_finish(&b);
+    static char text[64 + BE_N * 10];
+    int i, at = sprintf(text, "Jobs { id: u32, job: enum<u16> {");
+    for (i=0;i<BE_N;i++) at += sprintf(text + at, " job_%04d,", i);
+    sprintf(text + at, " } }");
+    return rant_schema_compile(rant_allocator_alloc, a, text, NULL);
 }
 static void schema_bigenum_checks(void){
     RantAllocator pa = rant_allocator_heap(0);
@@ -3045,32 +3006,6 @@ static void schema_root_checks(void){
     ST_CHECK(rant_schema_wire(sb).len == 3, "schema-root: `bool` wire is 3 bytes (%u)",
              (unsigned)rant_schema_wire(sb).len);
 
-    {   /* the C builder twin of the DSL: begin_value + one unnamed field */
-        RantSchemaBuilder b = rant_schema_begin_value(rant_allocator_alloc, &ma);
-        RantSchema *twin;
-        rant_schema_field(&b, "", RANT_BOOL);
-        twin = rant_schema_finish(&b);
-        ST_CHECK(twin && rant_schema_hash(twin) == rant_schema_hash(sb),
-                 "schema-root: builder value root == compiled `bool` (same hash)");
-        if (twin) rant_schema_free(twin, rant_allocator_alloc, &ma);
-    }
-    {   RantSchemaBuilder b = rant_schema_begin_value(rant_allocator_alloc, &ma);
-        RantSchema *twin;
-        rant_schema_field_var_array(&b, NULL, RANT_F32);           /* NULL name == "" */
-        twin = rant_schema_finish(&b);
-        ST_CHECK(twin && rant_schema_hash(twin) == rant_schema_hash(sarr),
-                 "schema-root: builder value root == compiled `f32[]` (same hash)");
-        if (twin) rant_schema_free(twin, rant_allocator_alloc, &ma);
-    }
-    {   RantSchemaBuilder b = rant_schema_begin_value(rant_allocator_alloc, &ma);
-        rant_schema_field(&b, "x", RANT_BOOL);                   /* a named bare root: refused */
-        ST_CHECK(rant_schema_finish(&b) == NULL, "schema-root: builder refuses a named bare root");
-    }
-    {   RantSchemaBuilder b = rant_schema_begin_value(rant_allocator_alloc, &ma);
-        rant_schema_field(&b, "", RANT_BOOL);
-        rant_schema_field(&b, "", RANT_U8);                      /* two types: not a bare root */
-        ST_CHECK(rant_schema_finish(&b) == NULL, "schema-root: builder refuses two bare fields");
-    }
     ST_CHECK(rant_schema_compile(rant_allocator_alloc, &ma, "Temperature: f32", NULL) == NULL
           && rant_schema_compile(rant_allocator_alloc, &ma, "bool bool", NULL) == NULL,
              "schema-root: a named bare root and trailing garbage are compile errors");
@@ -3875,11 +3810,13 @@ static void detail_paging_checks(void){
     /* (b) force first: one topic whose schema wire alone exceeds a datagram. respond must
        emit exactly that whole entry, never a header only reply that re asks forever. */
     {   RantAllocator mb = rant_allocator_heap(0);
-        RantSchemaBuilder b = rant_schema_begin(rant_allocator_alloc, &mb, "Big");
+        static char bigtext[16 + 200 * 16];
         i_RantTransportState *t2; i_RantTransportConfig c2; i_RantMetaSchema sc; i_RantDetailWant w; RantSchema *B;
         i_RantTopicDef d; uint8_t rq[64], *big; size_t need2, rl2, page2, len2; int k;
-        for (k = 0; k < 200; k++){ char fn[16]; snprintf(fn, sizeof fn, "field%03d", k); rant_schema_field(&b, fn, RANT_F64); }
-        B = rant_schema_finish(&b);
+        len2 = (size_t)sprintf(bigtext, "Big {");
+        for (k = 0; k < 200; k++) len2 += (size_t)sprintf(bigtext + len2, " field%03d: f64,", k);
+        sprintf(bigtext + len2, " }");
+        B = rant_schema_compile(rant_allocator_alloc, &mb, bigtext, NULL);
         ST_CHECK(B && rant_schema_wire(B).len > RANT_DGRAM_MAX,
                  "detail-paging: built a schema wire over one datagram (%u)",
                  (unsigned)(B ? rant_schema_wire(B).len : 0));

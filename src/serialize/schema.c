@@ -153,8 +153,8 @@ static size_t i_rant_schema_handle_off(const uint8_t *buf, size_t wire_len){
 
 /* Counts every field of the root into *n and its variable fields into *nvar. 0 on
  * malformed wire. A bare or alias root is 1 plus whatever its type flattens to. */
-int i_rant_schema_wire_fields(const void *wire, size_t wire_len,
-                              uint32_t *n, uint32_t *nvar){
+static int i_rant_schema_wire_fields(const void *wire, size_t wire_len,
+                                     uint32_t *n, uint32_t *nvar){
     i_Rd r; uint8_t ver, rl;
     *n = 0; *nvar = 0;
     r.w = (const uint8_t *)wire; r.n = wire_len; r.pos = 0; r.fail = 0;
@@ -307,7 +307,7 @@ static uint32_t i_rant_emit_type(uint8_t *buf, size_t wl, i_Rd *r, RantSchema *s
 
 /* Compiles the wire bytes at buf[0..wire_len] into a RantSchema placed after them in
  * buf. NULL on a malformed blob or when cap is too small. */
-RantSchema *i_rant_schema_compile(uint8_t *buf, size_t wire_len, size_t cap){
+static RantSchema *i_rant_schema_compile(uint8_t *buf, size_t wire_len, size_t cap){
     i_Rd r; uint8_t ver, root_kind, root_namelen;
     const char *root_name; size_t hoff, need; RantSchema *s;
     uint32_t total, nvar; uint16_t emitted = 0;

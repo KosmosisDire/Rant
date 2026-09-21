@@ -56,9 +56,6 @@ int i_rant_enum_backing_ok(uint8_t backing);
 int64_t i_rant_enum_read_val(uint8_t backing, const uint8_t *p);
 void i_rant_enum_write_val(uint8_t backing, uint8_t *p, int64_t v);
 int i_rant_enum_val_fits(uint8_t backing, int64_t v);
-int i_rant_schema_wire_fields(const void *wire, size_t wire_len,
-                              uint32_t *n, uint32_t *nvar);
-RantSchema *i_rant_schema_compile(uint8_t *buf, size_t wire_len, size_t cap);
 const i_Field *i_rant_schema_field_by_path(const RantSchema *s, const char *path,
                                            uint32_t *index);
 
