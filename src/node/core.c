@@ -669,7 +669,7 @@ static void i_rant_node_core_reflect_detail(i_RantNodeCore *c, i_RantNodePeerExt
     r->dirty = 1;
 }
 
-static void i_rant_reflect_format_addr(i_RantReflect *r, const RantDiscoveryAddr *a){
+static void i_rant_reflect_format_addr(i_RantReflect *r, const RantAddr *a){
     char *p = r->addr; unsigned i;
     if (a->ip_len == 4){
         for (i = 0; i < 4; i++){
@@ -1419,7 +1419,7 @@ static void i_rant_node_core_set_peer_oob(i_RantNodeCore *c, uint32_t id, RantBy
 
 /* fires PEER_UP or PEER_DOWN */
 static void i_rant_node_core_fire(i_RantNodeCore *c, RantEventKind kind, uint32_t id,
-                            const RantDiscoveryAddr *addr){
+                            const RantAddr *addr){
     RantEvent ev;
     if (!c->on_event) return;
     memset(&ev, 0, sizeof ev);
@@ -1430,7 +1430,7 @@ static void i_rant_node_core_fire(i_RantNodeCore *c, RantEventKind kind, uint32_
 
 /* fires a RANT_ERROR. too_big carries the OOM or meta too big byte count */
 static void i_rant_node_core_fire_error(i_RantNodeCore *c, RantErrorKind err, uint32_t id,
-                            const RantDiscoveryAddr *addr, uint64_t too_big){
+                            const RantAddr *addr, uint64_t too_big){
     RantEvent ev;
     if (!c->on_event) return;
     memset(&ev, 0, sizeof ev);
@@ -1502,7 +1502,7 @@ static void i_rant_node_core_detail_check(i_RantNodeCore *c, i_RantNodePeerExtra
 }
 
 /* discovery's on_peer_up hook, user is the core */
-static void i_rant_node_core_peer_up(void *user, uint32_t id, const RantDiscoveryAddr *addr,
+static void i_rant_node_core_peer_up(void *user, uint32_t id, const RantAddr *addr,
                             RantBytes meta){
     i_RantNodeCore *c = (i_RantNodeCore*)user;
     i_RantNodePeerExtra *ex = i_rant_node_core_peer_extra(c, id);
@@ -1657,7 +1657,7 @@ void i_rant_node_core_topics_unresolved(i_RantNodeCore *c, uint16_t *counts, uin
 /* Drains one queued request: INTEREST_REQs first, since an unassembled interest gates
    candidate discovery, then DETAIL_REQs, capped at 128 wants. Loop until 0. */
 size_t i_rant_node_core_detail_req_next(i_RantNodeCore *c, uint16_t domain,
-                            void *out, size_t cap, i_RantNodeDest *to){
+                            void *out, size_t cap, RantAddr *to){
     RantDetailWant wants[128];
     uint16_t s, n;
     if (!c || !c->discovery || cap < 24u) return 0;
@@ -1820,14 +1820,9 @@ void i_rant_node_core_discovery_hooks(i_RantNodeCore *c, RantDiscoveryCoreConfig
     cfg->user         = c;
 }
 
-int i_rant_node_core_resolve(i_RantNodeCore *c, uint32_t to, i_RantNodeDest *out){
-    RantDiscoveryAddr a;
+int i_rant_node_core_resolve(i_RantNodeCore *c, uint32_t to, RantAddr *out){
     memset(out, 0, sizeof *out);
-    if (!rant_discovery_addr_of_id(c->discovery, to, &a)) return 0;     /* the peer vanished */
-    memcpy(out->ip, a.ip, 16);
-    out->ip_len = a.ip_len;
-    out->port   = a.port;
-    return 1;
+    return rant_discovery_addr_of_id(c->discovery, to, out);     /* 0 = the peer vanished */
 }
 
 int i_rant_node_core_id_for_addr(i_RantNodeCore *c, const uint8_t ip[4], uint16_t port, uint32_t *id){

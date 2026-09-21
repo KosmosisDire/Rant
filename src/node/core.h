@@ -148,16 +148,9 @@ const RantSchema *i_rant_node_core_msg_schema(i_RantNodeCore *c, uint32_t peer, 
  * and the transport peer set in lockstep and fire the app's peer events. */
 void i_rant_node_core_discovery_hooks(i_RantNodeCore *c, RantDiscoveryCoreConfig *cfg);
 
-/* A resolved outbound destination. The runtime turns it into wire bytes for its link. */
-typedef struct {
-    uint8_t  ip[16];     /* IPv4 today */
-    uint8_t  ip_len;
-    uint16_t port;
-} i_RantNodeDest;
-
 /* resolve turns a peer id into an address, 1 if sendable. id_for_addr maps a source back
  * to a peer id, 1 on a hit. */
-int  i_rant_node_core_resolve(i_RantNodeCore *c, uint32_t to, i_RantNodeDest *out);
+int  i_rant_node_core_resolve(i_RantNodeCore *c, uint32_t to, RantAddr *out);
 int  i_rant_node_core_id_for_addr(i_RantNodeCore *c, const uint8_t ip[4], uint16_t port, uint32_t *id);
 
 /* The requester side of the uDTL cycle: apply_details ingests a response, detail_req_next
@@ -167,7 +160,7 @@ void   i_rant_node_core_apply_details(i_RantNodeCore *c, uint16_t domain, uint32
 int    i_rant_node_core_detail_any(i_RantNodeCore *c);
 void   i_rant_node_core_detail_rearm(i_RantNodeCore *c);
 size_t i_rant_node_core_detail_req_next(i_RantNodeCore *c, uint16_t domain,
-                                        void *out, size_t cap, i_RantNodeDest *to);
+                                        void *out, size_t cap, RantAddr *to);
 /* Unresolved candidate matches for one topic across every active peer. 0 = converged. */
 int    i_rant_node_core_topic_unresolved(i_RantNodeCore *c, uint16_t topic_index);
 /* The bulk form: every topic's count in one walk of each active peer's interest. */

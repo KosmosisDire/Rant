@@ -774,7 +774,7 @@ typedef struct {
 
 static void i_rant_node_layout(i_RantBump *b, uint16_t max_peers, uint16_t max_topics,
                               const RantConfig *transport_cfg,
-                              const RantDiscoveryNetConfig *discovery_rt_cfg, i_RantNodeBlocks *o){
+                              const RantDiscoveryCoreConfig *discovery_cfg, i_RantNodeBlocks *o){
     o->handles       = (uint8_t*)i_rant_bump_take(b, (size_t)max_topics * sizeof(RantTopic*), 16);
     o->node_core_bytes = i_rant_node_core_required_memory(max_topics);     /* no peers here */
     o->node_core = (uint8_t*)i_rant_bump_take(b, o->node_core_bytes, 16);
@@ -784,18 +784,18 @@ static void i_rant_node_layout(i_RantBump *b, uint16_t max_peers, uint16_t max_t
     /* only the (topic, class) segment pointer table lives in the arena */
     o->shm_pool = (uint8_t*)i_rant_bump_take(b, (size_t)max_topics * RANT_SHM_N_CLASSES * sizeof(void*), 16);
 #endif
-    o->discovery_bytes = rant_discovery_placement_memory(discovery_rt_cfg);
+    o->discovery_bytes = rant_discovery_placement_memory(discovery_cfg);
     o->discovery = (uint8_t*)i_rant_bump_take(b, o->discovery_bytes, 16);
     /* the RX buffer fits a unicast announce carrying the largest blob we accept, since
        recvfrom drops an oversized datagram and a late joiner has no other path to it */
-    o->rx_buf_bytes = rant_discovery_wire_size(discovery_rt_cfg->discovery.meta_cap);
+    o->rx_buf_bytes = rant_discovery_wire_size(discovery_cfg->meta_cap);
     if (o->rx_buf_bytes < RANT_DGRAM_MAX) o->rx_buf_bytes = RANT_DGRAM_MAX;
     o->rx_buf = (uint8_t*)i_rant_bump_take(b, o->rx_buf_bytes, 16);
 }
 
 /* Sends one datagram to a peer. 1 when done with it, 0 only on a would block TX full. */
 static int i_rant_node_tx(RantNode *n, uint32_t to, const uint8_t *buf, size_t len){
-    i_RantNodeDest d;
+    RantAddr d;
     if (!i_rant_node_core_resolve(n->core, to, &d)) return 1;     /* the peer vanished */
     if (i_rant_plat_send(n->fd, buf, len, d.ip, d.port) < 0){
         if (i_rant_plat_would_block()) return 0;                  /* TX full: retry next tick */
@@ -934,7 +934,7 @@ void *rant_heap_realloc(void *user, void *ptr, size_t size){
 }
 
 RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_message, RantEventFn on_event, const RantNodeOpts *opts){
-    RantNodeOpts o; RantDiscoveryNetConfig dc; RantConfig tc; i_RantNodeBlocks blocks;
+    RantNodeOpts o; RantDiscoveryCoreConfig dc; RantConfig tc; i_RantNodeBlocks blocks;
     uint16_t max_peers, max_topics, user_topics;
     uint8_t *base; void *arena; size_t need; RantAllocator pool;
     RantNode *n; i_RantSock fd; uint16_t local_port;
@@ -951,26 +951,19 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
 #ifndef RANT_NO_PATTERNS
     max_topics = (uint16_t)(max_topics + (o.disable_meta ? 0 : 2));
 #endif
-    max_peers    = o.discovery.max_peers ? o.discovery.max_peers : 16;
+    max_peers    = o.discovery.max_peers ? o.discovery.max_peers : RANT_MAX_PEERS;
 
     /* the sub configs. Sizing depends only on counts, the callbacks are set later */
     memset(&dc,0,sizeof dc); memset(&tc,0,sizeof tc);
-    dc.discovery.domain_id   = o.domain;
-    dc.discovery.data_port   = o.net.data_port;
-    dc.discovery.announce_interval_us = o.discovery.announce_interval_us;
-    dc.discovery.peer_timeout_us = o.discovery.peer_timeout_us;
-    dc.discovery.max_peers   = max_peers;
-    dc.discovery.meta_cap = rant_meta_cap(max_topics);
-    dc.discovery.peer_user_bytes = i_rant_node_core_peer_user_bytes();     /* the core's scratch */
-    dc.discovery.alloc = i_rant_node_alloc;     /* per peer blobs at their size. Set before sizing so
+    dc.domain_id   = o.domain;
+    dc.data_port   = o.net.data_port;
+    dc.announce_interval_us = o.discovery.announce_interval_us;
+    dc.peer_timeout_us = o.discovery.peer_timeout_us;
+    dc.max_peers   = max_peers;
+    dc.meta_cap = rant_meta_cap(max_topics);
+    dc.peer_user_bytes = i_rant_node_core_peer_user_bytes();     /* the core's scratch */
+    dc.alloc = i_rant_node_alloc;     /* per peer blobs at their size. Set before sizing so
                                                  measure and place agree. alloc_user is set below */
-    dc.group                 = o.net.discovery_group;
-    dc.discovery_port        = o.net.discovery_port;
-    dc.ttl                   = o.net.multicast_ttl;
-    dc.multicast_interface   = o.net.multicast_interface;
-    dc.seeds                 = o.net.seed_peers;
-    dc.n_seeds               = o.net.n_seed_peers;
-    dc.unicast_only          = o.net.unicast_only;
     tc.topics    = NULL;            /* reserve mode: topics created at runtime */
     tc.n_topics  = max_topics;
     tc.max_peers   = max_peers;
@@ -1019,7 +1012,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     n->domain = o.domain;
     n->net = o.net;
     n->announce_us = o.discovery.announce_interval_us ? o.discovery.announce_interval_us
-                                                      : 3000000u;   /* discovery's default */
+                                                      : RANT_ANNOUNCE_INTERVAL_US;
     n->match_wait_us = o.match_wait_ms < 0 ? 0u
                      : o.match_wait_ms ? (uint32_t)o.match_wait_ms * 1000u
                                        : (uint32_t)RANT_MATCH_WAIT_MS * 1000u;
@@ -1033,7 +1026,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     n->max_topics = max_topics;
     n->builtin_lo = user_topics;           /* the builtin block sits above the app's budget */
     n->max_peers = max_peers;
-    n->meta_cap = dc.discovery.meta_cap;   /* the initial accept bound, self heals up */
+    n->meta_cap = dc.meta_cap;   /* the initial accept bound, self heals up */
 
     tc.on_message = i_rant_node_on_message;       /* wrapped so on_message receives a RantMsg */
     tc.on_event   = i_rant_node_on_event;
@@ -1097,7 +1090,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     if (o.net.send_buffer_bytes) i_rant_plat_set_sndbuf(fd, (int)o.net.send_buffer_bytes);
     /* our advertised locator: the port we really bound and no address, unless the caller
        states one outright. See docs/discovery.md */
-    dc.discovery.data_port = o.net.advertise_port ? o.net.advertise_port : local_port;
+    dc.data_port = o.net.advertise_port ? o.net.advertise_port : local_port;
     if (o.net.self_ip){
         uint32_t naddr = i_rant_plat_parse_ip(o.net.self_ip);
         /* 0 and 0xFFFFFFFF are inet_addr's failure value and the broadcast address, neither
@@ -1106,17 +1099,17 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
             (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_BAD_ADDRESS, 0, 0, 0);
             goto fail_sock;
         }
-        i_rant_plat_naddr_to_ip4(naddr, dc.discovery.self_ip);
-        dc.discovery.self_ip_len = 4;
+        i_rant_plat_naddr_to_ip4(naddr, dc.self_ip);
+        dc.self_ip_len = 4;
     }
 
-    i_rant_node_core_discovery_hooks(n->core, &dc.discovery);   /* peer lifecycle and errors */
-    dc.discovery.alloc_user = n;               /* the blob hook allocates from the node's pool */
-    dc.discovery.name     = rant_string(node_name, node_name_len);     /* discovery owned */
+    i_rant_node_core_discovery_hooks(n->core, &dc);   /* peer lifecycle and errors */
+    dc.alloc_user = n;               /* the blob hook allocates from the node's pool */
+    dc.name     = rant_string(node_name, node_name_len);     /* discovery owned */
     /* the core builds our overlay, discovery wraps it in its blob after the locator and name */
     i_rant_node_core_build_meta(n->core);
-    dc.discovery.meta = i_rant_node_core_meta(n->core);
-    n->discovery = rant_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc);
+    dc.meta = i_rant_node_core_meta(n->core);
+    n->discovery = rant_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc, &o.net);
     if (!n->discovery){
         (void)i_rant_node_open_fail(on_event, o.user_data, rant_discovery_last_error(),
                                     rant_discovery_last_os_error(),
@@ -1165,7 +1158,7 @@ fail_threads:
  * buffers, SHM segments and the user held handles stay put. 0 leaves n unchanged. */
 static int i_rant_node_grow(RantNode *n, uint16_t new_max_peers, uint16_t new_max_topics,
                             uint16_t want_meta_cap){
-    RantConfig tc; RantDiscoveryNetConfig dc; i_RantNodeBlocks nb; i_RantBump b;
+    RantConfig tc; RantDiscoveryCoreConfig dc; i_RantNodeBlocks nb; i_RantBump b;
     RantTransportState *nt; i_RantNodeCore *ncore; RantDiscovery *ndisc;
     void *new_arena, *old_arena = n->arena;
     uint8_t *nbase; size_t need;
@@ -1182,10 +1175,10 @@ static int i_rant_node_grow(RantNode *n, uint16_t new_max_peers, uint16_t new_ma
     memset(&tc,0,sizeof tc); memset(&dc,0,sizeof dc);
     tc.topics=NULL; tc.n_topics=new_max_topics; tc.max_peers=new_max_peers;
     tc.allocator=i_rant_node_alloc; tc.frag_size=n->net.fragment_size;
-    dc.discovery.max_peers=new_max_peers; dc.discovery.meta_cap=new_meta_cap;
-    dc.discovery.peer_user_bytes = i_rant_node_core_peer_user_bytes();     /* scratch to match */
+    dc.max_peers=new_max_peers; dc.meta_cap=new_meta_cap;
+    dc.peer_user_bytes = i_rant_node_core_peer_user_bytes();     /* scratch to match */
     /* sizing must match the live core's hook mode: no arena blob pool */
-    dc.discovery.alloc = i_rant_node_alloc; dc.discovery.alloc_user = n;
+    dc.alloc = i_rant_node_alloc; dc.alloc_user = n;
 
     memset(&b,0,sizeof b);
     i_rant_node_layout(&b, new_max_peers, new_max_topics, &tc, &dc, &nb);
@@ -1566,7 +1559,7 @@ static void i_rant_node_rx_drain(RantNode *n, i_RantSock fd, uint64_t deadline){
             if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
                 /* a unicast announce aimed at our data port goes to discovery with its
                    source port, so a translated peer's observed source can bind */
-                RantDiscoveryAddr src;
+                RantAddr src;
                 memset(&src, 0, sizeof src);
                 memcpy(src.ip, src_ip, 4); src.ip_len = 4; src.port = src_port;
                 rant_discovery_feed(n->discovery, &src, rant_bytes(buf, (size_t)r));
@@ -1726,7 +1719,7 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
     /* the detail requester: drain queued requests and rearm every active peer once per
        announce interval while any went out. A sweep that sends nothing disarms the timer */
     if (i_rant_node_core_detail_any(n->core) || (n->next_detail_us && now >= n->next_detail_us)){
-        i_RantNodeDest dst; size_t len; int sent = 0;
+        RantAddr dst; size_t len; int sent = 0;
         if (n->next_detail_us && now >= n->next_detail_us)
             i_rant_node_core_detail_rearm(n->core);
         while ((len = i_rant_node_core_detail_req_next(n->core, n->domain, buf, sizeof buf, &dst)) != 0){

@@ -72,7 +72,7 @@ class RantTopicOpts(Structure):
     ]
 
 
-class RantDiscoveryAddr(Structure):
+class RantAddr(Structure):
     _fields_ = [
         ("ip", c_uint8 * 16),   # network-order bytes
         ("ip_len", c_uint8),    # 4 = IPv4, 16 = IPv6
@@ -81,11 +81,11 @@ class RantDiscoveryAddr(Structure):
 
 
 def seed_addrs(seeds):
-    """Marshal "ip" / "ip:port" strings into a C array of RantDiscoveryAddr (IPv4).
+    """Marshal "ip" / "ip:port" strings into a C array of RantAddr (IPv4).
     The node copies the array at open, so it need not outlive the call."""
     if not seeds:
         return None, 0
-    arr = (RantDiscoveryAddr * len(seeds))()
+    arr = (RantAddr * len(seeds))()
     for i, s in enumerate(seeds):
         host, _, port = s.partition(":")
         octets = host.split(".")

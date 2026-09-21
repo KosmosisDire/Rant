@@ -26,7 +26,7 @@ struct RantDiscovery {
     uint8_t               *rxbuf;       /* arena, wire_max */
     uint8_t               *txbuf;       /* arena, wire_max */
     RantDiscoveryPeer     *peer_view;   /* arena, max_peers: the snapshot for rant_discovery_peers */
-    RantDiscoveryAddr    seeds[RANT_DISCOVERY_MAX_SEEDS];
+    RantAddr    seeds[RANT_DISCOVERY_MAX_SEEDS];
     uint16_t             n_seeds;
 };
 
@@ -38,14 +38,14 @@ static void i_rant_discovery_tx1(RantDiscovery *d, const uint8_t *out, size_t n_
 /* One copy: the data port once the blob named one, else the discovery port. A peer whose
  * data port is unreachable should look dead. */
 static void i_rant_discovery_tx_to(RantDiscovery *d, const uint8_t *out, size_t n_bytes,
-                          const RantDiscoveryAddr *addr){
+                          const RantAddr *addr){
     if (addr->ip_len != 4) return;
     i_rant_discovery_tx1(d, out, n_bytes, addr->ip, addr->port ? addr->port : d->discovery_port);
 }
 
 /* An observed source exactly, else the locator. */
 static void i_rant_discovery_tx_peer(RantDiscovery *d, const uint8_t *out, size_t n_bytes,
-                          const RantDiscoveryAddr *addr, int kind){
+                          const RantAddr *addr, int kind){
     if (kind == 2){ if (addr->ip_len == 4) i_rant_discovery_tx1(d, out, n_bytes, addr->ip, addr->port); }
     else if (kind == 1) i_rant_discovery_tx_to(d, out, n_bytes, addr);
 }
@@ -68,10 +68,10 @@ static void i_rant_discovery_tx_group(RantDiscovery *d, const uint8_t *out, size
 static void i_rant_discovery_tx(RantDiscovery *d, const uint8_t *out, size_t n_bytes,
                           const uint8_t *skip_uuid){
     uint16_t s, discovery_port = d->discovery_port;
-    RantDiscoveryAddr addr;
+    RantAddr addr;
     i_rant_discovery_tx_group(d, out, n_bytes);
     for (s=0; s<d->n_seeds; s++){
-        const RantDiscoveryAddr *seed = &d->seeds[s];
+        const RantAddr *seed = &d->seeds[s];
         if (seed->ip_len != 4) continue;
         i_rant_discovery_tx1(d, out, n_bytes, seed->ip, seed->port ? seed->port : discovery_port);
     }
@@ -87,7 +87,7 @@ static void i_rant_discovery_tx(RantDiscovery *d, const uint8_t *out, size_t n_b
     }
 }
 
-void rant_discovery_feed(RantDiscovery *d, const RantDiscoveryAddr *src, RantBytes datagram){
+void rant_discovery_feed(RantDiscovery *d, const RantAddr *src, RantBytes datagram){
     if (!d) return;
     /* the data socket is the DATA channel */
     rant_discovery_on_datagram(d->core, src, RANT_DISCOVERY_VIA_DATA, datagram, i_rant_plat_now_us());
@@ -205,7 +205,7 @@ uint8_t rant_discovery_default_name(char *out, size_t cap, const char *want){
     uint32_t r; size_t i, max;
     if (!out || cap == 0) return 0;
     max = cap - 1;
-    if (max > RANT_DISCOVERY_NAME_MAX) max = RANT_DISCOVERY_NAME_MAX;
+    if (max > RANT_NODE_NAME_MAX) max = RANT_NODE_NAME_MAX;
     if (want && *want){                              /* the caller's name, clamped */
         for (i = 0; i < max && want[i]; i++) out[i] = want[i];
         out[i] = '\0';
@@ -226,20 +226,19 @@ typedef struct {
     size_t   wire_max, core_bytes;
 } i_RantRtBlocks;
 static void i_rant_discovery_rt_layout(i_RantBump *b, const RantDiscoveryCoreConfig *c, i_RantRtBlocks *o){
-    uint16_t max_peers = c->max_peers ? c->max_peers : 32u;
     o->wire_max   = rant_discovery_wire_size(c->meta_cap);
     o->d     = (RantDiscovery*)i_rant_bump_take(b, sizeof(struct RantDiscovery), 16);
     o->rxbuf = (uint8_t*)i_rant_bump_take(b, o->wire_max, 16);
     o->txbuf = (uint8_t*)i_rant_bump_take(b, o->wire_max, 16);
-    o->peer_view = (uint8_t*)i_rant_bump_take(b, (size_t)max_peers * sizeof(RantDiscoveryPeer), 16);
+    o->peer_view = (uint8_t*)i_rant_bump_take(b, (size_t)c->max_peers * sizeof(RantDiscoveryPeer), 16);
     o->core_bytes = rant_discovery_required_memory(c);
     o->core  = (uint8_t*)i_rant_bump_take(b, o->core_bytes, 16);
 }
 
-size_t rant_discovery_placement_memory(const RantDiscoveryNetConfig *cfg){
+size_t rant_discovery_placement_memory(const RantDiscoveryCoreConfig *cfg){
     RantDiscoveryCoreConfig c; i_RantBump b; i_RantRtBlocks blk;
     if (!cfg) return 0;
-    c = cfg->discovery;
+    c = *cfg;
     rant_discovery_config_defaults(&c);
     memset(&b, 0, sizeof b);
     i_rant_discovery_rt_layout(&b, &c, &blk);
@@ -257,8 +256,10 @@ static RantDiscovery *i_rant_discovery_fail(RantErrorKind e, int os_error){
 RantErrorKind rant_discovery_last_error(void){ return g_place_error; }
 int                       rant_discovery_last_os_error(void){ return g_place_os_error; }
 
-RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNetConfig *cfg){
-    RantDiscoveryNetConfig c;
+RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryCoreConfig *cfg,
+                                    const RantNodeNet *net){
+    RantDiscoveryCoreConfig c;
+    uint16_t discovery_port;
     RantDiscovery *d;
     uint8_t *base, *core_mem;
     size_t need;
@@ -270,15 +271,15 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNe
     i_RantIface want[RANT_DISCOVERY_MAX_SUBNETS];
     const char *group;
 
-    if (!mem || !cfg) return i_rant_discovery_fail(RANT_E_OOM, 0);
+    if (!mem || !cfg || !net) return i_rant_discovery_fail(RANT_E_OOM, 0);
     g_place_error = RANT_E_NONE; g_place_os_error = 0;
     c = *cfg;
-    rant_discovery_config_defaults(&c.discovery);
+    rant_discovery_config_defaults(&c);
     /* a node with no multicast asks whoever hears it to announce it onward */
-    if (c.unicast_only) c.discovery.relay_me = 1;
-    group     = c.group     ? c.group     : "239.255.0.7";
-    if (c.discovery_port == 0)    c.discovery_port  = 7400;
-    ttl  = c.ttl ? c.ttl : 1;
+    if (net->unicast_only) c.relay_me = 1;
+    group = net->discovery_group ? net->discovery_group : RANT_DISCOVERY_GROUP;
+    discovery_port = net->discovery_port ? net->discovery_port : RANT_DISCOVERY_PORT;
+    ttl   = net->multicast_ttl ? net->multicast_ttl : 1;
 
     need = rant_discovery_placement_memory(&c);
     if (cap < need) return i_rant_discovery_fail(RANT_E_OOM, 0);
@@ -286,7 +287,7 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNe
     base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
     {   i_RantBump b; memset(&b, 0, sizeof b);
         b.base = base; b.cap = cap - (size_t)(base - (uint8_t*)mem);
-        i_rant_discovery_rt_layout(&b, &c.discovery, &blk); }
+        i_rant_discovery_rt_layout(&b, &c, &blk); }
     d = blk.d;
     d->wire_max  = (uint32_t)blk.wire_max;
     d->rxbuf     = blk.rxbuf;
@@ -295,17 +296,17 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNe
     core_mem     = blk.core;
 
     /* auto generate a uuid if the caller left it zero */
-    for (i=0;i<16;i++) if (c.discovery.uuid[i]) { allzero = 0; break; }
+    for (i=0;i<16;i++) if (c.uuid[i]) { allzero = 0; break; }
 
     if (!i_rant_plat_startup()) return i_rant_discovery_fail(RANT_E_PLATFORM, 0);
-    if (allzero) i_rant_discovery_auto_uuid(c.discovery.uuid);
+    if (allzero) i_rant_discovery_auto_uuid(c.uuid);
 
-    d->core = rant_discovery_init(core_mem, cap - (size_t)(core_mem - (uint8_t*)mem), &c.discovery);
+    d->core = rant_discovery_init(core_mem, cap - (size_t)(core_mem - (uint8_t*)mem), &c);
     if (!d->core){ i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_OOM, 0); }
 
     fd = i_rant_plat_udp_open();
     if (fd == RANT_SOCK_BAD){ int e=i_rant_plat_last_socket_error(); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_SOCKET, e); }
-    if (!i_rant_plat_bind(fd, 0, c.discovery_port, 1)){ int e=i_rant_plat_last_socket_error(); i_rant_plat_close(fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_BIND, e); }
+    if (!i_rant_plat_bind(fd, 0, discovery_port, 1)){ int e=i_rant_plat_last_socket_error(); i_rant_plat_close(fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_BIND, e); }
 
     /* Join and announce on every interface. A pinned interface means exactly that one. */
     group_naddr = i_rant_plat_parse_ip(group);
@@ -313,10 +314,10 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNe
     d->tx_fd = fd;
     d->group_naddr = group_naddr;
     d->n_ifs = 0;
-    d->unicast_only = c.unicast_only ? 1u : 0u;
-    d->pinned = c.multicast_interface ? 1u : 0u;
+    d->unicast_only = net->unicast_only ? 1u : 0u;
+    d->pinned = net->multicast_interface ? 1u : 0u;
     if (d->pinned){
-        want[0].addr = i_rant_plat_parse_ip(c.multicast_interface);
+        want[0].addr = i_rant_plat_parse_ip(net->multicast_interface);
         want[0].mask = i_rant_discovery_if_mask_of(want[0].addr);     /* 0 if it names no real one */
         n_want = 1;
     } else n_want = i_rant_discovery_if_scan(want, RANT_DISCOVERY_MAX_SUBNETS);
@@ -339,19 +340,19 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNe
 
     d->unicast_fd = RANT_SOCK_BAD;
     d->if_scan_us = i_rant_plat_now_us() + RANT_DISCOVERY_IF_SCAN_US;
-    d->discovery_port = c.discovery_port;
-    d->max_peers = c.discovery.max_peers;
+    d->discovery_port = discovery_port;
+    d->max_peers = c.max_peers;
     d->n_seeds = 0;
-    if (c.seeds){
-        uint16_t k, seed_count = c.n_seeds;
+    if (net->seed_peers){
+        uint16_t k, seed_count = net->n_seed_peers;
         if (seed_count > RANT_DISCOVERY_MAX_SEEDS) seed_count = RANT_DISCOVERY_MAX_SEEDS;
-        for (k=0;k<seed_count;k++) d->seeds[k] = c.seeds[k];
+        for (k=0;k<seed_count;k++) d->seeds[k] = net->seed_peers[k];
         d->n_seeds = seed_count;
     }
 
     /* No locator (a discovery only instance): bind an own unicast RX port and advertise it,
        so a same host reply reaches this process, not the shared port's arbitrary owner. */
-    if (c.discovery.data_port == 0){
+    if (c.data_port == 0){
         i_RantSock uc = i_rant_plat_udp_open();
         if (uc != RANT_SOCK_BAD){
             uint16_t uport = i_rant_plat_bind(uc, 0, 0, 0) ? i_rant_plat_local_port(uc) : 0;
@@ -400,7 +401,7 @@ RantDiscovery *rant_discovery_migrate(RantDiscovery *old, void *new_mem, size_t 
 static int i_rant_discovery_rt_drain(RantDiscovery *d, i_RantSock fd, RantDiscoveryVia via){
     int got = 0, guard;
     for (guard = 0; guard < RANT_DISCOVERY_RX_BURST; guard++){
-        RantDiscoveryAddr src;
+        RantAddr src;
         uint8_t src_ip[4]; uint16_t src_port = 0;
         int n = i_rant_plat_recv(fd, d->rxbuf, d->wire_max, src_ip, &src_port);
         if (n < 0){ if (i_rant_plat_would_block()) break; continue; }    /* empty or transient */
@@ -417,7 +418,7 @@ static int i_rant_discovery_rt_drain(RantDiscovery *d, i_RantSock fd, RantDiscov
 /* One service pass with no wait. The node folds discovery into its one wait and calls
  * this every pass. */
 int rant_discovery_service(RantDiscovery *d, int fd_readable, int unicast_readable){
-    RantDiscoveryAddr to;
+    RantAddr to;
     uint64_t now;
     int got = 0, exact; size_t n_bytes;
     if (!d) return 0;

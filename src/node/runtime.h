@@ -17,37 +17,6 @@
 extern "C" {
 #endif
 
-/* Network addressing and sockets. Every field is zero means default. docs/discovery.md
- * explains the options. */
-typedef struct {
-    uint16_t              data_port;         /* the unicast data port, 0 = OS assigned */
-    const char           *discovery_group;   /* "239.255.0.7" */
-    uint16_t              discovery_port;    /* 7400 */
-    const char           *multicast_interface;/* pin discovery to this interface IP. NULL = every
-                                                interface, "127.0.0.1" = single host */
-    uint8_t               multicast_ttl;     /* hops an announce may travel, 1 */
-    const RantDiscoveryAddr *seed_peers;     /* unicast announces here too, port 0 = discovery_port */
-    uint16_t              n_seed_peers;
-    uint8_t               unicast_only;      /* 1 = no group join, seeds and relays only. Also for a
-                                                node behind an outbound only NAT */
-    uint32_t              recv_buffer_bytes; /* the data socket SO_RCVBUF, 0 = OS default */
-    uint32_t              send_buffer_bytes; /* the data socket SO_SNDBUF, 0 = OS default */
-    uint16_t              fragment_size;     /* UDP payload bytes per fragment, 0 = RANT_FRAG_SIZE.
-                                                Clamped to [MIN, MAX]. One size per node */
-    /* Stating our own locator. The default states nothing and peers record the source an
-     * announce arrived from. Use these for a static one to one mapping. */
-    const char           *self_ip;           /* advertise this IPv4 address. Unparseable refuses the
-                                                open with RANT_E_BAD_ADDRESS */
-    uint16_t              advertise_port;    /* advertise this data port instead of the bound one */
-} RantNodeNet;
-
-/* Discovery cadence and the peer table size, zero means default. */
-typedef struct {
-    uint32_t              announce_interval_us; /* 3 s */
-    uint32_t              peer_timeout_us;   /* drop a peer after this silence, 12 s */
-    uint16_t              max_peers;         /* 16 */
-} RantNodeDiscovery;
-
 #ifndef RANT_MATCH_WAIT_MS
 #define RANT_MATCH_WAIT_MS 1000     /* the default send path match wait bound */
 #endif

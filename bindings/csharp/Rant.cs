@@ -117,7 +117,7 @@ namespace Rant
         public ushort discovery_port;
         public IntPtr multicast_interface;     // const char*
         public byte multicast_ttl;
-        public IntPtr seed_peers;              // const RantDiscoveryAddr*
+        public IntPtr seed_peers;              // const RantAddr*
         public ushort n_seed_peers;
         public byte unicast_only;
         public uint recv_buffer_bytes;
@@ -128,7 +128,7 @@ namespace Rant
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RantDiscoveryAddr
+    internal struct RantAddr
     {
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)] public byte[] ip;
         public byte ip_len;                    // 4 = IPv4, 16 = IPv6
@@ -1767,7 +1767,7 @@ namespace Rant
         {
             count = 0;
             if (seeds == null || seeds.Length == 0) return IntPtr.Zero;
-            int stride = Marshal.SizeOf<RantDiscoveryAddr>();
+            int stride = Marshal.SizeOf<RantAddr>();
             IntPtr block = Marshal.AllocHGlobal(stride * seeds.Length);
             try
             {
@@ -1778,7 +1778,7 @@ namespace Rant
                     string[] oct = (colon < 0 ? s : s.Substring(0, colon)).Split('.');
                     if (oct.Length != 4)
                         throw new ArgumentException("seedPeers entry '" + s + "' is not an IPv4 address");
-                    var a = new RantDiscoveryAddr { ip = new byte[16], ip_len = 4 };
+                    var a = new RantAddr { ip = new byte[16], ip_len = 4 };
                     for (int k = 0; k < 4; k++) a.ip[k] = byte.Parse(oct[k]);
                     if (colon >= 0) a.port = ushort.Parse(s.Substring(colon + 1));
                     Marshal.StructureToPtr(a, IntPtr.Add(block, i * stride), false);

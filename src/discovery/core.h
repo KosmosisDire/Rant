@@ -5,6 +5,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../common/types.h"
 #include "../common/string.h"
 #include "../common/alloc.h"
 
@@ -17,19 +18,12 @@ extern "C" {
 #endif
 
 #define RANT_DISCOVERY_META_MAX 64     /* default per peer overlay capacity */
-#define RANT_DISCOVERY_NAME_MAX 32     /* advertised peer name bytes */
 /* The fixed header is 24 bytes, then [u32 meta_version][u16 meta_len][meta]. */
 #define RANT_DISCOVERY_META_OFF 30
 /* Largest discovery section of the blob: port, self ip and name. The overlay follows. */
-#define RANT_DISCOVERY_DISC_MAX (2u + 1u + 16u + 1u + RANT_DISCOVERY_NAME_MAX)
+#define RANT_DISCOVERY_DISC_MAX (2u + 1u + 16u + 1u + RANT_NODE_NAME_MAX)
 /* Smallest datagram buffer. The runtime grows it to fit meta_cap. */
 #define RANT_DISCOVERY_WIRE_MAX 128
-
-typedef struct {
-    uint8_t  ip[16];   /* network order bytes */
-    uint8_t  ip_len;   /* 4 or 16 */
-    uint16_t port;     /* data port, host order */
-} RantDiscoveryAddr;
 
 /* Which local socket a datagram arrived on. A NAT may rewrite a peer's source per flow,
  * so the core keeps one observed source per channel. See spec/discovery.md. */
@@ -59,7 +53,7 @@ typedef enum {
 typedef struct {
     uint32_t            id;            /* local handle, stable across a drop and return */
     uint8_t             uuid[16];
-    RantDiscoveryAddr addr;            /* advertised unicast locator */
+    RantAddr addr;            /* advertised unicast locator */
     RantPeerLiveness    liveness;
     uint64_t            last_heard_us;
     RantString          name;          /* {NULL,0} if none */
@@ -86,7 +80,7 @@ typedef struct {
     uint8_t  relay_me;      /* mark our announces relay me, for a node with no multicast */
     /* The peer lifecycle hooks, both optional. up: first contact, an address or blob
      * change, or a resume, with the locator and the overlay we hold. */
-    void (*on_peer_up)(void *user, uint32_t peer, const RantDiscoveryAddr *addr, RantBytes meta);
+    void (*on_peer_up)(void *user, uint32_t peer, const RantAddr *addr, RantBytes meta);
     void (*on_peer_down)(void *user, uint32_t peer, RantDiscoveryDownReason reason);
     /* Optional, errors only: PEER_REFUSED (.ip, .port) and PEER_META_TOO_BIG (.peer, 0 for
      * an unknown one, .ip, .port, .too_big_bytes = the wanted size). .user is user below. */
@@ -117,7 +111,7 @@ RantDiscoveryState *rant_discovery_core_migrate(RantDiscoveryState *old, void *n
                  const uint8_t *self_meta, void *peer_cb_user);
 /* src NULL or port 0 means the IO layer cannot say, so the locator comes from the blob
  * alone and no observed source binds. via says which local socket it arrived on. */
-void           rant_discovery_on_datagram(RantDiscoveryState *st, const RantDiscoveryAddr *src,
+void           rant_discovery_on_datagram(RantDiscoveryState *st, const RantAddr *src,
                                         RantDiscoveryVia via, RantBytes datagram, uint64_t now_us);
 size_t         rant_discovery_update(RantDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
 /* When update next wants to run its timers. 0 means now. Peer timeout sweeps ride the
@@ -142,14 +136,14 @@ void           rant_discovery_set_local_subnets(RantDiscoveryState *st,
 /* Drains one unicast datagram: a solicit reply or a re fetch request. Returns bytes and
  * fills *to, or 0. *exact 1 means *to is an observed source, send exactly there. */
 size_t         rant_discovery_poll_targeted(RantDiscoveryState *st, void *out, size_t cap,
-                                      RantDiscoveryAddr *to, int *exact);
+                                      RantAddr *to, int *exact);
 /* Drains one proxied announce built on behalf of a relay me peer. The runtime sends it
  * on every path. Loop until 0. */
 size_t         rant_discovery_poll_relay(RantDiscoveryState *st, void *out, size_t cap);
 /* Drains one introduction: a proxied announce of a peer we hear directly, addressed to
  * one relay me peer. *to and *exact as in poll_targeted. Loop until 0. */
 size_t         rant_discovery_poll_introduce(RantDiscoveryState *st, void *out, size_t cap,
-                                      RantDiscoveryAddr *to, int *exact);
+                                      RantAddr *to, int *exact);
 /* Live peers, DROPPED entries excluded. */
 uint16_t       rant_discovery_peer_count(const RantDiscoveryState *st);
 /* Table capacity, the slot range for peer_addr and peer_at. */
@@ -157,7 +151,7 @@ uint16_t       rant_discovery_max_peers(const RantDiscoveryState *st);
 /* Discovery TX destination for the ACTIVE peer in a slot. 0 none, 1 the locator, which
  * the runtime expands to both ports, 2 an observed source, send exactly there. */
 int            rant_discovery_peer_addr(const RantDiscoveryState *st, uint16_t slot,
-                                      RantDiscoveryAddr *out);
+                                      RantAddr *out);
 /* Read only view of the peer in a slot, ACTIVE or DROPPED. 1 if it holds one. */
 int            rant_discovery_peer_at(const RantDiscoveryState *st, uint16_t slot,
                                       RantDiscoveryPeer *out);
@@ -170,7 +164,7 @@ RantBytes        rant_discovery_peer_meta(const RantDiscoveryState *st, uint32_t
                                       uint32_t *version);
 /* The one address to send data to: the observed data source when bound, else the locator. */
 int            rant_discovery_addr_of_id(const RantDiscoveryState *st, uint32_t id,
-                                      RantDiscoveryAddr *out);
+                                      RantAddr *out);
 /* {NULL,0} for an unknown peer. */
 RantString       rant_discovery_peer_name(const RantDiscoveryState *st, uint32_t id);
 /* Maps a source back to a peer id. A peer with observed sources matches only those. */

@@ -388,7 +388,7 @@ int main(int argc, char **argv){
     if (if_ip)      opts.net.multicast_interface = if_ip;          /* multihomed: pin it */
     else if (mcast) opts.net.multicast_interface = "127.0.0.1";    /* same host: stay local */
 
-    RantDiscoveryAddr seed;
+    RantAddr seed;
     if (peer_ip){
         memset(&seed, 0, sizeof seed);
         if (parse_ipv4(peer_ip, seed.ip) < 0){ fprintf(stderr, "bad --peer ip %s\n", peer_ip); return 2; }

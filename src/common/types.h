@@ -1,5 +1,5 @@
 /* The public vocabulary every layer shares: limits, roles, the QoS, result codes, the
- * repair counters and the event. */
+ * repair counters, the network options and the event. */
 #ifndef RANT_TYPES_H
 #define RANT_TYPES_H
 
@@ -82,6 +82,50 @@ typedef struct {
     uint64_t frags_ahead;      /* beyond the one sample held ahead: dropped, fetched in order */
     uint64_t frags_malformed;  /* count 0, frag past count, or not subscribed */
 } RantRepairStats;
+
+/* One network address. Every layer names a peer, a seed or a destination with it. */
+typedef struct {
+    uint8_t  ip[16];   /* network order bytes, IPv4 today */
+    uint8_t  ip_len;   /* 4 or 16, 0 = none */
+    uint16_t port;     /* host order */
+} RantAddr;
+
+/* The discovery defaults, stated once for every layer. */
+#define RANT_DISCOVERY_GROUP      "239.255.0.7"
+#define RANT_DISCOVERY_PORT       7400
+#define RANT_ANNOUNCE_INTERVAL_US 3000000u     /* 3 s. The peer timeout defaults to 4 of them */
+#define RANT_MAX_PEERS            16
+
+/* Network addressing and sockets. Every field is zero means default. docs/discovery.md
+ * explains the options. */
+typedef struct {
+    uint16_t              data_port;         /* the unicast data port, 0 = OS assigned */
+    const char           *discovery_group;   /* RANT_DISCOVERY_GROUP */
+    uint16_t              discovery_port;    /* RANT_DISCOVERY_PORT */
+    const char           *multicast_interface;/* pin discovery to this interface IP. NULL = every
+                                                interface, "127.0.0.1" = single host */
+    uint8_t               multicast_ttl;     /* hops an announce may travel, 1 */
+    const RantAddr       *seed_peers;        /* unicast announces here too, port 0 = discovery_port */
+    uint16_t              n_seed_peers;
+    uint8_t               unicast_only;      /* 1 = no group join, seeds and relays only. Also for a
+                                                node behind an outbound only NAT */
+    uint32_t              recv_buffer_bytes; /* the data socket SO_RCVBUF, 0 = OS default */
+    uint32_t              send_buffer_bytes; /* the data socket SO_SNDBUF, 0 = OS default */
+    uint16_t              fragment_size;     /* UDP payload bytes per fragment, 0 = RANT_FRAG_SIZE.
+                                                Clamped to [MIN, MAX]. One size per node */
+    /* Stating our own locator. The default states nothing and peers record the source an
+     * announce arrived from. Use these for a static one to one mapping. */
+    const char           *self_ip;           /* advertise this IPv4 address. Unparseable refuses the
+                                                open with RANT_E_BAD_ADDRESS */
+    uint16_t              advertise_port;    /* advertise this data port instead of the bound one */
+} RantNodeNet;
+
+/* Discovery cadence and the peer table size, zero means default. */
+typedef struct {
+    uint32_t              announce_interval_us; /* RANT_ANNOUNCE_INTERVAL_US */
+    uint32_t              peer_timeout_us;   /* drop a peer after this silence, 12 s */
+    uint16_t              max_peers;         /* RANT_MAX_PEERS */
+} RantNodeDiscovery;
 
 /* The one event type, fired by every layer. Four lifecycle kinds plus RANT_ERROR, whose
  * .error says which fault. Read only the fields named for the kind. */

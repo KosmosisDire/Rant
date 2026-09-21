@@ -459,7 +459,7 @@ static int node_main(int argc, char **argv){
         opts.net.multicast_interface = if_ip;       /* pin discovery to this one interface */
     else if (if_mode==1)
         opts.net.multicast_interface = "127.0.0.1";   /* loopback only, off the LAN */
-    RantDiscoveryAddr seed;
+    RantAddr seed;
     if (peer_ip){                     /* bootstrap without multicast */
         uint32_t a4 = inet_addr(peer_ip);
         if (a4 != INADDR_NONE){
@@ -1221,7 +1221,7 @@ static void ahead_checks(void){
 /* ---- discovery-core (sans-IO) checks: peer lifecycle without sockets ---- */
 static uint32_t dc_up_id, dc_up_n, dc_down_id, dc_down_n, dc_refused_n;
 static int      dc_down_reason;
-static void dc_up(void *user, uint32_t peer, const RantDiscoveryAddr *addr, RantBytes meta){
+static void dc_up(void *user, uint32_t peer, const RantAddr *addr, RantBytes meta){
     (void)user; (void)addr; (void)meta; dc_up_id=peer; dc_up_n++;
 }
 static void dc_down(void *user, uint32_t peer, RantDiscoveryDownReason reason){
@@ -1272,7 +1272,7 @@ static size_t dc_mk_ip(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uin
    discovery socket, 1 = the data port socket */
 static void dc_feed(RantDiscoveryState *st, const uint8_t ip[4], uint16_t sport, int via,
                     const uint8_t *buf, size_t n, uint64_t now){
-    RantDiscoveryAddr src;
+    RantAddr src;
     memset(&src, 0, sizeof src);
     memcpy(src.ip, ip, 4); src.ip_len = 4; src.port = sport;
     rant_discovery_on_datagram(st, &src,
@@ -1355,7 +1355,7 @@ static void disc_core_checks(void){
 
     /* 8. RELAY, the rules the loopback phase cannot see: who enlists us, one hop only, and
        a proxied locator losing to a direct path we still hear */
-    { uint32_t id9; RantDiscoveryAddr a; size_t pn; uint16_t pport;
+    { uint32_t id9; RantAddr a; size_t pn; uint16_t pport;
       st = rant_discovery_init(mem,sizeof mem,&c);              /* fresh receiver */
       rant_discovery_update(st, 1000, out, sizeof out);
       /* (a) a DIRECT relay-me announce enlists us: we owe a proxied announce for it */
@@ -1401,7 +1401,7 @@ static void disc_core_checks(void){
 
     /* 9. SELF-IP: a node states its locator outright. It must ride our own announce, and a
        relay must propagate the stated address, not the source it saw. */
-    { RantDiscoveryCoreConfig sc2; RantDiscoveryState *s2; RantDiscoveryAddr a;
+    { RantDiscoveryCoreConfig sc2; RantDiscoveryState *s2; RantAddr a;
       uint8_t pub_ip[4]={203,0,113,7}; uint32_t id12; size_t pn;
       sc2 = c;                                     /* same domain/timing, our own uuid */
       memcpy(sc2.self_ip, pub_ip, 4); sc2.self_ip_len = 4; sc2.data_port = 7400;
@@ -1432,7 +1432,7 @@ static void disc_core_checks(void){
 
     /* 10. OBSERVED SOURCES: a unicast only peer behind a NAT advertises a fiction, so the
        receiver binds one observed source per local channel and routes everything there. */
-    { RantDiscoveryCoreConfig c4; RantDiscoveryAddr a; uint32_t id20, id21, id22, idX, idU;
+    { RantDiscoveryCoreConfig c4; RantAddr a; uint32_t id20, id21, id22, idX, idU;
       uint8_t na[4]={192,168,1,50}, sx[4]={192,168,1,200}, su[4]={192,168,1,51};
       size_t pn; int ex;
       c4 = c; c4.max_peers = 4;
@@ -1551,7 +1551,7 @@ static void disc_core_checks(void){
                rant_discovery_peer_count(st));
       /* nor is a direct-stale origin introduced to a newly appearing relay-me peer */
       n=dc_mk(buf,41,0x04,99,8001,1); dc_feed(st,sb,50002,1,buf,n,t + 2000);
-      { int saw40=0, k2; RantDiscoveryAddr a2; int ex2;
+      { int saw40=0, k2; RantAddr a2; int ex2;
         for (k2=0;k2<8;k2++){
             pn = rant_discovery_poll_introduce(st, out, sizeof out, &a2, &ex2);
             if (!pn) break;
@@ -1566,7 +1566,7 @@ static void disc_core_checks(void){
 
     /* 12. A UNICAST-ONLY RECEIVER: a published port forward rewrites the source to the
        gateway on our own subnet, so a source never overrides a held locator here. */
-    { RantDiscoveryCoreConfig c6; RantDiscoverySubnet net; RantDiscoveryAddr a;
+    { RantDiscoveryCoreConfig c6; RantDiscoverySubnet net; RantAddr a;
       RantDiscoveryPeer v; uint32_t id50, got;
       static const uint8_t gw[4]={10,0,2,2}, real_ip[4]={192,168,1,106};
       static const uint8_t net_ip[4]={10,0,2,0}, net_mask[4]={255,255,255,0};
@@ -1677,7 +1677,7 @@ static void node_core_checks(void){
     RantConfig tc; RantTransportState *tr; RantTopicDef ch[1];
     RantDiscoveryCoreConfig dcfg; RantDiscoveryState *st;
     i_RantNodeCoreConfig cc; i_RantNodeCore *nc;
-    i_RantNodeDest d; uint32_t id, idA, idB; size_t n;
+    RantAddr d; uint32_t id, idA, idB; size_t n;
     /* STATIC allocator over a caller buffer: the embedded no-heap contract */
     static RantAllocator A; A = rant_allocator_static(amem, sizeof amem);
 
@@ -1877,7 +1877,7 @@ static void shmn_on_message(const RantMsg *msg){
 }
 static RantNode *shmn_open(int is_pub, int shm_capable, uint16_t domain, void **mem_out){
     static RantTopicDef ch[2]; static int slot;
-    RantTopicDef *d=&ch[slot++ & 1]; RantDiscoveryAddr seed; RantNodeOpts opts;
+    RantTopicDef *d=&ch[slot++ & 1]; RantAddr seed; RantNodeOpts opts;
     size_t cap = 1u<<20; void *mem; RantQos q; memset(&q,0,sizeof q);
     q.reliability=RANT_RELIABLE; q.keep_last=4; q.catch_up=1;
     memset(d,0,sizeof *d); d->name="shmnode"; d->qos=q; d->role=is_pub?RANT_PUB_ONLY:RANT_SUB_ONLY;
@@ -2114,7 +2114,7 @@ static void dynamic_grow_checks(void){
                                     "dg/6","dg/7","dg/8","dg/9","dg/10","dg/11"};
     RantAllocator pa = rant_allocator_heap(0), sa = rant_allocator_heap(0);
     RantNodeOpts po, so; RantNode *P=NULL, *S=NULL; RantTopic *pc0=NULL, *pcN;
-    RantTopicOpts co; RantDiscoveryAddr seed; uint8_t payload[8]; int i, t;
+    RantTopicOpts co; RantAddr seed; uint8_t payload[8]; int i, t;
     memset(&co,0,sizeof co); co.qos.reliability=RANT_RELIABLE; co.qos.keep_last=32;
     co.qos.catch_up=32; co.qos.heartbeat_us=50000;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
@@ -2659,7 +2659,7 @@ static void schema_advert_checks(void){
     RantAllocator sa = rant_allocator_heap(0);
     RantAllocator ma = rant_allocator_heap(0);       /* caller side schema */
     RantNodeOpts po, so; RantNode *P=NULL, *S=NULL; RantTopic *pc;
-    RantTopicOpts co; RantDiscoveryAddr seed; RantSchema *sch=NULL;
+    RantTopicOpts co; RantAddr seed; RantSchema *sch=NULL;
     uint32_t pose_h = (uint32_t)rant_topic_id("sch/pose");
     uint32_t raw_h  = (uint32_t)rant_topic_id("sch/raw");
     uint32_t late_h = (uint32_t)rant_topic_id("sch/late");
@@ -2754,7 +2754,7 @@ static void schema_bind_checks(void){
     RantAllocator sa = rant_allocator_heap(0);
     RantAllocator ma = rant_allocator_heap(0);
     RantNodeOpts po, so; RantNode *P=NULL, *S=NULL;
-    RantTopic *pc, *pc_bad; RantTopicOpts co; RantDiscoveryAddr seed;
+    RantTopic *pc, *pc_bad; RantTopicOpts co; RantAddr seed;
     RantSchema *W, *R, *WB, *RB; int t;
     /* writer: the full Pose. reader: a reordered subset of it */
     W  = rant_schema_compile(rant_allocator_alloc, &ma,
@@ -2845,7 +2845,7 @@ static void schema_bigenum_checks(void){
     RantAllocator sa = rant_allocator_heap(0);
     RantAllocator ma = rant_allocator_heap(0);
     RantNodeOpts po, so; RantNode *P=NULL, *S=NULL; RantTopic *pc; RantTopicOpts co;
-    RantDiscoveryAddr seed; RantSchema *es; int t, ji;
+    RantAddr seed; RantSchema *es; int t, ji;
 
     es = be_build_schema(&ma);
     ST_CHECK(es!=NULL, "bigenum: 1024-option schema compiles");
@@ -3004,7 +3004,7 @@ static void schema_root_checks(void){
     RantAllocator qa = rant_allocator_heap(0);
     RantAllocator ma = rant_allocator_heap(0);
     RantNodeOpts po, so, qo; RantNode *P=NULL, *S=NULL, *Q=NULL;
-    RantTopicOpts co; RantDiscoveryAddr seed;
+    RantTopicOpts co; RantAddr seed;
     RantSchema *sb, *su8, *sstr, *sarr, *smap, *senum, *swrap;
     RantTopic *pflag, *pnote, *psamples, *pextras, *pmode, *pbad, *pwrap;
     int t;
@@ -3533,7 +3533,7 @@ static void stdtypes_checks(void){
     RantAllocator pa = rant_allocator_heap(0);
     RantAllocator sa = rant_allocator_heap(0);
     RantNodeOpts po, so; RantNode *P = NULL, *S = NULL;
-    RantTopicOpts co; RantDiscoveryAddr seed;
+    RantTopicOpts co; RantAddr seed;
     RantTopic *ppose, *pimg, *pbad; RantSchema *SPose, *SImg, *SBad, *SBadSub;
     int t;
 
@@ -3915,7 +3915,7 @@ static void detail_live_checks(void){
     RantAllocator pa = rant_allocator_heap(0);
     RantAllocator sa = rant_allocator_heap(0);
     RantAllocator ma = rant_allocator_heap(0);
-    RantNodeOpts po, so; RantNode *P=NULL, *S=NULL; RantTopicOpts co; RantDiscoveryAddr seed;
+    RantNodeOpts po, so; RantNode *P=NULL, *S=NULL; RantTopicOpts co; RantAddr seed;
     RantSchema *W; RantTopic *pc;
     i_RantSock q = RANT_SOCK_BAD;
     uint8_t pip[4]={0,0,0,0}; uint16_t pport=0; uint32_t pversion=0;
@@ -4919,7 +4919,7 @@ static uint32_t cp_wait_parked(RantNode *P, RantNode *C, RantQueue *q){
 static void callback_pattern_checks(void){
     RantAllocator pa = rant_allocator_heap(0);
     RantAllocator ca = rant_allocator_heap(0);
-    RantNodeOpts po, co; RantNode *P=NULL, *C=NULL; RantDiscoveryAddr seed;
+    RantNodeOpts po, co; RantNode *P=NULL, *C=NULL; RantAddr seed;
     RantFunction *cadd, *ctask, *cnone, *pinl, *cinl;
     RantVariable *pvar, *cvar;
     uint32_t waiting, id = 0; int t, r, r2;
@@ -5180,7 +5180,7 @@ static void pf_pump(RantNode *a, RantNode *b, int ms){
 static void patterns_checks(void){
     RantAllocator pa = rant_allocator_heap(0);
     RantAllocator ca = rant_allocator_heap(0);
-    RantNodeOpts po, co; RantNode *P=NULL, *C=NULL; RantDiscoveryAddr seed;
+    RantNodeOpts po, co; RantNode *P=NULL, *C=NULL; RantAddr seed;
     RantFunction *prov, *call_add, *pe, *ce, *pd, *cd, *pnh, *cnh, *ghost, *pfm, *cfm;
     uint16_t dom = ST_DOMAIN+20; int t;
 
@@ -5709,7 +5709,7 @@ static void tk_on_cancel_cb(uint64_t token, void *user){ (void)user; tk_cancel_t
 static void task_checks(void){
     RantAllocator pa = rant_allocator_heap(0);
     RantAllocator ca = rant_allocator_heap(0);
-    RantNodeOpts po, co; RantNode *P=NULL, *C=NULL; RantDiscoveryAddr seed;
+    RantNodeOpts po, co; RantNode *P=NULL, *C=NULL; RantAddr seed;
     RantFunction *pxfer, *cxfer, *plong, *clong, *pnc, *cnc, *pinl, *cinl, *pbare, *cbare;
     uint16_t dom = ST_DOMAIN+32; int t;
 
@@ -5959,7 +5959,7 @@ static void taskx_checks(void){
     RantAllocator ac2 = rant_allocator_heap(0);
     RantAllocator ax    = rant_allocator_heap(0);
     RantAllocator ma    = rant_allocator_heap(0);
-    RantNodeOpts o; RantDiscoveryAddr seed;
+    RantNodeOpts o; RantAddr seed;
     RantNode *P, *P2, *C1, *C2, *X, *ns[5];
     RantSchema *req_s, *prg_s, *rsp_s;
     RantFunction *pmix, *pnoc, *pfile, *psel, *pret, *pret2, *psel2, *pshut;
@@ -6413,7 +6413,7 @@ static void dup_on_event(const RantEvent *ev){
 static void dup_authority_checks(void){
     RantAllocator aa = rant_allocator_heap(0);
     RantAllocator ba = rant_allocator_heap(0);
-    RantNodeOpts ao, bo; RantNode *A, *B; RantDiscoveryAddr seed;
+    RantNodeOpts ao, bo; RantNode *A, *B; RantAddr seed;
     int a_dups = 0, b_dups = 0, t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
     memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+21; ao.discovery.max_peers=4;
@@ -6468,7 +6468,7 @@ static void dup_authority_checks(void){
 static void retire_checks(void){
     RantAllocator aa = rant_allocator_heap(0);
     RantAllocator ba = rant_allocator_heap(0);
-    RantNodeOpts ao, bo; RantNode *A, *B; RantDiscoveryAddr seed;
+    RantNodeOpts ao, bo; RantNode *A, *B; RantAddr seed;
     int t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
     memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+22; ao.discovery.max_peers=4;
@@ -6574,7 +6574,7 @@ static int loud_active_peers(RantNode *n){
 static void loud_checks(void){
     RantAllocator aa = rant_allocator_heap(0);
     RantAllocator ba = rant_allocator_heap(0);
-    RantNodeOpts ao, bo; RantNode *A, *B; RantDiscoveryAddr seed; RantEvent le;
+    RantNodeOpts ao, bo; RantNode *A, *B; RantAddr seed; RantEvent le;
     RantSchema *pose; char txt[192]; int t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
     memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+23; ao.discovery.max_peers=4;
@@ -6707,7 +6707,7 @@ static void loud_checks(void){
 static void reflect_dropped_checks(void){
     RantAllocator aa = rant_allocator_heap(0);
     RantAllocator ba = rant_allocator_heap(0);
-    RantNodeOpts ao, bo; RantNode *A, *B; RantDiscoveryAddr seed;
+    RantNodeOpts ao, bo; RantNode *A, *B; RantAddr seed;
     RantVariable *def; uint32_t pid = 0; int t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
     memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+23; ao.discovery.max_peers=4;
@@ -6761,7 +6761,7 @@ static void reflect_dropped_checks(void){
 static void varwait_checks(void){
     RantAllocator aa = rant_allocator_heap(0);
     RantAllocator ba = rant_allocator_heap(0);
-    RantNodeOpts ao, bo; RantNode *P, *C; RantDiscoveryAddr seed;
+    RantNodeOpts ao, bo; RantNode *P, *C; RantAddr seed;
     RantVariable *vd; int t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
     memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+31; ao.discovery.max_peers=4;
@@ -6857,7 +6857,7 @@ static void churn_checks(void){
     RantAllocator pa = rant_allocator_heap(0);
     RantAllocator ca = rant_allocator_heap(0);
     RantAllocator ua = rant_allocator_heap(0);
-    RantNodeOpts po, co2, uo; RantNode *P, *C, *U; RantDiscoveryAddr seed;
+    RantNodeOpts po, co2, uo; RantNode *P, *C, *U; RantAddr seed;
     RantSchema *G1, *G2, *G3;
     RantTopic *beat, *csub; RantTopicOpts topts;
     RantNode *nodes[4];
@@ -7089,7 +7089,7 @@ static void mw_on_event(const RantEvent *ev){
 }
 
 static void matchwait_checks(void){
-    RantDiscoveryAddr seed; int t;
+    RantAddr seed; int t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
 
 #ifdef _WIN32
@@ -7307,7 +7307,7 @@ static void relay_checks(void){
     /* R's data port is fixed so U can seed exactly one address (per-process, like the
        matchwait port: concurrent selftests must not collide on the bind) */
     const uint16_t R_PORT = (uint16_t)(20000u + st_domain_base % 15000u);
-    RantDiscoveryAddr seed; int t;
+    RantAddr seed; int t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4; seed.port=R_PORT;
 
     /* (a) INTRODUCTION + DATA, then the relay dies */
@@ -7409,7 +7409,7 @@ static void relay_checks(void){
 static void nat_checks(void){
     const uint16_t R2_PORT = (uint16_t)(21000u + st_domain_base % 15000u);
     uint16_t DEAD_PORT = 0;
-    RantDiscoveryAddr seed; int t;
+    RantAddr seed; int t;
     i_RantSock bh;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4; seed.port=R2_PORT;
 
@@ -7498,7 +7498,7 @@ static void nat_checks(void){
 
 /* The self ip phase: stating our own locator. On one host the advertised port carries
  * the proof, it is deliberately not the port A bound. */
-static int sip_addr_of(RantNode *n, const char *name, RantDiscoveryAddr *out){
+static int sip_addr_of(RantNode *n, const char *name, RantAddr *out){
     uint16_t c = 0, i; size_t nl = strlen(name);
     const RantDiscoveryPeer *p = st_peers(n, &c);
     for (i=0;i<c;i++)
@@ -7512,7 +7512,7 @@ static void selfip_checks(void){
     /* (a) peers record what we STATE, not where our packets came from */
     { RantAllocator aa = rant_allocator_heap(0);
       RantAllocator ba = rant_allocator_heap(0);
-      RantNodeOpts ao, bo; RantNode *A=NULL, *B=NULL; RantDiscoveryAddr got;
+      RantNodeOpts ao, bo; RantNode *A=NULL, *B=NULL; RantAddr got;
       memset(&bo,0,sizeof bo); bo.domain=ST_DOMAIN+29; bo.disable_shm=1; bo.discovery.max_peers=4;
       bo.discovery.announce_interval_us=200000; bo.net.multicast_interface="127.0.0.1";
       ao=bo; ao.net.self_ip="127.0.0.1"; ao.net.advertise_port=ADV_PORT;
@@ -7584,7 +7584,7 @@ static void ts_checks(void){
     static uint8_t mem_a[1], mem_b[1];
     static unsigned char big[64*1024];
     RantTopicDef ca[4], cb[4];
-    RantNodeOpts ao, bo; RantDiscoveryAddr seed;
+    RantNodeOpts ao, bo; RantAddr seed;
     RantNode *A, *B;
     uint8_t payload[64];
     uint64_t before, after;
@@ -7906,7 +7906,7 @@ static void interest_external_checks(void){
     RantAllocator pa = rant_allocator_heap(0);
     RantAllocator sa = rant_allocator_heap(0);
     RantNodeOpts po, so; RantNode *P, *S; RantTopic *pub=NULL, *sub=NULL;
-    RantTopicOpts co; RantDiscoveryAddr seed; char name[16];
+    RantTopicOpts co; RantAddr seed; char name[16];
     uint8_t payload[8]; int i, t;
     memset(&co,0,sizeof co); co.qos.reliability=RANT_RELIABLE; co.qos.keep_last=4; co.qos.catch_up=1;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
@@ -7983,7 +7983,7 @@ static void interest_external_checks(void){
 static void metalog_checks(void){
     RantAllocator aa = rant_allocator_heap(0);
     RantAllocator ba = rant_allocator_heap(0);
-    RantNodeOpts ao, bo; RantNode *A=NULL, *B=NULL; RantDiscoveryAddr seed;
+    RantNodeOpts ao, bo; RantNode *A=NULL, *B=NULL; RantAddr seed;
     int t, i;
 
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
@@ -8624,7 +8624,7 @@ static RantNode *ctl_open(uint16_t domain, int coordinator,
                          const char *if_ip, const char *peer_ip){
     static uint8_t mem[8<<20];
     static RantTopicDef ch[2];
-    static RantDiscoveryAddr seed;
+    static RantAddr seed;
     RantNodeOpts opts;
     memset(ch, 0, sizeof ch);
     ch[0].name                  = "ctl/cmd";
@@ -9032,7 +9032,7 @@ static uint64_t ms_allocs(RantNode *P, RantNode **S, int nsubs){
 }
 static void ms_run(size_t plen, uint16_t keep, int nsubs, int disable_shm){
     RantAllocator pa, sa[16]; RantNodeOpts po, so; RantNode *P=NULL, *S[16];
-    RantTopic *pc=NULL; RantTopicOpts co; RantDiscoveryAddr seed;
+    RantTopic *pc=NULL; RantTopicOpts co; RantAddr seed;
     uint8_t *payload; int i, j, k, t, nwarm, nsteady; unsigned dom = ms_domain++;
     uint64_t a0=0, a1=0, a2=0; size_t ppeak=0, speak=0;
     double cold_sum=0, warm_sum=0, t0, t1, msg_s; int coldc=0;

@@ -21,24 +21,13 @@ const RantDiscoveryPeer *rant_discovery_peers(RantDiscovery *d, uint16_t *count)
 /* The sans-IO core, for the by id lookups. Valid for the runtime's life. */
 RantDiscoveryState *rant_discovery_state(RantDiscovery *d);
 
-/* The placement config. Zero and NULL fields get defaults. A zero uuid is auto generated. */
-typedef struct {
-    RantDiscoveryCoreConfig discovery;          /* the core config */
-    const char  *group;       /* default "239.255.0.7" */
-    uint16_t     discovery_port;   /* default 7400 */
-    uint8_t      ttl;         /* default 1 */
-    const char  *multicast_interface;    /* this interface IP only, never rescanned. NULL = every
-                                 interface, "127.0.0.1" = single host isolation */
-    const RantDiscoveryAddr *seeds;    /* also unicast announces here, at most MAX_SEEDS */
-    uint16_t     n_seeds;
-    uint8_t      unicast_only;  /* 1 = no multicast at all. Implies discovery.relay_me. Seed at
-                                 least one peer, or be seeded by one, or nothing can find us. */
-} RantDiscoveryNetConfig;
-
-size_t       rant_discovery_placement_memory(const RantDiscoveryNetConfig *cfg);
-/* Places a runtime in caller memory. The caller owns mem. NULL on failure, and
+size_t       rant_discovery_placement_memory(const RantDiscoveryCoreConfig *cfg);
+/* Places a runtime in caller memory, which the caller owns. cfg is the core config, a zero
+ * uuid is auto generated. net gives the group, port, ttl, interface, seeds and
+ * unicast_only, where unicast_only implies cfg.relay_me. NULL on failure, and
  * rant_discovery_last_error names the step. */
-RantDiscovery       *rant_discovery_place(void *mem, size_t mem_size, const RantDiscoveryNetConfig *cfg);
+RantDiscovery       *rant_discovery_place(void *mem, size_t mem_size,
+                                          const RantDiscoveryCoreConfig *cfg, const RantNodeNet *net);
 
 /* Why the last place returned NULL: OOM (the buffer was too small), PLATFORM, SOCKET, BIND
  * or MCAST_JOIN. A process global with no lock, read it right after. */
@@ -56,7 +45,7 @@ void         rant_discovery_close(RantDiscovery *d, int send_bye);
 /* node integration */
 /* A discovery datagram that arrived on the data socket. src carries the port too, so the
  * core can bind an observed source. */
-void         rant_discovery_feed(RantDiscovery *d, const RantDiscoveryAddr *src, RantBytes datagram);
+void         rant_discovery_feed(RantDiscovery *d, const RantAddr *src, RantBytes datagram);
 /* Routes unicast discovery TX out of fd, the node's data socket. RANT_SOCK_BAD restores
  * the own socket. Group TX stays on the own socket. */
 void         rant_discovery_set_tx_fd(RantDiscovery *d, i_RantSock fd);

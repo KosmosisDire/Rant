@@ -2083,7 +2083,7 @@ public:
         impl->mcast_if   = o.multicast_interface;
         impl->self_ip    = o.self_ip;
         for (const std::string& s : o.seed_peers) {
-            detail::RantDiscoveryAddr a;
+            detail::RantAddr a;
             if (parse_addr(s, a)) impl->seeds.push_back(a);
         }
         std::string nm(name);
@@ -2321,7 +2321,7 @@ private:
         std::string                disc_group;
         std::string                mcast_if;
         std::string                self_ip;
-        std::vector<detail::RantDiscoveryAddr> seeds;
+        std::vector<detail::RantAddr> seeds;
 
         /* wrapper registries. create_mu serializes wrapper side creates and is never taken from
          * a callback. reg_mu is a leaf lock, never call into C while holding it. */
@@ -2459,7 +2459,7 @@ private:
 
     /* Parse "ip" or "ip:port" into a locator, port 0 = discovery_port. Hand rolled so no
      * locale bound scanf is needed. */
-    static bool parse_addr(const std::string& s, detail::RantDiscoveryAddr& out) {
+    static bool parse_addr(const std::string& s, detail::RantAddr& out) {
         unsigned oct[4] = {0}, port = 0;
         size_t i = 0, n = s.size();
         for (int part = 0; part < 4; ++part) {

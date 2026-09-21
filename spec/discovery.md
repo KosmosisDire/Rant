@@ -53,17 +53,17 @@ byte trailer after the blob, which meta_len excludes and parsers otherwise ignor
 history: v3 added the versioned blob, v4 the relay flags, v5 observed sources. A datagram
 with another magic, version or domain is dropped, as is a malformed blob. The per peer
 overlay capacity defaults to `RANT_DISCOVERY_META_MAX` (64) bytes and the name to
-`RANT_DISCOVERY_NAME_MAX` (32).
+`RANT_NODE_NAME_MAX` (32).
 
 ## Timing
 
 The first announce is phased by a hash of the uuid within one interval, so nodes do not
 announce in lockstep, and a solicit goes out at startup. Peer timeout sweeps run on the
 announce cadence, so detection lags by at most one interval. `rant_discovery_next_due_us`
-tells a driving loop when the next timer is due. The core defaults are a 3 s interval, a
-12 s peer timeout, a 2 min gone timeout and 32 peers (the node's default is 16). A BYE is
-sent three times (`RANT_DISCOVERY_BYE_SENDS`), since one shot UDP may lose it and
-receivers dedup by uuid. The runtime drains a socket to empty on every pass, capped at
+tells a driving loop when the next timer is due. The defaults are a 3 s interval, a 12 s
+peer timeout, a 2 min gone timeout and 16 peers. The interval, the peer count, the group
+and the port are stated once in `common/types.h`. A BYE is sent three times
+(`RANT_DISCOVERY_BYE_SENDS`), since one shot UDP may lose it and receivers dedup by uuid. The runtime drains a socket to empty on every pass, capped at
 2048 datagrams. One receive per poll would let a slow poller's backlog keep a dead peer
 alive. Multicast loop stays on, since several instances on one host
 need it, and the uuid self filter drops the echoes.
@@ -81,7 +81,7 @@ the subscriber kept its `deliver_upto`, so the writer fills only the gap and rep
 history is deduped (spec/transport.md, peer resume). A new uuid is a fresh peer and gets
 `catch_up`. When a new peer needs a slot the oldest DROPPED peer is evicted (reason
 `RANT_DISCOVERY_GONE`). A table full of ACTIVE peers refuses the newcomer
-(`on_peer_refused`, `RANT_E_PEER_REFUSED`) rather than evicting a live one.
+(a `RANT_E_PEER_REFUSED` event) rather than evicting a live one.
 `timeout_us` is the single tolerance knob. A separate grace timer was rejected as part of
 the timeout. One helper fires PEER_DOWN then frees the slot for BYE, both eviction sweeps,
 allocation eviction and GONE promotion.
