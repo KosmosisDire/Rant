@@ -48,26 +48,6 @@ typedef enum {
     RANT_DISCOVERY_GONE = 1     /* said BYE, silent past the gone timeout, or evicted: free state */
 } RantDiscoveryDownReason;
 
-/* Discovery is generic and carries an opaque blob, so it has its own event type. The
- * node translates these into its RantEvent. */
-typedef enum {
-    RANT_DISCOVERY_PEER_UP,          /* first contact, an address or blob change, or a resume */
-    RANT_DISCOVERY_PEER_DOWN,        /* .reason says DROP or GONE */
-    RANT_DISCOVERY_PEER_REFUSED,     /* table full of active peers, the newcomer was refused */
-    RANT_DISCOVERY_META_TOO_BIG      /* a peer's blob exceeds meta_cap or the receive buffer */
-} RantDiscoveryEventKind;
-
-typedef struct {
-    RantDiscoveryEventKind     kind;
-    void                    *user;       /* RantDiscoveryCoreConfig.user */
-    uint32_t                   peer;     /* local peer id, 0 in META_TOO_BIG for an unknown peer */
-    RantDiscoveryAddr          addr;     /* UP and REFUSED: the locator. TOO_BIG: locator or source */
-    RantDiscoveryDownReason    reason;   /* DOWN only */
-    RantString                 name;     /* UP: the advertised name, {NULL,0} if none */
-    RantBytes                  meta;     /* UP: the overlay. TOO_BIG: .len is the wanted size */
-} RantDiscoveryEvent;
-typedef void (*RantDiscoveryEventFn)(const RantDiscoveryEvent *ev);
-
 /* Liveness for the read only peer view. */
 typedef enum {
     RANT_PEER_ACTIVE    = 0,   /* heard within peer_timeout_us */
@@ -104,7 +84,13 @@ typedef struct {
     uint16_t meta_cap;      /* per peer overlay capacity, 0 = RANT_DISCOVERY_META_MAX */
     uint16_t peer_user_bytes;    /* scratch reserved per peer, 0 = none */
     uint8_t  relay_me;      /* mark our announces relay me, for a node with no multicast */
-    RantDiscoveryEventFn on_event;
+    /* The peer lifecycle hooks, both optional. up: first contact, an address or blob
+     * change, or a resume, with the locator and the overlay we hold. */
+    void (*on_peer_up)(void *user, uint32_t peer, const RantDiscoveryAddr *addr, RantBytes meta);
+    void (*on_peer_down)(void *user, uint32_t peer, RantDiscoveryDownReason reason);
+    /* Optional, errors only: PEER_REFUSED (.ip, .port) and PEER_META_TOO_BIG (.peer, 0 for
+     * an unknown one, .ip, .port, .too_big_bytes = the wanted size). .user is user below. */
+    RantEventFn on_event;
     void *user;
     /* Optional hook. Per peer blobs are then allocated at their actual length instead of
      * a fixed max_peers x meta_cap pool. Pair with rant_discovery_destroy. */

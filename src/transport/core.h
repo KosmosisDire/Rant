@@ -76,33 +76,6 @@ typedef int (*i_RantShmMsgFn)(void *user, uint16_t topic_index, uint32_t from_pe
                              const uint8_t *desc);
 #endif
 
-/* The transport's own events. The node maps them into its RantEvent. */
-typedef enum {
-    RANT_TRANSPORT_MSG_LOST,          /* seqnos skipped: .topic, .peer, .lost_first, .lost_count */
-    RANT_TRANSPORT_MSG_TOO_BIG,       /* a received message could not be buffered, .too_big_bytes */
-    RANT_TRANSPORT_NAME_COLLISION,    /* a peer's name hashes to ours but differs, .identity */
-    RANT_TRANSPORT_QOS_INCOMPATIBLE,/* a reliable subscriber refused a best effort publisher */
-    RANT_TRANSPORT_SCHEMA_MISMATCH, /* the schema_check hook refused a direction, .peer_is_pub */
-    RANT_TRANSPORT_INTEREST_OVERFLOW,/* a peer's index map failed to allocate: .lost_count */
-    RANT_TRANSPORT_META_TRUNCATED_INTEREST, /* our overlay overflowed, peers see no topics */
-    RANT_TRANSPORT_META_TRUNCATED_SCHEMA,     /* retired, kept so binding enums stay aligned */
-    RANT_TRANSPORT_KIND_MISMATCH      /* a verified peer advertises the name under another kind */
-} RantTransportEventKind;
-
-/* Read only the fields named for the kind. The topic name comes from rant_transport_topic_name. */
-typedef struct {
-    RantTransportEventKind kind;
-    void       *user;          /* RantConfig.user */
-    uint32_t   peer;           /* 0 = none */
-    uint16_t   topic;        /* local topic handle */
-    uint64_t   lost_first;     /* MSG_LOST: first skipped seqno */
-    uint64_t   lost_count;     /* MSG_LOST: seqnos skipped, fragments not messages */
-    uint64_t   too_big_bytes;  /* MSG_TOO_BIG: size of the dropped message */
-    uint64_t   identity;       /* NAME_COLLISION: the colliding identity */
-    uint8_t    peer_is_pub;    /* SCHEMA_MISMATCH: the refused direction, 1 = their publisher */
-} RantTransportEvent;
-typedef void (*RantTransportEventFn)(const RantTransportEvent *ev);
-
 /* RantConfig.allocator is required. Every growable buffer sizes through it, so memory
  * scales with traffic and matches. Static mode passes rant_allocator_alloc over a static one. */
 
@@ -117,13 +90,17 @@ typedef struct {
 #ifdef RANT_SHM
     i_RantShmMsgFn           on_shm;     /* SHM-DATA delivery, the node resolves the descriptor */
 #endif
-    RantTransportEventFn    on_event;   /* optional */
+    RantEventFn             on_event;   /* optional, .user is RantConfig.user */
     RantAllocFn             allocator;  /* required, init fails without it */
     /* Optional schema gate at detail intake, once per direction. peer_is_pub 1 gates the
      * read side. Return 1 to allow. Verdicts are cached per (peer, index). */
     int                 (*schema_check)(void *user, uint32_t peer, uint16_t topic_index,
                                         int peer_is_pub, uint64_t schema_hash,
                                         RantBytes schema_wire);
+    /* Optional: one line saying why schema_check refused that direction, or NULL. It
+     * rides a SCHEMA_MISMATCH event as .schema_detail. */
+    const char         *(*schema_why)(void *user, uint32_t peer, uint16_t topic_index,
+                                      int peer_is_pub);
     /* Optional wall clock, UTC microseconds, stamped at commit. NULL still frames the 8
      * bytes as 0 on a stamped topic. Never the monotonic clock, the stamp crosses hosts. */
     uint64_t            (*source_time)(void *user);

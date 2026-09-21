@@ -337,7 +337,7 @@ void   i_rant_reader_hb(RantTransportState *st, int topic_index, int peer_slot, 
 size_t i_rant_reader_emit(RantTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
 i_RantTopic *i_rant_topic_at(RantTransportState *st, uint16_t topic_index, int *idx_out);
 int    i_rant_peer_slot(RantTransportState *st, uint32_t id);
-void   i_rant_transport_fire_event(RantTransportState *st, RantTransportEventKind kind, uint16_t topic_index, uint32_t peer, uint64_t first, uint64_t count);
+void   i_rant_transport_fire_event(RantTransportState *st, RantErrorKind error, uint16_t topic_index, uint32_t peer, uint64_t first, uint64_t count);
 uint64_t i_rant_topic_unicast_join_seqno(const i_RantTopic *topic);
 
 #endif /* RANT_TRANSPORT_INTERNAL_H */

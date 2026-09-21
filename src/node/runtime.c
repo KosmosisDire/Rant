@@ -725,8 +725,8 @@ static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from,
 static int i_rant_node_on_message(void *u, uint16_t topic_index, uint32_t from, RantBytes data){
     return i_rant_node_deliver((RantNode*)u, topic_index, from, data);
 }
-/* Node core events funnel through here. The core sets ev->user to this node, swap it for
- * the app's user_data before handing on. */
+/* Node core and transport events funnel through here. Both set ev->user to this node,
+ * swap it for the app's user_data before handing on. */
 static void i_rant_node_on_event(const RantEvent *ev){
     RantNode *n = (RantNode*)ev->user;
     /* dynamic mode has no peer cap: a refusal means grow at the next poll, out of this
@@ -753,43 +753,14 @@ static int i_rant_node_schema_check(void *u, uint32_t peer, uint16_t topic_index
                                          peer_is_pub, hash, wire);
 }
 
+/* the text behind a refusal of that gate, for the transport's SCHEMA_MISMATCH event */
+static const char *i_rant_node_schema_why(void *u, uint32_t peer, uint16_t topic_index,
+                                          int peer_is_pub){
+    return i_rant_node_core_schema_why(((RantNode*)u)->core, peer, topic_index, peer_is_pub);
+}
+
 /* the transport's source clock: the wall clock, since it is read on other hosts */
 static uint64_t i_rant_node_source_time(void *u){ (void)u; return i_rant_plat_wall_us(); }
-
-/* Maps a transport event onto the app RantEvent. MSG_LOST is an info kind, everything
- * else is a RANT_ERROR with its RantErrorKind, and topic scoped kinds get our name. */
-static void i_rant_node_on_transport_event(const RantTransportEvent *tev){
-    RantNode *n = (RantNode*)tev->user;
-    RantEvent e;
-    memset(&e, 0, sizeof e);
-    e.peer = tev->peer; e.topic = tev->topic;
-    e.lost_first = tev->lost_first; e.lost_count = tev->lost_count;
-    e.too_big_bytes = tev->too_big_bytes; e.identity = tev->identity;
-    switch (tev->kind){
-    case RANT_TRANSPORT_MSG_LOST:
-        e.kind = RANT_MSG_LOST; e.topic_name = i_rant_node_topic_name(n, tev->topic); break;
-    case RANT_TRANSPORT_MSG_TOO_BIG:
-        e.kind = RANT_ERROR; e.error = RANT_E_MSG_TOO_BIG; e.topic_name = i_rant_node_topic_name(n, tev->topic); break;
-    case RANT_TRANSPORT_NAME_COLLISION:
-        e.kind = RANT_ERROR; e.error = RANT_E_NAME_COLLISION; e.topic_name = i_rant_node_topic_name(n, tev->topic); break;
-    case RANT_TRANSPORT_QOS_INCOMPATIBLE:
-        e.kind = RANT_ERROR; e.error = RANT_E_QOS_INCOMPATIBLE; e.topic_name = i_rant_node_topic_name(n, tev->topic); break;
-    case RANT_TRANSPORT_KIND_MISMATCH:
-        e.kind = RANT_ERROR; e.error = RANT_E_KIND_MISMATCH; e.topic_name = i_rant_node_topic_name(n, tev->topic); break;
-    case RANT_TRANSPORT_SCHEMA_MISMATCH:
-        e.kind = RANT_ERROR; e.error = RANT_E_SCHEMA_MISMATCH; e.topic_name = i_rant_node_topic_name(n, tev->topic);
-        e.schema_detail = i_rant_node_core_schema_why(n->core, tev->peer, tev->topic,
-                                                      tev->peer_is_pub); break;
-    case RANT_TRANSPORT_INTEREST_OVERFLOW:
-        e.kind = RANT_ERROR; e.error = RANT_E_INTEREST_OVERFLOW; break;
-    case RANT_TRANSPORT_META_TRUNCATED_INTEREST:
-        e.kind = RANT_ERROR; e.error = RANT_E_META_TRUNCATED_INTEREST; break;
-    case RANT_TRANSPORT_META_TRUNCATED_SCHEMA:
-        e.kind = RANT_ERROR; e.error = RANT_E_META_TRUNCATED_SCHEMA; break;
-    default: return;
-    }
-    i_rant_node_emit(n, &e);
-}
 
 /* The arena's sub blocks, laid out in one place so the measure pass and the build pass
  * run the same sequence and never drift. */
@@ -1065,8 +1036,9 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     n->meta_cap = dc.discovery.meta_cap;   /* the initial accept bound, self heals up */
 
     tc.on_message = i_rant_node_on_message;       /* wrapped so on_message receives a RantMsg */
-    tc.on_event   = i_rant_node_on_transport_event;
+    tc.on_event   = i_rant_node_on_event;
     tc.schema_check = i_rant_node_schema_check;
+    tc.schema_why   = i_rant_node_schema_why;
     tc.source_time = i_rant_node_source_time;
     tc.user       = n;
 #ifdef RANT_SHM
@@ -1138,8 +1110,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
         dc.discovery.self_ip_len = 4;
     }
 
-    dc.discovery.on_event = i_rant_node_core_on_disc_event;     /* the core demuxes peer events */
-    dc.discovery.user     = n->core;
+    i_rant_node_core_discovery_hooks(n->core, &dc.discovery);   /* peer lifecycle and errors */
     dc.discovery.alloc_user = n;               /* the blob hook allocates from the node's pool */
     dc.discovery.name     = rant_string(node_name, node_name_len);     /* discovery owned */
     /* the core builds our overlay, discovery wraps it in its blob after the locator and name */
@@ -1147,15 +1118,8 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     dc.discovery.meta = i_rant_node_core_meta(n->core);
     n->discovery = rant_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc);
     if (!n->discovery){
-        RantErrorKind err;     /* discovery's setup failure in our vocabulary */
-        switch (rant_discovery_last_error()){
-        case RANT_DISCOVERY_E_PLATFORM:     err = RANT_E_PLATFORM;     break;
-        case RANT_DISCOVERY_E_SOCKET:       err = RANT_E_SOCKET;       break;
-        case RANT_DISCOVERY_E_BIND:         err = RANT_E_BIND;         break;
-        case RANT_DISCOVERY_E_MCAST_JOIN: err = RANT_E_MCAST_JOIN; break;
-        default:                          err = RANT_E_OOM;          break;
-        }
-        (void)i_rant_node_open_fail(on_event, o.user_data, err, rant_discovery_last_os_error(),
+        (void)i_rant_node_open_fail(on_event, o.user_data, rant_discovery_last_error(),
+                                    rant_discovery_last_os_error(),
                                     o.net.discovery_port, 0);
         goto fail_sock;
     }

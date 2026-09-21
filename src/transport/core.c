@@ -279,20 +279,29 @@ static i_RantTopic *i_rant_topic_by_identity(RantTransportState *st, uint64_t id
 }
 
 
-/* first and count are the kind's two numeric slots, routed to the named fields. */
-void i_rant_transport_fire_event(RantTransportState *st, RantTransportEventKind kind, uint16_t topic_index,
+/* RANT_E_NONE fires RANT_MSG_LOST, anything else a RANT_ERROR. first and count are the
+ * error's two numeric slots, routed to the named fields. */
+void i_rant_transport_fire_event(RantTransportState *st, RantErrorKind error, uint16_t topic_index,
                         uint32_t peer, uint64_t first, uint64_t count){
-    RantTransportEvent ev;
+    RantEvent ev;
+    int topic_scoped = 1;
     if (!st->cfg.on_event) return;
     memset(&ev, 0, sizeof ev);
-    ev.kind=kind; ev.topic=topic_index; ev.peer=peer; ev.user=st->cfg.user;
-    switch (kind){
-    case RANT_TRANSPORT_MSG_LOST:         ev.lost_first = first; ev.lost_count = count; break;
-    case RANT_TRANSPORT_MSG_TOO_BIG:      ev.too_big_bytes = count; break;
-    case RANT_TRANSPORT_NAME_COLLISION: ev.identity = first; break;
-    case RANT_TRANSPORT_SCHEMA_MISMATCH: ev.peer_is_pub = (uint8_t)first; break;
+    ev.kind = error == RANT_E_NONE ? RANT_MSG_LOST : RANT_ERROR; ev.error = error;
+    ev.topic=topic_index; ev.peer=peer; ev.user=st->cfg.user;
+    switch (error){
+    case RANT_E_NONE:               ev.lost_first = first; ev.lost_count = count; break;
+    case RANT_E_MSG_TOO_BIG:        ev.too_big_bytes = count; break;
+    case RANT_E_NAME_COLLISION:     ev.identity = first; break;
+    case RANT_E_SCHEMA_MISMATCH:    /* first is the refused direction, 1 = their publisher */
+        if (st->cfg.schema_why)
+            ev.schema_detail = st->cfg.schema_why(st->cfg.user, peer, topic_index, (int)first);
+        break;
+    case RANT_E_INTEREST_OVERFLOW:  ev.lost_count = count; topic_scoped = 0; break;
+    case RANT_E_META_TRUNCATED_INTEREST: topic_scoped = 0; break;
     default: break;
     }
+    if (topic_scoped) ev.topic_name = (const char*)rant_transport_topic_name(st, topic_index).data;
     st->cfg.on_event(&ev);
 }
 
@@ -865,7 +874,7 @@ void rant_transport_apply_peer_interest(RantTransportState *st, uint32_t peer_id
         {   /* the kind gate: the same name under another kind is refused, never cross wired */
             uint8_t their_kind = (uint8_t)((flags & RANT__INT_KIND_MASK) >> RANT__INT_KIND_SHIFT);
             if (their_kind != topic->kind){
-                i_rant_transport_fire_event(st, RANT_TRANSPORT_KIND_MISMATCH, cidx, peer_id, 0, 0);
+                i_rant_transport_fire_event(st, RANT_E_KIND_MISMATCH, cidx, peer_id, 0, 0);
                 continue;
             }
         }
@@ -875,16 +884,16 @@ void rant_transport_apply_peer_interest(RantTransportState *st, uint32_t peer_id
         if (their_pub){   /* their offered qos against our subscription */
             int ours_sub = rant_role_subs(topic->role);
             if (ours_sub && topic->qos.reliability==RANT_RELIABLE && !rel){
-                i_rant_transport_fire_event(st, RANT_TRANSPORT_QOS_INCOMPATIBLE, cidx, peer_id, 0, 0);
+                i_rant_transport_fire_event(st, RANT_E_QOS_INCOMPATIBLE, cidx, peer_id, 0, 0);
             } else if (!(astate[a] & RANT__AST_READ_OK)){
-                i_rant_transport_fire_event(st, RANT_TRANSPORT_SCHEMA_MISMATCH, cidx, peer_id, 1, 0);
+                i_rant_transport_fire_event(st, RANT_E_SCHEMA_MISMATCH, cidx, peer_id, 1, 0);
             } else {
                 i_rant_bit_set(peer_pub_bitmap,(uint32_t)cidx);
             }
         }
         if (their_sub){                                /* their requested qos, for our writer */
             if (!(astate[a] & RANT__AST_WRITE_OK)){
-                i_rant_transport_fire_event(st, RANT_TRANSPORT_SCHEMA_MISMATCH, cidx, peer_id, 0, 0);
+                i_rant_transport_fire_event(st, RANT_E_SCHEMA_MISMATCH, cidx, peer_id, 0, 0);
             } else {
                 i_rant_bit_set(peer_sub_bitmap,(uint32_t)cidx);
                 if (rel) i_rant_bit_set(peer_sub_reliable,(uint32_t)cidx);
@@ -892,7 +901,7 @@ void rant_transport_apply_peer_interest(RantTransportState *st, uint32_t peer_id
         }
     }
     if (unmappable)   /* never silent: those topics can never deliver here */
-        i_rant_transport_fire_event(st, RANT_TRANSPORT_INTEREST_OVERFLOW, 0, peer_id, 0, unmappable);
+        i_rant_transport_fire_event(st, RANT_E_INTEREST_OVERFLOW, 0, peer_id, 0, unmappable);
     for (c=0;c<st->cfg.n_topics;c++) i_rant_topic_rematch(st,c,(uint16_t)peer_slot);
 
     /* per lane values, applied after the rematch so the lanes exist and re derived on
@@ -1024,7 +1033,7 @@ uint16_t rant_transport_meta_build(RantTransportState *st, uint8_t *out, uint16_
     interest_len = rant_transport_build_interest(st, out + off, cap - off);
     len = (size_t)off + interest_len;
     if (interest_len == 0)    /* did not fit: never silent */
-        i_rant_transport_fire_event(st, RANT_TRANSPORT_META_TRUNCATED_INTEREST, 0, 0, 0, 0);
+        i_rant_transport_fire_event(st, RANT_E_META_TRUNCATED_INTEREST, 0, 0, 0, 0);
     return (uint16_t)len;
 }
 
@@ -1460,7 +1469,7 @@ uint16_t rant_transport_apply_peer_details(RantTransportState *st, uint32_t peer
         }
         if (topic->name_len != dd.name.len || memcmp(topic->name, dd.name.data, dd.name.len) != 0){
             astate[dd.index] = RANT__AST_DETAILED;     /* the same id, a different name: refused */
-            i_rant_transport_fire_event(st, RANT_TRANSPORT_NAME_COLLISION, (uint16_t)cidx,
+            i_rant_transport_fire_event(st, RANT_E_NAME_COLLISION, (uint16_t)cidx,
                         peer_id, id64, 0);
             fresh++; continue;
         }

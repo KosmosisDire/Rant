@@ -96,26 +96,25 @@ class ErrorKind(_pyenum.IntEnum):
     SCHEMA_MISMATCH = 4
     INTEREST_OVERFLOW = 5
     META_TRUNCATED_INTEREST = 6
-    META_TRUNCATED_SCHEMA = 7
-    PEER_META_TOO_BIG = 8
-    MSG_TOO_BIG = 9
-    PEER_REFUSED = 10
-    EVICTED_UNSENT = 11
-    UNMATCHED_SEND = 12
-    DUPLICATE_AUTHORITY = 13
-    OOM = 14
-    PLATFORM = 15
-    SOCKET = 16
-    BIND = 17
-    MCAST_JOIN = 18
-    SEND = 19
-    RECV = 20
-    POLL = 21
-    WAKER = 22
-    BAD_ADDRESS = 23
-    BAD_NAME = 24        # a create refused: the name is empty, too long or carries '@'
-    STATE = 25           # a create refused from a callback, or the topic reserve is full
-    BAD_SCHEMA = 26      # a create refused: the schema failed to parse
+    PEER_META_TOO_BIG = 7
+    MSG_TOO_BIG = 8
+    PEER_REFUSED = 9
+    EVICTED_UNSENT = 10
+    UNMATCHED_SEND = 11
+    DUPLICATE_AUTHORITY = 12
+    OOM = 13
+    PLATFORM = 14
+    SOCKET = 15
+    BIND = 16
+    MCAST_JOIN = 17
+    SEND = 18
+    RECV = 19
+    POLL = 20
+    WAKER = 21
+    BAD_ADDRESS = 22
+    BAD_NAME = 23        # a create refused: the name is empty, too long or carries '@'
+    STATE = 24           # a create refused from a callback, or the topic reserve is full
+    BAD_SCHEMA = 25      # a create refused: the schema failed to parse
 
 
 class PeerLiveness(_pyenum.IntEnum):

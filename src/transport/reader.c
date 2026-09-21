@@ -120,7 +120,7 @@ static i_RantReaderOrder i_rant_reader_order_arrival(RantTransportState *st, int
             return RANT_ORDER_GAP;
         }
         if (r->started && !topic->directed){   /* adopt, a directed skip is no loss */
-            i_rant_transport_fire_event(st, RANT_TRANSPORT_MSG_LOST, (uint16_t)topic_index, st->peer_ids[peer_slot],
+            i_rant_transport_fire_event(st, RANT_E_NONE, (uint16_t)topic_index, st->peer_ids[peer_slot],
                         r->deliver_upto, base - r->deliver_upto);
             topic->repair_stats.msgs_skipped += base - r->deliver_upto;
         }
@@ -181,7 +181,7 @@ void i_rant_reader_shm(RantTransportState *st, int topic_index, int peer_slot, c
             }
         }
         if (reliable && ++r->shm_fail >= RANT_SHM_MAX_RETRY){
-            i_rant_transport_fire_event(st, RANT_TRANSPORT_MSG_LOST, (uint16_t)topic_index, st->peer_ids[peer_slot],
+            i_rant_transport_fire_event(st, RANT_E_NONE, (uint16_t)topic_index, st->peer_ids[peer_slot],
                         base, count);
             topic->repair_stats.msgs_skipped += count;
             r->shm_fail = 0;
@@ -234,7 +234,7 @@ void i_rant_reader_data(RantTransportState *st, int topic_index, int peer_slot, 
        held ahead is simply not held and comes back in order later */
     if (!i_rant_asm_fit(st, a, sample_len, count)){
         if (a == &r->next){ topic->repair_stats.frags_ahead++; return; }
-        i_rant_transport_fire_event(st, RANT_TRANSPORT_MSG_TOO_BIG, (uint16_t)topic_index, st->peer_ids[peer_slot],
+        i_rant_transport_fire_event(st, RANT_E_MSG_TOO_BIG, (uint16_t)topic_index, st->peer_ids[peer_slot],
                     0, sample_len);
         r->deliver_upto = base + count; r->cur.active = 0;
         i_rant_reader_settle(r);
@@ -291,7 +291,7 @@ void i_rant_reader_hb(RantTransportState *st, int topic_index, int peer_slot, co
                 if (r->lapped && last + 1 > to) to = last + 1;
                 r->lapped = 1;
             }
-            i_rant_transport_fire_event(st, RANT_TRANSPORT_MSG_LOST, (uint16_t)topic_index, st->peer_ids[peer_slot],
+            i_rant_transport_fire_event(st, RANT_E_NONE, (uint16_t)topic_index, st->peer_ids[peer_slot],
                         r->deliver_upto, to - r->deliver_upto);
             topic->repair_stats.msgs_skipped += to - r->deliver_upto;
         }

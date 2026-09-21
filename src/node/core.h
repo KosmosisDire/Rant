@@ -12,73 +12,6 @@
 extern "C" {
 #endif
 
-/* The node's event. Four lifecycle kinds plus RANT_ERROR, whose .error says which fault.
- * Read only the fields named for the kind. rant_event_str formats any of them. */
-typedef enum {
-    RANT_PEER_UP,          /* discovered or resumed: .peer, .ip, .ip_len, .port */
-    RANT_PEER_DOWN,        /* lost or fell silent: .peer */
-    RANT_PEER_INTEREST,    /* interest applied: .peer, .publish_topics, .receive_topics */
-    RANT_MSG_LOST,         /* seqnos skipped: .topic, .peer, .lost_first, .lost_count. Not an error */
-    RANT_ERROR             /* read .error and rant_event_str */
-} RantEventKind;
-
-/* The error carried by a RANT_ERROR event and returned by rant_last_error. Named RANT_E_*
- * to stay distinct from the RantResult return codes. docs/node.md lists them. */
-typedef enum {
-    RANT_E_NONE = 0,
-    /* a match was refused, or advertised data cannot flow */
-    RANT_E_NAME_COLLISION,     /* a peer's topic name hashes to ours but differs: .identity, .topic.
-                                  Or, with .peer 0, a create found a live same name topic on this node */
-    RANT_E_QOS_INCOMPATIBLE, /* a reliable subscriber met a best effort publisher: .topic, .peer */
-    RANT_E_KIND_MISMATCH,      /* the name is another entity kind at a peer: .topic, .peer */
-    RANT_E_SCHEMA_MISMATCH,    /* a refused match or an ill fitting message: .topic, .peer */
-    RANT_E_INTEREST_OVERFLOW,/* a peer's index map failed to allocate: .peer, .lost_count entries */
-    RANT_E_META_TRUNCATED_INTEREST, /* our overlay overflowed, peers see no topics */
-    RANT_E_META_TRUNCATED_SCHEMA,     /* retired, kept so binding enums stay aligned */
-    RANT_E_PEER_META_TOO_BIG,/* a peer's blob exceeds our buffer: .peer (0 = new), .too_big_bytes */
-    RANT_E_MSG_TOO_BIG,        /* a received message could not be buffered: .too_big_bytes */
-    RANT_E_PEER_REFUSED,       /* the peer table is full of active peers: .ip, .ip_len, .port */
-    RANT_E_EVICTED_UNSENT,     /* a send overwrote unsent history: .topic, .lost_first, .lost_count */
-    RANT_E_UNMATCHED_SEND,     /* a send committed to nobody while a match was resolving: .topic */
-    RANT_E_DUPLICATE_AUTHORITY, /* a peer also claims the handler side: .topic, .peer. Diagnostic */
-    /* IO and setup, mostly at open. .os_error carries the OS code */
-    RANT_E_OOM,                /* the allocator returned NULL: .too_big_bytes = bytes needed */
-    RANT_E_PLATFORM,           /* platform net init failed */
-    RANT_E_SOCKET,             /* opening a UDP socket failed */
-    RANT_E_BIND,               /* bind failed, the port is in use: .port */
-    RANT_E_MCAST_JOIN,         /* joining the discovery group failed, a bad interface */
-    RANT_E_SEND,               /* a send hard failed: .peer, .topic, .too_big_bytes = its size */
-    RANT_E_RECV,               /* a receive hard failed */
-    RANT_E_POLL,               /* the socket wait failed */
-    RANT_E_WAKER,              /* no cross thread waker, wakes come at the next tick */
-    RANT_E_BAD_ADDRESS,        /* a configured address could not be parsed, refused at open */
-    RANT_E_BAD_NAME,           /* a create's name is empty, too long or carries '@': .topic_name */
-    RANT_E_STATE,              /* a create refused in this state: from a callback, or the reserve is full */
-    RANT_E_BAD_SCHEMA          /* a create's schema failed to parse: .topic_name */
-} RantErrorKind;
-
-typedef struct {
-    RantEventKind kind;
-    RantErrorKind error;         /* RANT_ERROR: which error, else RANT_E_NONE */
-    const char *topic_name;  /* topic scoped events: our topic's name, valid for the callback */
-    void       *user;          /* RantNodeOpts.user_data */
-    uint32_t   peer;           /* the peer id, 0 = none */
-    uint16_t   topic;        /* the local topic handle */
-    int        os_error;       /* the OS code for SOCKET, BIND, MCAST_JOIN, SEND, RECV and POLL */
-    uint8_t    ip[16];         /* the peer address, network order */
-    uint8_t    ip_len;         /* 4 or 16, else 0 */
-    uint16_t   port;
-    uint64_t   lost_first;     /* MSG_LOST and EVICTED_UNSENT: the first seqno */
-    uint64_t   lost_count;     /* the count, or INTEREST_OVERFLOW's entries */
-    uint64_t   too_big_bytes;  /* MSG_TOO_BIG, PEER_META_TOO_BIG, OOM and SEND: the byte count */
-    uint64_t   identity;       /* NAME_COLLISION: the colliding identity */
-    uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
-    uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from it */
-    const char *schema_detail; /* SCHEMA_MISMATCH: one line saying what was incompatible, or NULL */
-    const char *peer_name;     /* the peer's node name, NULL when unknown. Prefer it over .peer */
-} RantEvent;
-typedef void (*RantEventFn)(const RantEvent *ev);
-
 /* Formats ev as one line into buf, always NUL terminated. Returns buf. RANT_NO_DIAG
  * compiles the text out and yields "error N". */
 RANT_API const char *rant_event_str(const RantEvent *ev, char *buf, size_t cap);
@@ -211,9 +144,9 @@ const char *i_rant_node_core_note_size_mismatch(i_RantNodeCore *c, uint32_t peer
  * publisher's own for an untyped topic, or NULL for raw. */
 const RantSchema *i_rant_node_core_msg_schema(i_RantNodeCore *c, uint32_t peer, uint16_t topic_index);
 
-/* The discovery core's on_event sink, with cfg.user = this core. Keeps the peer table and
- * the transport peer set in lockstep and fires the app's peer events. */
-void i_rant_node_core_on_disc_event(const RantDiscoveryEvent *ev);
+/* Points cfg's peer hooks, error sink and user at this core. The hooks keep the peer table
+ * and the transport peer set in lockstep and fire the app's peer events. */
+void i_rant_node_core_discovery_hooks(i_RantNodeCore *c, RantDiscoveryCoreConfig *cfg);
 
 /* A resolved outbound destination. The runtime turns it into wire bytes for its link. */
 typedef struct {

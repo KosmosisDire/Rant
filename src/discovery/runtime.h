@@ -40,16 +40,9 @@ size_t       rant_discovery_placement_memory(const RantDiscoveryNetConfig *cfg);
  * rant_discovery_last_error names the step. */
 RantDiscovery       *rant_discovery_place(void *mem, size_t mem_size, const RantDiscoveryNetConfig *cfg);
 
-/* Why the last place returned NULL. A process global with no lock, read it right after. */
-typedef enum {
-    RANT_DISCOVERY_OK = 0,
-    RANT_DISCOVERY_E_MEMORY,        /* the buffer was too small */
-    RANT_DISCOVERY_E_PLATFORM,      /* net startup failed */
-    RANT_DISCOVERY_E_SOCKET,        /* socket open failed */
-    RANT_DISCOVERY_E_BIND,          /* bind to the discovery port failed */
-    RANT_DISCOVERY_E_MCAST_JOIN     /* joining the group failed */
-} RantDiscoveryPlaceError;
-RantDiscoveryPlaceError rant_discovery_last_error(void);
+/* Why the last place returned NULL: OOM (the buffer was too small), PLATFORM, SOCKET, BIND
+ * or MCAST_JOIN. A process global with no lock, read it right after. */
+RantErrorKind rant_discovery_last_error(void);
 /* The OS socket error captured with the last failure, 0 if none. */
 int          rant_discovery_last_os_error(void);
 /* Relocates a placed runtime into a bigger block, keeping the socket, uuid and peers.

@@ -774,8 +774,8 @@ static RantTransportState *rate_W, *rate_R;
 static int rate_on_msg(void *u, uint16_t ch, uint32_t from, RantBytes d){
     (void)u;(void)ch;(void)from;(void)d; rate_recv++; return 0;
 }
-static void rate_on_event(const RantTransportEvent *ev){
-    if (ev->kind==RANT_TRANSPORT_MSG_LOST) rate_lost += (int)ev->lost_count;
+static void rate_on_event(const RantEvent *ev){
+    if (ev->kind==RANT_MSG_LOST) rate_lost += (int)ev->lost_count;
 }
 static void rate_send(void){
     static unsigned char p[16];
@@ -841,8 +841,8 @@ static uint8_t lap_held[8][RANT_DGRAM_MAX]; static size_t lap_hl[8]; static int 
 static int lap_on_msg(void *u, uint16_t ch, uint32_t from, RantBytes d){
     (void)u;(void)ch;(void)from;(void)d; lap_recv++; return 0;
 }
-static void lap_on_event(const RantTransportEvent *ev){
-    if (ev->kind==RANT_TRANSPORT_MSG_LOST) lap_lost += (int)ev->lost_count;
+static void lap_on_event(const RantEvent *ev){
+    if (ev->kind==RANT_MSG_LOST) lap_lost += (int)ev->lost_count;
 }
 static void lap_send(void){                       /* one 6-fragment message */
     static unsigned char p[6*RANT_FRAG_SIZE - 100];
@@ -1076,8 +1076,8 @@ static int ah_on_msg(void *u, uint16_t ch, uint32_t from, RantBytes d){
         ah_last = tag; }
     ah_recv++; return 0;
 }
-static void ah_on_event(const RantTransportEvent *ev){
-    if (ev->kind==RANT_TRANSPORT_MSG_LOST) ah_lost += (int)ev->lost_count;
+static void ah_on_event(const RantEvent *ev){
+    if (ev->kind==RANT_MSG_LOST) ah_lost += (int)ev->lost_count;
 }
 static void ah_send(void){                       /* one 6-fragment message, tagged */
     static unsigned char p[6*RANT_FRAG_SIZE - 100];
@@ -1221,11 +1221,13 @@ static void ahead_checks(void){
 /* ---- discovery-core (sans-IO) checks: peer lifecycle without sockets ---- */
 static uint32_t dc_up_id, dc_up_n, dc_down_id, dc_down_n, dc_refused_n;
 static int      dc_down_reason;
-static void dc_event(const RantDiscoveryEvent *ev){
-    if      (ev->kind==RANT_DISCOVERY_PEER_UP)       { dc_up_id=ev->peer; dc_up_n++; }
-    else if (ev->kind==RANT_DISCOVERY_PEER_DOWN)     { dc_down_id=ev->peer; dc_down_reason=(int)ev->reason; dc_down_n++; }
-    else if (ev->kind==RANT_DISCOVERY_PEER_REFUSED){ dc_refused_n++; }
+static void dc_up(void *user, uint32_t peer, const RantDiscoveryAddr *addr, RantBytes meta){
+    (void)user; (void)addr; (void)meta; dc_up_id=peer; dc_up_n++;
 }
+static void dc_down(void *user, uint32_t peer, RantDiscoveryDownReason reason){
+    (void)user; dc_down_id=peer; dc_down_reason=(int)reason; dc_down_n++;
+}
+static void dc_error(const RantEvent *ev){ if (ev->error==RANT_E_PEER_REFUSED) dc_refused_n++; }
 
 /* craft a v3 announce for sender `uid` (uuid = all uid bytes), meta_len 0 */
 static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port, uint32_t mver){
@@ -1287,7 +1289,7 @@ static void disc_core_checks(void){
     memset(&c,0,sizeof c);
     memset(c.uuid,0xEE,16);                        /* receiver uuid, distinct from senders */
     c.domain_id=99; c.announce_interval_us=1000000; c.peer_timeout_us=1000000; c.max_peers=2;
-    c.on_event=dc_event;
+    c.on_peer_up=dc_up; c.on_peer_down=dc_down; c.on_event=dc_error;
     st = rant_discovery_init(mem,sizeof mem,&c);
     ST_CHECK(st!=NULL, "disc-core: init");
     if (!st) return;
@@ -1699,7 +1701,7 @@ static void node_core_checks(void){
     memset(&dcfg,0,sizeof dcfg); memset(dcfg.uuid,0xEE,16);
     dcfg.domain_id=99; dcfg.announce_interval_us=1000000; dcfg.peer_timeout_us=1000000; dcfg.max_peers=2;
     dcfg.peer_user_bytes=i_rant_node_core_peer_user_bytes();
-    dcfg.on_event=i_rant_node_core_on_disc_event; dcfg.user=nc;
+    i_rant_node_core_discovery_hooks(nc, &dcfg);
     st = rant_discovery_init(dmem, sizeof dmem, &dcfg);
     ST_CHECK(st!=NULL, "node-core: discovery init");
     if (!st) return;
@@ -1811,7 +1813,7 @@ static RantTransportState *shml_W, *shml_R;
 static int shml_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t *desc){
     (void)u;(void)ch;(void)from;(void)desc; if (shml_ok){ shml_recv++; return 1; } return 0;
 }
-static void shml_on_event(const RantTransportEvent *ev){ if (ev->kind==RANT_TRANSPORT_MSG_LOST) shml_lost++; }
+static void shml_on_event(const RantEvent *ev){ if (ev->kind==RANT_MSG_LOST) shml_lost++; }
 static void shml_pump(int n){
     uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t ol; int i;
     for (i=0;i<n;i++){
@@ -2150,7 +2152,7 @@ static void dynamic_grow_checks(void){
 /* (17) QoS: a RANT_RELIABLE subscriber must refuse a best effort publisher, every other
    direction matches. Sans IO transport core: build the interest, apply, read the match. */
 static unsigned long qos_incompat_n;
-static void qos_on_event(const RantTransportEvent *ev){ if (ev->kind==RANT_TRANSPORT_QOS_INCOMPATIBLE) qos_incompat_n++; }
+static void qos_on_event(const RantEvent *ev){ if (ev->error==RANT_E_QOS_INCOMPATIBLE) qos_incompat_n++; }
 static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_out){
     RantTopicDef cw, cr; RantConfig wc, rc; void *mw, *mr; size_t nw, nr;
     RantTransportState *W, *R; uint16_t pub=0, recv=0;

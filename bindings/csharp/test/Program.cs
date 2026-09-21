@@ -233,6 +233,11 @@ static class Program
               dup != null && dup.Error != null && dup.Error.Error == ErrorKind.NameCollision);
         Check("and LastError reads the same reason",
               cli.LastError != null && cli.LastError.Error == ErrorKind.NameCollision);
+        // a code near the end of the enum: any drift from the C enum shows as another name
+        RantException badName = null;
+        try { cli.Publisher<Level>("bad@name"); } catch (RantException e) { badName = e; }
+        Check("a late error code keeps its name",
+              badName != null && badName.Error != null && badName.Error.Error == ErrorKind.BadName);
         var rb = boomR.TryCall(new AddReq { A = 1, B = 1 }, 3000);
         Check("TryCall answers AppError as a value", rb.Status == CallStatus.AppError);
         bool threw = false;

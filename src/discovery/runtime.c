@@ -248,13 +248,13 @@ size_t rant_discovery_placement_memory(const RantDiscoveryNetConfig *cfg){
 
 /* Process globals with no lock, read right after a NULL return. The node builds its
    RANT_ERROR from them. */
-static RantDiscoveryPlaceError g_place_error = RANT_DISCOVERY_OK;
+static RantErrorKind g_place_error = RANT_E_NONE;
 static int                       g_place_os_error = 0;
-static RantDiscovery *i_rant_discovery_fail(RantDiscoveryPlaceError e, int os_error){
+static RantDiscovery *i_rant_discovery_fail(RantErrorKind e, int os_error){
     g_place_error = e; g_place_os_error = os_error;
     return NULL;
 }
-RantDiscoveryPlaceError rant_discovery_last_error(void){ return g_place_error; }
+RantErrorKind rant_discovery_last_error(void){ return g_place_error; }
 int                       rant_discovery_last_os_error(void){ return g_place_os_error; }
 
 RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNetConfig *cfg){
@@ -270,8 +270,8 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNe
     i_RantIface want[RANT_DISCOVERY_MAX_SUBNETS];
     const char *group;
 
-    if (!mem || !cfg) return NULL;
-    g_place_error = RANT_DISCOVERY_OK; g_place_os_error = 0;
+    if (!mem || !cfg) return i_rant_discovery_fail(RANT_E_OOM, 0);
+    g_place_error = RANT_E_NONE; g_place_os_error = 0;
     c = *cfg;
     rant_discovery_config_defaults(&c.discovery);
     /* a node with no multicast asks whoever hears it to announce it onward */
@@ -281,7 +281,7 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNe
     ttl  = c.ttl ? c.ttl : 1;
 
     need = rant_discovery_placement_memory(&c);
-    if (cap < need) return i_rant_discovery_fail(RANT_DISCOVERY_E_MEMORY, 0);
+    if (cap < need) return i_rant_discovery_fail(RANT_E_OOM, 0);
 
     base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
     {   i_RantBump b; memset(&b, 0, sizeof b);
@@ -297,15 +297,15 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNe
     /* auto generate a uuid if the caller left it zero */
     for (i=0;i<16;i++) if (c.discovery.uuid[i]) { allzero = 0; break; }
 
-    if (!i_rant_plat_startup()) return i_rant_discovery_fail(RANT_DISCOVERY_E_PLATFORM, 0);
+    if (!i_rant_plat_startup()) return i_rant_discovery_fail(RANT_E_PLATFORM, 0);
     if (allzero) i_rant_discovery_auto_uuid(c.discovery.uuid);
 
     d->core = rant_discovery_init(core_mem, cap - (size_t)(core_mem - (uint8_t*)mem), &c.discovery);
-    if (!d->core){ i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_DISCOVERY_E_MEMORY, 0); }
+    if (!d->core){ i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_OOM, 0); }
 
     fd = i_rant_plat_udp_open();
-    if (fd == RANT_SOCK_BAD){ int e=i_rant_plat_last_socket_error(); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_DISCOVERY_E_SOCKET, e); }
-    if (!i_rant_plat_bind(fd, 0, c.discovery_port, 1)){ int e=i_rant_plat_last_socket_error(); i_rant_plat_close(fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_DISCOVERY_E_BIND, e); }
+    if (fd == RANT_SOCK_BAD){ int e=i_rant_plat_last_socket_error(); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_SOCKET, e); }
+    if (!i_rant_plat_bind(fd, 0, c.discovery_port, 1)){ int e=i_rant_plat_last_socket_error(); i_rant_plat_close(fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_BIND, e); }
 
     /* Join and announce on every interface. A pinned interface means exactly that one. */
     group_naddr = i_rant_plat_parse_ip(group);
@@ -328,7 +328,7 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNe
         }
         if (!joined){
             int e=i_rant_plat_last_socket_error();
-            i_rant_plat_close(fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_DISCOVERY_E_MCAST_JOIN, e);
+            i_rant_plat_close(fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_MCAST_JOIN, e);
         }
         i_rant_plat_mcast_ttl(fd, ttl);
         /* loop stays on for several instances per host, the uuid filter drops the echoes */

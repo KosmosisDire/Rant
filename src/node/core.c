@@ -79,8 +79,6 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
         p=i_rant_event_append_str(p,end," matched topics whose index map could not be allocated"); break;
     case RANT_E_META_TRUNCATED_INTEREST:
         p=i_rant_event_append_str(p,end,"meta-truncated: interest list dropped (announce overlay full)"); break;
-    case RANT_E_META_TRUNCATED_SCHEMA:
-        p=i_rant_event_append_str(p,end,"meta-truncated: schema section dropped (announce overlay full)"); break;
     case RANT_E_PEER_META_TOO_BIG:
         p=i_rant_event_append_str(p,end,"peer-meta-too-big "); p=i_rant_event_append_peer(p,end,ev);
         if (ev->ip_len==4){ p=i_rant_event_append_str(p,end," at "); p=i_rant_event_append_addr(p,end,ev); }
@@ -1503,8 +1501,10 @@ static void i_rant_node_core_detail_check(i_RantNodeCore *c, i_RantNodePeerExtra
     }
 }
 
-static void i_rant_node_core_peer_up(i_RantNodeCore *c, uint32_t id, const RantDiscoveryAddr *addr,
+/* discovery's on_peer_up hook, user is the core */
+static void i_rant_node_core_peer_up(void *user, uint32_t id, const RantDiscoveryAddr *addr,
                             RantBytes meta){
+    i_RantNodeCore *c = (i_RantNodeCore*)user;
     i_RantNodePeerExtra *ex = i_rant_node_core_peer_extra(c, id);
     uint16_t frag = rant_meta_frag(meta);
     uint32_t meta_version = 0;
@@ -1774,7 +1774,9 @@ void i_rant_node_core_apply_interest_page(i_RantNodeCore *c, uint16_t domain, ui
     i_rant_node_core_detail_check(c, ex, peer, rant_bytes(ex->interest_buf, total));
 }
 
-static void i_rant_node_core_peer_down(i_RantNodeCore *c, uint32_t id, RantDiscoveryDownReason reason){
+/* discovery's on_peer_down hook, user is the core */
+static void i_rant_node_core_peer_down(void *user, uint32_t id, RantDiscoveryDownReason reason){
+    i_RantNodeCore *c = (i_RantNodeCore*)user;
     i_RantNodePeerExtra *ex = i_rant_node_core_peer_extra(c, id);       /* freed after this event */
     if (reason == RANT_DISCOVERY_DROP){
         /* fell silent: keep the transport state for a same incarnation resume, drop the
@@ -1802,28 +1804,20 @@ static void i_rant_node_core_peer_down(i_RantNodeCore *c, uint32_t id, RantDisco
     }
 }
 
-static void i_rant_node_core_peer_refused(i_RantNodeCore *c, const RantDiscoveryAddr *addr){
-    i_rant_node_core_fire_error(c, RANT_E_PEER_REFUSED, 0, addr, 0);
+/* discovery's errors, re aimed at our sink */
+static void i_rant_node_core_on_discovery_error(const RantEvent *ev){
+    i_RantNodeCore *c = (i_RantNodeCore*)ev->user;
+    RantEvent e = *ev;
+    if (!c->on_event) return;
+    e.user = c->user;
+    c->on_event(&e);
 }
 
-/* The discovery core's event sink, demuxed into the lifecycle handlers above. */
-void i_rant_node_core_on_disc_event(const RantDiscoveryEvent *ev){
-    i_RantNodeCore *c = (i_RantNodeCore*)ev->user;
-    switch (ev->kind){
-        case RANT_DISCOVERY_PEER_UP:
-            i_rant_node_core_peer_up(c, ev->peer, &ev->addr, ev->meta);
-            break;
-        case RANT_DISCOVERY_PEER_DOWN:
-            i_rant_node_core_peer_down(c, ev->peer, ev->reason);
-            break;
-        case RANT_DISCOVERY_PEER_REFUSED:
-            i_rant_node_core_peer_refused(c, &ev->addr);
-            break;
-        case RANT_DISCOVERY_META_TOO_BIG:
-            i_rant_node_core_fire_error(c, RANT_E_PEER_META_TOO_BIG, ev->peer, &ev->addr, ev->meta.len);
-            break;
-        default: break;
-    }
+void i_rant_node_core_discovery_hooks(i_RantNodeCore *c, RantDiscoveryCoreConfig *cfg){
+    cfg->on_peer_up   = i_rant_node_core_peer_up;
+    cfg->on_peer_down = i_rant_node_core_peer_down;
+    cfg->on_event     = i_rant_node_core_on_discovery_error;
+    cfg->user         = c;
 }
 
 int i_rant_node_core_resolve(i_RantNodeCore *c, uint32_t to, i_RantNodeDest *out){

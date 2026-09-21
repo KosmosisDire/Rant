@@ -428,6 +428,13 @@ def handles():
             time.sleep(0.005)
         check("last_error is the schema mismatch",
               a.last_error.error == rant.ErrorKind.SCHEMA_MISMATCH)
+        # a code near the end of the enum: any drift from the C enum shows as another name
+        try:
+            a.publisher("bad@name")
+        except rant.Error:
+            pass
+        check("a late error code keeps its name",
+              a.last_error.error == rant.ErrorKind.BAD_NAME)
     finally:
         a.close()
         b.close()

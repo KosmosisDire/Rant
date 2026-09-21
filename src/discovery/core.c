@@ -72,41 +72,24 @@ struct RantDiscoveryState {
     i_RantDiscoveryPeer    *peers;
 };
 
-/* The event builders. peer_up carries the parsed name and the overlay we hold. */
+/* The hook and event builders. peer_up carries the overlay we hold. */
 static void i_rant_discovery_fire_up(RantDiscoveryState *st, const i_RantDiscoveryPeer *peer,
                                const RantDiscoveryAddr *addr){
-    RantDiscoveryEvent ev;
-    if (!st->cfg.on_event) return;
-    memset(&ev, 0, sizeof ev);
-    ev.kind = RANT_DISCOVERY_PEER_UP; ev.user = st->cfg.user; ev.peer = peer->local_id;
-    if (addr) ev.addr = *addr;
-    ev.name = rant_string(peer->name_len ? peer->name : NULL, peer->name_len);
-    ev.meta = rant_bytes(peer->meta_len ? peer->meta : NULL, peer->meta_len);
-    st->cfg.on_event(&ev);
+    if (!st->cfg.on_peer_up) return;
+    st->cfg.on_peer_up(st->cfg.user, peer->local_id, addr,
+                       rant_bytes(peer->meta_len ? peer->meta : NULL, peer->meta_len));
 }
 static void i_rant_discovery_fire_down(RantDiscoveryState *st, uint32_t id, RantDiscoveryDownReason reason){
-    RantDiscoveryEvent ev;
-    if (!st->cfg.on_event) return;
-    memset(&ev, 0, sizeof ev);
-    ev.kind = RANT_DISCOVERY_PEER_DOWN; ev.user = st->cfg.user; ev.peer = id; ev.reason = reason;
-    st->cfg.on_event(&ev);
+    if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, id, reason);
 }
-static void i_rant_discovery_fire_refused(RantDiscoveryState *st, const RantDiscoveryAddr *addr){
-    RantDiscoveryEvent ev;
+static void i_rant_discovery_fire_error(RantDiscoveryState *st, RantErrorKind error, uint32_t id,
+                                  const RantDiscoveryAddr *addr, uint64_t too_big){
+    RantEvent ev;
     if (!st->cfg.on_event) return;
     memset(&ev, 0, sizeof ev);
-    ev.kind = RANT_DISCOVERY_PEER_REFUSED; ev.user = st->cfg.user;
-    if (addr) ev.addr = *addr;
-    st->cfg.on_event(&ev);
-}
-static void i_rant_discovery_fire_meta_too_big(RantDiscoveryState *st, uint32_t id,
-                                     const RantDiscoveryAddr *addr, RantBytes overlay){
-    RantDiscoveryEvent ev;
-    if (!st->cfg.on_event) return;
-    memset(&ev, 0, sizeof ev);
-    ev.kind = RANT_DISCOVERY_META_TOO_BIG; ev.user = st->cfg.user; ev.peer = id;
-    if (addr) ev.addr = *addr;
-    ev.meta = overlay;
+    ev.kind = RANT_ERROR; ev.error = error; ev.user = st->cfg.user; ev.peer = id;
+    ev.too_big_bytes = too_big;
+    if (addr){ memcpy(ev.ip, addr->ip, 16); ev.ip_len = addr->ip_len; ev.port = addr->port; }
     st->cfg.on_event(&ev);
 }
 
@@ -464,8 +447,8 @@ void rant_discovery_on_datagram(RantDiscoveryState *st, const RantDiscoveryAddr 
         RantDiscoveryAddr a; int at = i_rant_discovery_find(st, uuid);
         memset(&a, 0, sizeof a);
         if (src_ip && (src_ip_len==4 || src_ip_len==16)){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
-        i_rant_discovery_fire_meta_too_big(st, at >= 0 ? st->peers[at].local_id : 0, &a,
-                                           rant_bytes(NULL, meta_len));
+        i_rant_discovery_fire_error(st, RANT_E_PEER_META_TOO_BIG,
+                                    at >= 0 ? st->peers[at].local_id : 0, &a, meta_len);
         return;
     }
     blob = p + RANT_DISCOVERY_META_OFF;
@@ -491,7 +474,8 @@ void rant_discovery_on_datagram(RantDiscoveryState *st, const RantDiscoveryAddr 
             memset(&a, 0, sizeof a);
             if (disc_ip_len){ memcpy(a.ip, disc_ip, disc_ip_len); a.ip_len = disc_ip_len; }
             a.port = disc_port;
-            i_rant_discovery_fire_meta_too_big(st, at >= 0 ? st->peers[at].local_id : 0, &a, overlay);
+            i_rant_discovery_fire_error(st, RANT_E_PEER_META_TOO_BIG,
+                                        at >= 0 ? st->peers[at].local_id : 0, &a, overlay.len);
             return;
         }
         have_disc = 1;
@@ -533,7 +517,7 @@ void rant_discovery_on_datagram(RantDiscoveryState *st, const RantDiscoveryAddr 
             i_rant_discovery_evict_observed(st, src_ip, src_ip_len, src_port);
         idx = i_rant_discovery_alloc(st);
         if (idx < 0){       /* table full of active peers: refuse, never evict a live one */
-            i_rant_discovery_fire_refused(st, &addr);
+            i_rant_discovery_fire_error(st, RANT_E_PEER_REFUSED, 0, &addr, 0);
             return;
         }
         keep_meta = st->peers[idx].meta;            /* the blob buffer survives the reset */
@@ -828,7 +812,7 @@ void rant_discovery_solicit(RantDiscoveryState *st){ if (st) st->want_solicit = 
 /* No version changes. The local side may now have a topic a held blob's interest matches. */
 void rant_discovery_replay_peers(RantDiscoveryState *st){
     uint16_t i;
-    if (!st || !st->cfg.on_event) return;
+    if (!st || !st->cfg.on_peer_up) return;
     for (i=0;i<st->cap_peers;i++){
         i_RantDiscoveryPeer *peer = &st->peers[i];
         RantDiscoveryAddr addr;

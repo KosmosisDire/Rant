@@ -198,9 +198,16 @@ A `no_timestamp` topic frames neither slot, so a capture time cannot ride it.
 
 ## Errors
 
-One event kind, `RANT_ERROR`, with a `RantErrorKind` code. The transport keeps its own
-typed event kinds (sans-IO) and discovery keeps a last error slot, so the node maps every
-lower layer event into `RANT_ERROR` in one place per layer. Text is built on demand by
+One event kind, `RANT_ERROR`, with a `RantErrorKind` code. `RantEvent` and its codes live
+in `common/types.h` and every layer fires them directly, so an error has one name from
+the transport to the bindings and nothing is translated on the way up. The transport
+fills the topic name itself and asks its `schema_why` hook for the mismatch text.
+Discovery fires only its two errors (`PEER_REFUSED`, `PEER_META_TOO_BIG`) as events. Its
+peer up and peer down are plain hooks, since they carry the overlay and the DROP or GONE
+reason the node core acts on, and the app's `PEER_UP` and `PEER_DOWN` come from the node
+core after it has done that work. `rant_discovery_last_error` returns a `RantErrorKind`
+too. Each layer sets `.user` to its own config user, and the single emit point swaps in
+the app's `user_data`. Text is built on demand by
 `rant_event_str`, so the data path never touches it. `rant_last_error(n)` keeps the last
 error per node, and a process global slot keeps the failure of a `rant_node_open` that
 returned no handle. That failure also fires the `on_event` passed to open.

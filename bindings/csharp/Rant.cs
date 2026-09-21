@@ -45,7 +45,7 @@ namespace Rant
     {
         None = 0,
         NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
-        MetaTruncatedInterest, MetaTruncatedSchema, PeerMetaTooBig, MessageTooBig,
+        MetaTruncatedInterest, PeerMetaTooBig, MessageTooBig,
         PeerRefused, EvictedUnsent, UnmatchedSend, DuplicateAuthority,
         Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress,
         BadName, State, BadSchema   // a create refused: the name, the moment, the schema
