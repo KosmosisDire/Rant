@@ -1,6 +1,6 @@
 # Explorer
 
-`RANT/Rant Explorer` is the debugger UI: a real Rant node, not a passive sniffer, with a
+`RANT/explorer-rant` is the debugger UI: a real Rant node, not a passive sniffer, with a
 Nodes tab and a Topics tab, greyscale plus one teal accent, dark and light. Clay (v0.14)
 does the layout, since the design is CSS flexbox and Clay is a flexbox engine. SDL3 with
 SDL3_ttf renders through FreeType, whose hinting keeps text crisp. CPM builds SDL3 and
@@ -8,9 +8,9 @@ SDL3_ttf static, clay.h and nanosvg are downloaded.
 
 ## Build
 
-`Rant Explorer/CMakeLists.txt` takes Rant through CPM at the release version it pins, so it
+`explorer-rant/CMakeLists.txt` takes Rant through CPM at the release version it pins, so it
 never reaches into this checkout. Its `windows-local` and `linux-local` presets set
-`CPM_rant_SOURCE` to `../Rant` to build against the working tree. It links `rant::rant` and
+`CPM_rant_SOURCE` to `../rant` to build against the working tree. It links `rant::rant` and
 `rant::rant_platform`, never `rant_host`, since `net_capture.c` compiles its own transport
 only amalgamation with `RANT_NO_SHM`. It includes `tools/static_runtime.cmake` from the
 fetched source before SDL3, so SDL3 and vendored freetype share the static runtime. The
