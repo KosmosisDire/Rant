@@ -1,4 +1,4 @@
-# The amalgamator: concatenates the src/ layers in dependency order into the dist/ headers
+# The amalgamator: concatenates the src/ layers in dependency order into dist/rant.h
 # with local includes dropped. docs/building.md has the by hand command and the flags.
 
 cmake_minimum_required(VERSION 3.15)
@@ -14,7 +14,7 @@ set(BANNER [==[
 /* GENERATED single-header build. DO NOT EDIT.
  * Rant, the core library of RANT. Amalgamated from src/ by the CMake
  * build (tools/pack.cmake). Edit the split sources in src/ and rebuild (or run
- * tools/pack.cmake) to regenerate. See the flag scheme in tools/pack.cmake.
+ * tools/pack.cmake) to regenerate.
  */
 ]==])
 
@@ -26,44 +26,10 @@ set(REGION_GUARD [==[
 #endif
 ]==])
 
-# RANT_TRANSPORT_* bridge: pull in the sibling discovery header (it carries a
-# real local #include, which must survive into the output).
-set(BRIDGE [==[
-#ifndef RANT_TRANSPORT_SANS_IO
-  #if defined(RANT_TRANSPORT_IMPLEMENTATION) && !defined(RANT_DISCOVERY_IMPLEMENTATION)
-  #define RANT_DISCOVERY_IMPLEMENTATION
-  #endif
-  #include "rant_discovery.h"   /* discovery: needed by the node runtime */
-#endif
-
-]==])
-
-# rant.h's single user knob RANT_* mapped onto the per-module flags.
-set(FLAGMAP [==[
-#ifdef RANT_IMPLEMENTATION
-  #ifndef RANT_DISCOVERY_IMPLEMENTATION
-  #define RANT_DISCOVERY_IMPLEMENTATION
-  #endif
-  #ifndef RANT_TRANSPORT_IMPLEMENTATION
-  #define RANT_TRANSPORT_IMPLEMENTATION
-  #endif
-#endif
-#ifdef RANT_SANS_IO
-  #ifndef RANT_DISCOVERY_SANS_IO
-  #define RANT_DISCOVERY_SANS_IO
-  #endif
-  #ifndef RANT_TRANSPORT_SANS_IO
-  #define RANT_TRANSPORT_SANS_IO
-  #endif
-#endif
-
-]==])
-
 # POSIX feature test preamble. Must precede the first system header so glibc exposes the
 # socket API.
-function(rant_posix_preamble f impl sansio)
-  set(t [==[
-#if defined(@IMPL@) && !defined(@SANSIO@) && !defined(_WIN32)
+set(POSIX_PREAMBLE [==[
+#if defined(RANT_IMPLEMENTATION) && !defined(_WIN32)
   #ifndef _POSIX_C_SOURCE
   #define _POSIX_C_SOURCE 200809L
   #endif
@@ -76,10 +42,6 @@ function(rant_posix_preamble f impl sansio)
 #endif
 
 ]==])
-  string(REPLACE "@IMPL@" "${impl}" t "${t}")
-  string(REPLACE "@SANSIO@" "${sansio}" t "${t}")
-  file(APPEND "${f}" "${t}")
-endfunction()
 
 # Append src/NAME to file F inside a foldable region with local includes dropped. The
 # strip is anchored to a line start, so an include in a comment or string is never touched.
@@ -94,158 +56,57 @@ function(rant_emit f name)
   file(APPEND "${f}" "#pragma region ${name}\n${c}#pragma endregion\n")
 endfunction()
 
-# rant_discovery.h: discovery core plus runtime, one header.
-function(build_discovery f)
+# rant.h: every layer in dependency order. Declarations first, then the implementation
+# under RANT_IMPLEMENTATION.
+function(build_header f)
   file(WRITE  "${f}" "${BANNER}")
   file(APPEND "${f}" "${REGION_GUARD}")
-  rant_posix_preamble("${f}" RANT_DISCOVERY_IMPLEMENTATION RANT_DISCOVERY_SANS_IO)
+  file(APPEND "${f}" "${POSIX_PREAMBLE}")
 
   rant_emit("${f}" common/api.h)
   rant_emit("${f}" common/string.h)
   rant_emit("${f}" common/alloc.h)
   rant_emit("${f}" discovery/core.h)
-  file(APPEND "${f}" "\n#ifndef RANT_DISCOVERY_SANS_IO\n")
   rant_emit("${f}" platform/core.h)
   rant_emit("${f}" discovery/runtime.h)
-  file(APPEND "${f}" "#endif /* !RANT_DISCOVERY_SANS_IO */\n")
-
-  file(APPEND "${f}" "\n#ifdef RANT_DISCOVERY_IMPLEMENTATION\n")
-  rant_emit("${f}" common/bytes.h)
-  rant_emit("${f}" common/arena.h)
-  rant_emit("${f}" discovery/core.c)
-  file(APPEND "${f}" "\n#ifndef RANT_DISCOVERY_SANS_IO\n")
-  file(APPEND "${f}" "#ifndef RANT_PLAT_CUSTOM\n")
-  rant_emit("${f}" platform/core.c)
-  file(APPEND "${f}" "#endif /* !RANT_PLAT_CUSTOM */\n")
-  rant_emit("${f}" discovery/runtime.c)
-  file(APPEND "${f}" "#endif /* !RANT_DISCOVERY_SANS_IO */\n")
-  file(APPEND "${f}" "#endif /* RANT_DISCOVERY_IMPLEMENTATION */\n")
-  message(STATUS "wrote ${f}")
-endfunction()
-
-# rant_transport.h: transport core plus node runtime, one header. The node impl
-# needs discovery, so this header includes the sibling rant_discovery.h.
-function(build_transport f)
-  file(WRITE  "${f}" "${BANNER}")
-  file(APPEND "${f}" "${REGION_GUARD}")
-  rant_posix_preamble("${f}" RANT_TRANSPORT_IMPLEMENTATION RANT_TRANSPORT_SANS_IO)
-  file(APPEND "${f}" "${BRIDGE}")
-
-  rant_emit("${f}" common/api.h)
-  rant_emit("${f}" common/string.h)
-  rant_emit("${f}" common/alloc.h)
   rant_emit("${f}" transport/core.h)
-  file(APPEND "${f}" "\n#ifndef RANT_TRANSPORT_SANS_IO\n")
   rant_emit("${f}" serialize/schema.h)
-  file(APPEND "${f}" "#ifndef RANT_NO_STDTYPES
-")
+  file(APPEND "${f}" "#ifndef RANT_NO_STDTYPES\n")
   rant_emit("${f}" serialize/stdtypes.h)
-  file(APPEND "${f}" "#endif /* !RANT_NO_STDTYPES */
-")
+  file(APPEND "${f}" "#endif /* !RANT_NO_STDTYPES */\n")
   rant_emit("${f}" node/core.h)
   rant_emit("${f}" node/runtime.h)
   rant_emit("${f}" shm/core.h)
   file(APPEND "${f}" "#ifndef RANT_NO_PATTERNS\n")
   rant_emit("${f}" patterns/core.h)
   file(APPEND "${f}" "#endif /* !RANT_NO_PATTERNS */\n")
-  file(APPEND "${f}" "#endif /* !RANT_TRANSPORT_SANS_IO */\n")
 
-  file(APPEND "${f}" "\n#ifdef RANT_TRANSPORT_IMPLEMENTATION\n")
+  file(APPEND "${f}" "\n#ifdef RANT_IMPLEMENTATION\n")
   rant_emit("${f}" common/bytes.h)
   rant_emit("${f}" common/arena.h)
   rant_emit("${f}" common/hash.h)
-  rant_emit("${f}" transport/internal.h)
-  rant_emit("${f}" transport/wire.c)
-  rant_emit("${f}" transport/sched.c)
-  rant_emit("${f}" transport/writer.c)
-  rant_emit("${f}" transport/reader.c)
-  rant_emit("${f}" transport/core.c)
-  file(APPEND "${f}" "\n#ifndef RANT_TRANSPORT_SANS_IO\n")
-  rant_emit("${f}" serialize/schema.c)
-  file(APPEND "${f}" "#ifndef RANT_NO_STDTYPES
-")
-  rant_emit("${f}" serialize/stdtypes.c)
-  file(APPEND "${f}" "#endif /* !RANT_NO_STDTYPES */
-")
-  rant_emit("${f}" shm/core.c)
-  rant_emit("${f}" node/core.c)
-  rant_emit("${f}" node/runtime.c)
-  file(APPEND "${f}" "#ifndef RANT_NO_PATTERNS\n")
-  rant_emit("${f}" patterns/core.c)
-  file(APPEND "${f}" "#endif /* !RANT_NO_PATTERNS */\n")
-  file(APPEND "${f}" "#endif /* !RANT_TRANSPORT_SANS_IO */\n")
-  file(APPEND "${f}" "#endif /* RANT_TRANSPORT_IMPLEMENTATION */\n")
-  message(STATUS "wrote ${f}")
-endfunction()
-
-# rant.h: discovery, transport, and node all inlined into one file.
-function(build_combined f)
-  file(WRITE  "${f}" "${BANNER}")
-  file(APPEND "${f}" "${REGION_GUARD}")
-  file(APPEND "${f}" "${FLAGMAP}")
-  rant_posix_preamble("${f}" RANT_DISCOVERY_IMPLEMENTATION RANT_DISCOVERY_SANS_IO)
-
-  rant_emit("${f}" common/api.h)
-  rant_emit("${f}" common/string.h)
-  rant_emit("${f}" common/alloc.h)
-  rant_emit("${f}" discovery/core.h)
-  file(APPEND "${f}" "\n#ifndef RANT_DISCOVERY_SANS_IO\n")
-  rant_emit("${f}" platform/core.h)
-  rant_emit("${f}" discovery/runtime.h)
-  file(APPEND "${f}" "#endif /* !RANT_DISCOVERY_SANS_IO */\n")
-  rant_emit("${f}" transport/core.h)
-  file(APPEND "${f}" "\n#ifndef RANT_TRANSPORT_SANS_IO\n")
-  rant_emit("${f}" serialize/schema.h)
-  file(APPEND "${f}" "#ifndef RANT_NO_STDTYPES
-")
-  rant_emit("${f}" serialize/stdtypes.h)
-  file(APPEND "${f}" "#endif /* !RANT_NO_STDTYPES */
-")
-  rant_emit("${f}" node/core.h)
-  rant_emit("${f}" node/runtime.h)
-  rant_emit("${f}" shm/core.h)
-  file(APPEND "${f}" "#ifndef RANT_NO_PATTERNS\n")
-  rant_emit("${f}" patterns/core.h)
-  file(APPEND "${f}" "#endif /* !RANT_NO_PATTERNS */\n")
-  file(APPEND "${f}" "#endif /* !RANT_TRANSPORT_SANS_IO */\n")
-
-  file(APPEND "${f}" "\n#ifdef RANT_DISCOVERY_IMPLEMENTATION\n")
-  rant_emit("${f}" common/bytes.h)
-  rant_emit("${f}" common/arena.h)
   rant_emit("${f}" discovery/core.c)
-  file(APPEND "${f}" "\n#ifndef RANT_DISCOVERY_SANS_IO\n")
   file(APPEND "${f}" "#ifndef RANT_PLAT_CUSTOM\n")
   rant_emit("${f}" platform/core.c)
   file(APPEND "${f}" "#endif /* !RANT_PLAT_CUSTOM */\n")
   rant_emit("${f}" discovery/runtime.c)
-  file(APPEND "${f}" "#endif /* !RANT_DISCOVERY_SANS_IO */\n")
-  file(APPEND "${f}" "#endif /* RANT_DISCOVERY_IMPLEMENTATION */\n")
-
-  file(APPEND "${f}" "\n#ifdef RANT_TRANSPORT_IMPLEMENTATION\n")
-  rant_emit("${f}" common/bytes.h)
-  rant_emit("${f}" common/arena.h)
-  rant_emit("${f}" common/hash.h)
   rant_emit("${f}" transport/internal.h)
   rant_emit("${f}" transport/wire.c)
   rant_emit("${f}" transport/sched.c)
   rant_emit("${f}" transport/writer.c)
   rant_emit("${f}" transport/reader.c)
   rant_emit("${f}" transport/core.c)
-  file(APPEND "${f}" "\n#ifndef RANT_TRANSPORT_SANS_IO\n")
   rant_emit("${f}" serialize/schema.c)
-  file(APPEND "${f}" "#ifndef RANT_NO_STDTYPES
-")
+  file(APPEND "${f}" "#ifndef RANT_NO_STDTYPES\n")
   rant_emit("${f}" serialize/stdtypes.c)
-  file(APPEND "${f}" "#endif /* !RANT_NO_STDTYPES */
-")
+  file(APPEND "${f}" "#endif /* !RANT_NO_STDTYPES */\n")
   rant_emit("${f}" shm/core.c)
   rant_emit("${f}" node/core.c)
   rant_emit("${f}" node/runtime.c)
   file(APPEND "${f}" "#ifndef RANT_NO_PATTERNS\n")
   rant_emit("${f}" patterns/core.c)
   file(APPEND "${f}" "#endif /* !RANT_NO_PATTERNS */\n")
-  file(APPEND "${f}" "#endif /* !RANT_TRANSPORT_SANS_IO */\n")
-  file(APPEND "${f}" "#endif /* RANT_TRANSPORT_IMPLEMENTATION */\n")
+  file(APPEND "${f}" "#endif /* RANT_IMPLEMENTATION */\n")
   message(STATUS "wrote ${f}")
 endfunction()
 
@@ -279,9 +140,7 @@ endfunction()
 # The C# wrapper is a hand written P/Invoke layer over the prebuilt native library, so
 # nothing is generated for it.
 
-build_discovery("${OUT}/rant_discovery.h")
-build_transport("${OUT}/rant_transport.h")
-build_combined("${OUT}/rant.h")
+build_header("${OUT}/rant.h")
 build_cpp("${OUT}/rant.hpp" "${OUT}/rant.h")
 build_anchor("${OUT}/rant.c" "rant.h")
 build_anchor("${OUT}/rant.cpp" "rant.hpp")

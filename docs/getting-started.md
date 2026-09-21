@@ -1,12 +1,7 @@
 # Getting started
 
-Rant is a C99 library shipped as single headers built from `src/`. Pick one packaging:
-
-- `rant.h` holds everything.
-- `rant_discovery.h` plus `rant_transport.h` split it in two. The transport header includes
-  the discovery one.
-
-Define the implementation macro in exactly one C file:
+Rant is a C99 library shipped as one header, `rant.h`, built from `src/`. Define the
+implementation macro in exactly one C file:
 
 ```c
 #define RANT_IMPLEMENTATION
@@ -73,13 +68,11 @@ event, never a silent truncation. spec/allocation.md lists what is allocated whe
 
 ## Build flags
 
-Define these before the include. `<P>` is `RANT_DISCOVERY` or `RANT_TRANSPORT` for the
-split headers and `Rant` for the combined one.
+Define these before the include.
 
 | flag | effect |
 |---|---|
-| `<P>_IMPLEMENTATION` | emit the implementation, in one file only |
-| `<P>_SANS_IO` | strip the runtime, keep the portable cores |
+| `RANT_IMPLEMENTATION` | emit the implementation, in one file only |
 | `RANT_PLAT_CUSTOM` | drop only the bundled platform implementation, so a caller links its own `i_rant_plat_*` functions |
 | `RANT_SHM` | same host shared memory path. Auto on for Windows, Linux, macOS and BSD |
 | `RANT_NO_SHM` | force shared memory off. Drops the Linux `-lrt` |
@@ -91,14 +84,8 @@ split headers and `Rant` for the combined one.
 | `RANT_NO_PATTERNS` | strip functions, tasks and variables |
 | `RANT_NO_STDTYPES` | strip the standard type roster (docs/stdtypes.md) |
 
-A `NO` flag always wins. The runtime is on by default. Embedded or bring your own IO
-callers define `<P>_SANS_IO`:
-
-```c
-#define RANT_IMPLEMENTATION
-#define RANT_SANS_IO
-#include "rant.h"
-```
+A `NO` flag always wins. An embedded target with its own sockets and clock defines
+`RANT_PLAT_CUSTOM` and links its own `i_rant_plat_*` functions (spec/platform.md).
 
 ## Tunables
 

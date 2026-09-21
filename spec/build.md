@@ -7,9 +7,9 @@ static library a consumer links, and `rant_shared` the shared library the bindin
 Each carries a `rant::` alias, and that is what another project links, whether it adds
 Rant as a subproject or finds the installed package.
 
-- `tools/pack.cmake` runs through an `add_custom_command` whose OUTPUT is the three dist
-  headers, so it re packs only when a `src/` file or pack.cmake changes. It also splices
-  `rant.h` into `dist/rant.hpp` and writes the two anchors. `dist/` is not committed,
+- `tools/pack.cmake` runs through an `add_custom_command` whose OUTPUT is `dist/rant.h`
+  and the files made from it, so it re packs only when a `src/` file or pack.cmake
+  changes. It also splices `rant.h` into `dist/rant.hpp` and writes the two anchors. `dist/` is not committed,
   so configure also runs the packer once when any output is missing: a header only
   consumer depends on no build step, and cmake before 3.19 takes no dependency on an
   INTERFACE target. The target is `rant_dist`, not `dist`, since a consumer may own that
@@ -51,8 +51,7 @@ Rant as a subproject or finds the installed package.
   a standalone `web-rant` configure share one list. `rant_host` is a static library over
   `dist/rant.c`, so a consumer defines no `RANT_IMPLEMENTATION` and writes no anchor.
   The in tree programs link `rant` and `rant_platform` instead, never `rant_host`: each
-  compiles its own flavour of the amalgamation, some with `RANT_NO_SHM` or transport only,
-  and linking the built library too would define every symbol twice. `rant_shared` is the
+  compiles its own flavour of the amalgamation, some with `RANT_NO_SHM`, and linking the built library too would define every symbol twice. `rant_shared` is the
   same anchor built with `RANT_BUILD_SHARED` and hidden visibility, `EXCLUDE_FROM_ALL` in a
   subproject, and it exports `RANT_LINK_SHARED` to whatever links it.
 - `dist/rant.c` and `dist/rant.cpp` are the generated anchors, two lines each. They are
@@ -64,7 +63,7 @@ Rant as a subproject or finds the installed package.
   cmake 3.21 and the root asks for 3.15. The config type list really did reach a
   consumer once: it is a FORCEd cache entry, so it overwrote the consumer's own. `dist/` is
   not committed, so a consumer runs the packer and reads `src/`.
-- `install()` copies the four `dist/` headers into `include/` and writes an export set plus
+- `install()` copies `dist/rant.h` and `dist/rant.hpp` into `include/` and writes an export set plus
   `rant-config.cmake` (from `tools/rant-config.cmake.in`) into `share/cmake/rant`, so
   `find_package(rant CONFIG)` hands over the same two targets. The config finds Threads
   before the targets file, which names `Threads::Threads`.

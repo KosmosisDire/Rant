@@ -57,8 +57,6 @@ file(GLOB_RECURSE RANT_SRC CONFIGURE_DEPENDS
      "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h")
 
 set(RANT_DIST
-    "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant_discovery.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant_transport.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.hpp"     # C++ wrapper with rant.h embedded
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.c"       # the C implementation anchor
@@ -166,8 +164,8 @@ endif()
 if(RANT_BUILD_TOOLS)
   # One host program from one source file: link the core + platform libs and
   # wait for dist/ to be (re)generated first.
-  # Each in tree program defines its own RANT_IMPLEMENTATION flavour (some want NO_SHM or
-  # transport only), so they take the headers and the OS libraries, never the built library.
+  # Each in tree program defines its own RANT_IMPLEMENTATION flavour (some want NO_SHM),
+  # so they take the headers and the OS libraries, never the built library.
   function(rant_program name src)
     add_executable(${name} "${src}")
     target_link_libraries(${name} PRIVATE rant rant_platform)
@@ -248,8 +246,6 @@ if(RANT_INSTALL)
   endif()
 
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.h"
-                "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant_discovery.h"
-                "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant_transport.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.hpp"
           DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 

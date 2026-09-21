@@ -1,8 +1,8 @@
 /* A diagnostic: the interfaces discovery joins and announces out of, plus what the OS
  * route table would have picked. spec/platform.md says why discovery ignores the latter. */
-#define RANT_TRANSPORT_IMPLEMENTATION
+#define RANT_IMPLEMENTATION
 #define RANT_NO_SHM
-#include "rant_transport.h"
+#include "rant.h"
 #include <stdio.h>
 
 static void show(const char *label, uint32_t naddr){
