@@ -31,10 +31,10 @@ The page allocator halves its request on failure for fragmented heaps.
 
 ## The copied pool rule
 
-`rant_node_open` and `rant_discovery_open` copy the caller's allocator by value into their
-own struct, so the caller may pass a stack temporary. Every close and every failure path
-must copy the pool value out, then reset the copy, because the reset frees the very page
-holding the struct that holds the pool field. Copy it out LAST, after every hook free has
+`rant_node_open` copies the caller's allocator by value into its own struct, so the
+caller may pass a stack temporary. Every close and every failure path must copy the pool
+value out, then reset the copy, because the reset frees the very page holding the struct
+that holds the pool field. Copy it out LAST, after every hook free has
 run, or the stale copy double frees (this was a heap corruption crash). One allocator per
 node: a shared long lived allocator would have its pages freed under anything that
 outlives the node. Callers never reset it themselves.

@@ -17,7 +17,7 @@ called a naddr. The two are the same four bytes. `i_rant_plat_ip4_to_naddr` and
 ## Feature flags
 
 Three features share one flag shape: `RANT_SHM`, `RANT_THREADS` and `RANT_PROC_STATS`.
-Each is auto detected where the bundled layer provides it, the matching `RANT_NO_*` opt
+The detection lives once in `common/features.h`. Each is auto detected where the bundled layer provides it, the matching `RANT_NO_*` opt
 out always wins, and a new platform layer that implements the contract declares support by
 defining the flag itself. Code guards are `#ifdef RANT_THREADS`, never
 `#ifndef RANT_NO_THREADS`.
@@ -108,8 +108,9 @@ The 64 bit atomics carry acquire and release order for the chunk generation stam
 `src/common/` holds the helpers every layer shares: `alloc.h` (spec/allocation.md),
 `arena.h` (the measure then build bump packer), `bytes.h` (little endian packing),
 `hash.h` (FNV-1a) and `string.h` (`RantBytes` and `RantString`). All are static inline, so
-a layer compiles standalone and pays nothing for a helper it does not use, and the
-amalgamator emits each once per implementation unit.
+a layer pays nothing for a helper it does not use. `types.h` is the public vocabulary
+every layer shares (limits, roles, `RantQos`, `RantResult`, `RantRepairStats`), so no
+layer owns a type another layer's API needs. `features.h` is the flag detection above.
 
 The FNV basis in `hash.h` is not the textbook one. On wire identities depend on it, so it
 never changes. `i_rant_plat_hash16` in the platform layer uses the textbook basis and is

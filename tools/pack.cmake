@@ -64,6 +64,8 @@ function(build_header f)
   file(APPEND "${f}" "${POSIX_PREAMBLE}")
 
   rant_emit("${f}" common/api.h)
+  rant_emit("${f}" common/features.h)
+  rant_emit("${f}" common/types.h)
   rant_emit("${f}" common/string.h)
   rant_emit("${f}" common/alloc.h)
   rant_emit("${f}" discovery/core.h)

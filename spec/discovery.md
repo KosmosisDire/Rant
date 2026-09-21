@@ -65,8 +65,7 @@ tells a driving loop when the next timer is due. The core defaults are a 3 s int
 sent three times (`RANT_DISCOVERY_BYE_SENDS`), since one shot UDP may lose it and
 receivers dedup by uuid. The runtime drains a socket to empty on every pass, capped at
 2048 datagrams. One receive per poll would let a slow poller's backlog keep a dead peer
-alive. `rant_discovery_gather` re solicits four times a second until the peer set has been
-quiet for the asked time. Multicast loop stays on, since several instances on one host
+alive. Multicast loop stays on, since several instances on one host
 need it, and the uuid self filter drops the echoes.
 
 ## Peer lifecycle

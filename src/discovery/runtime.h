@@ -1,11 +1,9 @@
-/* The discovery runtime: sockets, clock and uuid over the core. rant_discovery_open owns
- * its memory. rant_discovery_place uses a caller buffer, which is how the node embeds it. */
+/* The discovery runtime: sockets, clock and uuid over the core. rant_discovery_place runs
+ * in a caller buffer, which is how the node embeds it. */
 #ifndef RANT_DISCOVERY_RT_H
 #define RANT_DISCOVERY_RT_H
 
-#include "../common/api.h"
 #include "core.h"
-#include "../common/alloc.h"
 #include "../platform/core.h"
 
 #ifdef __cplusplus
@@ -16,44 +14,13 @@ extern "C" {
 
 typedef struct RantDiscovery RantDiscovery;
 
-/* Options for rant_discovery_open. Zero means default. The meta blob is opaque. */
-typedef struct {
-    uint16_t              domain;               /* default 0 */
-    const char           *discovery_group;      /* default "239.255.0.7" */
-    uint16_t              discovery_port;       /* default 7400 */
-    const char           *multicast_interface;  /* pin to this interface IP, NULL = all */
-    uint8_t                 multicast_ttl;      /* default 1 */
-    uint16_t                max_peers;          /* default 32 */
-    RantDiscoveryEventFn    on_event;           /* optional */
-    void                 *user;                 /* passed to on_event */
-    const RantDiscoveryAddr *seed_peers;        /* unicast seeds for multicast filtered nets */
-    uint16_t                n_seed_peers;
-    uint8_t                 unicast_only;         /* 1 = never touch multicast */
-    RantBytes               meta;                 /* optional opaque overlay to advertise */
-    uint16_t                meta_cap;        /* per peer incoming overlay buffer, 0 = default */
-    uint16_t                peer_user_bytes;      /* scratch reserved per peer, 0 = none */
-} RantDiscoveryConfig;
-
-/* alloc is copied in and reset on close, so it may be a temporary. A NULL name is auto
- * generated and a NULL cfg means all defaults. NULL on failure, see rant_discovery_last_error. */
-RANT_API RantDiscovery       *rant_discovery_open(RantAllocator *alloc, const char *name, const RantDiscoveryConfig *cfg);
-
-/* lifecycle */
-/* One loop tick. 1 if a datagram arrived, 0 if idle, negative on a socket error. */
-RANT_API int          rant_discovery_poll(RantDiscovery *d, int timeout_ms);
-/* Blocks: solicits, then pumps until the peer set is quiet for quiet_ms or timeout_ms
- * passes. Returns the peer count. */
-RANT_API int          rant_discovery_gather(RantDiscovery *d, int quiet_ms, int timeout_ms);
-/* Optionally multicasts a BYE, then closes the sockets and frees owned memory. */
-RANT_API void         rant_discovery_close(RantDiscovery *d, int send_bye);
-
-/* The live peer list by pointer, valid until the next poll. Each .user is writable in place. */
-RANT_API const RantDiscoveryPeer *rant_discovery_peers(RantDiscovery *d, uint16_t *count);
+/* The live peer list by pointer, valid until the next service pass. Each .user is
+ * writable in place. */
+const RantDiscoveryPeer *rant_discovery_peers(RantDiscovery *d, uint16_t *count);
 
 /* The sans-IO core, for the by id lookups. Valid for the runtime's life. */
-RANT_API RantDiscoveryState *rant_discovery_state(RantDiscovery *d);
+RantDiscoveryState *rant_discovery_state(RantDiscovery *d);
 
-/* advanced: placement open */
 /* The placement config. Zero and NULL fields get defaults. A zero uuid is auto generated. */
 typedef struct {
     RantDiscoveryCoreConfig discovery;          /* the core config */
@@ -68,12 +35,12 @@ typedef struct {
                                  least one peer, or be seeded by one, or nothing can find us. */
 } RantDiscoveryNetConfig;
 
-RANT_API size_t       rant_discovery_placement_memory(const RantDiscoveryNetConfig *cfg);
+size_t       rant_discovery_placement_memory(const RantDiscoveryNetConfig *cfg);
 /* Places a runtime in caller memory. The caller owns mem. NULL on failure, and
  * rant_discovery_last_error names the step. */
-RANT_API RantDiscovery       *rant_discovery_place(void *mem, size_t mem_size, const RantDiscoveryNetConfig *cfg);
+RantDiscovery       *rant_discovery_place(void *mem, size_t mem_size, const RantDiscoveryNetConfig *cfg);
 
-/* Why the last open or place returned NULL. A process global with no lock, read it right after. */
+/* Why the last place returned NULL. A process global with no lock, read it right after. */
 typedef enum {
     RANT_DISCOVERY_OK = 0,
     RANT_DISCOVERY_E_MEMORY,        /* the buffer was too small */
@@ -82,40 +49,43 @@ typedef enum {
     RANT_DISCOVERY_E_BIND,          /* bind to the discovery port failed */
     RANT_DISCOVERY_E_MCAST_JOIN     /* joining the group failed */
 } RantDiscoveryPlaceError;
-RANT_API RantDiscoveryPlaceError rant_discovery_last_error(void);
+RantDiscoveryPlaceError rant_discovery_last_error(void);
 /* The OS socket error captured with the last failure, 0 if none. */
-RANT_API int          rant_discovery_last_os_error(void);
+int          rant_discovery_last_os_error(void);
 /* Relocates a placed runtime into a bigger block, keeping the socket, uuid and peers.
  * self_meta is the new announce blob address. The caller frees the old block after. */
-RANT_API RantDiscovery       *rant_discovery_migrate(RantDiscovery *old, void *new_mem, size_t new_cap,
+RantDiscovery       *rant_discovery_migrate(RantDiscovery *old, void *new_mem, size_t new_cap,
                  uint16_t new_max_peers, uint16_t new_meta_cap, const uint8_t *self_meta, void *peer_cb_user);
+
+/* Optionally multicasts a BYE, then closes the sockets. The caller frees mem after. */
+void         rant_discovery_close(RantDiscovery *d, int send_bye);
 
 /* node integration */
 /* A discovery datagram that arrived on the data socket. src carries the port too, so the
  * core can bind an observed source. */
-RANT_API void         rant_discovery_feed(RantDiscovery *d, const RantDiscoveryAddr *src, RantBytes datagram);
+void         rant_discovery_feed(RantDiscovery *d, const RantDiscoveryAddr *src, RantBytes datagram);
 /* Routes unicast discovery TX out of fd, the node's data socket. RANT_SOCK_BAD restores
  * the own socket. Group TX stays on the own socket. */
-RANT_API void         rant_discovery_set_tx_fd(RantDiscovery *d, i_RantSock fd);
+void         rant_discovery_set_tx_fd(RantDiscovery *d, i_RantSock fd);
 /* Replaces the overlay and bumps its version. meta must outlive the runtime. */
-RANT_API void         rant_discovery_advertise(RantDiscovery *d, RantBytes meta);
+void         rant_discovery_advertise(RantDiscovery *d, RantBytes meta);
 /* Re applies every peer's interest. Call after changing our own advertised meta. */
-RANT_API void         rant_discovery_replay(RantDiscovery *d);
-/* The receive sockets, 1 or 2, for a caller with its own wait. Stable across a migrate. */
-RANT_API int          rant_discovery_pollfds(RantDiscovery *d, i_RantSock out[2]);
-/* rant_discovery_poll without the wait. Pass each fd's readability in pollfds order. Call
- * it every pass, the clock driven work needs no readable fd. */
-RANT_API int          rant_discovery_service(RantDiscovery *d, int fd_readable, int unicast_readable);
+void         rant_discovery_replay(RantDiscovery *d);
+/* The receive sockets, 1 or 2, for the caller's wait. Stable across a migrate. */
+int          rant_discovery_pollfds(RantDiscovery *d, i_RantSock out[2]);
+/* One service pass with no wait. Pass each fd's readability in pollfds order. Call it
+ * every pass, the clock driven work needs no readable fd. */
+int          rant_discovery_service(RantDiscovery *d, int fd_readable, int unicast_readable);
 
 /* uuid */
 /* A random RFC 9562 v4 uuid. 0 if there is no entropy source. */
-RANT_API int          rant_discovery_make_uuid4(uint8_t out[16]);
+int          rant_discovery_make_uuid4(uint8_t out[16]);
 /* The CSPRNG path, else a host identity fallback. Shared with the node's RantUuid. */
 void       i_rant_discovery_auto_uuid(uint8_t out[16]);
 
 /* Resolves an advertised name into out: want clamped, or an auto "node-XXXXXXXX" when
  * want is NULL or empty. Returns the length. */
-RANT_API uint8_t      rant_discovery_default_name(char *out, size_t cap, const char *want);
+uint8_t      rant_discovery_default_name(char *out, size_t cap, const char *want);
 
 #ifdef __cplusplus
 }

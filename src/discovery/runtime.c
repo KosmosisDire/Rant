@@ -26,8 +26,6 @@ struct RantDiscovery {
     uint8_t               *rxbuf;       /* arena, wire_max */
     uint8_t               *txbuf;       /* arena, wire_max */
     RantDiscoveryPeer     *peer_view;   /* arena, max_peers: the snapshot for rant_discovery_peers */
-    RantAllocator         pool;        /* the open path's allocator, reset at close. Zeroed on the
-                                         place path, where the caller owns the memory */
     RantDiscoveryAddr    seeds[RANT_DISCOVERY_MAX_SEEDS];
     uint16_t             n_seeds;
 };
@@ -294,7 +292,6 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNe
     d->rxbuf     = blk.rxbuf;
     d->txbuf     = blk.txbuf;
     d->peer_view = (RantDiscoveryPeer*)blk.peer_view;
-    memset(&d->pool, 0, sizeof d->pool); /* the caller owns mem, the open path overwrites this */
     core_mem     = blk.core;
 
     /* auto generate a uuid if the caller left it zero */
@@ -370,42 +367,6 @@ RantDiscovery *rant_discovery_place(void *mem, size_t cap, const RantDiscoveryNe
     return d;
 }
 
-/* The defaults first constructor. No automatic growth, a full peer table refuses. */
-RantDiscovery *rant_discovery_open(RantAllocator *alloc, const char *name, const RantDiscoveryConfig *cfg){
-    RantDiscoveryNetConfig nc; RantDiscoveryConfig o; RantDiscovery *d;
-    char namebuf[RANT_DISCOVERY_NAME_MAX + 1]; uint8_t namelen;
-    void *block; size_t need; RantAllocator pool;
-    if (!alloc) return NULL;
-    memset(&o, 0, sizeof o); if (cfg) o = *cfg;
-    namelen = rant_discovery_default_name(namebuf, sizeof namebuf, name);     /* auto if NULL */
-
-    memset(&nc, 0, sizeof nc);
-    nc.discovery.domain_id     = o.domain;
-    nc.discovery.max_peers     = o.max_peers;          /* 0 = default */
-    nc.discovery.meta_cap = o.meta_cap;
-    nc.discovery.peer_user_bytes = o.peer_user_bytes;
-    nc.discovery.meta          = o.meta;
-    nc.discovery.on_event      = o.on_event;
-    nc.discovery.user          = o.user;
-    nc.discovery.name          = rant_string(namebuf, namelen);     /* the core copies it at init */
-    nc.group               = o.discovery_group;
-    nc.discovery_port      = o.discovery_port;
-    nc.ttl                 = o.multicast_ttl;
-    nc.multicast_interface = o.multicast_interface;
-    nc.seeds               = o.seed_peers;
-    nc.n_seeds             = o.n_seed_peers;
-    nc.unicast_only        = o.unicast_only;
-
-    need = rant_discovery_placement_memory(&nc);
-    pool = *alloc;                                 /* copied, the caller's may be a temporary */
-    block = rant_allocator_alloc(&pool, NULL, need);
-    if (!block) return i_rant_discovery_fail(RANT_DISCOVERY_E_MEMORY, 0);
-    d = rant_discovery_place(block, need, &nc);
-    if (!d){ RantAllocator p = pool; rant_allocator_reset(&p); return NULL; }
-    d->pool = pool;                                /* the block's pool, close resets it */
-    return d;
-}
-
 /* The struct copy keeps the socket, group and seeds. The core is migrated and self_meta
  * re pointed. The caller frees the old block after. */
 RantDiscovery *rant_discovery_migrate(RantDiscovery *old, void *new_mem, size_t new_cap,
@@ -420,7 +381,7 @@ RantDiscovery *rant_discovery_migrate(RantDiscovery *old, void *new_mem, size_t 
     memset(&b,0,sizeof b); b.base = base; b.cap = new_cap - (size_t)(base - (uint8_t*)new_mem);
     i_rant_discovery_rt_layout(&b, &dc, &blk);
     d = blk.d;
-    *d = *old;                          /* fd, group_naddr, discovery_port, seeds, n_seeds, pool */
+    *d = *old;                          /* fd, group_naddr, discovery_port, seeds, n_seeds */
     d->wire_max = (uint32_t)blk.wire_max;
     d->rxbuf = blk.rxbuf; d->txbuf = blk.txbuf;
     d->peer_view = (RantDiscoveryPeer*)blk.peer_view;
@@ -453,7 +414,7 @@ static int i_rant_discovery_rt_drain(RantDiscovery *d, i_RantSock fd, RantDiscov
     return got;
 }
 
-/* The poll body without the wait. The node folds discovery into its one wait and calls
+/* One service pass with no wait. The node folds discovery into its one wait and calls
  * this every pass. */
 int rant_discovery_service(RantDiscovery *d, int fd_readable, int unicast_readable){
     RantDiscoveryAddr to;
@@ -490,38 +451,6 @@ int rant_discovery_service(RantDiscovery *d, int fd_readable, int unicast_readab
     return got;
 }
 
-int rant_discovery_poll(RantDiscovery *d, int timeout_ms){
-    i_RantPollfd pfd[2];
-    int nfds = 1;
-    memset(pfd, 0, sizeof pfd);
-    pfd[0].fd = d->fd; pfd[0].events = RANT_POLLIN;
-    if (d->unicast_fd != RANT_SOCK_BAD){ pfd[1].fd = d->unicast_fd; pfd[1].events = RANT_POLLIN; nfds = 2; }
-    if (i_rant_plat_poll(pfd, nfds, timeout_ms) < 0) return -1;
-    return rant_discovery_service(d, (pfd[0].revents & RANT_POLLIN) != 0,
-                                  nfds == 2 && (pfd[1].revents & RANT_POLLIN) != 0);
-}
-
-int rant_discovery_gather(RantDiscovery *d, int quiet_ms, int timeout_ms){
-    uint64_t start, last_change, last_solicit = 0;
-    uint16_t count;
-    if (!d) return 0;
-    start = i_rant_plat_now_us(); last_change = start;
-    count = rant_discovery_peer_count(d->core);
-    for (;;){
-        uint64_t now = i_rant_plat_now_us(); uint16_t c;
-        if (now - last_solicit >= 250000u){     /* re solicit 4 times a second */
-            rant_discovery_solicit(d->core); last_solicit = now;
-        }
-        rant_discovery_poll(d, 10);                /* sends the solicit, takes in replies */
-        now = i_rant_plat_now_us();
-        c = rant_discovery_peer_count(d->core);
-        if (c > count){ count = c; last_change = now; }   /* grew: keep waiting */
-        if (count > 0 && now - last_change >= (uint64_t)quiet_ms*1000u) break;
-        if (now - start >= (uint64_t)timeout_ms*1000u) break;
-    }
-    return (int)count;
-}
-
 RantDiscoveryState *rant_discovery_state(RantDiscovery *d){ return d ? d->core : NULL; }
 
 const RantDiscoveryPeer *rant_discovery_peers(RantDiscovery *d, uint16_t *count){
@@ -534,17 +463,14 @@ const RantDiscoveryPeer *rant_discovery_peers(RantDiscovery *d, uint16_t *count)
 }
 
 void rant_discovery_close(RantDiscovery *d, int send_bye){
-    RantAllocator pool;
     if (!d) return;
     if (send_bye){
         size_t n_bytes = rant_discovery_leave(d->core, d->txbuf, d->wire_max);
         int k;
         for (k = 0; n_bytes && k < RANT_DISCOVERY_BYE_SENDS; k++) i_rant_discovery_tx(d, d->txbuf, n_bytes, NULL);
     }
-    rant_discovery_destroy(d->core);     /* may mutate the pool, so it runs before the copy out */
+    rant_discovery_destroy(d->core);
     i_rant_plat_close(d->fd);
     if (d->unicast_fd != RANT_SOCK_BAD) i_rant_plat_close(d->unicast_fd);
     i_rant_plat_cleanup();
-    pool = d->pool;                  /* copy out last: the reset frees the block holding d */
-    rant_allocator_reset(&pool);     /* the place path has an empty pool, a no op */
 }

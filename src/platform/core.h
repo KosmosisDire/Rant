@@ -5,39 +5,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../common/features.h"
 
 #ifdef __cplusplus
 extern "C" {
-#endif
-
-/* RANT_SHM is auto detected where the bundled layer has it and RANT_NO_SHM always wins.
- * This block mirrors transport/core.h exactly. Edit both together. */
-#if !defined(RANT_SHM) && !defined(RANT_NO_SHM)
-  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
-      defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
-      defined(__DragonFly__)
-    #define RANT_SHM
-  #endif
-#endif
-#if defined(RANT_SHM) && defined(RANT_NO_SHM)
-  #undef RANT_SHM                /* both set, the opt out wins */
-#endif
-
-/* RANT_THREADS follows the same shape. A new platform layer that implements the thread
- * contract below defines it itself. */
-#if !defined(RANT_THREADS) && !defined(RANT_NO_THREADS)
-  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
-      defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
-      defined(__DragonFly__) || defined(ESP_PLATFORM)
-    #define RANT_THREADS
-  #elif defined(__has_include)
-    #if __has_include(<pthread.h>)
-      #define RANT_THREADS     /* unknown POSIX with pthreads */
-    #endif
-  #endif
-#endif
-#if defined(RANT_THREADS) && defined(RANT_NO_THREADS)
-  #undef RANT_THREADS          /* both set, the opt out wins */
 #endif
 
 /* A POSIX fd or a Windows SOCKET, both fit in intptr_t. */
@@ -63,18 +34,6 @@ uint64_t i_rant_plat_pid(void);
 /* Wall clock microseconds since the Unix epoch, for timestamps compared across hosts. */
 uint64_t i_rant_plat_wall_us(void);
 
-/* RANT_PROC_STATS follows the same shape. When off the two functions below are absent and
- * every consumer compiles out with them, so a layer that cannot measure implements nothing. */
-#if !defined(RANT_PROC_STATS) && !defined(RANT_NO_PROC_STATS)
-  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
-      defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
-      defined(__DragonFly__) || defined(ESP_PLATFORM)
-    #define RANT_PROC_STATS
-  #endif
-#endif
-#if defined(RANT_PROC_STATS) && defined(RANT_NO_PROC_STATS)
-  #undef RANT_PROC_STATS         /* both set, the opt out wins */
-#endif
 #ifdef RANT_PROC_STATS
 /* Per process, not per node. Any out pointer may be NULL. 0 on a transient OS failure. */
 int      i_rant_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes,
