@@ -3,7 +3,7 @@
 
 
 /* work is queued as lane record indices, the destination is the record's peer slot */
-static void i_rant_dest_push(RantTransportState *st, uint32_t d){
+static void i_rant_dest_push(i_RantTransportState *st, uint32_t d){
     uint32_t ndest = st->cfg.max_peers, pos;
     if (st->dest_queued[d]) return;
     st->dest_queued[d]=1;
@@ -14,7 +14,7 @@ static void i_rant_dest_push(RantTransportState *st, uint32_t d){
 
 
 /* idempotent while queued */
-void i_rant_lane_enqueue(RantTransportState *st, uint32_t li){
+void i_rant_lane_enqueue(i_RantTransportState *st, uint32_t li){
     i_RantLane *l=&st->lanes[li];
     uint32_t d=l->peer_slot;
     if (l->queued) return;
@@ -28,7 +28,7 @@ void i_rant_lane_enqueue(RantTransportState *st, uint32_t li){
 
 /* A recycled record must never linger on a dest list, or it misroutes another lane's
  * submessages to the old peer. Unmatch time only, the lists are short. */
-void i_rant_sched_drop(RantTransportState *st, uint32_t li){
+void i_rant_sched_drop(i_RantTransportState *st, uint32_t li){
     i_RantLane *l=&st->lanes[li];
     uint32_t d, cur, prev;
     if (!l->queued) return;
@@ -46,7 +46,7 @@ void i_rant_sched_drop(RantTransportState *st, uint32_t li){
 
 /* Enqueues and tracks a freshly armed reader deadline for the poll cap. The sweep uses
  * i_rant_lane_enqueue instead, since it recomputes the deadline itself. */
-void i_rant_lane_wake(RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+void i_rant_lane_wake(i_RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
     uint32_t li=i_rant_lane_id(st,topic_index,peer_slot);
     i_RantLane *l;
     if (li==RANT__NIL) return;                       /* unmatched lane: nothing to schedule */
@@ -57,7 +57,7 @@ void i_rant_lane_wake(RantTransportState *st, uint16_t topic_index, uint32_t pee
 
 
 /* sendable work a popped record still owes now. Timer armed work is the sweep's job */
-static int i_rant_lane_work(RantTransportState *st, const i_RantLane *l, uint64_t now){
+static int i_rant_lane_work(i_RantTransportState *st, const i_RantLane *l, uint64_t now){
     i_RantTopic *topic=&st->topics[l->topic];
     uint32_t peer_slot=l->peer_slot;
     if (!st->peer_used[peer_slot] || st->peer_dormant[peer_slot]) return 0;   /* dormant */
@@ -73,7 +73,7 @@ static int i_rant_lane_work(RantTransportState *st, const i_RantLane *l, uint64_
 
 /* Clock driven: a cursor walks the pool waking lanes whose timers came due, covering it
  * every RANT_HB_SWEEP_US. A forced full pass when next_deadline_us is due recomputes it. */
-static void i_rant_hb_sweep(RantTransportState *st, uint64_t now){
+static void i_rant_hb_sweep(i_RantTransportState *st, uint64_t now){
     uint32_t total=st->lane_cap, due, k;
     uint64_t span = now - st->sweep_time_us;
     int forced = (now >= st->next_deadline_us);    /* a tracked timer is due */
@@ -121,7 +121,7 @@ static void i_rant_hb_sweep(RantTransportState *st, uint64_t now){
 }
 
 
-int i_rant_transport_poll_send(RantTransportState *st, uint32_t *to_peer, void *out, size_t cap, size_t *out_len, uint64_t now){
+int i_rant_transport_poll_send(i_RantTransportState *st, uint32_t *to_peer, void *out, size_t cap, size_t *out_len, uint64_t now){
     uint32_t ndest=st->cfg.max_peers;
     i_rant_hb_sweep(st, now);
     while (st->dest_queue_count){
@@ -167,11 +167,11 @@ int i_rant_transport_poll_send(RantTransportState *st, uint32_t *to_peer, void *
 }
 
 
-uint64_t i_rant_transport_next_deadline_us(RantTransportState *st){
+uint64_t i_rant_transport_next_deadline_us(i_RantTransportState *st){
     return st->next_deadline_us == RANT__NO_DEADLINE ? 0 : st->next_deadline_us;
 }
 
 
-int i_rant_transport_tx_pending(RantTransportState *st){
+int i_rant_transport_tx_pending(i_RantTransportState *st){
     return st->dest_queue_count != 0;   /* the active lane queue */
 }

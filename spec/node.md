@@ -166,7 +166,7 @@ fills the one ahead hold, so an unpark delivers both with no resend. The writer'
 `acked_upto` stalls, its history fills, and the publisher's send blocks on normal flow
 control. Draining calls `i_rant_transport_deliver_parked` and kicks the waker. A writer HB
 floor past the held sample gives up with one `MSG_LOST`, the bounded loss escape. Any new
-sans-IO consumer of `RantMessageFn` must return 0.
+sans-IO consumer of `i_RantMessageFn` must return 0.
 
 Size the queue at least `keep_last` times the message size, or the reader parks while
 the writer keeps bursting and heals only through the paced repair path (16.4 to 3.7 GB/s
@@ -176,7 +176,7 @@ on release) is the known escape for huge payloads, not built.
 ## Timestamps
 
 `written_us` is 8 little endian bytes the writer prepends inside the sample ahead of any
-pattern header, stamped in `i_rant_writer_store` from the `RantConfig.source_time` hook
+pattern header, stamped in `i_rant_writer_store` from the `i_RantTransportConfig.source_time` hook
 (the node wires it to `i_rant_plat_wall_us`). A NULL hook still writes 8 zero bytes:
 framing is driven by the QoS alone, never by hook presence. The opt out
 (`qos.no_timestamp`) rides the attrs byte of the DETAIL_RESP (`RANT_ATTR_NO_TIMESTAMP`,

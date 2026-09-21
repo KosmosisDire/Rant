@@ -169,10 +169,10 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
 #define rant_node_subscriber_progress(n, idx, p, b, h, t) \
         rant_topic_subscriber_progress(rant_node_topic((n),(idx)), (p),(b),(h),(t))
 
-/* Open a node and create its topics from a RantTopicDef array in index order, so the array
+/* Open a node and create its topics from a i_RantTopicDef array in index order, so the array
  * index is the handle index the shims above resolve. */
 static RantNode *test_node_open(uint8_t *mem, size_t cap, const char *name, RantMsgFn on_msg,
-                               RantEventFn on_event, RantNodeOpts opts, const RantTopicDef *chans, uint16_t nch){
+                               RantEventFn on_event, RantNodeOpts opts, const i_RantTopicDef *chans, uint16_t nch){
     RantNode *node; uint16_t i; RantAllocator alloc = rant_allocator_heap(0);
     (void)mem; (void)cap;             /* heap-backed: the node self-sizes (was a static arena) */
     if (!opts.max_topics) opts.max_topics = nch ? nch : 1;
@@ -429,7 +429,7 @@ static int node_main(int argc, char **argv){
 #endif
               << 16)); }
 
-    static RantTopicDef ch[2+XCH_MAX];
+    static i_RantTopicDef ch[2+XCH_MAX];
     static char xnames[XCH_MAX][8];   /* "x0".."x511": extra topics' topic names */
     memset(ch, 0, sizeof ch);
     ch[0].name = "probe";
@@ -716,7 +716,7 @@ static uint16_t st_domain_base = 33;
 static int st_fail = 0;
 /* the discovery peer table behind a node, for raw announce checks. The public walk is
    rant_node_peers_next */
-static const RantDiscoveryPeer *st_peers(RantNode *n, uint16_t *count){
+static const i_RantDiscoveryPeerView *st_peers(RantNode *n, uint16_t *count){
     return i_rant_discovery_peers(n->discovery, count);
 }
 /* cond is evaluated exactly once: a condition with side effects must not run twice, or
@@ -753,9 +753,9 @@ static void st_pump(RantNode *a, RantNode *b, int ms){         /* run both nodes
 
 /* A one way link between raw transports: hand src's interest to dst and run the pairwise
    detail exchange by hand, as the runtimes would. The announce only nominates. */
-static void st_apply_verified(RantTransportState *dst, uint32_t src_id, RantTransportState *src){
+static void st_apply_verified(i_RantTransportState *dst, uint32_t src_id, i_RantTransportState *src){
     uint8_t ib[512], rq[512], rp[2048]; size_t il, rl, pl; uint16_t nw;
-    RantDetailWant wl[16];
+    i_RantDetailWant wl[16];
     il = i_rant_transport_build_interest(src, ib, sizeof ib);
     i_rant_transport_apply_peer_interest(dst, src_id, rant_bytes(ib, il));
     nw = i_rant_transport_detail_wants(dst, NULL, src_id, rant_bytes(ib, il), wl, 16);
@@ -770,7 +770,7 @@ static void st_apply_verified(RantTransportState *dst, uint32_t src_id, RantTran
    paces its lane to the subscriber's max_rate_hz (spec/testing.md). The pump can drop. */
 static int rate_recv, rate_lost, rate_drop;
 static uint64_t rate_clk;
-static RantTransportState *rate_W, *rate_R;
+static i_RantTransportState *rate_W, *rate_R;
 static int rate_on_msg(void *u, uint16_t ch, uint32_t from, RantBytes d){
     (void)u;(void)ch;(void)from;(void)d; rate_recv++; return 0;
 }
@@ -790,7 +790,7 @@ static void rate_pump(uint64_t dt){   /* flush W to R, then advance the clock */
     rate_clk += dt;
 }
 static void rate_checks(void){
-    RantTopicDef cw, cr; RantConfig wc, rc; void *mw, *mr; size_t nw, nr; int i;
+    i_RantTopicDef cw, cr; i_RantTransportConfig wc, rc; void *mw, *mr; size_t nw, nr; int i;
     RantAllocator wa = rant_allocator_heap(0);
     RantAllocator ra = rant_allocator_heap(0);
     RantQos q; memset(&q,0,sizeof q); q.reliability=RANT_BEST_EFFORT; q.keep_last=4;
@@ -836,7 +836,7 @@ static void rate_checks(void){
    fragment reliable stream through a pump that can drop DATA (spec/testing.md). */
 static int lap_recv, lap_lost, lap_drop_all; static unsigned lap_drop_mask;
 static uint64_t lap_clk;
-static RantTransportState *lap_W, *lap_R;
+static i_RantTransportState *lap_W, *lap_R;
 static uint8_t lap_held[8][RANT_DGRAM_MAX]; static size_t lap_hl[8]; static int lap_nh;
 static int lap_on_msg(void *u, uint16_t ch, uint32_t from, RantBytes d){
     (void)u;(void)ch;(void)from;(void)d; lap_recv++; return 0;
@@ -879,7 +879,7 @@ static void lap_flush_w(int split_after){
 static void lap_pump(uint64_t dt){ lap_flush_w(0); lap_collect_r(); lap_feed_w(); lap_clk += dt; }
 static void lap_run(int ms){ while (ms-- > 0) lap_pump(1000); }   /* 1 ms steps */
 static void lapped_checks(void){
-    RantTopicDef cw, cr; RantConfig wc, rc; void *mw, *mr; size_t nw, nr; int i;
+    i_RantTopicDef cw, cr; i_RantTransportConfig wc, rc; void *mw, *mr; size_t nw, nr; int i;
     RantAllocator wa = rant_allocator_heap(0);
     RantAllocator ra = rant_allocator_heap(0);
     RantRepairStats rs;
@@ -960,7 +960,7 @@ static void lapped_checks(void){
    one way delay L, so every round trip is exactly 2L (spec/testing.md). */
 static int rt_recv, rt_drop_all, rt_drop_ack; static unsigned rt_drop_mask, rt_drop_resend_of;
 static uint64_t rt_clk, rt_lat;
-static RantTransportState *rt_W, *rt_R;
+static i_RantTransportState *rt_W, *rt_R;
 static int rt_hb_seen;
 static int rt_on_msg(void *u, uint16_t ch, uint32_t from, RantBytes d){
     (void)u;(void)ch;(void)from;(void)d; rt_recv++; return 0;
@@ -992,10 +992,10 @@ static void rt_pump(void){
     rt_clk += 2u*rt_lat;
 }
 static void rtt_checks(void){
-    RantTopicDef cw, cr; RantConfig wc, rc; void *mw, *mr; size_t nw, nr; int i, n;
+    i_RantTopicDef cw, cr; i_RantTransportConfig wc, rc; void *mw, *mr; size_t nw, nr; int i, n;
     RantAllocator wa = rant_allocator_heap(0);
     RantAllocator ra = rant_allocator_heap(0);
-    RantPeerRtt e;
+    i_RantPeerRtt e;
     RantQos q; memset(&q,0,sizeof q); q.reliability=RANT_RELIABLE; q.keep_last=8;
     q.heartbeat_us=200000;   /* idle HB far off: only the tail HB matters here */
     memset(&cw,0,sizeof cw); cw.name="rtt"; cw.qos=q; cw.role=RANT_PUB_ONLY;
@@ -1066,7 +1066,7 @@ static void rtt_checks(void){
 static int ah_recv, ah_lost, ah_refuse, ah_order_bad; static unsigned ah_drop_mask, ah_tag, ah_last;
 static uint64_t ah_drop_lo, ah_drop_hi;   /* drop DATA seqnos in [lo, hi), a message plus resends */
 static uint64_t ah_clk, ah_first_base; static int ah_have_first;
-static RantTransportState *ah_W, *ah_R;
+static i_RantTransportState *ah_W, *ah_R;
 static uint8_t ah_held[8][RANT_DGRAM_MAX]; static size_t ah_hl[8]; static int ah_nh;
 static int ah_on_msg(void *u, uint16_t ch, uint32_t from, RantBytes d){
     (void)u;(void)ch;(void)from;
@@ -1115,7 +1115,7 @@ static void ah_flush_w(void){
 static void ah_pump(uint64_t dt){ ah_flush_w(); ah_collect_r(); ah_feed_w(); ah_clk += dt; }
 static void ah_run(int ms){ while (ms-- > 0) ah_pump(1000); }
 static void ahead_checks(void){
-    RantTopicDef cw, cr; RantConfig wc, rc; void *mw, *mr; size_t nw, nr;
+    i_RantTopicDef cw, cr; i_RantTransportConfig wc, rc; void *mw, *mr; size_t nw, nr;
     RantAllocator wa = rant_allocator_heap(0);
     RantAllocator ra = rant_allocator_heap(0);
     RantRepairStats ws, rs; uint64_t resent0, ahead0;
@@ -1224,7 +1224,7 @@ static int      dc_down_reason;
 static void dc_up(void *user, uint32_t peer, const RantAddr *addr, RantBytes meta){
     (void)user; (void)addr; (void)meta; dc_up_id=peer; dc_up_n++;
 }
-static void dc_down(void *user, uint32_t peer, RantDiscoveryDownReason reason){
+static void dc_down(void *user, uint32_t peer, i_RantDiscoveryDownReason reason){
     (void)user; dc_down_id=peer; dc_down_reason=(int)reason; dc_down_n++;
 }
 static void dc_error(const RantEvent *ev){ if (ev->error==RANT_E_PEER_REFUSED) dc_refused_n++; }
@@ -1270,7 +1270,7 @@ static size_t dc_mk_ip(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uin
 
 /* feed one crafted datagram to a core as if received from (ip, sport). via 0 = the
    discovery socket, 1 = the data port socket */
-static void dc_feed(RantDiscoveryState *st, const uint8_t ip[4], uint16_t sport, int via,
+static void dc_feed(i_RantDiscoveryState *st, const uint8_t ip[4], uint16_t sport, int via,
                     const uint8_t *buf, size_t n, uint64_t now){
     RantAddr src;
     memset(&src, 0, sizeof src);
@@ -1284,7 +1284,7 @@ static void disc_core_checks(void){
     static uint8_t mem[8192];
     uint8_t buf[RANT_DISCOVERY_WIRE_MAX], out[RANT_DISCOVERY_WIRE_MAX];
     uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3};
-    RantDiscoveryCoreConfig c; RantDiscoveryState *st;
+    i_RantDiscoveryCoreConfig c; i_RantDiscoveryState *st;
     uint32_t idA, idB; size_t n;
     memset(&c,0,sizeof c);
     memset(c.uuid,0xEE,16);                        /* receiver uuid, distinct from senders */
@@ -1401,7 +1401,7 @@ static void disc_core_checks(void){
 
     /* 9. SELF-IP: a node states its locator outright. It must ride our own announce, and a
        relay must propagate the stated address, not the source it saw. */
-    { RantDiscoveryCoreConfig sc2; RantDiscoveryState *s2; RantAddr a;
+    { i_RantDiscoveryCoreConfig sc2; i_RantDiscoveryState *s2; RantAddr a;
       uint8_t pub_ip[4]={203,0,113,7}; uint32_t id12; size_t pn;
       sc2 = c;                                     /* same domain/timing, our own uuid */
       memcpy(sc2.self_ip, pub_ip, 4); sc2.self_ip_len = 4; sc2.data_port = 7400;
@@ -1432,7 +1432,7 @@ static void disc_core_checks(void){
 
     /* 10. OBSERVED SOURCES: a unicast only peer behind a NAT advertises a fiction, so the
        receiver binds one observed source per local channel and routes everything there. */
-    { RantDiscoveryCoreConfig c4; RantAddr a; uint32_t id20, id21, id22, idX, idU;
+    { i_RantDiscoveryCoreConfig c4; RantAddr a; uint32_t id20, id21, id22, idX, idU;
       uint8_t na[4]={192,168,1,50}, sx[4]={192,168,1,200}, su[4]={192,168,1,51};
       size_t pn; int ex;
       c4 = c; c4.max_peers = 4;
@@ -1526,7 +1526,7 @@ static void disc_core_checks(void){
 
     /* 11. GHOST GATE: relaying is sustained by direct liveness only. Proxies still refresh
        plain liveness, so the entry outlives the origin by one timeout, then dies. */
-    { RantDiscoveryCoreConfig c5; uint64_t t; size_t pn; int round, relayed;
+    { i_RantDiscoveryCoreConfig c5; uint64_t t; size_t pn; int round, relayed;
       c5 = c; c5.max_peers = 4;
       st = i_rant_discovery_init(mem,sizeof mem,&c5);
       i_rant_discovery_update(st, 1000, out, sizeof out);
@@ -1566,8 +1566,8 @@ static void disc_core_checks(void){
 
     /* 12. A UNICAST-ONLY RECEIVER: a published port forward rewrites the source to the
        gateway on our own subnet, so a source never overrides a held locator here. */
-    { RantDiscoveryCoreConfig c6; RantDiscoverySubnet net; RantAddr a;
-      RantDiscoveryPeer v; uint32_t id50, got;
+    { i_RantDiscoveryCoreConfig c6; i_RantDiscoverySubnet net; RantAddr a;
+      i_RantDiscoveryPeerView v; uint32_t id50, got;
       static const uint8_t gw[4]={10,0,2,2}, real_ip[4]={192,168,1,106};
       static const uint8_t net_ip[4]={10,0,2,0}, net_mask[4]={255,255,255,0};
       c6 = c; c6.max_peers = 4; c6.relay_me = 1;         /* we are the NAT'd node */
@@ -1598,7 +1598,7 @@ static void disc_core_checks(void){
 
     /* 13. DUPLICATE SUPPRESSION: two foreign proxies within one announce interval suppress
        our own emission, our looped echo never counts, and a changed origin re arms it. */
-    { RantDiscoveryCoreConfig c7; uint8_t mine[RANT_DISCOVERY_WIRE_MAX];
+    { i_RantDiscoveryCoreConfig c7; uint8_t mine[RANT_DISCOVERY_WIRE_MAX];
       size_t mn, pn2;
       c7 = c; c7.max_peers = 4;
       st = i_rant_discovery_init(mem,sizeof mem,&c7);
@@ -1674,8 +1674,8 @@ static void node_core_checks(void){
     static uint8_t tmem[1<<18], cmem[4096], dmem[8192], amem[1<<16];
     uint8_t buf[256], out[RANT_DISCOVERY_WIRE_MAX];
     uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3};
-    RantConfig tc; RantTransportState *tr; RantTopicDef ch[1];
-    RantDiscoveryCoreConfig dcfg; RantDiscoveryState *st;
+    i_RantTransportConfig tc; i_RantTransportState *tr; i_RantTopicDef ch[1];
+    i_RantDiscoveryCoreConfig dcfg; i_RantDiscoveryState *st;
     i_RantNodeCoreConfig cc; i_RantNodeCore *nc;
     RantAddr d; uint32_t id, idA, idB; size_t n;
     /* STATIC allocator over a caller buffer: the embedded no-heap contract */
@@ -1809,7 +1809,7 @@ static void shm_module_checks(void){
    success and a pump that can drop SHM-DATA (spec/testing.md). */
 static int shml_ok, shml_recv, shml_lost, shml_drop;
 static uint64_t shml_now;
-static RantTransportState *shml_W, *shml_R;
+static i_RantTransportState *shml_W, *shml_R;
 static int shml_on_shm(void *u, uint16_t ch, uint32_t from, const uint8_t *desc){
     (void)u;(void)ch;(void)from;(void)desc; if (shml_ok){ shml_recv++; return 1; } return 0;
 }
@@ -1831,7 +1831,7 @@ static void shml_send(void){
     memset(desc,0,sizeof desc); i_rant_transport_send_shm(shml_W, 0, rant_bytes(chunk, 1000), desc, shml_now);
 }
 static void shm_loss_checks(void){
-    RantTopicDef cw, cr; RantConfig wc, rc; void *mw, *mr; size_t nw, nr;
+    i_RantTopicDef cw, cr; i_RantTransportConfig wc, rc; void *mw, *mr; size_t nw, nr;
     RantAllocator wa = rant_allocator_heap(0);
     RantAllocator ra = rant_allocator_heap(0);
     RantQos q; memset(&q,0,sizeof q); q.reliability=RANT_RELIABLE; q.keep_last=8;
@@ -1876,8 +1876,8 @@ static void shmn_on_message(const RantMsg *msg){
     shmn_recv++; shmn_len=len; shmn_sum=s;
 }
 static RantNode *shmn_open(int is_pub, int shm_capable, uint16_t domain, void **mem_out){
-    static RantTopicDef ch[2]; static int slot;
-    RantTopicDef *d=&ch[slot++ & 1]; RantAddr seed; RantNodeOpts opts;
+    static i_RantTopicDef ch[2]; static int slot;
+    i_RantTopicDef *d=&ch[slot++ & 1]; RantAddr seed; RantNodeOpts opts;
     size_t cap = 1u<<20; void *mem; RantQos q; memset(&q,0,sizeof q);
     q.reliability=RANT_RELIABLE; q.keep_last=4; q.catch_up=1;
     memset(d,0,sizeof *d); d->name="shmnode"; d->qos=q; d->role=is_pub?RANT_PUB_ONLY:RANT_SUB_ONLY;
@@ -1967,7 +1967,7 @@ static void unit_checks(void){
     /* send result codes on the transport core: the size check precedes the role check, and
        an init with no allocator must refuse (spec/testing.md) */
     {   static uint8_t tmem[1<<16], amem[1<<12];
-        RantTopicDef uch[2]; RantConfig tc; RantTransportState *ts; uint8_t buf[128];
+        i_RantTopicDef uch[2]; i_RantTransportConfig tc; i_RantTransportState *ts; uint8_t buf[128];
         static RantAllocator A; A = rant_allocator_static(amem, sizeof amem);
         memset(uch, 0, sizeof uch);
         uch[0].name = "u/pub"; uch[0].role = RANT_PUBSUB;
@@ -2074,7 +2074,7 @@ static void evu_on_event(const RantEvent *ev){
 static void event_user_checks(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20]; static int sentinel;
     const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both to one identity, see collide.c */
-    RantTopicDef cw, cr; RantNodeOpts wo, ro; RantNode *w, *r;
+    i_RantTopicDef cw, cr; RantNodeOpts wo, ro; RantNode *w, *r;
     uint8_t payload[16]; int i; memset(payload,0x5A,sizeof payload);
     memset(&cw,0,sizeof cw);
     cw.name=A; cw.role=RANT_PUB_ONLY;
@@ -2154,8 +2154,8 @@ static void dynamic_grow_checks(void){
 static unsigned long qos_incompat_n;
 static void qos_on_event(const RantEvent *ev){ if (ev->error==RANT_E_QOS_INCOMPATIBLE) qos_incompat_n++; }
 static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_out){
-    RantTopicDef cw, cr; RantConfig wc, rc; void *mw, *mr; size_t nw, nr;
-    RantTransportState *W, *R; uint16_t pub=0, recv=0;
+    i_RantTopicDef cw, cr; i_RantTransportConfig wc, rc; void *mw, *mr; size_t nw, nr;
+    i_RantTransportState *W, *R; uint16_t pub=0, recv=0;
     RantAllocator wa = rant_allocator_heap(0);
     RantAllocator ra = rant_allocator_heap(0);
     memset(&cw,0,sizeof cw); cw.name="qostopic"; cw.role=RANT_PUB_ONLY;
@@ -2193,8 +2193,8 @@ static void qos_match_checks(void){
 /* (17b) flow control: a best effort reader matched to a reliable writer must not count
    toward backpressure. Fill the history ring past keep_last with no acks. */
 static int beff_would_evict(int rrel){
-    RantTopicDef cw, cr; RantConfig wc, rc; void *mw, *mr; size_t nw, nr;
-    RantTransportState *W, *R; uint8_t payload[8]; int i, evict;
+    i_RantTopicDef cw, cr; i_RantTransportConfig wc, rc; void *mw, *mr; size_t nw, nr;
+    i_RantTransportState *W, *R; uint8_t payload[8]; int i, evict;
     RantAllocator wa = rant_allocator_heap(0);
     RantAllocator ra = rant_allocator_heap(0);
     memset(&cw,0,sizeof cw); cw.name="beff"; cw.role=RANT_PUB_ONLY;
@@ -2664,7 +2664,7 @@ static void schema_advert_checks(void){
     uint32_t raw_h  = (uint32_t)i_rant_topic_id("sch/raw");
     uint32_t late_h = (uint32_t)i_rant_topic_id("sch/late");
     int t, pose_ok=0, raw_ok=0;
-    const RantDiscoveryPeer *peers; uint16_t n_peers=0;
+    const i_RantDiscoveryPeerView *peers; uint16_t n_peers=0;
 
     {   RantSchemaBuilder b = rant_schema_begin(rant_allocator_alloc, &ma, "Pose");
         rant_schema_field(&b, "x", RANT_F64);
@@ -2697,7 +2697,7 @@ static void schema_advert_checks(void){
     peers = st_peers(S, &n_peers);   /* S's view of P */
     ST_CHECK(peers && n_peers==1, "announce: subscriber sees one peer (%u)", n_peers);
     if (peers && n_peers==1){
-        RantInterestIter it; RantTopicEntry tp;
+        i_RantInterestIter it; i_RantTopicEntry tp;
         memset(&it,0,sizeof it);
         while (i_rant_node_peer_interest_next(&peers[0], &it, &tp)){
             if (!tp.is_pub) continue;
@@ -2711,7 +2711,7 @@ static void schema_advert_checks(void){
         {   RantTopic *lc = rant_node_create_topic(P, "sch/late", RANT_INACTIVE, NULL, &co);
             ST_CHECK(lc!=NULL, "announce: inactive topic created");
             for (t=0;t<200;t++){ rant_node_poll(P,2); rant_node_poll(S,2); }
-            {   RantInterestIter it2; RantTopicEntry tp2; int seen=0;
+            {   i_RantInterestIter it2; i_RantTopicEntry tp2; int seen=0;
                 peers = st_peers(S, &n_peers);
                 memset(&it2,0,sizeof it2);
                 while (i_rant_node_peer_interest_next(&peers[0], &it2, &tp2))
@@ -2720,7 +2720,7 @@ static void schema_advert_checks(void){
             }
             rant_topic_set_role(lc, RANT_PUB_ONLY);
             for (t=0;t<400;t++){ rant_node_poll(P,2); rant_node_poll(S,2); }
-            {   RantInterestIter it2; RantTopicEntry tp2; uint16_t late_alias=0xFFFF;
+            {   i_RantInterestIter it2; i_RantTopicEntry tp2; uint16_t late_alias=0xFFFF;
                 peers = st_peers(S, &n_peers);
                 memset(&it2,0,sizeof it2);
                 while (i_rant_node_peer_interest_next(&peers[0], &it2, &tp2))
@@ -3721,9 +3721,9 @@ static void stdtypes_checks(void){
 static void detail_codec_checks(void){
     static uint8_t tmem[1<<18];
     RantAllocator ma = rant_allocator_heap(0);
-    RantConfig tc; RantTransportState *tr; RantTopicDef ch[3];
-    RantMetaSchema schemas[3]; RantSchema *S;
-    RantDetailWant wants[4];
+    i_RantTransportConfig tc; i_RantTransportState *tr; i_RantTopicDef ch[3];
+    i_RantMetaSchema schemas[3]; RantSchema *S;
+    i_RantDetailWant wants[4];
     uint8_t req[256], resp[1024], out2[1024];
     size_t rl, need, len;
 
@@ -3759,7 +3759,7 @@ static void detail_codec_checks(void){
           && i_rant_detail_domain(rant_bytes(resp,len))==77
           && i_rant_detail_meta_version(rant_bytes(resp,len))==9,
              "detail: resp header carries the responder version");
-    {   RantDetailIter it; RantDetail d; int n=0, ok_typed=0, ok_raw=0;
+    {   i_RantDetailIter it; i_RantDetail d; int n=0, ok_typed=0, ok_raw=0;
         RantBytes wire = rant_bytes(NULL, 0);
         memset(&it,0,sizeof it);
         while (i_rant_detail_next(rant_bytes(resp,len), &it, &d)){
@@ -3788,7 +3788,7 @@ static void detail_codec_checks(void){
     wants[0].schema_hash = rant_schema_hash(S);
     rl  = i_rant_detail_req_build(77, 5, wants, 2, req, sizeof req);
     len = i_rant_transport_detail_respond(tr, schemas, 9, rant_bytes(req,rl), resp, sizeof resp);
-    {   RantDetailIter it; RantDetail d; int hash_only=0; memset(&it,0,sizeof it);
+    {   i_RantDetailIter it; i_RantDetail d; int hash_only=0; memset(&it,0,sizeof it);
         while (i_rant_detail_next(rant_bytes(resp,len), &it, &d))
             if (d.index==0) hash_only = d.schema_wire.len==0 && d.schema_hash==rant_schema_hash(S);
         ST_CHECK(hash_only, "detail: identical hash rides hash-only (no wire)");
@@ -3800,7 +3800,7 @@ static void detail_codec_checks(void){
     rl = i_rant_detail_req_build(77, 5, wants, 2, req, sizeof req);
     {   size_t full = i_rant_transport_detail_resp_size(tr, schemas, rant_bytes(req,rl));
         size_t cut  = i_rant_transport_detail_respond(tr, schemas, 9, rant_bytes(req,rl), out2, full-1);
-        RantDetailIter it; RantDetail d; int n=0; uint16_t first=0xFFFF;
+        i_RantDetailIter it; i_RantDetail d; int n=0; uint16_t first=0xFFFF;
         memset(&it,0,sizeof it);
         while (i_rant_detail_next(rant_bytes(out2,cut), &it, &d)){ if (!n) first=d.index; n++; }
         ST_CHECK(cut>0 && cut<full && n==1 && first==0,
@@ -3825,8 +3825,8 @@ static void detail_codec_checks(void){
 static void detail_paging_checks(void){
 #define DP_N 40
     RantAllocator ma = rant_allocator_heap(0);
-    RantConfig tc; RantTransportState *tr; RantMetaSchema schemas[DP_N]; RantSchema *S;
-    RantDetailWant wants[DP_N]; uint8_t req[512], buf[RANT_DGRAM_MAX + 8];
+    i_RantTransportConfig tc; i_RantTransportState *tr; i_RantMetaSchema schemas[DP_N]; RantSchema *S;
+    i_RantDetailWant wants[DP_N]; uint8_t req[512], buf[RANT_DGRAM_MAX + 8];
     char names[DP_N][RANT_TOPIC_NAME_MAX + 1];
     int done[DP_N], i, rounds, resolved, max_page = 0;
 
@@ -3841,7 +3841,7 @@ static void detail_paging_checks(void){
 
     memset(schemas, 0, sizeof schemas);
     for (i = 0; i < DP_N; i++){                          /* long names so entries are fat */
-        RantTopicDef d; memset(&d, 0, sizeof d);
+        i_RantTopicDef d; memset(&d, 0, sizeof d);
         snprintf(names[i], sizeof names[i],
                  "paging.detail.regression.topic.with.a.long.name.%02d", i);
         d.name = names[i]; d.role = RANT_PUB_ONLY;
@@ -3853,7 +3853,7 @@ static void detail_paging_checks(void){
        it carried, repeat. Exactly what i_rant_transport_detail_wants drives live. */
     memset(done, 0, sizeof done);
     for (rounds = 0, resolved = 0; resolved < DP_N && rounds < DP_N; rounds++){
-        uint16_t nw = 0; size_t rl, page, len; RantDetailIter it; RantDetail dd; int got = 0;
+        uint16_t nw = 0; size_t rl, page, len; i_RantDetailIter it; i_RantDetail dd; int got = 0;
         for (i = 0; i < DP_N; i++) if (!done[i]){ wants[nw].index = (uint16_t)i; wants[nw].schema_hash = 0; nw++; }
         rl = i_rant_detail_req_build(3, 1, wants, nw, req, sizeof req);
         if (!rl) break;
@@ -3876,8 +3876,8 @@ static void detail_paging_checks(void){
        emit exactly that whole entry, never a header only reply that re asks forever. */
     {   RantAllocator mb = rant_allocator_heap(0);
         RantSchemaBuilder b = rant_schema_begin(rant_allocator_alloc, &mb, "Big");
-        RantTransportState *t2; RantConfig c2; RantMetaSchema sc; RantDetailWant w; RantSchema *B;
-        RantTopicDef d; uint8_t rq[64], *big; size_t need2, rl2, page2, len2; int k;
+        i_RantTransportState *t2; i_RantTransportConfig c2; i_RantMetaSchema sc; i_RantDetailWant w; RantSchema *B;
+        i_RantTopicDef d; uint8_t rq[64], *big; size_t need2, rl2, page2, len2; int k;
         for (k = 0; k < 200; k++){ char fn[16]; snprintf(fn, sizeof fn, "field%03d", k); rant_schema_field(&b, fn, RANT_F64); }
         B = rant_schema_finish(&b);
         ST_CHECK(B && rant_schema_wire(B).len > RANT_DGRAM_MAX,
@@ -3897,7 +3897,7 @@ static void detail_paging_checks(void){
             ST_CHECK(page2 > RANT_DGRAM_MAX, "detail-paging: the oversize entry is measured whole (%u)", (unsigned)page2);
             big = (uint8_t*)rant_allocator_alloc(&mb, NULL, page2 + 8);
             len2 = big ? i_rant_transport_detail_respond(t2, &sc, 1, rant_bytes(rq, rl2), big, page2) : 0;
-            {   RantDetailIter it; RantDetail dd; int n = 0; uint64_t h = 0;
+            {   i_RantDetailIter it; i_RantDetail dd; int n = 0; uint64_t h = 0;
                 memset(&it, 0, sizeof it);
                 while (big && i_rant_detail_next(rant_bytes(big, len2), &it, &dd)){ n++; h = dd.schema_hash; }
                 ST_CHECK(n == 1 && h == rant_schema_hash(B),
@@ -3945,12 +3945,12 @@ static void detail_live_checks(void){
 
     /* the oracle: the publisher's locator, version, and advertised topics as its v9
        blob (held by the subscriber) states them */
-    {   uint16_t cnt=0, k; const RantDiscoveryPeer *ps = st_peers(S, &cnt);
-        const RantDiscoveryPeer *pp = NULL;
+    {   uint16_t cnt=0, k; const i_RantDiscoveryPeerView *ps = st_peers(S, &cnt);
+        const i_RantDiscoveryPeerView *pp = NULL;
         for (k=0;k<cnt;k++) if (ps[k].name.len==6 && memcmp(ps[k].name.data,"dt-pub",6)==0) pp=&ps[k];
         ST_CHECK(pp!=NULL, "detail-live: publisher in the peer view");
         if (pp){
-            RantInterestIter it; RantTopicEntry tp;
+            i_RantInterestIter it; i_RantTopicEntry tp;
             memcpy(pip, pp->addr.ip, 4); pport = pp->addr.port; pversion = pp->meta_version;
             memset(&it,0,sizeof it);
             /* v10 entries carry 32-bit hashes only: bind each announced entry to the
@@ -3980,7 +3980,7 @@ static void detail_live_checks(void){
             uint32_t pid = 0;
             int have_pose = 0, have_plain = 0, pose_typed = 0, plain_raw = 0;
             for (t=0;t<800;t++){
-                uint16_t cnt=0, k; const RantDiscoveryPeer *ops;
+                uint16_t cnt=0, k; const i_RantDiscoveryPeerView *ops;
                 RantIter it; RantEntityInfo ei;
                 rant_node_poll(O,2); rant_node_poll(P,1); rant_node_poll(S,1);
                 ops = st_peers(O, &cnt);
@@ -4009,7 +4009,7 @@ static void detail_live_checks(void){
                topic's schema exactly like a publisher's */
             {   uint32_t sid = 0; int sub_typed = 0;
                 for (t=0;t<800;t++){
-                    uint16_t cnt=0, k; const RantDiscoveryPeer *ops;
+                    uint16_t cnt=0, k; const i_RantDiscoveryPeerView *ops;
                     RantIter it; RantEntityInfo ei;
                     rant_node_poll(O,2); rant_node_poll(P,1); rant_node_poll(S,1);
                     ops = st_peers(O, &cnt);
@@ -4055,7 +4055,7 @@ static void detail_live_checks(void){
     ST_CHECK(q != RANT_SOCK_BAD, "detail-live: raw requester socket");
     if (q != RANT_SOCK_BAD && nw==2 && pport){
         uint8_t req[128], r1[2048], r2[2048]; size_t rl; int n1=-1, n2=-1;
-        RantDetailWant wants[4]; uint16_t k;
+        i_RantDetailWant wants[4]; uint16_t k;
         i_rant_plat_set_nonblock(q);
         for (k=0;k<nw;k++){ wants[k].index=oalias[k]; wants[k].schema_hash=0; }
         rl = i_rant_detail_req_build(dom, pversion, wants, nw, req, sizeof req);
@@ -4079,7 +4079,7 @@ static void detail_live_checks(void){
         ST_CHECK(n1>0, "detail-live: response reached the request's source socket");
         if (n1>0){
             RantBytes rb = rant_bytes(r1, (size_t)n1);
-            RantDetailIter it; RantDetail d; int n=0, names_ok=1, hashes_ok=1, wire_ok=0;
+            i_RantDetailIter it; i_RantDetail d; int n=0, names_ok=1, hashes_ok=1, wire_ok=0;
             ST_CHECK(i_rant_detail_kind(rb)==RANT_DETAIL_RESP && i_rant_detail_domain(rb)==dom
                   && i_rant_detail_meta_version(rb)==pversion,
                      "detail-live: header matches the announced version (%u)", pversion);
@@ -4231,7 +4231,7 @@ static void threaded_checks(void){
     memset(payload, 0x33, sizeof payload);
 
     /* 20. RELIABLE: exactly-once ordered delivery under multithreaded send */
-    { RantTopicDef cd[1]; RantNodeOpts o; RantNode *w, *r;
+    { i_RantTopicDef cd[1]; RantNodeOpts o; RantNode *w, *r;
       memset(cd, 0, sizeof cd);
       cd[0].name = "th/rel"; cd[0].role = RANT_PUB_ONLY;
       cd[0].qos.reliability = RANT_RELIABLE; cd[0].qos.keep_last = 8;
@@ -4286,7 +4286,7 @@ static void threaded_checks(void){
     }
 
     /* 21 + 21b + 22. BURST / HOSTILE / WAKER on one best-effort pair */
-    { RantTopicDef cd[1]; RantNodeOpts o; RantNode *w, *r;
+    { i_RantTopicDef cd[1]; RantNodeOpts o; RantNode *w, *r;
       memset(cd, 0, sizeof cd);
       cd[0].name = "th/burst"; cd[0].role = RANT_PUB_ONLY;
       cd[0].qos.keep_last = 4;   /* best-effort */
@@ -4356,7 +4356,7 @@ static void threaded_checks(void){
 
     /* 22b. CAPPED: a rate capped subscriber holds samples back on its lane, which must never
        slow a depth 1 publisher. A send that waits for the lane's tick takes 20 ms here. */
-    { RantTopicDef cd[1]; RantNodeOpts o; RantNode *w, *r; uint8_t payload[16];
+    { i_RantTopicDef cd[1]; RantNodeOpts o; RantNode *w, *r; uint8_t payload[16];
       memset(payload, 0, sizeof payload);
       memset(cd, 0, sizeof cd);
       cd[0].name = "th/capped"; cd[0].role = RANT_PUB_ONLY;
@@ -4412,7 +4412,7 @@ static void threaded_checks(void){
     /* 22c. UNLOCKED HANDLER: a 30 ms inline handler on the service thread must not delay a
        send on another thread of the same node. A create from a third thread waits for the
        handler and succeeds, a create from inside the handler stays refused. */
-    { RantTopicDef cw[3], cr[3]; RantNodeOpts o; RantNode *w, *r; uint8_t payload[16];
+    { i_RantTopicDef cw[3], cr[3]; RantNodeOpts o; RantNode *w, *r; uint8_t payload[16];
       memset(payload, 0, sizeof payload);
       memset(cw, 0, sizeof cw);
       cw[0].name = "th/fast"; cw[0].role = RANT_PUB_ONLY; cw[0].qos.keep_last = 1; cw[0].qos.max_message_bytes = 32;
@@ -4481,7 +4481,7 @@ static void threaded_checks(void){
 
     /* 23. REENTRANT: echo from the callback, forbidden calls refuse loudly. The ring must be
        deeper than the request burst since a reentrant send never waits for a TX pass. */
-    { RantTopicDef ca[2], cb[2]; RantNodeOpts o; RantNode *a, *b;
+    { i_RantTopicDef ca[2], cb[2]; RantNodeOpts o; RantNode *a, *b;
       memset(ca, 0, sizeof ca);
       ca[0].name = "th/req"; ca[0].role = RANT_PUB_ONLY;
       ca[0].qos.reliability = RANT_RELIABLE; ca[0].qos.keep_last = 16;
@@ -4518,7 +4518,7 @@ static void threaded_checks(void){
        broadcasts them loose, repeated under a watchdog. A hang here is the deadlock detector. */
     { uint64_t phase_t0 = i_rant_plat_now_us(); int iter;
       for (iter=0; iter<3; iter++){
-          RantTopicDef cd[1]; RantNodeOpts o; RantNode *w, *r;
+          i_RantTopicDef cd[1]; RantNodeOpts o; RantNode *w, *r;
           i_RantThread h1, h2;
           memset(cd, 0, sizeof cd);
           cd[0].name = "th/stop"; cd[0].role = RANT_PUB_ONLY;
@@ -4561,7 +4561,7 @@ static void qc_on_message(const RantMsg *msg){ (void)msg; qc_dispatched++; }
 static void queue_checks(void){
     static uint8_t mem_a[1], mem_b[1];
     uint8_t payload[512];
-    RantTopicDef ca[4], cb[4];
+    i_RantTopicDef ca[4], cb[4];
     RantNodeOpts ao, bo;
     RantNode *a, *b;
     RantTopic *lazy, *be, *rel, *disp;
@@ -4726,7 +4726,7 @@ static void cq_on_message(const RantMsg *m){
 static void callback_queue_checks(void){
     static uint8_t mem_a[1], mem_b[1];
     uint8_t payload[64];
-    RantTopicDef ca[3];
+    i_RantTopicDef ca[3];
     RantNodeOpts ao, bo;
     RantNode *a, *b;
     RantTopic *in;
@@ -5501,7 +5501,7 @@ static void patterns_checks(void){
     /* reflection: the entity walk folds P's channels. P hosts 5 functions and 3 variables,
        and the peer walk from C and P's local walk must both yield exactly those. */
     for (t=0;t<200;t++) pf_pump(P,C,2);   /* let any straggling detail fetches settle */
-    { const RantDiscoveryPeer *ps; uint16_t pc = 0; uint32_t pid = 0;
+    { const i_RantDiscoveryPeerView *ps; uint16_t pc = 0; uint32_t pid = 0;
       ps = st_peers(C, &pc);
       if (ps && pc) pid = ps[0].id;
       { RantIter eit; RantEntityInfo ei;
@@ -5938,7 +5938,7 @@ static void txm_tap_on_msg(void *user, const RantMsg *msg){
 }
 static uint32_t txm_peer_by_name(RantNode *n, const char *name){
     uint16_t cnt, i; size_t nl = strlen(name);
-    const RantDiscoveryPeer *ps = st_peers(n, &cnt);
+    const i_RantDiscoveryPeerView *ps = st_peers(n, &cnt);
     if (!ps) return 0;
     for (i=0;i<cnt;i++)
         if (ps[i].name.len==nl && memcmp(ps[i].name.data,name,nl)==0) return ps[i].id;
@@ -6431,10 +6431,10 @@ static void dup_authority_checks(void){
       /* wait until B holds A's interest: the create-time sweep's precondition */
       { uint32_t want = (uint32_t)i_rant_topic_id("dupvar"); int seen = 0;
         for (t=0;t<2000 && !seen;t++){
-            const RantDiscoveryPeer *ps; uint16_t pc;
+            const i_RantDiscoveryPeerView *ps; uint16_t pc;
             pf_pump(A,B,2);
             ps = st_peers(B,&pc);
-            if (ps && pc){ RantInterestIter it; RantTopicEntry e; memset(&it,0,sizeof it);
+            if (ps && pc){ i_RantInterestIter it; i_RantTopicEntry e; memset(&it,0,sizeof it);
                 while (i_rant_node_peer_interest_next(&ps[0], &it, &e))
                     if (e.hash==want){ seen=1; break; } }
         }
@@ -6725,7 +6725,7 @@ static void reflect_dropped_checks(void){
     ST_CHECK(def != NULL, "ghost: variable definition created");
     { int ents = 0;
       for (t=0;t<2000 && !ents;t++){
-          RantIter eit; RantEntityInfo ei; const RantDiscoveryPeer *ps; uint16_t pc;
+          RantIter eit; RantEntityInfo ei; const i_RantDiscoveryPeerView *ps; uint16_t pc;
           pf_pump(A,B,2);
           ps = st_peers(B, &pc);
           if (!(ps && pc)) continue;
@@ -6738,7 +6738,7 @@ static void reflect_dropped_checks(void){
     rant_node_close(A, 0);     /* silent death, no BYE: B must DROP (not forget) the peer */
     { uint64_t end = i_rant_plat_now_us() + 1200000u;     /* > peer_timeout */
       while (i_rant_plat_now_us() < end) rant_node_poll(B, 5); }
-    { const RantDiscoveryPeer *ps; uint16_t pc, i; int dropped = 0;
+    { const i_RantDiscoveryPeerView *ps; uint16_t pc, i; int dropped = 0;
       ps = st_peers(B, &pc);
       for (i=0; ps && i<pc; i++)
           if (ps[i].id == pid && ps[i].liveness == RANT_PEER_DROPPED) dropped = 1;
@@ -6781,10 +6781,10 @@ static void varwait_checks(void){
        come from the cached blob. Verdicts are not yet fetched. */
     { uint32_t want = (uint32_t)i_rant_topic_id("vw"); int seen = 0;
       for (t=0;t<2000 && !seen;t++){
-          const RantDiscoveryPeer *ps; uint16_t pc;
+          const i_RantDiscoveryPeerView *ps; uint16_t pc;
           pf_pump(P,C,2);
           ps = st_peers(C,&pc);
-          if (ps && pc){ RantInterestIter it; RantTopicEntry e; memset(&it,0,sizeof it);
+          if (ps && pc){ i_RantInterestIter it; i_RantTopicEntry e; memset(&it,0,sizeof it);
               while (i_rant_node_peer_interest_next(&ps[0], &it, &e))
                   if (e.hash==want){ seen=1; break; } }
       }
@@ -7289,7 +7289,7 @@ static void rly_on_message(const RantMsg *msg){
 /* is `name` an ACTIVE peer of n? (the peer view is discovery's own, valid until the next poll) */
 static int rly_sees(RantNode *n, const char *name){
     uint16_t c = 0, i; size_t nl = strlen(name);
-    const RantDiscoveryPeer *p = st_peers(n, &c);
+    const i_RantDiscoveryPeerView *p = st_peers(n, &c);
     for (i=0;i<c;i++)
         if (p[i].liveness == RANT_PEER_ACTIVE && p[i].name.len == nl &&
             memcmp(p[i].name.data, name, nl) == 0) return 1;
@@ -7500,7 +7500,7 @@ static void nat_checks(void){
  * the proof, it is deliberately not the port A bound. */
 static int sip_addr_of(RantNode *n, const char *name, RantAddr *out){
     uint16_t c = 0, i; size_t nl = strlen(name);
-    const RantDiscoveryPeer *p = st_peers(n, &c);
+    const i_RantDiscoveryPeerView *p = st_peers(n, &c);
     for (i=0;i<c;i++)
         if (p[i].liveness == RANT_PEER_ACTIVE && p[i].name.len == nl &&
             memcmp(p[i].name.data, name, nl) == 0){ *out = p[i].addr; return 1; }
@@ -7583,7 +7583,7 @@ static void ts_on_var_write(const RantVariableUpdate *u, void *user){
 static void ts_checks(void){
     static uint8_t mem_a[1], mem_b[1];
     static unsigned char big[64*1024];
-    RantTopicDef ca[4], cb[4];
+    i_RantTopicDef ca[4], cb[4];
     RantNodeOpts ao, bo; RantAddr seed;
     RantNode *A, *B;
     uint8_t payload[64];
@@ -7838,7 +7838,7 @@ static void ts_checks(void){
 static void interest_codec_checks(void){
     static uint8_t tmem[1<<16];
     RantAllocator ma = rant_allocator_heap(0);
-    RantConfig tc; RantTransportState *tr; RantTopicDef ch[3];
+    i_RantTransportConfig tc; i_RantTransportState *tr; i_RantTopicDef ch[3];
     uint8_t meta[256], req[64], page[128];
     uint16_t ml; uint32_t total, off; RantBytes chunk;
 
@@ -7938,7 +7938,7 @@ static void interest_external_checks(void){
     {   /* reflection reads the assembled interest, not the announce: the entity fold must
            enumerate the external peer's whole set. The interest epoch is the observer cache key. */
         uint16_t cnt, k; int ents = 0; uint32_t pid = 0, epoch = 0;
-        const RantDiscoveryPeer *ps = st_peers(S, &cnt);
+        const i_RantDiscoveryPeerView *ps = st_peers(S, &cnt);
         for (k=0;k<cnt;k++)
             if (ps && ps[k].name.len==6 && !memcmp(ps[k].name.data,"ix-pub",6)){
                 pid = ps[k].id; epoch = i_rant_node_peer_interest_epoch(&ps[k]);
@@ -7969,7 +7969,7 @@ static void interest_external_checks(void){
     {   /* the epoch is quiet in steady state too: an epoch-keyed observer cache
            (the explorer) re-walks only on real change, never per announce */
         uint16_t cnt, k; uint32_t epoch_now = 0;
-        const RantDiscoveryPeer *ps = st_peers(S, &cnt);
+        const i_RantDiscoveryPeerView *ps = st_peers(S, &cnt);
         for (k=0;k<cnt;k++)
             if (ps && ps[k].id==ix_epoch_pid) epoch_now = i_rant_node_peer_interest_epoch(&ps[k]);
         ST_CHECK(ix_epoch_pid && epoch_now==ix_epoch,
@@ -8044,7 +8044,7 @@ static void metalog_checks(void){
 
     /* @rant/meta: B calls A's endpoint directed at A's peer id. A answers on its service
        thread while B blocks in the call */
-    { const RantDiscoveryPeer *ps; uint16_t cnt=0; uint32_t idA=0;
+    { const i_RantDiscoveryPeerView *ps; uint16_t cnt=0; uint32_t idA=0;
       RantResponse rep; int rc;
       ps = st_peers(B, &cnt);
       for (i=0;i<(int)cnt;i++)
@@ -8108,7 +8108,7 @@ static int selftest_main(void){
     printf("selftest domains: %u..\n", (unsigned)st_domain_base);
     memset(payload, 0x5A, sizeof payload);
 
-    RantTopicDef ch[4]; memset(ch, 0, sizeof ch);
+    i_RantTopicDef ch[4]; memset(ch, 0, sizeof ch);
     ch[0].name = "st/gap";
     ch[0].qos.reliability = RANT_RELIABLE; ch[0].qos.keep_last = ST_DEPTH;
     ch[0].qos.max_message_bytes = 64; ch[0].qos.heartbeat_us = 50000;
@@ -8121,7 +8121,7 @@ static int selftest_main(void){
     /* disable_shm: phases 2 to 4b exercise the UDP reliability path. The same host SHM path
        has its own coverage and its chunk recycle semantics differ. */
     RantNodeOpts wo = { .domain = ST_DOMAIN, .disable_shm = 1 };
-    { RantNodeOpts ro = wo; RantTopicDef chr[4]; RantNode *w, *r;
+    { RantNodeOpts ro = wo; i_RantTopicDef chr[4]; RantNode *w, *r;
       memcpy(chr, ch, sizeof ch);
       ch[0].role = ch[1].role = ch[2].role = ch[3].role = RANT_PUB_ONLY;
       chr[0].role = chr[1].role = chr[3].role = RANT_SUB_ONLY;
@@ -8236,7 +8236,7 @@ static int selftest_main(void){
         i_rant_transport_apply_peer_interest(r->transport, wid, rant_bytes(ib, il));
         /* the apply only nominates, since peer_remove dropped the cached verdicts. Run the sans
            IO detail exchange by hand so the flapped reader re verifies and rematches */
-        {   RantDetailWant wl[8]; uint8_t rq[256], rp[1024]; uint16_t nw2, verified; size_t rl2, pl2;
+        {   i_RantDetailWant wl[8]; uint8_t rq[256], rp[1024]; uint16_t nw2, verified; size_t rl2, pl2;
             nw2 = i_rant_transport_detail_wants(r->transport, NULL, wid, rant_bytes(ib, il), wl, 8);
             ST_CHECK(nw2 > 0, "flap: re-added peer nominates pending candidates (%u)", nw2);
             rl2 = i_rant_detail_req_build(ST_DOMAIN, 0, wl, nw2, rq, sizeof rq);
@@ -8282,7 +8282,7 @@ static int selftest_main(void){
 
     /* 6. SCALE: 40 topics. The full interest list rides one announce blob, matched at peer_up */
     { static uint8_t mem_a[1<<20], mem_b[1<<20];
-      static RantTopicDef cha[ST_NCH], chb[ST_NCH];
+      static i_RantTopicDef cha[ST_NCH], chb[ST_NCH];
       static char snames[ST_NCH][12];     /* "scale/0".."scale/39" */
       RantNodeOpts ao, bo; RantNode *a, *b; uint16_t k;
       memset(cha, 0, sizeof cha);
@@ -8316,7 +8316,7 @@ static int selftest_main(void){
     /* 7. NAMED: the cross peer identity is the topic name hash, independent of each node's
        local handle. A distinct name never cross wires and clean names raise no collision. */
     { static uint8_t mem_nw[1<<20], mem_nr[1<<20];
-      RantTopicDef nw[1], nr[2];
+      i_RantTopicDef nw[1], nr[2];
       RantNodeOpts wo2, ro2; RantNode *w2, *r2;
       memset(nw,0,sizeof nw); memset(nr,0,sizeof nr);
       nw[0].name="robot/lidar"; nw[0].role=RANT_PUB_ONLY;
@@ -8350,7 +8350,7 @@ static int selftest_main(void){
        FNV-1a. Rant must fire on_collision and refuse the match, never cross wire. */
     { static uint8_t mem_cw[1<<20], mem_cr[1<<20];
       const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both hash to 23f58aa8628b1cce */
-      RantTopicDef cw, cr; RantNodeOpts wo3, ro3; RantNode *w3, *r3;
+      i_RantTopicDef cw, cr; RantNodeOpts wo3, ro3; RantNode *w3, *r3;
       ST_CHECK(i_rant_topic_id(A)==i_rant_topic_id(B) && strcmp(A,B)!=0,
                "collision: test pair still shares one identity (else regen via collide)");
       memset(&cw,0,sizeof cw);
@@ -8623,7 +8623,7 @@ static void ctl_on_message(const RantMsg *msg){
 static RantNode *ctl_open(uint16_t domain, int coordinator,
                          const char *if_ip, const char *peer_ip){
     static uint8_t mem[8<<20];
-    static RantTopicDef ch[2];
+    static i_RantTopicDef ch[2];
     static RantAddr seed;
     RantNodeOpts opts;
     memset(ch, 0, sizeof ch);

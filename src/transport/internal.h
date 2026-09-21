@@ -35,7 +35,7 @@
 /* per entry interest flags, the announce's hash list */
 #define RANT__INT_ROLE_MASK 0x03u /* bits 0 and 1: the advertiser's RantRole */
 #define RANT__INT_RELIABLE    0x04u /* bit 2: offered or requested reliability */
-#define RANT__INT_KIND_MASK 0x78u /* bits 3 to 6: the advertiser's RantTopicKind */
+#define RANT__INT_KIND_MASK 0x78u /* bits 3 to 6: the advertiser's i_RantTopicKind */
 #define RANT__INT_KIND_SHIFT 3u
 #define RANT__INT_HOLE_RUN    0x80u /* bit 7: a run of undefined slots, hash = the run length */
 #ifdef RANT_SHM
@@ -183,7 +183,7 @@ typedef struct {
     const char *name;       /* our copy, NUL terminated storage */
     uint8_t   name_len;
     uint8_t   role;         /* RantRole */
-    uint8_t   kind;         /* RantTopicKind, gates matching */
+    uint8_t   kind;         /* i_RantTopicKind, gates matching */
     uint8_t   attrs;        /* RANT_ATTR_* from the definer, NO_TIMESTAMP derives from the qos */
     uint8_t   prefix_bytes; /* pattern header bytes in front of each payload */
     uint8_t   directed;     /* point to point sends, no cross lane MSG_LOST */
@@ -204,13 +204,13 @@ typedef struct {
     RantRepairStats repair_stats;
 } i_RantTopic;
 
-struct RantTransportState {
-    RantConfig      cfg;
+struct i_RantTransportState {
+    i_RantTransportConfig      cfg;
     uint32_t      *peer_ids;  /* [max_peers] */
     uint8_t       *peer_used; /* [max_peers] */
     uint8_t       *peer_dormant;/* [max_peers] silent peers, out of flow control, state kept */
     uint16_t      *peer_frag; /* [max_peers] each peer's advertised fragment size */
-    RantPeerRtt *peer_rtt;    /* [max_peers] the round trip estimator */
+    i_RantPeerRtt *peer_rtt;    /* [max_peers] the round trip estimator */
     uint16_t     frag;        /* our fragment size */
 #ifdef RANT_SHM
     uint8_t     *peer_shm;  /* [max_peers] 1 = the peer can receive SHM-DATA */
@@ -263,7 +263,7 @@ static inline const uint8_t *i_rant_sample_buf(const i_RantWriterSample *s){ ret
 #endif
 /* Keeps next_deadline at the minimum armed time. t 0 is an immediate ack, woken through
    the active lane queue, so it is ignored here. */
-static inline void i_rant_transport_arm_deadline(RantTransportState *st, uint64_t t){
+static inline void i_rant_transport_arm_deadline(i_RantTransportState *st, uint64_t t){
     if (t && t < st->next_deadline_us) st->next_deadline_us = t;
 }
 
@@ -292,25 +292,25 @@ static inline int i_rant_topic_needs_sweep(const i_RantTopic *topic){
 }
 
 /* The lane record for a (topic, peer) pair, RANT__NIL when unmatched. */
-static inline uint32_t i_rant_lane_id(RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+static inline uint32_t i_rant_lane_id(i_RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
     uint16_t lane = st->lane_index[(size_t)topic_index*st->cfg.max_peers + peer_slot];
     return lane == 0xFFFFu ? RANT__NIL : (uint32_t)lane;
 }
-static inline i_RantLane *i_rant_lane_at(RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+static inline i_RantLane *i_rant_lane_at(i_RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
     uint32_t li = i_rant_lane_id(st, topic_index, peer_slot);
     return li == RANT__NIL ? NULL : &st->lanes[li];
 }
 /* NULL when the lane is unmatched. Every caller treats that as not used. */
-static inline i_RantWriterProxy *i_rant_writer_proxy_at(RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+static inline i_RantWriterProxy *i_rant_writer_proxy_at(i_RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
     i_RantLane *l = i_rant_lane_at(st, topic_index, peer_slot);
     return l ? &l->w : NULL;
 }
-static inline i_RantReaderProxy *i_rant_reader_proxy_at(RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+static inline i_RantReaderProxy *i_rant_reader_proxy_at(i_RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
     i_RantLane *l = i_rant_lane_at(st, topic_index, peer_slot);
     return l ? &l->r : NULL;
 }
 /* The wire index of a local topic is its own index. The peer mapped it from our interest. */
-static inline uint16_t i_rant_wire_index_of(RantTransportState *st, int topic_index){
+static inline uint16_t i_rant_wire_index_of(i_RantTransportState *st, int topic_index){
     (void)st; return (uint16_t)topic_index;
 }
 
@@ -321,23 +321,23 @@ size_t i_rant_wire_mk_shm(uint8_t *o, uint16_t index, uint64_t base, uint16_t co
 #endif
 size_t i_rant_wire_mk_hb(uint8_t *o, uint16_t index, uint64_t first, uint64_t last, uint32_t cnt);
 size_t i_rant_wire_mk_nack(uint8_t *o, uint16_t index, uint64_t base, uint16_t nbits, uint32_t bitmap, uint32_t epoch, uint8_t flags);
-void   i_rant_lane_wake(RantTransportState *st, uint16_t topic_index, uint32_t peer_slot);
-void   i_rant_lane_enqueue(RantTransportState *st, uint32_t li);
-void   i_rant_sched_drop(RantTransportState *st, uint32_t rec);
-size_t i_rant_writer_emit(RantTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
-void   i_rant_writer_nack(RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
+void   i_rant_lane_wake(i_RantTransportState *st, uint16_t topic_index, uint32_t peer_slot);
+void   i_rant_lane_enqueue(i_RantTransportState *st, uint32_t li);
+void   i_rant_sched_drop(i_RantTransportState *st, uint32_t rec);
+size_t i_rant_writer_emit(i_RantTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
+void   i_rant_writer_nack(i_RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
 /* the per peer RTT estimator: fold one sample, and the retransmit bound it implies */
-void     i_rant_rtt_sample(RantTransportState *st, uint32_t peer_slot, uint64_t sample_us);
-uint32_t i_rant_rtt_rto(RantTransportState *st, uint32_t peer_slot, uint32_t fallback_us);
-void   i_rant_reader_data(RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
+void     i_rant_rtt_sample(i_RantTransportState *st, uint32_t peer_slot, uint64_t sample_us);
+uint32_t i_rant_rtt_rto(i_RantTransportState *st, uint32_t peer_slot, uint32_t fallback_us);
+void   i_rant_reader_data(i_RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
 #ifdef RANT_SHM
-void   i_rant_reader_shm(RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
+void   i_rant_reader_shm(i_RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
 #endif
-void   i_rant_reader_hb(RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
-size_t i_rant_reader_emit(RantTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
-i_RantTopic *i_rant_topic_at(RantTransportState *st, uint16_t topic_index, int *idx_out);
-int    i_rant_peer_slot(RantTransportState *st, uint32_t id);
-void   i_rant_transport_fire_event(RantTransportState *st, RantErrorKind error, uint16_t topic_index, uint32_t peer, uint64_t first, uint64_t count);
+void   i_rant_reader_hb(i_RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
+size_t i_rant_reader_emit(i_RantTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
+i_RantTopic *i_rant_topic_at(i_RantTransportState *st, uint16_t topic_index, int *idx_out);
+int    i_rant_peer_slot(i_RantTransportState *st, uint32_t id);
+void   i_rant_transport_fire_event(i_RantTransportState *st, RantErrorKind error, uint16_t topic_index, uint32_t peer, uint64_t first, uint64_t count);
 uint64_t i_rant_topic_unicast_join_seqno(const i_RantTopic *topic);
 
 #endif /* RANT_TRANSPORT_INTERNAL_H */

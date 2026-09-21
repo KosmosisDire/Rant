@@ -74,7 +74,7 @@ struct RantTopic {
     uint64_t  came_up_us;                /* our last create, role change or retype: the match wait's anchor */
     uint8_t   prefix_bytes;              /* pattern header bytes split into .header, 0 = plain */
     uint8_t   prefix_string;             /* [u8 len][bytes] follows the prefix on a response kind */
-    uint8_t   kind;                      /* RantTopicKind */
+    uint8_t   kind;                      /* i_RantTopicKind */
     uint8_t   role;                      /* RantRole, mirrored at create and set_role */
     uint8_t   attrs, directed;           /* the def's declared facts, kept so refresh can redefine */
     uint8_t   reflect;                   /* created with reflect_from_mesh, so refresh applies */
@@ -96,9 +96,9 @@ typedef struct {
 } i_RantLogPend;
 
 struct RantNode {
-    RantTransportState       *transport;
+    i_RantTransportState       *transport;
     i_RantNodeCore *core;       /* the peer table and discovery lifecycle, sans-IO */
-    RantDiscovery       *discovery;
+    i_RantDiscovery       *discovery;
     i_RantSock         fd;       /* the unicast data socket */
     uint16_t      domain;
     RantNodeNet    net;         /* a copy of opts.net */
@@ -773,8 +773,8 @@ typedef struct {
 } i_RantNodeBlocks;
 
 static void i_rant_node_layout(i_RantBump *b, uint16_t max_peers, uint16_t max_topics,
-                              const RantConfig *transport_cfg,
-                              const RantDiscoveryCoreConfig *discovery_cfg, i_RantNodeBlocks *o){
+                              const i_RantTransportConfig *transport_cfg,
+                              const i_RantDiscoveryCoreConfig *discovery_cfg, i_RantNodeBlocks *o){
     o->handles       = (uint8_t*)i_rant_bump_take(b, (size_t)max_topics * sizeof(RantTopic*), 16);
     o->node_core_bytes = i_rant_node_core_required_memory(max_topics);     /* no peers here */
     o->node_core = (uint8_t*)i_rant_bump_take(b, o->node_core_bytes, 16);
@@ -934,7 +934,7 @@ void *rant_heap_realloc(void *user, void *ptr, size_t size){
 }
 
 RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_message, RantEventFn on_event, const RantNodeOpts *opts){
-    RantNodeOpts o; RantDiscoveryCoreConfig dc; RantConfig tc; i_RantNodeBlocks blocks;
+    RantNodeOpts o; i_RantDiscoveryCoreConfig dc; i_RantTransportConfig tc; i_RantNodeBlocks blocks;
     uint16_t max_peers, max_topics, user_topics;
     uint8_t *base; void *arena; size_t need; RantAllocator pool;
     RantNode *n; i_RantSock fd; uint16_t local_port;
@@ -1158,8 +1158,8 @@ fail_threads:
  * buffers, SHM segments and the user held handles stay put. 0 leaves n unchanged. */
 static int i_rant_node_grow(RantNode *n, uint16_t new_max_peers, uint16_t new_max_topics,
                             uint16_t want_meta_cap){
-    RantConfig tc; RantDiscoveryCoreConfig dc; i_RantNodeBlocks nb; i_RantBump b;
-    RantTransportState *nt; i_RantNodeCore *ncore; RantDiscovery *ndisc;
+    i_RantTransportConfig tc; i_RantDiscoveryCoreConfig dc; i_RantNodeBlocks nb; i_RantBump b;
+    i_RantTransportState *nt; i_RantNodeCore *ncore; i_RantDiscovery *ndisc;
     void *new_arena, *old_arena = n->arena;
     uint8_t *nbase; size_t need;
     uint16_t old_max_topics = n->max_topics;
@@ -1277,7 +1277,7 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
                               const RantSchema *schema, const RantTopicOpts *opts,
                               uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
                               i_RantSysMsgFn sys_msg, void *sys_user, int allow_at){
-    RantTopicDef def; RantTopic *h; uint16_t idx; int acquired;
+    i_RantTopicDef def; RantTopic *h; uint16_t idx; int acquired;
     int reuse = 0;
     if (!n || !name) return NULL;
     acquired = i_rant_node_lock(n);
@@ -2234,8 +2234,8 @@ uint8_t    i_rant_topic_kind (const RantTopic *topic){ return topic ? topic->kin
 uint8_t    i_rant_topic_role (const RantTopic *topic){ return topic ? topic->role : (uint8_t)RANT_INACTIVE; }
 uint8_t    i_rant_topic_reliability(const RantTopic *topic){ return topic ? (uint8_t)topic->qos.reliability : 0; }
 int i_rant_node_peer_uuid(RantNode *n, uint32_t peer, uint8_t out[16]){
-    const RantDiscoveryState *st; uint16_t q, np; int acquired, found = 0;
-    RantDiscoveryPeer v;
+    const i_RantDiscoveryState *st; uint16_t q, np; int acquired, found = 0;
+    i_RantDiscoveryPeerView v;
     if (!n) return 0;
     acquired = i_rant_node_lock(n);
     st = i_rant_discovery_state(n->discovery);
@@ -2343,7 +2343,7 @@ int rant_node_peers_next(RantNode *n, RantIter *it, RantPeerInfo *out){
     acquired = i_rant_node_lock(n);
     r = i_rant_node_core_peers_next(n->core, it, out);
     if (r){   /* the transport's path measurement, folded in since the core is sans transport */
-        RantPeerRtt e;
+        i_RantPeerRtt e;
         if (i_rant_transport_peer_rtt(n->transport, out->id, &e)){
             out->rtt_us = e.rtt_us; out->rtt_jitter_us = e.rtt_jitter_us;
             out->rtt_min_us = e.rtt_min_us; out->rtt_samples = e.samples;
@@ -2392,7 +2392,7 @@ uint32_t rant_node_mesh_epoch(RantNode *n){
 /* Re types a live topic in place: the slot is retired and reused at the same index under
  * a bumped generation, the schema copy replaced, the handle and queue kept. Lock held. */
 int i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reliability){
-    RantNode *n = topic->n; RantTopicDef def; RantSchema *copy = NULL; uint16_t idx = topic->index;
+    RantNode *n = topic->n; i_RantTopicDef def; RantSchema *copy = NULL; uint16_t idx = topic->index;
     uint32_t rb; int rc;
     i_rant_node_callbacks_settle(n);
     if (schema){
@@ -2633,7 +2633,7 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
     }
     if (sections & RANT_META_PEERS){
         uint16_t cnt = 0, i;
-        const RantDiscoveryPeer *ps = i_rant_discovery_peers(n->discovery, &cnt);
+        const i_RantDiscoveryPeerView *ps = i_rant_discovery_peers(n->discovery, &cnt);
         rant_map_open_array(w, "peers");
         for (i = 0; i < cnt; i++){
             uint16_t pub_to = 0, recv_from = 0;
@@ -2651,7 +2651,7 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
             rant_map_put_uint(w, "age_us", now > ps[i].last_heard_us ? now - ps[i].last_heard_us : 0);
             rant_map_put_uint(w, "publish_to", pub_to);
             rant_map_put_uint(w, "receive_from", recv_from);
-            {   RantPeerRtt e;     /* the measured round trip, absent until the first sample */
+            {   i_RantPeerRtt e;     /* the measured round trip, absent until the first sample */
                 if (i_rant_transport_peer_rtt(n->transport, ps[i].id, &e) && e.samples){
                     rant_map_put_uint(w, "rtt_us", e.rtt_us);
                     rant_map_put_uint(w, "rtt_jitter_us", e.rtt_jitter_us);
@@ -2777,7 +2777,7 @@ int rant_topic_ready(RantTopic *topic){
 static int i_rant_node_settled(RantNode *n, uint64_t start, uint64_t now){
     uint64_t quiet = n->announce_us < 300000u ? n->announce_us : 300000u;
     uint16_t i, count = 0;
-    const RantDiscoveryPeer *peers = i_rant_discovery_peers(n->discovery, &count);
+    const i_RantDiscoveryPeerView *peers = i_rant_discovery_peers(n->discovery, &count);
     int any = 0;
     for (i = 0; i < count; i++){
         if (peers[i].liveness != RANT_PEER_ACTIVE) continue;     /* dropped: not expected to answer */

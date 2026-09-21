@@ -8,8 +8,8 @@
 #define RANT_DISCOVERY_BYE_SENDS 3     /* one shot UDP, so resend. Receivers dedup by uuid */
 #define RANT_DISCOVERY_IF_SCAN_US 3000000u     /* re enumerate interfaces this often in auto mode */
 
-struct RantDiscovery {
-    RantDiscoveryState *core;
+struct i_RantDiscovery {
+    i_RantDiscoveryState *core;
     i_RantSock              fd;
     i_RantSock              tx_fd;         /* unicast TX leaves here: the node's data socket, else fd */
     i_RantIface            ifs[RANT_DISCOVERY_MAX_SUBNETS];    /* joined and announced out of */
@@ -23,26 +23,26 @@ struct RantDiscovery {
     uint32_t               wire_max;    /* scratch buffer size */
     uint8_t               *rxbuf;       /* arena, wire_max */
     uint8_t               *txbuf;       /* arena, wire_max */
-    RantDiscoveryPeer     *peer_view;   /* arena, max_peers: the snapshot for i_rant_discovery_peers */
+    i_RantDiscoveryPeerView     *peer_view;   /* arena, max_peers: the snapshot for i_rant_discovery_peers */
     RantAddr    seeds[RANT_DISCOVERY_MAX_SEEDS];
     uint16_t             n_seeds;
 };
 
-static void i_rant_discovery_tx1(RantDiscovery *d, const uint8_t *out, size_t n_bytes,
+static void i_rant_discovery_tx1(i_RantDiscovery *d, const uint8_t *out, size_t n_bytes,
                           const uint8_t ip[4], uint16_t port){
     i_rant_plat_send(d->tx_fd, out, n_bytes, ip, port);
 }
 
 /* One copy: the data port once the blob named one, else the discovery port. A peer whose
  * data port is unreachable should look dead. */
-static void i_rant_discovery_tx_to(RantDiscovery *d, const uint8_t *out, size_t n_bytes,
+static void i_rant_discovery_tx_to(i_RantDiscovery *d, const uint8_t *out, size_t n_bytes,
                           const RantAddr *addr){
     if (addr->ip_len != 4) return;
     i_rant_discovery_tx1(d, out, n_bytes, addr->ip, addr->port ? addr->port : d->discovery_port);
 }
 
 /* An observed source exactly, else the locator. */
-static void i_rant_discovery_tx_peer(RantDiscovery *d, const uint8_t *out, size_t n_bytes,
+static void i_rant_discovery_tx_peer(i_RantDiscovery *d, const uint8_t *out, size_t n_bytes,
                           const RantAddr *addr, int kind){
     if (kind == 2){ if (addr->ip_len == 4) i_rant_discovery_tx1(d, out, n_bytes, addr->ip, addr->port); }
     else if (kind == 1) i_rant_discovery_tx_to(d, out, n_bytes, addr);
@@ -50,7 +50,7 @@ static void i_rant_discovery_tx_peer(RantDiscovery *d, const uint8_t *out, size_
 
 /* Out of every interface, so each copy carries the source correct for its path. A failed
  * sendto on one adapter does not stop the others. */
-static void i_rant_discovery_tx_group(RantDiscovery *d, const uint8_t *out, size_t n_bytes){
+static void i_rant_discovery_tx_group(i_RantDiscovery *d, const uint8_t *out, size_t n_bytes){
     uint8_t group_ip[4], i;
     if (d->unicast_only) return;   /* seeds and known peers are the only paths */
     i_rant_plat_naddr_to_ip4(d->group_naddr, group_ip);
@@ -63,7 +63,7 @@ static void i_rant_discovery_tx_group(RantDiscovery *d, const uint8_t *out, size
 
 /* The group, every seed and every known peer. skip_uuid leaves out a proxy's own origin,
  * whose self filter would only discard it. */
-static void i_rant_discovery_tx(RantDiscovery *d, const uint8_t *out, size_t n_bytes,
+static void i_rant_discovery_tx(i_RantDiscovery *d, const uint8_t *out, size_t n_bytes,
                           const uint8_t *skip_uuid){
     uint16_t s, discovery_port = d->discovery_port;
     RantAddr addr;
@@ -76,7 +76,7 @@ static void i_rant_discovery_tx(RantDiscovery *d, const uint8_t *out, size_t n_b
     for (s=0; s<d->max_peers; s++){
         int kind;
         if (skip_uuid){
-            RantDiscoveryPeer v;
+            i_RantDiscoveryPeerView v;
             if (i_rant_discovery_peer_at(d->core, s, &v) && memcmp(v.uuid, skip_uuid, 16)==0)
                 continue;
         }
@@ -85,25 +85,25 @@ static void i_rant_discovery_tx(RantDiscovery *d, const uint8_t *out, size_t n_b
     }
 }
 
-void i_rant_discovery_feed(RantDiscovery *d, const RantAddr *src, RantBytes datagram){
+void i_rant_discovery_feed(i_RantDiscovery *d, const RantAddr *src, RantBytes datagram){
     if (!d) return;
     /* the data socket is the DATA channel */
     i_rant_discovery_on_datagram(d->core, src, RANT_DISCOVERY_VIA_DATA, datagram, i_rant_plat_now_us());
 }
 
-void i_rant_discovery_set_tx_fd(RantDiscovery *d, i_RantSock fd){
+void i_rant_discovery_set_tx_fd(i_RantDiscovery *d, i_RantSock fd){
     if (d) d->tx_fd = (fd == RANT_SOCK_BAD) ? d->fd : fd;
 }
 
-void i_rant_discovery_advertise(RantDiscovery *d, RantBytes meta){
+void i_rant_discovery_advertise(i_RantDiscovery *d, RantBytes meta){
     if (d) i_rant_discovery_set_meta(d->core, meta);
 }
 
-void i_rant_discovery_replay(RantDiscovery *d){
+void i_rant_discovery_replay(i_RantDiscovery *d){
     if (d) i_rant_discovery_replay_peers(d->core);
 }
 
-i_RantSock i_rant_discovery_fd(RantDiscovery *d){ return d ? d->fd : RANT_SOCK_BAD; }
+i_RantSock i_rant_discovery_fd(i_RantDiscovery *d){ return d ? d->fd : RANT_SOCK_BAD; }
 
 /* The up, non loopback interfaces. Loopback is the fallback for a host with nothing else
  * up, never a member of the normal set. 0 only when the platform cannot enumerate. */
@@ -140,8 +140,8 @@ static int i_rant_discovery_if_has(const i_RantIface *set, uint8_t n, uint32_t a
 
 /* Leaves what went away, joins what appeared, and hands the core our subnets. A per
  * interface join failure is ordinary, so this returns how many memberships are live. */
-static uint8_t i_rant_discovery_if_apply(RantDiscovery *d, const i_RantIface *want, uint8_t n_want){
-    RantDiscoverySubnet nets[RANT_DISCOVERY_MAX_SUBNETS];
+static uint8_t i_rant_discovery_if_apply(i_RantDiscovery *d, const i_RantIface *want, uint8_t n_want){
+    i_RantDiscoverySubnet nets[RANT_DISCOVERY_MAX_SUBNETS];
     uint8_t i, joined = 0;
     if (n_want > RANT_DISCOVERY_MAX_SUBNETS) n_want = RANT_DISCOVERY_MAX_SUBNETS;
     if (d->unicast_only) joined = n_want;   /* no membership, but the core still gets our subnets */
@@ -165,7 +165,7 @@ static uint8_t i_rant_discovery_if_apply(RantDiscovery *d, const i_RantIface *wa
 }
 
 /* A link that comes up after open is joined, and one that goes away drops its membership. */
-static void i_rant_discovery_if_refresh(RantDiscovery *d){
+static void i_rant_discovery_if_refresh(i_RantDiscovery *d){
     i_RantIface want[RANT_DISCOVERY_MAX_SUBNETS];
     uint8_t n_want = i_rant_discovery_if_scan(want, RANT_DISCOVERY_MAX_SUBNETS);
     uint8_t i, same = (uint8_t)(n_want == d->n_ifs);
@@ -213,22 +213,22 @@ uint8_t i_rant_discovery_default_name(char *out, size_t cap, const char *want){
 
 /* The one arena layout: the struct, the wire scratch, the peer view, then the core. */
 typedef struct {
-    RantDiscovery *d;
+    i_RantDiscovery *d;
     uint8_t *rxbuf, *txbuf, *peer_view, *core;
     size_t   wire_max, core_bytes;
 } i_RantRtBlocks;
-static void i_rant_discovery_rt_layout(i_RantBump *b, const RantDiscoveryCoreConfig *c, i_RantRtBlocks *o){
+static void i_rant_discovery_rt_layout(i_RantBump *b, const i_RantDiscoveryCoreConfig *c, i_RantRtBlocks *o){
     o->wire_max   = i_rant_discovery_wire_size(c->meta_cap);
-    o->d     = (RantDiscovery*)i_rant_bump_take(b, sizeof(struct RantDiscovery), 16);
+    o->d     = (i_RantDiscovery*)i_rant_bump_take(b, sizeof(struct i_RantDiscovery), 16);
     o->rxbuf = (uint8_t*)i_rant_bump_take(b, o->wire_max, 16);
     o->txbuf = (uint8_t*)i_rant_bump_take(b, o->wire_max, 16);
-    o->peer_view = (uint8_t*)i_rant_bump_take(b, (size_t)c->max_peers * sizeof(RantDiscoveryPeer), 16);
+    o->peer_view = (uint8_t*)i_rant_bump_take(b, (size_t)c->max_peers * sizeof(i_RantDiscoveryPeerView), 16);
     o->core_bytes = i_rant_discovery_required_memory(c);
     o->core  = (uint8_t*)i_rant_bump_take(b, o->core_bytes, 16);
 }
 
-size_t i_rant_discovery_placement_memory(const RantDiscoveryCoreConfig *cfg){
-    RantDiscoveryCoreConfig c; i_RantBump b; i_RantRtBlocks blk;
+size_t i_rant_discovery_placement_memory(const i_RantDiscoveryCoreConfig *cfg){
+    i_RantDiscoveryCoreConfig c; i_RantBump b; i_RantRtBlocks blk;
     if (!cfg) return 0;
     c = *cfg;
     i_rant_discovery_config_defaults(&c);
@@ -241,18 +241,18 @@ size_t i_rant_discovery_placement_memory(const RantDiscoveryCoreConfig *cfg){
    RANT_ERROR from them. */
 static RantErrorKind g_place_error = RANT_E_NONE;
 static int                       g_place_os_error = 0;
-static RantDiscovery *i_rant_discovery_fail(RantErrorKind e, int os_error){
+static i_RantDiscovery *i_rant_discovery_fail(RantErrorKind e, int os_error){
     g_place_error = e; g_place_os_error = os_error;
     return NULL;
 }
 RantErrorKind i_rant_discovery_last_error(void){ return g_place_error; }
 int                       i_rant_discovery_last_os_error(void){ return g_place_os_error; }
 
-RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const RantDiscoveryCoreConfig *cfg,
+i_RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const i_RantDiscoveryCoreConfig *cfg,
                                     const RantNodeNet *net){
-    RantDiscoveryCoreConfig c;
+    i_RantDiscoveryCoreConfig c;
     uint16_t discovery_port;
-    RantDiscovery *d;
+    i_RantDiscovery *d;
     uint8_t *base, *core_mem;
     size_t need;
     i_RantRtBlocks blk;
@@ -284,7 +284,7 @@ RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const RantDiscovery
     d->wire_max  = (uint32_t)blk.wire_max;
     d->rxbuf     = blk.rxbuf;
     d->txbuf     = blk.txbuf;
-    d->peer_view = (RantDiscoveryPeer*)blk.peer_view;
+    d->peer_view = (i_RantDiscoveryPeerView*)blk.peer_view;
     core_mem     = blk.core;
 
     /* auto generate a uuid if the caller left it zero */
@@ -345,10 +345,10 @@ RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const RantDiscovery
 
 /* The struct copy keeps the socket, group and seeds. The core is migrated and self_meta
  * re pointed. The caller frees the old block after. */
-RantDiscovery *i_rant_discovery_migrate(RantDiscovery *old, void *new_mem, size_t new_cap,
+i_RantDiscovery *i_rant_discovery_migrate(i_RantDiscovery *old, void *new_mem, size_t new_cap,
         uint16_t new_max_peers, uint16_t new_meta_cap, const uint8_t *self_meta, void *peer_cb_user){
-    RantDiscoveryCoreConfig dc; i_RantRtBlocks blk; i_RantBump b; RantDiscovery *d;
-    RantDiscoveryState *nc; uint8_t *base; size_t need;
+    i_RantDiscoveryCoreConfig dc; i_RantRtBlocks blk; i_RantBump b; i_RantDiscovery *d;
+    i_RantDiscoveryState *nc; uint8_t *base; size_t need;
     if (!old) return NULL;
     dc = old->core->cfg; dc.max_peers = new_max_peers; dc.meta_cap = new_meta_cap;
     {   i_RantBump mb; memset(&mb,0,sizeof mb); i_rant_discovery_rt_layout(&mb, &dc, &blk); need = mb.offset + 16u; }
@@ -360,7 +360,7 @@ RantDiscovery *i_rant_discovery_migrate(RantDiscovery *old, void *new_mem, size_
     *d = *old;                          /* fd, group_naddr, discovery_port, seeds, n_seeds */
     d->wire_max = (uint32_t)blk.wire_max;
     d->rxbuf = blk.rxbuf; d->txbuf = blk.txbuf;
-    d->peer_view = (RantDiscoveryPeer*)blk.peer_view;
+    d->peer_view = (i_RantDiscoveryPeerView*)blk.peer_view;
     d->max_peers = new_max_peers;
     nc = i_rant_discovery_core_migrate(old->core, blk.core,
              new_cap - (size_t)(blk.core - (uint8_t*)new_mem), new_max_peers, new_meta_cap,
@@ -373,7 +373,7 @@ RantDiscovery *i_rant_discovery_migrate(RantDiscovery *old, void *new_mem, size_
 /* Drains to empty, capped by the burst guard. One recv per poll would let a slow poller's
  * backlog keep a dead peer alive. */
 #define RANT_DISCOVERY_RX_BURST 2048
-static int i_rant_discovery_rt_drain(RantDiscovery *d, i_RantSock fd, RantDiscoveryVia via){
+static int i_rant_discovery_rt_drain(i_RantDiscovery *d, i_RantSock fd, i_RantDiscoveryVia via){
     int got = 0, guard;
     for (guard = 0; guard < RANT_DISCOVERY_RX_BURST; guard++){
         RantAddr src;
@@ -392,7 +392,7 @@ static int i_rant_discovery_rt_drain(RantDiscovery *d, i_RantSock fd, RantDiscov
 
 /* One service pass with no wait. The node folds discovery into its one wait and calls
  * this every pass. */
-int i_rant_discovery_service(RantDiscovery *d, int fd_readable){
+int i_rant_discovery_service(i_RantDiscovery *d, int fd_readable){
     RantAddr to;
     uint64_t now;
     int got = 0, exact; size_t n_bytes;
@@ -424,9 +424,9 @@ int i_rant_discovery_service(RantDiscovery *d, int fd_readable){
     return got;
 }
 
-RantDiscoveryState *i_rant_discovery_state(RantDiscovery *d){ return d ? d->core : NULL; }
+i_RantDiscoveryState *i_rant_discovery_state(i_RantDiscovery *d){ return d ? d->core : NULL; }
 
-const RantDiscoveryPeer *i_rant_discovery_peers(RantDiscovery *d, uint16_t *count){
+const i_RantDiscoveryPeerView *i_rant_discovery_peers(i_RantDiscovery *d, uint16_t *count){
     uint16_t i, n = 0;
     if (!d){ if (count) *count = 0; return NULL; }
     for (i=0;i<d->max_peers;i++)
@@ -435,7 +435,7 @@ const RantDiscoveryPeer *i_rant_discovery_peers(RantDiscovery *d, uint16_t *coun
     return d->peer_view;
 }
 
-void i_rant_discovery_close(RantDiscovery *d, int send_bye){
+void i_rant_discovery_close(i_RantDiscovery *d, int send_bye){
     if (!d) return;
     if (send_bye){
         size_t n_bytes = i_rant_discovery_leave(d->core, d->txbuf, d->wire_max);

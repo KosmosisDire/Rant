@@ -363,7 +363,7 @@ uint32_t i_rant_topic_oldest_match(RantTopic *topic);
 /* This node's discovery uuid, stable for its lifetime. The task layer's progress demux filter. */
 const uint8_t *i_rant_node_uuid(RantNode *n);
 /* Reflection getters for the patterns layer's entity enumeration. */
-uint8_t      i_rant_topic_kind (const RantTopic *topic);       /* RantTopicKind */
+uint8_t      i_rant_topic_kind (const RantTopic *topic);       /* i_RantTopicKind */
 uint8_t      i_rant_topic_role (const RantTopic *topic);       /* the current RantRole */
 RantString i_rant_topic_name (const RantTopic *topic);         /* the stable name copy */
 uint8_t      i_rant_topic_reliability(const RantTopic *topic);       /* the create qos reliability */

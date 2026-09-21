@@ -75,8 +75,8 @@ typedef struct {
 /* What the core needs from the runtime, set once at init. The peer table lives in the
  * discovery core, which also holds the core's per peer lifecycle scratch. */
 typedef struct {
-    RantTransportState             *transport;
-    RantDiscoveryState    *discovery;    /* may be NULL at init, bound later */
+    i_RantTransportState             *transport;
+    i_RantDiscoveryState    *discovery;    /* may be NULL at init, bound later */
     uint16_t              n_topics;      /* sizes the per topic arrays */
     uint16_t              frag_size;     /* our fragment size, baked into the overlay */
     RantEventFn           on_event;      /* optional */
@@ -97,7 +97,7 @@ i_RantNodeCore *i_rant_node_core_init(void *mem, size_t mem_size, const i_RantNo
 i_RantNodeCore *i_rant_node_core_migrate(i_RantNodeCore *old, void *new_mem, size_t new_cap,
                                        uint16_t new_n_topics);
 /* Binds the discovery core whose peer table this core delegates to, again after a migrate. */
-void            i_rant_node_core_bind_discovery(i_RantNodeCore *c, RantDiscoveryState *discovery);
+void            i_rant_node_core_bind_discovery(i_RantNodeCore *c, i_RantDiscoveryState *discovery);
 /* Bytes of per peer scratch the core needs in the discovery peer table. */
 uint16_t        i_rant_node_core_peer_user_bytes(void);
 
@@ -146,7 +146,7 @@ const RantSchema *i_rant_node_core_msg_schema(i_RantNodeCore *c, uint32_t peer, 
 
 /* Points cfg's peer hooks, error sink and user at this core. The hooks keep the peer table
  * and the transport peer set in lockstep and fire the app's peer events. */
-void i_rant_node_core_discovery_hooks(i_RantNodeCore *c, RantDiscoveryCoreConfig *cfg);
+void i_rant_node_core_discovery_hooks(i_RantNodeCore *c, i_RantDiscoveryCoreConfig *cfg);
 
 /* resolve turns a peer id into an address, 1 if sendable. id_for_addr maps a source back
  * to a peer id, 1 on a hit. */
@@ -176,10 +176,10 @@ int      i_rant_node_core_peer_at(i_RantNodeCore *c, uint16_t slot, uint32_t *id
                                 uint8_t ip[16], uint8_t *ip_len, uint16_t *port);
 
 /* Reflection: the tables behind the runtime's walks. See spec/reflection.md. */
-uint16_t i_rant_node_peer_frag(const RantDiscoveryPeer *peer);
-uint32_t i_rant_node_peer_interest_epoch(const RantDiscoveryPeer *peer);
-int      i_rant_node_peer_interest_next(const RantDiscoveryPeer *peer,
-                              RantInterestIter *it, RantTopicEntry *out);
+uint16_t i_rant_node_peer_frag(const i_RantDiscoveryPeerView *peer);
+uint32_t i_rant_node_peer_interest_epoch(const i_RantDiscoveryPeerView *peer);
+int      i_rant_node_peer_interest_next(const i_RantDiscoveryPeerView *peer,
+                              i_RantInterestIter *it, i_RantTopicEntry *out);
 void     i_rant_node_core_set_self_name(i_RantNodeCore *c, RantString name);
 void     i_rant_node_core_self_begin(i_RantNodeCore *c);
 void     i_rant_node_core_self_channel(i_RantNodeCore *c, uint16_t index, RantString name,

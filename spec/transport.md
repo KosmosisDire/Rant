@@ -134,7 +134,7 @@ per topic and node owned).
 
 ## Round trip estimate
 
-The transport keeps one estimator per peer (`RantPeerRtt`, RFC 6298 shape: smoothed
+The transport keeps one estimator per peer (`i_RantPeerRtt`, RFC 6298 shape: smoothed
 value, mean deviation, floor, sample count), fed by the reliable path with no probe
 traffic. The first sample seeds srtt = R and rttvar = R/2, then rttvar = (3v + |srtt - R|)
 / 4 and srtt = (7s + R) / 8. A writer times the push of a sample's LAST fragment to the

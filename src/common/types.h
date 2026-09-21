@@ -90,6 +90,12 @@ typedef struct {
     uint16_t port;     /* host order */
 } RantAddr;
 
+/* Whether a listed peer is here now or is a dropped peer's last known view. */
+typedef enum {
+    RANT_PEER_ACTIVE    = 0,   /* heard within peer_timeout_us */
+    RANT_PEER_DROPPED = 1       /* silent, state kept, the same uuid may return */
+} RantPeerLiveness;
+
 /* The discovery defaults, stated once for every layer. */
 #define RANT_DISCOVERY_GROUP      "239.255.0.7"
 #define RANT_DISCOVERY_PORT       7400

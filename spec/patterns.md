@@ -47,7 +47,7 @@ and settled. Do not relitigate them.
 
 ## Kinds
 
-`RantTopicKind` rides bits 3 to 6 of the announce interest flags. A kind mismatch is
+`i_RantTopicKind` rides bits 3 to 6 of the announce interest flags. A kind mismatch is
 refused with `RANT_E_KIND_MISMATCH`.
 
 | kind | channel | who publishes |

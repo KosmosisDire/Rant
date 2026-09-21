@@ -19,7 +19,7 @@ static i_RantWriterSample *i_rant_sample_find(i_RantTopic *topic, uint64_t seqno
 
 
 /* Seals the filled head slot into history at the next seqno, stamped with its destination. */
-static void i_rant_writer_seal(RantTransportState *st, i_RantTopic *topic, size_t len,
+static void i_rant_writer_seal(i_RantTransportState *st, i_RantTopic *topic, size_t len,
                                uint32_t dest_slot, uint64_t *base_out, uint16_t *count_out){
     uint16_t depth = topic->qos.keep_last;
     uint16_t count = (uint16_t)((len + st->frag - 1) / st->frag);
@@ -58,7 +58,7 @@ static void i_rant_writer_lane_advance(i_RantTopic *topic, i_RantWriterProxy *w,
 
 /* Seals and wakes the lanes that carry the sample, O(matches). A directed sample wakes
  * only its lane and every other lane derives its skip. */
-static void i_rant_writer_commit(RantTransportState *st, uint16_t topic_index, size_t len,
+static void i_rant_writer_commit(i_RantTransportState *st, uint16_t topic_index, size_t len,
                                  uint32_t dest_slot){
     i_RantTopic *topic = &st->topics[topic_index];
     int reliable = (topic->qos.reliability==RANT_RELIABLE);
@@ -76,14 +76,14 @@ static void i_rant_writer_commit(RantTransportState *st, uint16_t topic_index, s
 
 
 /* The 65535 fragment cap, checked before the no subscriber early out. */
-static int i_rant_writer_too_big(RantTransportState *st, i_RantTopic *topic, size_t len){
+static int i_rant_writer_too_big(i_RantTransportState *st, i_RantTopic *topic, size_t len){
     (void)topic;
     return len > 65535u*(uint32_t)st->frag;
 }
 
 /* Stores ts, hdr and data into the head slot. The source stamp is taken here, once per
  * message, so a repair resend, a replay and the SHM chunk all carry the original. */
-static int i_rant_writer_store(RantTransportState *st, i_RantTopic *topic,
+static int i_rant_writer_store(i_RantTransportState *st, i_RantTopic *topic,
                                RantBytes hdr, RantBytes data, uint64_t capture_us,
                                size_t *len_out){
     uint32_t ts = i_rant_topic_ts_bytes(topic);
@@ -118,7 +118,7 @@ static int i_rant_writer_store(RantTransportState *st, i_RantTopic *topic,
 
 
 /* The one send: prologue, store and commit. dest_slot is stamped onto the sample. */
-static int i_rant_writer_send(RantTransportState *st, uint16_t topic_index,
+static int i_rant_writer_send(i_RantTransportState *st, uint16_t topic_index,
                               RantBytes hdr, RantBytes data, uint64_t capture_us,
                               uint32_t dest_slot){
     i_RantTopic *topic; size_t len; int r;
@@ -138,20 +138,20 @@ static int i_rant_writer_send(RantTransportState *st, uint16_t topic_index,
 }
 
 
-int i_rant_transport_send(RantTransportState *st, uint16_t topic_index, RantBytes data, uint64_t now){
+int i_rant_transport_send(i_RantTransportState *st, uint16_t topic_index, RantBytes data, uint64_t now){
     RantBytes nohdr; nohdr.data=NULL; nohdr.len=0;
     return i_rant_transport_send_hdr(st, topic_index, nohdr, data, 0, now);
 }
 
 
-int i_rant_transport_send_hdr(RantTransportState *st, uint16_t topic_index, RantBytes hdr,
+int i_rant_transport_send_hdr(i_RantTransportState *st, uint16_t topic_index, RantBytes hdr,
                             RantBytes data, uint64_t capture_us, uint64_t now){
     (void)now;
     return i_rant_writer_send(st, topic_index, hdr, data, capture_us, RANT__DEST_ALL);
 }
 
 
-int i_rant_transport_send_to(RantTransportState *st, uint16_t topic_index, uint32_t to_peer,
+int i_rant_transport_send_to(i_RantTransportState *st, uint16_t topic_index, uint32_t to_peer,
                            RantBytes hdr, RantBytes data, uint64_t capture_us, uint64_t now){
     int peer_slot = i_rant_peer_slot(st, to_peer);     /* unknown: sent to nobody, seqno consumed */
     (void)now;
@@ -163,7 +163,7 @@ int i_rant_transport_send_to(RantTransportState *st, uint16_t topic_index, uint3
 
 /* The chunk is the whole wire sample, the caller wrote the stamp and any header into it,
  * so nothing is gathered or copied here. */
-int i_rant_transport_send_shm(RantTransportState *st, uint16_t topic_index, RantBytes chunk,
+int i_rant_transport_send_shm(i_RantTransportState *st, uint16_t topic_index, RantBytes chunk,
                   const uint8_t *desc, uint64_t now){
     i_RantTopic *topic; i_RantWriterSample *slot; size_t len = chunk.len;
     (void)now;
@@ -181,7 +181,7 @@ int i_rant_transport_send_shm(RantTransportState *st, uint16_t topic_index, Rant
 #endif
 
 
-int i_rant_transport_send_would_evict(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_send_would_evict(i_RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     i_RantWriterSample *slot; uint32_t li;
     if (!topic || topic->qos.reliability != RANT_RELIABLE) return 0;
@@ -196,7 +196,7 @@ int i_rant_transport_send_would_evict(RantTransportState *st, uint16_t topic_ind
 }
 
 
-int i_rant_transport_send_would_evict_unsent(RantTransportState *st, uint16_t topic_index,
+int i_rant_transport_send_would_evict_unsent(i_RantTransportState *st, uint16_t topic_index,
                                             uint64_t *evict_base, uint32_t *evict_count){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     i_RantWriterSample *slot; uint32_t li;
@@ -217,7 +217,7 @@ int i_rant_transport_send_would_evict_unsent(RantTransportState *st, uint16_t to
 }
 
 
-int i_rant_transport_send_drained(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_send_drained(i_RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li;
     if (!topic || topic->qos.reliability != RANT_RELIABLE) return 1;    /* no acks to await */
@@ -230,21 +230,21 @@ int i_rant_transport_send_drained(RantTransportState *st, uint16_t topic_index){
 }
 
 
-int i_rant_transport_publisher_match_count(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_publisher_match_count(i_RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     return topic ? (int)topic->matched_writers : 0;   /* cached at match time, O(1) */
 }
 
 
 /* O(1) from the cached count. */
-int i_rant_transport_subscriber_match_count(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_subscriber_match_count(i_RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     return topic ? (int)topic->matched_readers : 0;
 }
 
 
 /* Dormant excluded. O(matches), for liveness decisions, not the send path. */
-int i_rant_transport_publisher_live_matches(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_publisher_live_matches(i_RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li; int cnt = 0;
     if (!topic) return 0;
@@ -256,7 +256,7 @@ int i_rant_transport_publisher_live_matches(RantTransportState *st, uint16_t top
 }
 
 
-int i_rant_transport_publisher_peer_matched(RantTransportState *st, uint16_t topic_index,
+int i_rant_transport_publisher_peer_matched(i_RantTransportState *st, uint16_t topic_index,
                                           uint32_t peer_id){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li; int slot;
@@ -272,7 +272,7 @@ int i_rant_transport_publisher_peer_matched(RantTransportState *st, uint16_t top
 
 
 /* The chain is newest first, so the last live hit is the oldest. */
-uint32_t i_rant_transport_publisher_oldest_match(RantTransportState *st, uint16_t topic_index){
+uint32_t i_rant_transport_publisher_oldest_match(i_RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li, id = 0;
     if (!topic) return 0;
@@ -284,7 +284,7 @@ uint32_t i_rant_transport_publisher_oldest_match(RantTransportState *st, uint16_
 }
 
 
-int i_rant_transport_repair_pending(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_repair_pending(i_RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li; int cnt = 0;
     if (!topic) return 0;
@@ -298,7 +298,7 @@ int i_rant_transport_repair_pending(RantTransportState *st, uint16_t topic_index
 #ifdef RANT_SHM
 
 /* One remote reader forces inline UDP for the whole message. */
-int i_rant_transport_publisher_shm_eligible(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_publisher_shm_eligible(i_RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li; int any=0;
     if (!topic) return 0;
@@ -313,7 +313,7 @@ int i_rant_transport_publisher_shm_eligible(RantTransportState *st, uint16_t top
 #endif
 
 #ifdef RANT_SHM
-uint16_t i_rant_transport_topic_hist_head(RantTransportState *st, uint16_t topic_index){
+uint16_t i_rant_transport_topic_hist_head(i_RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     return topic ? topic->history_head : 0;
 }
@@ -321,7 +321,7 @@ uint16_t i_rant_transport_topic_hist_head(RantTransportState *st, uint16_t topic
 
 /* An HB advertising the window. Its first is the floor, which replaces GAP: the reader
  * skips to it. Resets the idle timer so it does not double send. */
-static size_t i_rant_writer_hb(RantTransportState *st, i_RantTopic *topic, i_RantWriterProxy *w, uint16_t index,
+static size_t i_rant_writer_hb(i_RantTransportState *st, i_RantTopic *topic, i_RantWriterProxy *w, uint16_t index,
                              uint8_t *out, size_t cap, uint64_t now){
     uint64_t first = topic->have_first ? topic->first_seqno : 0;
     if (cap < RANT_HEADER_HB) return 0;
@@ -335,14 +335,14 @@ static size_t i_rant_writer_hb(RantTransportState *st, i_RantTopic *topic, i_Ran
 
 /* The queue just drained: the next HB comes within the tail window so a lost final message
  * repairs fast. The reader's immediate ack normally suppresses it, so healthy traffic is free. */
-static void i_rant_writer_arm_tail(RantTransportState *st, i_RantWriterProxy *w, uint32_t peer_slot, uint64_t now){
+static void i_rant_writer_arm_tail(i_RantTransportState *st, i_RantWriterProxy *w, uint32_t peer_slot, uint64_t now){
     uint64_t tail = now + i_rant_rtt_rto(st, peer_slot, RANT_HB_TAIL_US);
     if (w->hb_next_us <= now || w->hb_next_us > tail) w->hb_next_us = tail;
     i_rant_transport_arm_deadline(st, w->hb_next_us);
 }
 
 
-void i_rant_writer_nack(RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now){
+void i_rant_writer_nack(i_RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now){
     i_RantTopic *topic=&st->topics[topic_index];
     i_RantWriterProxy *w=i_rant_writer_proxy_at(st,topic_index,peer_slot);
     uint64_t base=i_rant_le_r64(p+RANT_OFFSET_SEQNO); uint16_t nbits=i_rant_le_r16(p+RANT_OFFSET_NACK_NBITS); uint32_t bitmap=i_rant_le_r32(p+RANT_OFFSET_NACK_BITMAP);
@@ -404,7 +404,7 @@ void i_rant_writer_nack(RantTransportState *st, int topic_index, int peer_slot, 
 
 /* One writer submessage if due and it fits cap, 0 if none. On no fit the state is
  * untouched, so the same submessage is produced next time. */
-size_t i_rant_writer_emit(RantTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
+size_t i_rant_writer_emit(i_RantTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
     i_RantTopic *topic=&st->topics[topic_index];
     i_RantWriterProxy *w=i_rant_writer_proxy_at(st,topic_index,peer_slot);
     int reliable=(topic->qos.reliability==RANT_RELIABLE);

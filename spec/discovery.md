@@ -168,7 +168,7 @@ it with no new wire kinds.
    beats common UDP mapping timeouts. A NAT'd peer that replies to an announce's ARRIVAL
    source reaches the one socket that demuxes every datagram family.
 2. Peers bind one OBSERVED source per arrival channel (`obs_disc`, `obs_data`) from direct
-   `RELAY_ME` announces, keyed by uuid, with `RantDiscoveryVia` saying which local socket.
+   `RELAY_ME` announces, keyed by uuid, with `i_RantDiscoveryVia` saying which local socket.
    A unicast only node binds them for EVERY direct peer, because everything reaching it
    came through its own NAT: a published port forward rewrites the source to the NAT's
    internal gateway, which is the only endpoint replies are known to reach. For the same

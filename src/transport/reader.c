@@ -2,7 +2,7 @@
 #include "internal.h"
 
 
-int i_rant_transport_subscriber_progress(RantTransportState *st, uint16_t topic_index, uint32_t peer,
+int i_rant_transport_subscriber_progress(i_RantTransportState *st, uint16_t topic_index, uint32_t peer,
                          uint64_t *base_seqno, uint32_t *have, uint32_t *total){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     int peer_slot; i_RantReaderProxy *r;
@@ -28,7 +28,7 @@ static void i_rant_reader_arm(i_RantTopic *topic, i_RantReaderProxy *r, int is_h
 }
 
 /* Arms an immediate ACKNACK. force owes a cumulative ack even at an unchanged floor. */
-static void i_rant_reader_ack_now(RantTransportState *st, i_RantTopic *topic, i_RantReaderProxy *r,
+static void i_rant_reader_ack_now(i_RantTransportState *st, i_RantTopic *topic, i_RantReaderProxy *r,
                                   uint16_t topic_index, uint32_t peer_slot, int force, int is_hb){
     i_rant_reader_arm(topic, r, is_hb);
     r->ack_pending = 1; r->ack_due_us = 0;
@@ -41,7 +41,7 @@ static void i_rant_reader_ack_now(RantTransportState *st, i_RantTopic *topic, i_
  * deliver_upto, only a delivery, the floor and the lapped rule do. See spec/transport.md. */
 
 /* fit a slot's buffers to a sample, 0 = allocation failed */
-static int i_rant_asm_fit(RantTransportState *st, i_RantAssembly *a, uint32_t len, uint16_t count){
+static int i_rant_asm_fit(i_RantTransportState *st, i_RantAssembly *a, uint32_t len, uint16_t count){
     uint32_t bitmap_need = ((uint32_t)count + 7u) / 8u;
     if (a->cap < len){
         uint8_t *nb = (uint8_t*)st->cfg.allocator(st->cfg.user, a->buf, len?len:1u);
@@ -80,7 +80,7 @@ static i_RantAssembly *i_rant_reader_ahead(i_RantReaderProxy *r, uint64_t base){
 
 /* Hands up every complete sample from the head on. A reliable refusal parks the head, a
  * best effort one drops. Lane pointers are re derived after each callback. */
-static void i_rant_reader_deliver(RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+static void i_rant_reader_deliver(i_RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
     i_RantTopic *topic=&st->topics[topic_index];
     i_RantReaderProxy *r=i_rant_reader_proxy_at(st,topic_index,peer_slot);
     int reliable = (topic->qos.reliability==RANT_RELIABLE);
@@ -105,7 +105,7 @@ static void i_rant_reader_deliver(RantTransportState *st, uint16_t topic_index, 
 }
 
 
-static i_RantReaderOrder i_rant_reader_order_arrival(RantTransportState *st, int topic_index, int peer_slot,
+static i_RantReaderOrder i_rant_reader_order_arrival(i_RantTransportState *st, int topic_index, int peer_slot,
                                              i_RantReaderProxy *r, uint64_t base, uint64_t top){
     i_RantTopic *topic=&st->topics[topic_index];
     if (base < r->deliver_upto) return RANT_ORDER_OLD;
@@ -134,7 +134,7 @@ static i_RantReaderOrder i_rant_reader_order_arrival(RantTransportState *st, int
 
 /* An SHM-DATA covers its whole range, so there is no reassembly, only ordering. The
  * descriptor goes to on_shm and the node delivers. An SHM sample is never held ahead. */
-void i_rant_reader_shm(RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now){
+void i_rant_reader_shm(i_RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now){
     i_RantTopic *topic=&st->topics[topic_index];
     i_RantReaderProxy *r=i_rant_reader_proxy_at(st,topic_index,peer_slot);
     int reliable = (topic->qos.reliability==RANT_RELIABLE);
@@ -200,7 +200,7 @@ void i_rant_reader_shm(RantTransportState *st, int topic_index, int peer_slot, c
 #endif
 
 
-void i_rant_reader_data(RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p,
+void i_rant_reader_data(i_RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p,
                            uint64_t now){
     i_RantTopic *topic=&st->topics[topic_index];
     i_RantReaderProxy *r=i_rant_reader_proxy_at(st,topic_index,peer_slot);
@@ -272,7 +272,7 @@ void i_rant_reader_data(RantTransportState *st, int topic_index, int peer_slot, 
 }
 
 
-void i_rant_reader_hb(RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now){
+void i_rant_reader_hb(i_RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now){
     i_RantTopic *topic=&st->topics[topic_index];
     i_RantReaderProxy *r=i_rant_reader_proxy_at(st,topic_index,peer_slot);
     uint64_t first=i_rant_le_r64(p+RANT_OFFSET_SEQNO), last=i_rant_le_r64(p+RANT_OFFSET_HB_LAST);
@@ -316,7 +316,7 @@ void i_rant_reader_hb(RantTransportState *st, int topic_index, int peer_slot, co
 
 /* The ACKNACK for a lane if due, 0 if none. Repair is gap triggered, bounded by what was
  * received and deduped in flight. See spec/transport.md. */
-size_t i_rant_reader_emit(RantTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
+size_t i_rant_reader_emit(i_RantTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
     i_RantTopic *topic=&st->topics[topic_index];
     i_RantReaderProxy *r=i_rant_reader_proxy_at(st,topic_index,peer_slot);
     uint64_t first_missing, bound, top; uint16_t nbits=0; uint32_t bitmap=0;
@@ -394,7 +394,7 @@ size_t i_rant_reader_emit(RantTransportState *st, int topic_index, int peer_slot
 
 /* Retries every parked lane of a topic. The callbacks may re enter the transport, so lane
  * pointers are re derived after each call. */
-uint32_t i_rant_transport_deliver_parked(RantTransportState *st, uint16_t topic_index, uint64_t now){
+uint32_t i_rant_transport_deliver_parked(i_RantTransportState *st, uint16_t topic_index, uint64_t now){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li, still = 0;
     (void)now;

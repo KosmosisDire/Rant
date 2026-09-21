@@ -243,8 +243,8 @@ typedef struct { uint32_t peer; uint16_t topic; uint8_t peer_is_pub;
 #endif
 
 struct i_RantNodeCore {
-    RantTransportState             *transport;
-    RantDiscoveryState    *discovery;   /* the peer table we delegate to */
+    i_RantTransportState             *transport;
+    i_RantDiscoveryState    *discovery;   /* the peer table we delegate to */
     RantEventFn           on_event;
     void                 *user;
     int                   oob_capable;
@@ -253,7 +253,7 @@ struct i_RantNodeCore {
     uint16_t              meta_cap;
     uint16_t              meta_len;
     uint16_t              frag_size;   /* baked into the overlay */
-    RantMetaSchema         *chan_schemas;  /* per topic schema advertisement, hash 0 = none */
+    i_RantMetaSchema         *chan_schemas;  /* per topic schema advertisement, hash 0 = none */
     const RantSchema      **chan_compiled; /* per topic parsed schema, the gate's local side */
     uint16_t                n_topics;
     RantAllocFn             alloc;         /* required */
@@ -291,15 +291,15 @@ static int i_rant_node_core_array_reserve(i_RantNodeCore *c, void **arr, uint32_
 }
 
 uint16_t i_rant_node_core_peer_user_bytes(void){ return (uint16_t)sizeof(i_RantNodePeerExtra); }
-void i_rant_node_core_bind_discovery(i_RantNodeCore *c, RantDiscoveryState *discovery){ c->discovery = discovery; }
+void i_rant_node_core_bind_discovery(i_RantNodeCore *c, i_RantDiscoveryState *discovery){ c->discovery = discovery; }
 
 /* the arena layout: the core struct, then the per topic schema registry. One sequence so
    measure and build agree */
 static void i_rant_node_core_layout(i_RantBump *b, uint16_t n_topics,
                               i_RantNodeCore **out_c,
-                              RantMetaSchema **out_schemas, const RantSchema ***out_compiled){
+                              i_RantMetaSchema **out_schemas, const RantSchema ***out_compiled){
     i_RantNodeCore *c         = (i_RantNodeCore*)i_rant_bump_take(b, sizeof(struct i_RantNodeCore), 16);
-    RantMetaSchema *schemas = (RantMetaSchema*)i_rant_bump_take(b, (size_t)n_topics*sizeof(RantMetaSchema), 16);
+    i_RantMetaSchema *schemas = (i_RantMetaSchema*)i_rant_bump_take(b, (size_t)n_topics*sizeof(i_RantMetaSchema), 16);
     const RantSchema **compiled = (const RantSchema**)i_rant_bump_take(b, (size_t)n_topics*sizeof(RantSchema*), 16);
     if (out_c)        *out_c        = c;
     if (out_schemas)  *out_schemas  = schemas;
@@ -314,7 +314,7 @@ size_t i_rant_node_core_required_memory(uint16_t n_topics){
 
 i_RantNodeCore *i_rant_node_core_init(void *mem, size_t cap, const i_RantNodeCoreConfig *cfg){
     i_RantBump b; i_RantNodeCore *c; uint8_t *base;
-    RantMetaSchema *schemas; const RantSchema **compiled;
+    i_RantMetaSchema *schemas; const RantSchema **compiled;
     if (!mem || !cfg || !cfg->transport || !cfg->alloc) return NULL;
     if (cap < i_rant_node_core_required_memory(cfg->n_topics)) return NULL;
     base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
@@ -345,7 +345,7 @@ i_RantNodeCore *i_rant_node_core_init(void *mem, size_t cap, const i_RantNodeCor
 i_RantNodeCore *i_rant_node_core_migrate(i_RantNodeCore *old, void *new_mem, size_t new_cap,
                                        uint16_t new_n_topics){
     i_RantBump b; i_RantNodeCore *c; uint8_t *base;
-    RantMetaSchema *schemas; const RantSchema **compiled;
+    i_RantMetaSchema *schemas; const RantSchema **compiled;
     uint16_t keep;
     if (!old) return NULL;
     if (new_cap < i_rant_node_core_required_memory(new_n_topics)) return NULL;
@@ -637,7 +637,7 @@ static uint32_t i_rant_reflect_name(i_RantNodeCore *c, i_RantReflect *r, RantStr
 static void i_rant_node_core_reflect_interest(i_RantNodeCore *c, i_RantNodePeerExtra *ex,
                                               RantBytes interest){
     i_RantReflect *r = &ex->refl;
-    RantInterestIter it; RantTopicEntry e; uint32_t i;
+    i_RantInterestIter it; i_RantTopicEntry e; uint32_t i;
     if (!interest.data) return;
     for (i = 0; i < r->n_chan; i++) r->chan[i].present = 0;
     memset(&it, 0, sizeof it);
@@ -652,7 +652,7 @@ static void i_rant_node_core_reflect_interest(i_RantNodeCore *c, i_RantNodePeerE
 
 /* a detail entry: the name, the attrs and the interned schema for one index */
 static void i_rant_node_core_reflect_detail(i_RantNodeCore *c, i_RantNodePeerExtra *ex,
-                                            const RantDetail *d){
+                                            const i_RantDetail *d){
     i_RantReflect *r = &ex->refl;
     i_RantChannel *ch;
     if (d->name.len == 0 || d->name.len > RANT_TOPIC_NAME_MAX) return;
@@ -698,7 +698,7 @@ static void i_rant_reflect_format_addr(i_RantReflect *r, const RantAddr *a){
 
 /* the fold: channels to entities */
 
-/* one row per RantTopicKind: its entity, whether it is the primary channel, its name
+/* one row per i_RantTopicKind: its entity, whether it is the primary channel, its name
    suffix, and which role is the provider side */
 typedef struct { uint8_t entity, primary, provider_pubs; const char *suffix; } i_RantKindRow;
 static const i_RantKindRow i_rant_kind_rows[8] = {
@@ -922,7 +922,7 @@ static uint64_t i_rant_reflect_generation(const uint8_t uuid[16], const i_RantRe
 }
 
 /* the uuid behind a peer id, NULL if unknown. RANT_SELF is our own */
-static const uint8_t *i_rant_node_core_uuid_of(i_RantNodeCore *c, uint32_t peer, RantDiscoveryPeer *scratch){
+static const uint8_t *i_rant_node_core_uuid_of(i_RantNodeCore *c, uint32_t peer, i_RantDiscoveryPeerView *scratch){
     uint16_t q, np;
     if (!c->discovery) return NULL;
     if (peer == RANT_SELF) return i_rant_discovery_uuid(c->discovery);
@@ -938,7 +938,7 @@ static void i_rant_reflect_info(i_RantNodeCore *c, uint32_t peer, const i_RantRe
     const i_RantPeerEntity *e = &r->ent[slot];
     const i_RantChannel *p = e->primary != I_RANT_NONE16 ? &r->chan[e->primary] : NULL;
     const i_RantChannel *side = i_rant_reflect_side(r, e);
-    RantDiscoveryPeer scratch;
+    i_RantDiscoveryPeerView scratch;
     memset(out, 0, sizeof *out);
     out->kind = (RantEntityKind)e->kind;
     out->name = e->name_len ? rant_string(r->names + e->name_off, e->name_len) : rant_string(NULL, 0);
@@ -1020,7 +1020,7 @@ static void i_rant_node_core_mesh_build(i_RantNodeCore *c){
     if (c->self.dirty) i_rant_reflect_fold(c, &c->self);
     total = c->self.n_ent + 16u;
     for (s = 0; s < np; s++){
-        RantDiscoveryPeer v; i_RantNodePeerExtra *ex;
+        i_RantDiscoveryPeerView v; i_RantNodePeerExtra *ex;
         if (!i_rant_discovery_peer_at(c->discovery, s, &v) || v.liveness != RANT_PEER_ACTIVE) continue;
         ex = (i_RantNodePeerExtra*)v.user;
         if (!ex || !ex->added) continue;
@@ -1031,7 +1031,7 @@ static void i_rant_node_core_mesh_build(i_RantNodeCore *c){
     if (!recs) return;
     n = i_rant_mesh_gather(c, recs, n, total, RANT_SELF, &c->self, ~(uint64_t)0);
     for (s = 0; s < np; s++){
-        RantDiscoveryPeer v; i_RantNodePeerExtra *ex;
+        i_RantDiscoveryPeerView v; i_RantNodePeerExtra *ex;
         if (!i_rant_discovery_peer_at(c->discovery, s, &v) || v.liveness != RANT_PEER_ACTIVE) continue;
         ex = (i_RantNodePeerExtra*)v.user;
         if (!ex || !ex->added) continue;
@@ -1081,7 +1081,7 @@ static void i_rant_node_core_mesh_build(i_RantNodeCore *c){
             }
         }
         {   i_RantReflect *r = i_rant_node_core_reflect_of(c, m->from_peer);
-            RantDiscoveryPeer scratch;
+            i_RantDiscoveryPeerView scratch;
             const uint8_t *uuid = m->has_provider ? i_rant_node_core_uuid_of(c, m->provider, &scratch) : NULL;
             m->generation = r ? i_rant_reflect_generation(uuid, r, &r->ent[m->from_slot]) : 0;
         }
@@ -1136,7 +1136,7 @@ int i_rant_node_core_peers_next(i_RantNodeCore *c, RantIter *it, RantPeerInfo *o
     if (!c || !c->discovery || !it || !out) return 0;
     np = i_rant_discovery_max_peers(c->discovery);
     for (; it->a < np; it->a++){
-        RantDiscoveryPeer v; i_RantNodePeerExtra *ex;
+        i_RantDiscoveryPeerView v; i_RantNodePeerExtra *ex;
         if (!i_rant_discovery_peer_at(c->discovery, (uint16_t)it->a, &v)) continue;
         ex = (i_RantNodePeerExtra*)v.user;
         it->a++;
@@ -1232,7 +1232,7 @@ int i_rant_node_core_reflect_pick(i_RantNodeCore *c, RantEntityKind kind, const 
         i_RantReflect *r; uint32_t i;
         if (s == np) r = &c->self;
         else {
-            RantDiscoveryPeer v; i_RantNodePeerExtra *ex;
+            i_RantDiscoveryPeerView v; i_RantNodePeerExtra *ex;
             if (!i_rant_discovery_peer_at(c->discovery, s, &v) || v.liveness != RANT_PEER_ACTIVE) continue;
             ex = (i_RantNodePeerExtra*)v.user;
             if (!ex || !ex->added) continue;
@@ -1262,9 +1262,9 @@ int i_rant_node_core_reflect_pick(i_RantNodeCore *c, RantEntityKind kind, const 
  * entries are skipped, since the responder would not answer them. */
 static i_RantNodePeerExtra *i_rant_node_core_peer_extra(i_RantNodeCore *c, uint32_t id);
 static uint16_t i_rant_node_core_greedy_extend(i_RantNodeCore *c, uint32_t peer,
-                            RantBytes interest, RantDetailWant *wants, uint16_t n,
+                            RantBytes interest, i_RantDetailWant *wants, uint16_t n,
                             uint16_t max_wants){
-    RantInterestIter it; RantTopicEntry e;
+    i_RantInterestIter it; i_RantTopicEntry e;
     uint16_t k;
     memset(&it, 0, sizeof it);
     while (n < max_wants && i_rant_interest_next(interest, &it, &e)){
@@ -1491,7 +1491,7 @@ static void i_rant_node_core_interest_check(i_RantNodeCore *c, i_RantNodePeerExt
    apply, so the pending state is the retry state and a lost datagram heals. */
 static void i_rant_node_core_detail_check(i_RantNodeCore *c, i_RantNodePeerExtra *ex,
                             uint32_t id, RantBytes interest){
-    RantDetailWant probe;
+    i_RantDetailWant probe;
     if (!interest.data) return;
     if (i_rant_transport_detail_wants(c->transport, c->chan_schemas, id, interest, NULL, 0)
         || (c->fetch_details
@@ -1558,7 +1558,7 @@ void i_rant_node_core_apply_details(i_RantNodeCore *c, uint16_t domain, uint32_t
         if (held && i_rant_detail_meta_version(resp) < held) return;
     }
     {   /* every detail received feeds reflection */
-        RantDetailIter it; RantDetail dd;
+        i_RantDetailIter it; i_RantDetail dd;
         memset(&it, 0, sizeof it);
         while (i_rant_detail_next(resp, &it, &dd)) i_rant_node_core_reflect_detail(c, ex, &dd);
         if (ex->refl.dirty) i_rant_node_core_mesh_bump(c);
@@ -1581,7 +1581,7 @@ void i_rant_node_core_detail_rearm(i_RantNodeCore *c){
     if (!c || !c->discovery) return;
     n = i_rant_discovery_max_peers(c->discovery);
     for (s=0;s<n;s++){
-        RantDiscoveryPeer v; i_RantNodePeerExtra *ex;
+        i_RantDiscoveryPeerView v; i_RantNodePeerExtra *ex;
         if (!i_rant_discovery_peer_at(c->discovery, s, &v)) continue;
         if (v.liveness != RANT_PEER_ACTIVE) continue;
         ex = (i_RantNodePeerExtra*)v.user;
@@ -1610,7 +1610,7 @@ int i_rant_node_core_topic_unresolved(i_RantNodeCore *c, uint16_t topic_index){
     if (!c || !c->discovery) return 0;
     n = i_rant_discovery_max_peers(c->discovery);
     for (s=0;s<n;s++){
-        RantDiscoveryPeer v; i_RantNodePeerExtra *ex;
+        i_RantDiscoveryPeerView v; i_RantNodePeerExtra *ex;
         RantBytes interest;
         if (!i_rant_discovery_peer_at(c->discovery, s, &v)) continue;
         if (v.liveness != RANT_PEER_ACTIVE) continue;
@@ -1634,7 +1634,7 @@ void i_rant_node_core_topics_unresolved(i_RantNodeCore *c, uint16_t *counts, uin
     if (!c || !c->discovery) return;
     np = i_rant_discovery_max_peers(c->discovery);
     for (s=0;s<np;s++){
-        RantDiscoveryPeer v; i_RantNodePeerExtra *ex;
+        i_RantDiscoveryPeerView v; i_RantNodePeerExtra *ex;
         RantBytes interest = rant_bytes(NULL, 0); int all = 0;
         if (!i_rant_discovery_peer_at(c->discovery, s, &v)) continue;
         if (v.liveness != RANT_PEER_ACTIVE) continue;
@@ -1658,12 +1658,12 @@ void i_rant_node_core_topics_unresolved(i_RantNodeCore *c, uint16_t *counts, uin
    candidate discovery, then DETAIL_REQs, capped at 128 wants. Loop until 0. */
 size_t i_rant_node_core_detail_req_next(i_RantNodeCore *c, uint16_t domain,
                             void *out, size_t cap, RantAddr *to){
-    RantDetailWant wants[128];
+    i_RantDetailWant wants[128];
     uint16_t s, n;
     if (!c || !c->discovery || cap < 24u) return 0;
     n = i_rant_discovery_max_peers(c->discovery);
     for (s=0;s<n;s++){    /* the interest pass: one INTEREST_REQ per due peer, cursor driven */
-        RantDiscoveryPeer v; i_RantNodePeerExtra *ex;
+        i_RantDiscoveryPeerView v; i_RantNodePeerExtra *ex;
         uint32_t offset;
         if (!i_rant_discovery_peer_at(c->discovery, s, &v)) continue;
         ex = (i_RantNodePeerExtra*)v.user;
@@ -1679,7 +1679,7 @@ size_t i_rant_node_core_detail_req_next(i_RantNodeCore *c, uint16_t domain,
         }
     }
     for (s=0;s<n;s++){
-        RantDiscoveryPeer v; i_RantNodePeerExtra *ex;
+        i_RantDiscoveryPeerView v; i_RantNodePeerExtra *ex;
         RantBytes interest; uint16_t nw, maxw;
         if (!i_rant_discovery_peer_at(c->discovery, s, &v)) continue;
         ex = (i_RantNodePeerExtra*)v.user;
@@ -1775,7 +1775,7 @@ void i_rant_node_core_apply_interest_page(i_RantNodeCore *c, uint16_t domain, ui
 }
 
 /* discovery's on_peer_down hook, user is the core */
-static void i_rant_node_core_peer_down(void *user, uint32_t id, RantDiscoveryDownReason reason){
+static void i_rant_node_core_peer_down(void *user, uint32_t id, i_RantDiscoveryDownReason reason){
     i_RantNodeCore *c = (i_RantNodeCore*)user;
     i_RantNodePeerExtra *ex = i_rant_node_core_peer_extra(c, id);       /* freed after this event */
     if (reason == RANT_DISCOVERY_DROP){
@@ -1813,7 +1813,7 @@ static void i_rant_node_core_on_discovery_error(const RantEvent *ev){
     c->on_event(&e);
 }
 
-void i_rant_node_core_discovery_hooks(i_RantNodeCore *c, RantDiscoveryCoreConfig *cfg){
+void i_rant_node_core_discovery_hooks(i_RantNodeCore *c, i_RantDiscoveryCoreConfig *cfg){
     cfg->on_peer_up   = i_rant_node_core_peer_up;
     cfg->on_peer_down = i_rant_node_core_peer_down;
     cfg->on_event     = i_rant_node_core_on_discovery_error;
@@ -1840,7 +1840,7 @@ uint16_t i_rant_node_core_max_peers(i_RantNodeCore *c){ return i_rant_discovery_
 
 int i_rant_node_core_peer_at(i_RantNodeCore *c, uint16_t slot, uint32_t *id,
                            uint8_t ip[16], uint8_t *ip_len, uint16_t *port){
-    RantDiscoveryPeer v;
+    i_RantDiscoveryPeerView v;
     if (!i_rant_discovery_peer_at(c->discovery, slot, &v)) return 0;
     if (id)     *id = v.id;
     if (ip)     memcpy(ip, v.addr.ip, 16);
@@ -1849,17 +1849,17 @@ int i_rant_node_core_peer_at(i_RantNodeCore *c, uint16_t slot, uint32_t *id,
     return 1;
 }
 
-uint16_t i_rant_node_peer_frag(const RantDiscoveryPeer *peer){
+uint16_t i_rant_node_peer_frag(const i_RantDiscoveryPeerView *peer){
     return (peer && peer->meta.data) ? i_rant_meta_frag(peer->meta) : 0;
 }
 
-uint32_t i_rant_node_peer_interest_epoch(const RantDiscoveryPeer *peer){
+uint32_t i_rant_node_peer_interest_epoch(const i_RantDiscoveryPeerView *peer){
     const i_RantNodePeerExtra *ex = peer ? (const i_RantNodePeerExtra*)peer->user : NULL;
     return ex ? ex->interest_epoch : 0;
 }
 
-int i_rant_node_peer_interest_next(const RantDiscoveryPeer *peer,
-                                   RantInterestIter *it, RantTopicEntry *out){
+int i_rant_node_peer_interest_next(const i_RantDiscoveryPeerView *peer,
+                                   i_RantInterestIter *it, i_RantTopicEntry *out){
     if (!peer || !peer->meta.data) return 0;
     /* one read point for both interest homes, so every walk resolves external peers alike */
     return i_rant_interest_next(
