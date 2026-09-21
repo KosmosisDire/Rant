@@ -93,7 +93,7 @@ Rules from the footprint work:
   move. Durable references are pool indices.
 - Releasing a lane must drop it from the scheduler, or a recycled record on a destination
   list misroutes submessages to the old peer.
-- Our own announce blob is allocated at `rant_transport_meta_size`, which mirrors
+- Our own announce blob is allocated at `i_rant_transport_meta_size`, which mirrors
   `meta_build` byte for byte. Keep the two in sync.
 - Peer removal frees the lane's assembly buffers and bitmaps.
 - The per lane and per sample structs are laid out widest field first, so they carry no

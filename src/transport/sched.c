@@ -121,7 +121,7 @@ static void i_rant_hb_sweep(RantTransportState *st, uint64_t now){
 }
 
 
-int rant_transport_poll_send(RantTransportState *st, uint32_t *to_peer, void *out, size_t cap, size_t *out_len, uint64_t now){
+int i_rant_transport_poll_send(RantTransportState *st, uint32_t *to_peer, void *out, size_t cap, size_t *out_len, uint64_t now){
     uint32_t ndest=st->cfg.max_peers;
     i_rant_hb_sweep(st, now);
     while (st->dest_queue_count){
@@ -167,11 +167,11 @@ int rant_transport_poll_send(RantTransportState *st, uint32_t *to_peer, void *ou
 }
 
 
-uint64_t rant_transport_next_deadline_us(RantTransportState *st){
+uint64_t i_rant_transport_next_deadline_us(RantTransportState *st){
     return st->next_deadline_us == RANT__NO_DEADLINE ? 0 : st->next_deadline_us;
 }
 
 
-int rant_transport_tx_pending(RantTransportState *st){
+int i_rant_transport_tx_pending(RantTransportState *st){
     return st->dest_queue_count != 0;   /* the active lane queue */
 }

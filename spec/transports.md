@@ -62,7 +62,7 @@ and the shm module:
 - a callback to hand the locator up (`on_shm`, where 0 means unresolved and the
   reliability layer repairs or skips),
 - a publish entry that references an external buffer plus its locator
-  (`rant_transport_send_shm`).
+  (`i_rant_transport_send_shm`).
 
 The core never decodes the locator, maps memory or checks a host id. The node core decides
 a peer is out of band reachable when its host id equals ours (`oob_capable`, `oob_host`).

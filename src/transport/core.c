@@ -8,13 +8,13 @@
 #include <string.h>
 
 
-/* The wire name is the whole name, so the identity recomputed from it equals rant_topic_id. */
+/* The wire name is the whole name, so the identity recomputed from it equals i_rant_topic_id. */
 static uint64_t i_rant_identity_hash(const uint8_t *name, size_t n){ return i_rant_fnv1a64(name, n); }
 
-uint64_t rant_topic_id(const char *name){ return i_rant_fnv1a64_str(name); }
+uint64_t i_rant_topic_id(const char *name){ return i_rant_fnv1a64_str(name); }
 
-uint64_t rant_topic_identity(const RantTopicDef *def){
-    return rant_topic_id(def->name);
+uint64_t i_rant_topic_identity(const RantTopicDef *def){
+    return i_rant_topic_id(def->name);
 }
 
 static size_t i_rant_name_len(const char *s){              /* capped strlen */
@@ -34,14 +34,14 @@ static void i_rant_qos_defaults(RantQos *q){
 }
 
 
-uint16_t rant_clamp_frag(uint16_t frag_size){
+uint16_t i_rant_clamp_frag(uint16_t frag_size){
     uint16_t f = frag_size ? frag_size : RANT_FRAG_SIZE;
     if (f < RANT_FRAG_SIZE_MIN) f = RANT_FRAG_SIZE_MIN;
     if (f > RANT_FRAG_SIZE_MAX) f = RANT_FRAG_SIZE_MAX;
     return f;
 }
 
-uint16_t rant_transport_frag(RantTransportState *st){ return st ? st->frag : rant_clamp_frag(0); }
+uint16_t i_rant_transport_frag(RantTransportState *st){ return st ? st->frag : i_rant_clamp_frag(0); }
 
 
 /* Lays everything out, measure mode when b->base is NULL. The arena holds only the fixed
@@ -87,7 +87,7 @@ static RantTransportState *i_rant_transport_build(i_RantBump *b, const RantConfi
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
           st->peer_dormant=peer_dormant; st->peer_frag=peer_frag;
           st->peer_rtt=peer_rtt; memset(peer_rtt, 0, max_peers*sizeof(RantPeerRtt));
-          st->frag = rant_clamp_frag(cfg->frag_size);
+          st->frag = i_rant_clamp_frag(cfg->frag_size);
           st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap;
           st->peer_sub_reliable=peer_sub_reliable; st->bitmap_len=bitmap_len;
           st->topics=topic; st->reader_epoch_counter=1;
@@ -142,7 +142,7 @@ static RantTransportState *i_rant_transport_build(i_RantBump *b, const RantConfi
                 topic->role=def->role;
                 topic->kind=def->kind; topic->prefix_bytes=def->prefix_bytes; topic->directed=def->directed;
                 topic->attrs=def->attrs;
-                topic->identity = rant_topic_identity(def);
+                topic->identity = i_rant_topic_identity(def);
                 if (lane){ memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane]='\0'; }
                 topic->name_len = (uint8_t)lane;
                 topic->history=history; topic->history_owned=0; topic->history_head=0; topic->next_seqno=0; topic->have_first=0;
@@ -154,7 +154,7 @@ static RantTransportState *i_rant_transport_build(i_RantBump *b, const RantConfi
 }
 
 
-size_t rant_transport_required_memory(const RantConfig *cfg){
+size_t i_rant_transport_required_memory(const RantConfig *cfg){
     i_RantBump b; memset(&b,0,sizeof b);
     if (!cfg || cfg->n_topics==0 || cfg->max_peers==0) return 0;
     i_rant_transport_build(&b, cfg);
@@ -162,7 +162,7 @@ size_t rant_transport_required_memory(const RantConfig *cfg){
 }
 
 
-RantTransportState *rant_transport_init(void *mem, size_t cap, const RantConfig *cfg){
+RantTransportState *i_rant_transport_init(void *mem, size_t cap, const RantConfig *cfg){
     i_RantBump b; RantTransportState *st; uint16_t i;
     if (!mem || !cfg || cfg->n_topics==0 || cfg->max_peers==0) return NULL;
     if (!cfg->allocator) return NULL;    /* the allocator is the one memory model */
@@ -176,7 +176,7 @@ RantTransportState *rant_transport_init(void *mem, size_t cap, const RantConfig 
         for (j=0;j<i;j++)   /* same name under a different kind: the maps bind by identity, so
                                local twins would cross bind. See spec/interest.md */
             if (cfg->topics[j].kind != d->kind &&
-                rant_topic_id(cfg->topics[j].name) == rant_topic_id(d->name)) return NULL;
+                i_rant_topic_id(cfg->topics[j].name) == i_rant_topic_id(d->name)) return NULL;
     }
     memset(&b,0,sizeof b);
     b.base = (uint8_t*)(((uintptr_t)mem + 15u) & ~(uintptr_t)15u);
@@ -190,13 +190,13 @@ RantTransportState *rant_transport_init(void *mem, size_t cap, const RantConfig 
 
 /* Heap buffers stay put and the struct copies carry their pointers. The scheduler is
  * rebuilt from proxy state. The caller frees old's arena but must not destroy old. */
-RantTransportState *rant_transport_migrate(RantTransportState *old, void *new_mem, size_t new_cap,
+RantTransportState *i_rant_transport_migrate(RantTransportState *old, void *new_mem, size_t new_cap,
                         uint16_t new_max_peers, uint16_t new_n_topics){
     RantConfig nc; RantTransportState *nw; uint16_t omp, onc, c, p;
     if (!old) return NULL;
     nc = old->cfg; nc.topics = NULL;
     nc.max_peers = new_max_peers; nc.n_topics = new_n_topics;
-    nw = rant_transport_init(new_mem, new_cap, &nc);
+    nw = i_rant_transport_init(new_mem, new_cap, &nc);
     if (!nw) return NULL;
     omp = old->cfg.max_peers; onc = old->cfg.n_topics;
 
@@ -301,7 +301,7 @@ void i_rant_transport_fire_event(RantTransportState *st, RantErrorKind error, ui
     case RANT_E_META_TRUNCATED_INTEREST: topic_scoped = 0; break;
     default: break;
     }
-    if (topic_scoped) ev.topic_name = (const char*)rant_transport_topic_name(st, topic_index).data;
+    if (topic_scoped) ev.topic_name = (const char*)i_rant_transport_topic_name(st, topic_index).data;
     st->cfg.on_event(&ev);
 }
 
@@ -432,8 +432,8 @@ static void i_rant_topic_rematch(RantTransportState *st, uint16_t c, uint16_t pe
     i_RantTopic *topic=&st->topics[c];
     const uint8_t *peer_pub_bitmap=&st->peer_pub_bitmap[(size_t)peer_slot*st->bitmap_len];
     const uint8_t *peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
-    int wuse = rant_role_pubs(topic->role) && i_rant_bit_get(peer_sub_bitmap,c);
-    int ruse = rant_role_subs(topic->role) && i_rant_bit_get(peer_pub_bitmap,c);
+    int wuse = i_rant_role_pubs(topic->role) && i_rant_bit_get(peer_sub_bitmap,c);
+    int ruse = i_rant_role_subs(topic->role) && i_rant_bit_get(peer_pub_bitmap,c);
     i_RantLane *l;
     /* the rebind hold: nothing goes to a peer until it proved it applied our announce at
        the slot's rebind version. Inbound needs no hold, our own verdicts were re pended. */
@@ -465,7 +465,7 @@ static void i_rant_topic_rematch(RantTransportState *st, uint16_t c, uint16_t pe
 }
 
 
-void rant_transport_peer_add(RantTransportState *st, uint32_t id, uint16_t peer_frag){
+void i_rant_transport_peer_add(RantTransportState *st, uint32_t id, uint16_t peer_frag){
     uint16_t i; int free=-1; uint32_t max_peers=st->cfg.max_peers;
     if (i_rant_peer_slot(st,id)>=0) return;
     for (i=0;i<max_peers;i++) if(!st->peer_used[i]){free=(int)i;break;}
@@ -473,7 +473,7 @@ void rant_transport_peer_add(RantTransportState *st, uint32_t id, uint16_t peer_
     st->peer_used[free]=1; st->peer_ids[free]=id;
     memset(&st->peer_rtt[free], 0, sizeof(RantPeerRtt));     /* a new peer starts unmeasured */
     st->peer_dormant[free]=0;
-    st->peer_frag[free]=rant_clamp_frag(peer_frag);
+    st->peer_frag[free]=i_rant_clamp_frag(peer_frag);
 #ifdef RANT_SHM
     st->peer_shm[free]=0;   /* the node sets it on attach */
 #endif
@@ -491,7 +491,7 @@ void rant_transport_peer_add(RantTransportState *st, uint32_t id, uint16_t peer_
 }
 
 
-void rant_transport_peer_remove(RantTransportState *st, uint32_t id){
+void i_rant_transport_peer_remove(RantTransportState *st, uint32_t id){
     int s = i_rant_peer_slot(st,id); uint16_t c;
     if (s<0) return;
     for (c=0;c<st->cfg.n_topics;c++){
@@ -549,7 +549,7 @@ uint32_t i_rant_rtt_rto(RantTransportState *st, uint32_t peer_slot, uint32_t fal
     return rto > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)rto;
 }
 
-int rant_transport_peer_rtt(RantTransportState *st, uint32_t peer_id, RantPeerRtt *out){
+int i_rant_transport_peer_rtt(RantTransportState *st, uint32_t peer_id, RantPeerRtt *out){
     int s = st ? i_rant_peer_slot(st, peer_id) : -1;
     if (out) memset(out, 0, sizeof *out);
     if (s < 0) return 0;
@@ -559,7 +559,7 @@ int rant_transport_peer_rtt(RantTransportState *st, uint32_t peer_id, RantPeerRt
 
 
 /* Keeps every proxy and reader position, drops the peer from flow control. */
-void rant_transport_peer_dormant(RantTransportState *st, uint32_t id){
+void i_rant_transport_peer_dormant(RantTransportState *st, uint32_t id){
     int s = i_rant_peer_slot(st,id);
     if (s>=0) st->peer_dormant[s]=1;
 }
@@ -567,7 +567,7 @@ void rant_transport_peer_dormant(RantTransportState *st, uint32_t id){
 
 /* Re includes the peer and re reports each reader position, so the writer fills any gap
  * and the reader dedups any replay. */
-void rant_transport_peer_resume(RantTransportState *st, uint32_t id){
+void i_rant_transport_peer_resume(RantTransportState *st, uint32_t id){
     int s = i_rant_peer_slot(st,id); uint16_t c;
     if (s<0) return;
     st->peer_dormant[s]=0;
@@ -581,21 +581,21 @@ void rant_transport_peer_resume(RantTransportState *st, uint32_t id){
 }
 
 
-void rant_transport_peer_set_frag(RantTransportState *st, uint32_t id, uint16_t peer_frag){
+void i_rant_transport_peer_set_frag(RantTransportState *st, uint32_t id, uint16_t peer_frag){
     int s = i_rant_peer_slot(st,id);
-    if (s>=0) st->peer_frag[s]=rant_clamp_frag(peer_frag);
+    if (s>=0) st->peer_frag[s]=i_rant_clamp_frag(peer_frag);
 }
 
 #ifdef RANT_SHM
 
-void rant_transport_peer_set_shm(RantTransportState *st, uint32_t id, int is_shm){
+void i_rant_transport_peer_set_shm(RantTransportState *st, uint32_t id, int is_shm){
     int s = i_rant_peer_slot(st,id);
     if (s>=0) st->peer_shm[s]=(uint8_t)(is_shm?1:0);
 }
 #endif
 
 
-void rant_transport_destroy(RantTransportState *st){
+void i_rant_transport_destroy(RantTransportState *st){
     uint16_t c; uint32_t li;
     if (!st) return;
     for (c=0;c<st->cfg.n_topics;c++){
@@ -684,14 +684,14 @@ static int i_rant_hash32_candidates(RantTransportState *st, uint32_t h, int *idx
 
 
 /* Worst case: 5 bytes per slot plus the rate and generation sections at every topic. */
-size_t rant_interest_max(uint16_t n_topics){
+size_t i_rant_interest_max(uint16_t n_topics){
     return 2u + 5u * (size_t)n_topics + 2u + 4u * (size_t)n_topics
          + 2u + 3u * (size_t)n_topics;
 }
 
 /* the rate section's membership test, shared by the count and write walks */
 static int i_rant_topic_rate_sub(const i_RantTopic *t){
-    return i_rant_topic_announced(t) && t->qos.max_rate_hz && rant_role_subs(t->role);
+    return i_rant_topic_announced(t) && t->qos.max_rate_hz && i_rant_role_subs(t->role);
 }
 
 /* the generation section's membership test, shared by the count and write walks */
@@ -753,7 +753,7 @@ static size_t i_rant_interest_emit(RantTransportState *st, uint8_t *out, size_t 
     return (size_t)(rp - out);
 }
 
-size_t rant_transport_build_interest(RantTransportState *st, void *out, size_t cap){
+size_t i_rant_transport_build_interest(RantTransportState *st, void *out, size_t cap){
     return i_rant_interest_emit(st, (uint8_t*)out, cap);
 }
 
@@ -800,7 +800,7 @@ static i_RantInterestSections i_rant_interest_sections(const uint8_t *d, size_t 
 
 /* Re derives the peer's bits from cached verdicts plus the entry's current flags, then
  * rematches every topic. Idempotent. The gates are in spec/interest.md. */
-void rant_transport_apply_peer_interest(RantTransportState *st, uint32_t peer_id, RantBytes blob){
+void i_rant_transport_apply_peer_interest(RantTransportState *st, uint32_t peer_id, RantBytes blob){
     const uint8_t *d=blob.data, *e, *gp, *g_end;
     uint16_t n, c; uint32_t a, entries_len; int peer_slot=i_rant_peer_slot(st,peer_id);
     uint8_t *peer_pub_bitmap, *peer_sub_bitmap, *peer_sub_reliable;
@@ -878,11 +878,11 @@ void rant_transport_apply_peer_interest(RantTransportState *st, uint32_t peer_id
                 continue;
             }
         }
-        their_pub = rant_role_pubs(role);
-        their_sub = rant_role_subs(role);
+        their_pub = i_rant_role_pubs(role);
+        their_sub = i_rant_role_subs(role);
         rel       = (flags & RANT__INT_RELIABLE) != 0;
         if (their_pub){   /* their offered qos against our subscription */
-            int ours_sub = rant_role_subs(topic->role);
+            int ours_sub = i_rant_role_subs(topic->role);
             if (ours_sub && topic->qos.reliability==RANT_RELIABLE && !rel){
                 i_rant_transport_fire_event(st, RANT_E_QOS_INCOMPATIBLE, cidx, peer_id, 0, 0);
             } else if (!(astate[a] & RANT__AST_READ_OK)){
@@ -936,7 +936,7 @@ void rant_transport_apply_peer_interest(RantTransportState *st, uint32_t peer_id
 }
 
 
-int rant_transport_peer_timestamped(RantTransportState *st, uint16_t topic_index, uint32_t peer_id){
+int i_rant_transport_peer_timestamped(RantTransportState *st, uint16_t topic_index, uint32_t peer_id){
     int peer_slot;
     i_RantReaderProxy *r;
     if (!st || topic_index >= st->cfg.n_topics) return 1;
@@ -947,7 +947,7 @@ int rant_transport_peer_timestamped(RantTransportState *st, uint16_t topic_index
 }
 
 
-uint8_t rant_transport_peer_attrs(RantTransportState *st, uint32_t peer_id, uint16_t their_index){
+uint8_t i_rant_transport_peer_attrs(RantTransportState *st, uint32_t peer_id, uint16_t their_index){
     int peer_slot;
     if (!st) return 0;
     peer_slot = i_rant_peer_slot(st, peer_id);
@@ -957,7 +957,7 @@ uint8_t rant_transport_peer_attrs(RantTransportState *st, uint32_t peer_id, uint
 }
 
 
-void rant_transport_peer_match_counts(RantTransportState *st, uint32_t peer_id,
+void i_rant_transport_peer_match_counts(RantTransportState *st, uint32_t peer_id,
                             uint16_t *publish_to, uint16_t *receive_from){
     int s; uint16_t c, w=0, r=0;
     if (publish_to)   *publish_to   = 0;
@@ -998,25 +998,25 @@ static int i_rant_meta_ok(RantBytes meta){
 static uint16_t i_rant_meta_base(const uint8_t *meta){
     return (meta[2] & 1u) ? RANT__META_BASE_SHM : RANT__META_BASE_NOSHM;
 }
-uint16_t rant_meta_cap(uint16_t n_topics){
-    size_t cap = (size_t)RANT__META_BASE + rant_interest_max(n_topics);
+uint16_t i_rant_meta_cap(uint16_t n_topics){
+    size_t cap = (size_t)RANT__META_BASE + i_rant_interest_max(n_topics);
     if (cap > 65000u) cap = 65000u;
     return (uint16_t)cap;
 }
 
-uint32_t rant_transport_interest_size(RantTransportState *st){
+uint32_t i_rant_transport_interest_size(RantTransportState *st){
     return (uint32_t)i_rant_interest_emit(st, NULL, 0);
 }
 
-uint16_t rant_transport_meta_size(RantTransportState *st){
-    size_t len = (size_t)RANT__META_BASE + rant_transport_interest_size(st);
-    if (len > 65000u) len = 65000u;              /* the rant_meta_cap ceiling */
+uint16_t i_rant_transport_meta_size(RantTransportState *st){
+    size_t len = (size_t)RANT__META_BASE + i_rant_transport_interest_size(st);
+    if (len > 65000u) len = 65000u;              /* the i_rant_meta_cap ceiling */
     return (uint16_t)len;
 }
 
-uint16_t rant_transport_meta_bootstrap_size(void){ return RANT__META_BASE; }
+uint16_t i_rant_transport_meta_bootstrap_size(void){ return RANT__META_BASE; }
 
-uint16_t rant_transport_meta_build(RantTransportState *st, uint8_t *out, uint16_t cap,
+uint16_t i_rant_transport_meta_build(RantTransportState *st, uint8_t *out, uint16_t cap,
                          uint16_t frag_size, int shm_capable, const uint8_t host[16],
                          int interest_external){
     size_t interest_len, len; uint16_t off = RANT__META_BASE;
@@ -1030,19 +1030,19 @@ uint16_t rant_transport_meta_build(RantTransportState *st, uint8_t *out, uint16_
 #endif
     out[off-1] = interest_external ? RANT__META_IFLAG_EXTERNAL : 0u;
     if (interest_external) return off;     /* the bootstrap: locator sized, always one datagram */
-    interest_len = rant_transport_build_interest(st, out + off, cap - off);
+    interest_len = i_rant_transport_build_interest(st, out + off, cap - off);
     len = (size_t)off + interest_len;
     if (interest_len == 0)    /* did not fit: never silent */
         i_rant_transport_fire_event(st, RANT_E_META_TRUNCATED_INTEREST, 0, 0, 0, 0);
     return (uint16_t)len;
 }
 
-uint16_t rant_meta_frag(RantBytes meta){
+uint16_t i_rant_meta_frag(RantBytes meta){
     if (!i_rant_meta_ok(meta)) return 0;
     return (uint16_t)(meta.data[3] | ((uint16_t)meta.data[4] << 8));
 }
 
-int rant_meta_interest_external(RantBytes meta){
+int i_rant_meta_interest_external(RantBytes meta){
     uint16_t base;
     if (!i_rant_meta_ok(meta)) return 0;
     base = i_rant_meta_base(meta.data);
@@ -1050,7 +1050,7 @@ int rant_meta_interest_external(RantBytes meta){
     return (meta.data[base-1] & RANT__META_IFLAG_EXTERNAL) ? 1 : 0;
 }
 
-RantBytes rant_meta_interest(RantBytes meta){
+RantBytes i_rant_meta_interest(RantBytes meta){
     uint16_t off;
     if (!i_rant_meta_ok(meta)) return rant_bytes(NULL, 0);
     off = i_rant_meta_base(meta.data);       /* the interest follows the base */
@@ -1060,7 +1060,7 @@ RantBytes rant_meta_interest(RantBytes meta){
     return rant_bytes(meta.data + off, meta.len - off);
 }
 
-int rant_interest_next(RantBytes interest, RantInterestIter *it, RantTopicEntry *out){
+int i_rant_interest_next(RantBytes interest, RantInterestIter *it, RantTopicEntry *out){
     if (!it || !out) return 0;
     if (!it->started){                    /* first call: the [u16 n] header */
         it->started = 1; it->left = 0; it->index = 0; it->phase = 0; it->off = 0;
@@ -1089,7 +1089,7 @@ int rant_interest_next(RantBytes interest, RantInterestIter *it, RantTopicEntry 
         out->reliable = (uint8_t)((flags & RANT__INT_RELIABLE) ? 1 : 0);
         out->kind     = (uint8_t)((flags & RANT__INT_KIND_MASK) >> RANT__INT_KIND_SHIFT);
         out->hash     = i_rant_le_r32(interest.data + off);
-        if (it->phase == 0 && rant_role_pubs(role)){
+        if (it->phase == 0 && i_rant_role_pubs(role)){
             out->is_pub = 1;
             if (role==RANT_PUBSUB){ it->phase = 1; return 1; }     /* the sub direction next call */
             it->left--; it->index++; it->off = off + 5u;
@@ -1102,12 +1102,12 @@ int rant_interest_next(RantBytes interest, RantInterestIter *it, RantTopicEntry 
     return 0;
 }
 
-int rant_meta_interest_next(RantBytes meta, RantInterestIter *it, RantTopicEntry *out){
-    return rant_interest_next(rant_meta_interest(meta), it, out);
+int i_rant_meta_interest_next(RantBytes meta, RantInterestIter *it, RantTopicEntry *out){
+    return i_rant_interest_next(i_rant_meta_interest(meta), it, out);
 }
 
 #ifdef RANT_SHM
-int rant_meta_shm(RantBytes meta, uint8_t host[16]){
+int i_rant_meta_shm(RantBytes meta, uint8_t host[16]){
     if (!i_rant_meta_ok(meta) || !(meta.data[2] & 1u)     /* the odd version carries the SHM base */
         || meta.len < RANT__META_BASE_SHM || !meta.data[5]) return 0;
     memcpy(host, meta.data+6, 16);
@@ -1127,15 +1127,15 @@ static int i_rant_detail_hdr_ok(RantBytes d){
         && d.data[5]==RANT__DETAIL_VER;
 }
 
-int rant_detail_kind(RantBytes dgram){
+int i_rant_detail_kind(RantBytes dgram){
     if (!i_rant_detail_hdr_ok(dgram)) return 0;
     return (dgram.data[4]>=RANT_DETAIL_REQ && dgram.data[4]<=RANT_INTEREST_RESP)
          ? dgram.data[4] : 0;
 }
-uint16_t rant_detail_domain(RantBytes dgram){
+uint16_t i_rant_detail_domain(RantBytes dgram){
     return i_rant_detail_hdr_ok(dgram) ? i_rant_le_r16(dgram.data+6) : 0;
 }
-uint32_t rant_detail_meta_version(RantBytes dgram){
+uint32_t i_rant_detail_meta_version(RantBytes dgram){
     return i_rant_detail_hdr_ok(dgram) ? i_rant_le_r32(dgram.data+8) : 0;
 }
 
@@ -1148,7 +1148,7 @@ static void i_rant_detail_hdr_write(uint8_t *o, uint8_t kind, uint16_t domain,
     i_rant_le_w16(o+12, n);
 }
 
-size_t rant_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
+size_t i_rant_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
                              const RantDetailWant *wants, uint16_t n_wants,
                              void *out, size_t cap){
     uint8_t *o=(uint8_t*)out; uint16_t k;
@@ -1166,7 +1166,7 @@ size_t rant_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
 
 /* The interest paging codec: pure header build and parse. The responder's slicing and
    the requester's cursor live in the node core. */
-size_t rant_interest_req_build(uint16_t domain, uint32_t peer_meta_version,
+size_t i_rant_interest_req_build(uint16_t domain, uint32_t peer_meta_version,
                                uint32_t offset, void *out, size_t cap){
     uint8_t *o=(uint8_t*)out;
     if (!o || cap < (size_t)RANT__DETAIL_HDR + 4u) return 0;
@@ -1175,14 +1175,14 @@ size_t rant_interest_req_build(uint16_t domain, uint32_t peer_meta_version,
     return (size_t)RANT__DETAIL_HDR + 4u;
 }
 
-int rant_interest_req_offset(RantBytes dgram, uint32_t *offset){
-    if (rant_detail_kind(dgram) != RANT_INTEREST_REQ) return 0;
+int i_rant_interest_req_offset(RantBytes dgram, uint32_t *offset){
+    if (i_rant_detail_kind(dgram) != RANT_INTEREST_REQ) return 0;
     if (dgram.len < (size_t)RANT__DETAIL_HDR + 4u) return 0;
     if (offset) *offset = i_rant_le_r32(dgram.data + RANT__DETAIL_HDR);
     return 1;
 }
 
-size_t rant_interest_resp_head(uint16_t domain, uint32_t meta_version, uint32_t total_len,
+size_t i_rant_interest_resp_head(uint16_t domain, uint32_t meta_version, uint32_t total_len,
                                uint32_t offset, uint16_t chunk_len, void *out, size_t cap){
     uint8_t *o=(uint8_t*)out;
     if (!o || cap < (size_t)RANT_INTEREST_RESP_HEAD) return 0;
@@ -1193,10 +1193,10 @@ size_t rant_interest_resp_head(uint16_t domain, uint32_t meta_version, uint32_t 
     return (size_t)RANT_INTEREST_RESP_HEAD;
 }
 
-int rant_interest_resp_parse(RantBytes dgram, uint32_t *total_len, uint32_t *offset,
+int i_rant_interest_resp_parse(RantBytes dgram, uint32_t *total_len, uint32_t *offset,
                              RantBytes *chunk){
     uint32_t total, off; uint16_t clen;
-    if (rant_detail_kind(dgram) != RANT_INTEREST_RESP) return 0;
+    if (i_rant_detail_kind(dgram) != RANT_INTEREST_RESP) return 0;
     if (dgram.len < (size_t)RANT_INTEREST_RESP_HEAD) return 0;
     total = i_rant_le_r32(dgram.data + RANT__DETAIL_HDR);
     off   = i_rant_le_r32(dgram.data + RANT__DETAIL_HDR + 4u);
@@ -1216,12 +1216,12 @@ static size_t i_rant_detail_answer(RantTransportState *st, const RantMetaSchema 
                                    uint8_t *out, size_t cap){
     const uint8_t *r; uint16_t n_req, k, n_out=0;
     size_t len = RANT__DETAIL_HDR;
-    if (!st || rant_detail_kind(req) != RANT_DETAIL_REQ) return 0;
+    if (!st || i_rant_detail_kind(req) != RANT_DETAIL_REQ) return 0;
     n_req = i_rant_le_r16(req.data+12);
     if (req.len < (size_t)RANT__DETAIL_HDR + (size_t)n_req*10u) return 0;     /* truncated: reject */
     if (out){
         if (cap < RANT__DETAIL_HDR) return 0;
-        i_rant_detail_hdr_write(out, RANT_DETAIL_RESP, rant_detail_domain(req), meta_version, 0);
+        i_rant_detail_hdr_write(out, RANT_DETAIL_RESP, i_rant_detail_domain(req), meta_version, 0);
     }
     r = req.data + RANT__DETAIL_HDR;
     for (k=0;k<n_req;k++,r+=10){
@@ -1258,24 +1258,24 @@ static size_t i_rant_detail_answer(RantTransportState *st, const RantMetaSchema 
     return len;
 }
 
-size_t rant_transport_detail_resp_size(RantTransportState *st, const RantMetaSchema *schemas,
+size_t i_rant_transport_detail_resp_size(RantTransportState *st, const RantMetaSchema *schemas,
                                        RantBytes req){
     /* one page, so the response never IP fragments and the requester pages the rest */
     return i_rant_detail_answer(st, schemas, 0, req, NULL, RANT_DGRAM_MAX);
 }
 
-size_t rant_transport_detail_respond(RantTransportState *st, const RantMetaSchema *schemas,
+size_t i_rant_transport_detail_respond(RantTransportState *st, const RantMetaSchema *schemas,
                                      uint32_t meta_version, RantBytes req,
                                      void *out, size_t cap){
     return i_rant_detail_answer(st, schemas, meta_version, req, (uint8_t*)out, cap);
 }
 
-int rant_detail_next(RantBytes resp, RantDetailIter *it, RantDetail *out){
+int i_rant_detail_next(RantBytes resp, RantDetailIter *it, RantDetail *out){
     uint32_t off; uint8_t nlen; uint16_t wlen;
     if (!it || !out) return 0;
     if (!it->started){
         it->started = 1; it->left = 0; it->off = RANT__DETAIL_HDR;
-        if (rant_detail_kind(resp) != RANT_DETAIL_RESP) return 0;
+        if (i_rant_detail_kind(resp) != RANT_DETAIL_RESP) return 0;
         it->left = i_rant_le_r16(resp.data+12);
     }
     if (!it->left) return 0;
@@ -1323,15 +1323,15 @@ static int i_rant_interest_scan_next(i_RantInterestScan *s){
         if (flags & RANT__INT_HOLE_RUN) continue;     /* a run of undefined slots */
         if (role == RANT_INACTIVE) continue;          /* declared but off */
         s->pos = a; s->hash = i_rant_le_r32(e); s->flags = flags;
-        s->their_pub = (uint8_t)rant_role_pubs(role);
-        s->their_sub = (uint8_t)rant_role_subs(role);
+        s->their_pub = (uint8_t)i_rant_role_pubs(role);
+        s->their_sub = (uint8_t)i_rant_role_subs(role);
         return 1;
     }
     return 0;
 }
 
 /* The pending candidates of a peer: a hash and role overlap with no cached verdict. */
-uint16_t rant_transport_detail_wants(RantTransportState *st, const RantMetaSchema *schemas,
+uint16_t i_rant_transport_detail_wants(RantTransportState *st, const RantMetaSchema *schemas,
                                      uint32_t peer_id, RantBytes interest,
                                      RantDetailWant *out, uint16_t max_wants){
     const uint8_t *d=interest.data;
@@ -1353,8 +1353,8 @@ uint16_t rant_transport_detail_wants(RantTransportState *st, const RantMetaSchem
         nc = i_rant_hash32_candidates(st, scan.hash, &cidx);
         if (!nc) continue;                                 /* no local topic */
         topic = &st->topics[cidx];
-        ours_pub = rant_role_pubs(topic->role);
-        ours_sub = rant_role_subs(topic->role);
+        ours_pub = i_rant_role_pubs(topic->role);
+        ours_sub = i_rant_role_subs(topic->role);
         if (!((scan.their_pub && ours_sub) || (scan.their_sub && ours_pub))) continue;
         if (out){
             if (cnt >= max_wants) break;
@@ -1370,7 +1370,7 @@ uint16_t rant_transport_detail_wants(RantTransportState *st, const RantMetaSchem
 
 /* Entries with no verdict storage are not counted. They can never resolve, so a wait on
  * them would only time out. */
-uint16_t rant_transport_topic_unresolved(RantTransportState *st, uint16_t topic_index,
+uint16_t i_rant_transport_topic_unresolved(RantTransportState *st, uint16_t topic_index,
                                          uint32_t peer_id, RantBytes interest){
     const uint8_t *d=interest.data;
     i_RantTopic *topic;
@@ -1384,8 +1384,8 @@ uint16_t rant_transport_topic_unresolved(RantTransportState *st, uint16_t topic_
     if (slot < 0) return 0;
     n = i_rant_le_r16(d);
     if (!i_rant_interest_walk_len(d, interest.len, n)) return 0;
-    ours_pub = rant_role_pubs(topic->role);
-    ours_sub = rant_role_subs(topic->role);
+    ours_pub = i_rant_role_pubs(topic->role);
+    ours_sub = i_rant_role_subs(topic->role);
     if (!ours_pub && !ours_sub) return 0;
     astate = st->peer_astate[slot]; alen = st->peer_index_len[slot];
     i_rant_interest_scan_init(&scan, d, n);
@@ -1405,7 +1405,7 @@ uint16_t rant_transport_topic_unresolved(RantTransportState *st, uint16_t topic_
     return cnt;
 }
 
-void rant_transport_peer_unresolved_fill(RantTransportState *st, uint32_t peer_id,
+void i_rant_transport_peer_unresolved_fill(RantTransportState *st, uint32_t peer_id,
                                          RantBytes interest, uint16_t *counts, uint16_t n){
     const uint8_t *d=interest.data;
     i_RantInterestScan scan;
@@ -1428,7 +1428,7 @@ void rant_transport_peer_unresolved_fill(RantTransportState *st, uint32_t peer_i
             const i_RantTopic *topic;
             if (!(astate[scan.pos] & RANT__AST_NAME_OK) || cidx >= n) continue;
             topic = &st->topics[cidx];
-            if (scan.their_sub && rant_role_pubs(topic->role) && topic->rebind_version
+            if (scan.their_sub && i_rant_role_pubs(topic->role) && topic->rebind_version
                 && st->peer_seen_version[slot] < topic->rebind_version && counts[cidx] != 0xFFFFu)
                 counts[cidx]++;
             continue;
@@ -1437,7 +1437,7 @@ void rant_transport_peer_unresolved_fill(RantTransportState *st, uint32_t peer_i
             const i_RantTopic *topic = &st->topics[c];
             int ours_pub, ours_sub;
             if (!i_rant_topic_announced(topic) || (uint32_t)topic->identity != scan.hash) continue;
-            ours_pub = rant_role_pubs(topic->role); ours_sub = rant_role_subs(topic->role);
+            ours_pub = i_rant_role_pubs(topic->role); ours_sub = i_rant_role_subs(topic->role);
             if (((scan.their_pub && ours_sub) || (scan.their_sub && ours_pub)) && counts[c] != 0xFFFFu)
                 counts[c]++;
         }
@@ -1446,14 +1446,14 @@ void rant_transport_peer_unresolved_fill(RantTransportState *st, uint32_t peer_i
 
 /* Verifies each entry and caches the verdict. Idempotent, decided indices are skipped, so
  * duplicate and crossing responses are harmless. */
-uint16_t rant_transport_apply_peer_details(RantTransportState *st, uint32_t peer_id, RantBytes resp){
+uint16_t i_rant_transport_apply_peer_details(RantTransportState *st, uint32_t peer_id, RantBytes resp){
     RantDetailIter it; RantDetail dd;
     int slot; uint16_t fresh = 0;
     if (!st) return 0;
     slot = i_rant_peer_slot(st, peer_id);
     if (slot < 0) return 0;
     memset(&it, 0, sizeof it);
-    while (rant_detail_next(resp, &it, &dd)){
+    while (i_rant_detail_next(resp, &it, &dd)){
         uint16_t *amap = st->peer_index[slot]; uint8_t *astate = st->peer_astate[slot];
         uint64_t id64; i_RantTopic *topic; int cidx = -1;
         if (!amap || !astate || (uint32_t)dd.index >= st->peer_index_len[slot])
@@ -1485,7 +1485,7 @@ uint16_t rant_transport_apply_peer_details(RantTransportState *st, uint32_t peer
 }
 
 
-int rant_transport_set_role(RantTransportState *st, uint16_t topic_index, uint8_t role){
+int i_rant_transport_set_role(RantTransportState *st, uint16_t topic_index, uint8_t role){
     i_RantTopic *topic; uint16_t p;
     if (role > RANT_INACTIVE) return -1;
     topic = i_rant_topic_at(st, topic_index, NULL);
@@ -1499,7 +1499,7 @@ int rant_transport_set_role(RantTransportState *st, uint16_t topic_index, uint8_
 }
 
 
-int rant_transport_topic_define(RantTransportState *st, uint16_t topic_index, const RantTopicDef *def){
+int i_rant_transport_topic_define(RantTransportState *st, uint16_t topic_index, const RantTopicDef *def){
     i_RantTopic *topic; RantQos q; uint16_t depth, p; size_t lane;
     if (!st || !def) return -1;
     if (topic_index >= st->cfg.n_topics) return -1;            /* out of the reserved range */
@@ -1513,7 +1513,7 @@ int rant_transport_topic_define(RantTransportState *st, uint16_t topic_index, co
            kind while both would be live, since the peer maps bind a name to one local topic
            and a live twin would only be shadowed. An INACTIVE twin is the QoS switch of
            spec/interest.md, and retired slots are exempt */
-        uint64_t id = rant_topic_identity(def); uint16_t c;
+        uint64_t id = i_rant_topic_identity(def); uint16_t c;
         for (c=0;c<st->cfg.n_topics;c++){
             const i_RantTopic *t = &st->topics[c];
             if (!i_rant_topic_announced(t) || t->identity != id) continue;
@@ -1532,7 +1532,7 @@ int rant_transport_topic_define(RantTransportState *st, uint16_t topic_index, co
     topic->role = def->role;
     topic->kind = def->kind; topic->prefix_bytes = def->prefix_bytes; topic->directed = def->directed;
     topic->attrs = def->attrs;
-    topic->identity = rant_topic_identity(def);
+    topic->identity = i_rant_topic_identity(def);
     memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane] = '\0';
     topic->name_len = (uint8_t)lane;
     topic->history_head = 0; topic->next_seqno = 0; topic->have_first = 0;
@@ -1553,7 +1553,7 @@ int rant_transport_topic_define(RantTransportState *st, uint16_t topic_index, co
 
 /* Parks a slot: every lane releases, the ring is freed and the slot leaves the announce.
  * Identity, name, kind, qos, gen and next_seqno stay for reuse to compare. */
-int rant_transport_topic_retire(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_topic_retire(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic; uint16_t p, d, depth;
     if (!st) return -1;
     topic = i_rant_topic_at(st, topic_index, NULL);
@@ -1582,11 +1582,11 @@ int rant_transport_topic_retire(RantTransportState *st, uint16_t topic_index){
 }
 
 
-int rant_transport_topic_reuse_find(RantTransportState *st, const char *name, uint8_t kind,
+int i_rant_transport_topic_reuse_find(RantTransportState *st, const char *name, uint8_t kind,
                                     uint16_t *index_out){
     uint64_t id; uint16_t c; int any = -1;
     if (!st || !name || !name[0]) return 0;
-    id = rant_topic_id(name);
+    id = i_rant_topic_id(name);
     for (c=0;c<st->cfg.n_topics;c++){
         const i_RantTopic *t = &st->topics[c];
         if (!t->retired) continue;
@@ -1600,7 +1600,7 @@ int rant_transport_topic_reuse_find(RantTransportState *st, const char *name, ui
 
 /* Rebinds a retired slot. The seqno line always continues: an identical rebind keeps a
  * peer's reader position valid, and a changed one re forms every lane anyway. */
-int rant_transport_topic_reuse(RantTransportState *st, uint16_t topic_index,
+int i_rant_transport_topic_reuse(RantTransportState *st, uint16_t topic_index,
                                const RantTopicDef *def, int binding_changed,
                                uint32_t rebind_version){
     i_RantTopic *topic; RantQos q; uint16_t depth, p; size_t nlen; uint64_t id;
@@ -1611,7 +1611,7 @@ int rant_transport_topic_reuse(RantTransportState *st, uint16_t topic_index,
     nlen = i_rant_name_len(def->name);
     if (def->name[nlen]) return -3;                          /* longer than RANT_TOPIC_NAME_MAX */
     if (def->directed && def->qos.catch_up) return -1;       /* directed history never replays */
-    id = rant_topic_identity(def);
+    id = i_rant_topic_identity(def);
     {   /* the same name rule as at define */
         uint16_t c;
         for (c=0;c<st->cfg.n_topics;c++){
@@ -1680,7 +1680,7 @@ int rant_transport_topic_reuse(RantTransportState *st, uint16_t topic_index,
 
 /* Releases the writer lanes the advance takes out of the rebind hold. 1 when a lane
  * actually formed, so the caller re fires its interest event. */
-int rant_transport_peer_seen_version(RantTransportState *st, uint32_t peer_id, uint32_t version){
+int i_rant_transport_peer_seen_version(RantTransportState *st, uint32_t peer_id, uint32_t version){
     int s; uint16_t c; uint32_t old; int changed = 0;
     if (!st) return 0;
     s = i_rant_peer_slot(st, peer_id);
@@ -1702,31 +1702,31 @@ int rant_transport_peer_seen_version(RantTransportState *st, uint32_t peer_id, u
 }
 
 
-uint64_t rant_transport_topic_seqno(RantTransportState *st, uint16_t topic_index){
+uint64_t i_rant_transport_topic_seqno(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = st ? i_rant_topic_at(st, topic_index, NULL) : NULL;
     return topic ? topic->next_seqno : 0;
 }
 
 
-RantString rant_transport_topic_name(RantTransportState *st, uint16_t topic_index){
+RantString i_rant_transport_topic_name(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     if (!topic || topic->name_len == 0) return rant_string(NULL, 0);     /* undefined */
     return rant_string(topic->name, topic->name_len);
 }
 
 
-const RantQos *rant_transport_topic_qos(RantTransportState *st, uint16_t topic_index){
+const RantQos *i_rant_transport_topic_qos(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     return topic ? &topic->qos : NULL;
 }
 
-uint8_t rant_transport_topic_attrs(RantTransportState *st, uint16_t topic_index){
+uint8_t i_rant_transport_topic_attrs(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     return topic ? topic->attrs : 0;
 }
 
 
-void rant_transport_repair_stats(RantTransportState *st, uint16_t topic_index, RantRepairStats *out){
+void i_rant_transport_repair_stats(RantTransportState *st, uint16_t topic_index, RantRepairStats *out){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     if (!out) return;
     if (topic) *out = topic->repair_stats;
@@ -1734,7 +1734,7 @@ void rant_transport_repair_stats(RantTransportState *st, uint16_t topic_index, R
 }
 
 
-void rant_transport_on_datagram(RantTransportState *st, uint32_t from, RantBytes datagram, uint64_t now){
+void i_rant_transport_on_datagram(RantTransportState *st, uint32_t from, RantBytes datagram, uint64_t now){
     const uint8_t *p=datagram.data; size_t rem=datagram.len;
     int peer_slot=i_rant_peer_slot(st,from);
     if (peer_slot<0) return;

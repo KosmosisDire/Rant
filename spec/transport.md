@@ -36,7 +36,7 @@ reliable is matched on it.
 A send with zero matched writers skips the grow, the memcpy and the commit unless the
 topic retains history (reliable with `catch_up` above 0). The match count is O(1) off a
 cached counter. The send path kicks the waker only when something is still pending after
-its own drain (`rant_transport_tx_pending`, or a held datagram): the waker is a loopback
+its own drain (`i_rant_transport_tx_pending`, or a held datagram): the waker is a loopback
 send that costs about 36 us on Windows. See spec/node.md for the inline drain.
 
 The poll wait is capped at `next_deadline_us`, the earliest armed timer, fed at the arm
@@ -151,7 +151,7 @@ The bound is the smoothed value plus max(1 ms, 4 times the deviation), never und
 backstop (`qos.repair_delay_us` 0 = adaptive, a nonzero value pins it, 50 ms until the
 first sample) and the writer's tail heartbeat (`RANT_HB_TAIL_US` until the first sample).
 One lost resend then costs one round trip instead of 50 ms. Read it through
-`RantPeerInfo.rtt_*`, the `@rant/meta` peers section, or `rant_transport_peer_rtt`. The
+`RantPeerInfo.rtt_*`, the `@rant/meta` peers section, or `i_rant_transport_peer_rtt`. The
 `rtt:` selftests pin it with a virtual clock.
 
 ## Tail heartbeat
@@ -228,7 +228,7 @@ teardown because a graceful restart regenerates its uuid anyway.
 
 A message that would fragment to a same host subscriber goes through shared memory
 instead: one 37 byte descriptor on the wire and the payload in a shared chunk. The cutoff
-is this node's own fragment size (`rant_transport_frag`), since a writer fragments its
+is this node's own fragment size (`i_rant_transport_frag`), since a writer fragments its
 whole seqno line with one size. A message that fits one datagram goes inline either way,
 because the shared memory path still costs a descriptor plus pool and attach work. Same
 host is a host id match, not an address match. See spec/shm.md.

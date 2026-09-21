@@ -109,7 +109,7 @@ strict prefix of it.
   themselves, and a kick per wake made the two threads spin. There is no unsent wait.
   Unsent history at send time means a full socket, so KEEP_LAST proceeds and
   `RANT_E_EVICTED_UNSENT` fires after the send commits. A rate capped lane is exempt from
-  `rant_transport_send_would_evict_unsent`, since it holds samples back on purpose.
+  `i_rant_transport_send_would_evict_unsent`, since it holds samples back on purpose.
 - The blocking waits (match wait, send backpressure, topic drain, node settle, queue
   wait) share one `i_rant_node_wait_until` skeleton: predicate, periodic hook, outer flag.
   Invariants it carries: waiter accounting, re derive arena pointers after any wait, exit
@@ -164,7 +164,7 @@ nonzero, no `deliver_upto` advance, no ack, no repair traffic, the message held 
 assembly buffer (the SHM variant parks the descriptor). Incoming DATA of the next sample
 fills the one ahead hold, so an unpark delivers both with no resend. The writer's
 `acked_upto` stalls, its history fills, and the publisher's send blocks on normal flow
-control. Draining calls `rant_transport_deliver_parked` and kicks the waker. A writer HB
+control. Draining calls `i_rant_transport_deliver_parked` and kicks the waker. A writer HB
 floor past the held sample gives up with one `MSG_LOST`, the bounded loss escape. Any new
 sans-IO consumer of `RantMessageFn` must return 0.
 
@@ -205,7 +205,7 @@ fills the topic name itself and asks its `schema_why` hook for the mismatch text
 Discovery fires only its two errors (`PEER_REFUSED`, `PEER_META_TOO_BIG`) as events. Its
 peer up and peer down are plain hooks, since they carry the overlay and the DROP or GONE
 reason the node core acts on, and the app's `PEER_UP` and `PEER_DOWN` come from the node
-core after it has done that work. `rant_discovery_last_error` returns a `RantErrorKind`
+core after it has done that work. `i_rant_discovery_last_error` returns a `RantErrorKind`
 too. Each layer sets `.user` to its own config user, and the single emit point swaps in
 the app's `user_data`. Text is built on demand by
 `rant_event_str`, so the data path never touches it. `rant_last_error(n)` keeps the last

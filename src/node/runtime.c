@@ -396,7 +396,7 @@ pend_done:
 
 /* our topic's name as a C string, NULL if undefined: the topic_name view on events */
 static const char *i_rant_node_topic_name(RantNode *n, uint16_t topic_index){
-    RantString s = rant_transport_topic_name(n->transport, topic_index);
+    RantString s = i_rant_transport_topic_name(n->transport, topic_index);
     return (const char*)s.data;
 }
 
@@ -611,7 +611,7 @@ static i_RantMsgQueue *i_rant_node_queue_ensure(RantNode *n, RantTopic *h, const
     i_RantMsgQueue *q = h->q;
     uint32_t limit, initial;
     if (q) return q;
-    if (!qos) qos = rant_transport_topic_qos(n->transport, h->index);
+    if (!qos) qos = i_rant_transport_topic_qos(n->transport, h->index);
     limit = RANT__QALIGN((qos && qos->queue_bytes) ? qos->queue_bytes : RANT_QUEUE_CAP);
     initial = (qos && qos->queue_bytes) ? limit : (limit < 4096u ? limit : 4096u);
     q = (i_RantMsgQueue*)i_rant_node_alloc(n, NULL, sizeof *q);
@@ -641,7 +641,7 @@ static void i_rant_node_queue_release(RantNode *n, RantTopic *h, i_RantMsgQueue 
         i_rant_q_pop(q);
     }
     if (q->parked){
-        q->parked = rant_transport_deliver_parked(n->transport, h->index,
+        q->parked = i_rant_transport_deliver_parked(n->transport, h->index,
                                                   i_rant_plat_now_us()) ? 1u : 0u;
         i_rant_node_kick(n);
     }
@@ -674,7 +674,7 @@ static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from,
     const RantSchema *schema = i_rant_node_core_msg_schema(n->core, from, topic_index);
     /* the stamps first, then the header split, then the schema validates the payload */
     body = i_rant_node_strip_ts(data,
-              rant_transport_peer_timestamped(n->transport, topic_index, from),
+              i_rant_transport_peer_timestamped(n->transport, topic_index, from),
               &written_us, &capture_us);
     i_rant_node_split(h, body, &hdr, &payload);
     /* an op only pattern message (a zero payload, or a task op that is not CALL) skips
@@ -707,7 +707,7 @@ static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from,
     m.topic_index = topic_index; m.publisher_id = from;
     m.publisher_name = i_rant_node_core_peer_name(n->core, from);            /* a discovery view */
     if (!m.publisher_name.data) m.publisher_name = rant_cstr("unknown-peer"); /* never NULL */
-    m.topic_name = rant_transport_topic_name(n->transport, topic_index);
+    m.topic_name = i_rant_transport_topic_name(n->transport, topic_index);
     m.header = hdr; m.data = payload;
     m.schema = schema;
     m.recv_us = i_rant_plat_now_us();
@@ -778,17 +778,17 @@ static void i_rant_node_layout(i_RantBump *b, uint16_t max_peers, uint16_t max_t
     o->handles       = (uint8_t*)i_rant_bump_take(b, (size_t)max_topics * sizeof(RantTopic*), 16);
     o->node_core_bytes = i_rant_node_core_required_memory(max_topics);     /* no peers here */
     o->node_core = (uint8_t*)i_rant_bump_take(b, o->node_core_bytes, 16);
-    o->transport_bytes = rant_transport_required_memory(transport_cfg);
+    o->transport_bytes = i_rant_transport_required_memory(transport_cfg);
     o->transport = (uint8_t*)i_rant_bump_take(b, o->transport_bytes, 16);
 #ifdef RANT_SHM
     /* only the (topic, class) segment pointer table lives in the arena */
     o->shm_pool = (uint8_t*)i_rant_bump_take(b, (size_t)max_topics * RANT_SHM_N_CLASSES * sizeof(void*), 16);
 #endif
-    o->discovery_bytes = rant_discovery_placement_memory(discovery_cfg);
+    o->discovery_bytes = i_rant_discovery_placement_memory(discovery_cfg);
     o->discovery = (uint8_t*)i_rant_bump_take(b, o->discovery_bytes, 16);
     /* the RX buffer fits a unicast announce carrying the largest blob we accept, since
        recvfrom drops an oversized datagram and a late joiner has no other path to it */
-    o->rx_buf_bytes = rant_discovery_wire_size(discovery_cfg->meta_cap);
+    o->rx_buf_bytes = i_rant_discovery_wire_size(discovery_cfg->meta_cap);
     if (o->rx_buf_bytes < RANT_DGRAM_MAX) o->rx_buf_bytes = RANT_DGRAM_MAX;
     o->rx_buf = (uint8_t*)i_rant_bump_take(b, o->rx_buf_bytes, 16);
 }
@@ -823,7 +823,7 @@ static void i_rant_node_tx_drain(RantNode *n){
     if (n->tx_hold_len && i_rant_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
         n->tx_hold_len = 0;
     if (n->tx_hold_len) return;
-    while (rant_transport_poll_send(n->transport, &to, buf, sizeof buf, &out_len, i_rant_plat_now_us())){
+    while (i_rant_transport_poll_send(n->transport, &to, buf, sizeof buf, &out_len, i_rant_plat_now_us())){
         if (!i_rant_node_tx(n, to, buf, out_len)){
             memcpy(n->tx_hold, buf, out_len);
             n->tx_hold_len = out_len; n->tx_hold_peer = to;
@@ -841,8 +841,8 @@ static void i_rant_node_send_tx(RantNode *n, int acquired){
     if (own && n->fd != RANT_SOCK_BAD) i_rant_node_tx_drain(n);
     /* a full socket or a callback's commit is left to the poller, and so is a timer this
        send armed ahead of the poller's planned wake (its wait rounds up a millisecond) */
-    {   uint64_t next = rant_transport_next_deadline_us(n->transport);
-        if (n->tx_hold_len || rant_transport_tx_pending(n->transport)
+    {   uint64_t next = i_rant_transport_next_deadline_us(n->transport);
+        if (n->tx_hold_len || i_rant_transport_tx_pending(n->transport)
             || (next && n->pollers_sleeping && next + 1000u <= n->sleep_until_us))
             i_rant_node_kick(n);
     }
@@ -960,7 +960,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     dc.announce_interval_us = o.discovery.announce_interval_us;
     dc.peer_timeout_us = o.discovery.peer_timeout_us;
     dc.max_peers   = max_peers;
-    dc.meta_cap = rant_meta_cap(max_topics);
+    dc.meta_cap = i_rant_meta_cap(max_topics);
     dc.peer_user_bytes = i_rant_node_core_peer_user_bytes();     /* the core's scratch */
     dc.alloc = i_rant_node_alloc;     /* per peer blobs at their size. Set before sizing so
                                                  measure and place agree. alloc_user is set below */
@@ -968,7 +968,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     tc.n_topics  = max_topics;
     tc.max_peers   = max_peers;
     tc.frag_size= o.net.fragment_size;
-    tc.allocator   = i_rant_node_alloc;     /* required by rant_transport_init */
+    tc.allocator   = i_rant_node_alloc;     /* required by i_rant_transport_init */
 
     {   i_RantBump b; memset(&b,0,sizeof b);
         i_rant_node_layout(&b, max_peers, max_topics, &tc, &dc, &blocks);
@@ -1046,7 +1046,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     tc.on_shm = i_rant_node_on_shm;
 #endif
 
-    n->transport = rant_transport_init(blocks.transport, blocks.transport_bytes, &tc);
+    n->transport = i_rant_transport_init(blocks.transport, blocks.transport_bytes, &tc);
     if (!n->transport){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, 0); goto fail_threads; }
 #ifdef RANT_SHM
     {   uint32_t n_segments = (uint32_t)max_topics * RANT_SHM_N_CLASSES; uint32_t i;
@@ -1059,13 +1059,13 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
 #endif
 
     /* the sans-IO node core, bound to discovery's peer table below once it exists */
-    node_name_len = rant_discovery_default_name(node_name, sizeof node_name, name);
+    node_name_len = i_rant_discovery_default_name(node_name, sizeof node_name, name);
     memcpy(n->name, node_name, node_name_len); n->name[node_name_len] = '\0';   /* snapshot copy */
     n->name_len = node_name_len;
     {   i_RantNodeCoreConfig cc;
         memset(&cc, 0, sizeof cc);
-        cc.transport = n->transport;   /* cc.discovery is bound after rant_discovery_place */
-        cc.n_topics = max_topics; cc.frag_size = rant_clamp_frag(o.net.fragment_size);
+        cc.transport = n->transport;   /* cc.discovery is bound after i_rant_discovery_place */
+        cc.n_topics = max_topics; cc.frag_size = i_rant_clamp_frag(o.net.fragment_size);
         cc.on_event = i_rant_node_on_event; cc.user = n;
         cc.alloc = i_rant_node_alloc; cc.alloc_user = n;     /* backs the peer schema state */
         cc.fetch_details = o.fetch_details;
@@ -1109,20 +1109,20 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     /* the core builds our overlay, discovery wraps it in its blob after the locator and name */
     i_rant_node_core_build_meta(n->core);
     dc.meta = i_rant_node_core_meta(n->core);
-    n->discovery = rant_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc, &o.net);
+    n->discovery = i_rant_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc, &o.net);
     if (!n->discovery){
-        (void)i_rant_node_open_fail(on_event, o.user_data, rant_discovery_last_error(),
-                                    rant_discovery_last_os_error(),
+        (void)i_rant_node_open_fail(on_event, o.user_data, i_rant_discovery_last_error(),
+                                    i_rant_discovery_last_os_error(),
                                     o.net.discovery_port, 0);
         goto fail_sock;
     }
     /* the node core delegates address resolution and per peer scratch to discovery's table */
-    i_rant_node_core_bind_discovery(n->core, rant_discovery_state(n->discovery));
+    i_rant_node_core_bind_discovery(n->core, i_rant_discovery_state(n->discovery));
     i_rant_node_core_set_self_name(n->core, rant_string(n->name, strlen(n->name)));
 
     /* every unicast discovery send goes out of the data socket, so a NAT's per flow
        mappings are the ones the data will use. See spec/discovery.md */
-    rant_discovery_set_tx_fd(n->discovery, fd);
+    i_rant_discovery_set_tx_fd(n->discovery, fd);
 
     /* the post open gather anchor: discovery solicits on startup, so every peer already
        out there answers within an RTT of the first poll */
@@ -1164,7 +1164,7 @@ static int i_rant_node_grow(RantNode *n, uint16_t new_max_peers, uint16_t new_ma
     uint8_t *nbase; size_t need;
     uint16_t old_max_topics = n->max_topics;
     /* the accept bound never shrinks: topic derived, previously grown, or requested */
-    uint16_t new_meta_cap = rant_meta_cap(new_max_topics);
+    uint16_t new_meta_cap = i_rant_meta_cap(new_max_topics);
     if (n->meta_cap > new_meta_cap) new_meta_cap = n->meta_cap;
     if (want_meta_cap    > new_meta_cap) new_meta_cap = want_meta_cap;
 
@@ -1191,16 +1191,16 @@ static int i_rant_node_grow(RantNode *n, uint16_t new_max_peers, uint16_t new_ma
 
     /* migrate the three cores. Each leaves the old intact, so a failure frees the new
        arena and the old node keeps running, only refusing the growth */
-    nt = rant_transport_migrate(n->transport, nb.transport, nb.transport_bytes, new_max_peers, new_max_topics);
+    nt = i_rant_transport_migrate(n->transport, nb.transport, nb.transport_bytes, new_max_peers, new_max_topics);
     if (!nt){ rant_allocator_alloc(&n->pool, new_arena, 0); return 0; }
     ncore = i_rant_node_core_migrate(n->core, nb.node_core, nb.node_core_bytes, new_max_topics);
     if (!ncore){ rant_allocator_alloc(&n->pool, new_arena, 0); return 0; }
     ncore->transport = nt;                         /* re point the cross layer pointer */
     i_rant_node_core_build_meta(ncore);                /* rebuild the blob in the new buffer */
-    ndisc = rant_discovery_migrate(n->discovery, nb.discovery, nb.discovery_bytes,
+    ndisc = i_rant_discovery_migrate(n->discovery, nb.discovery, nb.discovery_bytes,
                                       new_max_peers, new_meta_cap, i_rant_node_core_meta(ncore).data, ncore);
     if (!ndisc){ rant_allocator_alloc(&n->pool, new_arena, 0); return 0; }
-    i_rant_node_core_bind_discovery(ncore, rant_discovery_state(ndisc));       /* the relocated table */
+    i_rant_node_core_bind_discovery(ncore, i_rant_discovery_state(ndisc));       /* the relocated table */
 
     /* the handle pointer array. The handle structs are stable and do not move */
     memcpy(nb.handles, n->handles, (size_t)old_max_topics*sizeof(RantTopic*));
@@ -1237,10 +1237,10 @@ static void i_rant_node_reflect_self(RantNode *n){
         RantTopic *h = n->handles[i];
         const RantQos *q;
         if (!h) continue;
-        q = rant_transport_topic_qos(n->transport, i);
+        q = i_rant_transport_topic_qos(n->transport, i);
         i_rant_node_core_self_channel(n->core, i, rant_string(h->name, h->name_len), h->kind, h->role,
                                       (uint8_t)(q ? q->reliability : 0),
-                                      rant_transport_topic_attrs(n->transport, i), h->schema);
+                                      i_rant_transport_topic_attrs(n->transport, i), h->schema);
     }
     i_rant_node_core_self_end(n->core);
 }
@@ -1250,8 +1250,8 @@ static void i_rant_node_reflect_self(RantNode *n){
 static void i_rant_node_readvertise(RantNode *n){
     i_rant_node_reflect_self(n);
     i_rant_node_core_build_meta(n->core);
-    rant_discovery_advertise(n->discovery, i_rant_node_core_meta(n->core));
-    rant_discovery_replay(n->discovery);
+    i_rant_discovery_advertise(n->discovery, i_rant_node_core_meta(n->core));
+    i_rant_discovery_replay(n->discovery);
     n->match_epoch++;
     i_rant_node_kick(n);
 }
@@ -1265,7 +1265,7 @@ static void i_rant_node_create_fail(RantNode *n, RantErrorKind err, const char *
                                     uint64_t need, int emit){
     RantEvent e; memset(&e, 0, sizeof e);
     e.kind = RANT_ERROR; e.error = err; e.topic_name = name; e.too_big_bytes = need;
-    if (err == RANT_E_NAME_COLLISION) e.identity = rant_topic_id(name);
+    if (err == RANT_E_NAME_COLLISION) e.identity = i_rant_topic_id(name);
     if (emit){ i_rant_node_emit(n, &e); return; }
     e.user = n->user_data;
     n->last_error = e;
@@ -1308,7 +1308,7 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
             i_rant_node_create_fail(n, RANT_E_STATE, name, 0, 1);
             i_rant_node_unlock(n, acquired); return NULL;
         }
-    } else if ((reuse = rant_transport_topic_reuse_find(n->transport, name, kind, &idx)) != 0){
+    } else if ((reuse = i_rant_transport_topic_reuse_find(n->transport, name, kind, &idx)) != 0){
         /* a retired slot takes this create so churn never grows the table. Same identity,
            kind and schema (find = 2) relinks silently, anything else rebinds. See spec/interest.md */
     } else {
@@ -1337,7 +1337,7 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
         const RantSchema *ms = NULL; uint8_t rel = 0;
         h->reflect = 1;
         i_rant_node_core_reflect_pick(n->core, RANT_ENTITY_TOPIC, name, 0,
-                                      rant_role_pubs((uint8_t)role), &ms, &rel, &h->generation);
+                                      i_rant_role_pubs((uint8_t)role), &ms, &rel, &h->generation);
         if (!schema) schema = ms;
         if (!h->qos.reliability) h->qos.reliability = rel ? RANT_RELIABLE : RANT_BEST_EFFORT;
     }
@@ -1375,11 +1375,11 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
             int changed = (reuse != 2)
                        || (new_hash != i_rant_node_core_topic_schema_hash(n->core, idx));
             uint32_t rb = changed
-                ? rant_discovery_meta_version(rant_discovery_state(n->discovery)) + 1u : 0u;
-            rc = rant_transport_topic_reuse(n->transport, idx, &def, changed, rb);
+                ? i_rant_discovery_meta_version(i_rant_discovery_state(n->discovery)) + 1u : 0u;
+            rc = i_rant_transport_topic_reuse(n->transport, idx, &def, changed, rb);
             if (rc == 0 && changed) i_rant_node_core_topic_rebound(n->core, idx);
         } else {
-            rc = rant_transport_topic_define(n->transport, idx, &def);
+            rc = i_rant_transport_topic_define(n->transport, idx, &def);
         }
         if (rc != 0){
             /* the transport's verdict: -2 a live same name slot, -3 the name, -4 OOM */
@@ -1562,7 +1562,7 @@ static void i_rant_node_rx_drain(RantNode *n, i_RantSock fd, uint64_t deadline){
                 RantAddr src;
                 memset(&src, 0, sizeof src);
                 memcpy(src.ip, src_ip, 4); src.ip_len = 4; src.port = src_port;
-                rant_discovery_feed(n->discovery, &src, rant_bytes(buf, (size_t)r));
+                i_rant_discovery_feed(n->discovery, &src, rant_bytes(buf, (size_t)r));
             } else if (r>=5 && buf[0]=='u' && buf[1]=='D' && buf[2]=='T' && buf[3]=='L'){
                 /* the pairwise detail exchange, stateless: a request is answered to its
                    source, a response feeds the pending match cycle. See spec/interest.md */
@@ -1574,7 +1574,7 @@ static void i_rant_node_rx_drain(RantNode *n, i_RantSock fd, uint64_t deadline){
                         uint32_t from;
                         if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from)
                             && i_rant_node_core_seen_version(n->core, from,
-                                   rant_detail_meta_version(rant_bytes(buf, (size_t)r))))
+                                   i_rant_detail_meta_version(rant_bytes(buf, (size_t)r))))
                             n->match_epoch++;
                     }
                 } else if (buf[4]==RANT_DETAIL_RESP){
@@ -1597,7 +1597,7 @@ static void i_rant_node_rx_drain(RantNode *n, i_RantSock fd, uint64_t deadline){
             } else {
                 uint32_t from;
                 if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from))
-                    rant_transport_on_datagram(n->transport, from, rant_bytes(buf, (size_t)r), i_rant_plat_now_us());
+                    i_rant_transport_on_datagram(n->transport, from, rant_bytes(buf, (size_t)r), i_rant_plat_now_us());
             }
         }
         if (i_rant_plat_now_us() >= deadline) break;        /* yield to discovery and send */
@@ -1607,8 +1607,8 @@ static void i_rant_node_rx_drain(RantNode *n, i_RantSock fd, uint64_t deadline){
 /* Caps a wait at the transport's next timer, discovery's next announce and the patterns
  * tick, so each fires on time with no traffic. Lock held, pure compute. */
 static int i_rant_node_wait_ms(RantNode *n, int timeout_ms){
-    uint64_t next = rant_transport_next_deadline_us(n->transport);
-    uint64_t due  = rant_discovery_next_due_us(rant_discovery_state(n->discovery));
+    uint64_t next = i_rant_transport_next_deadline_us(n->transport);
+    uint64_t due  = i_rant_discovery_next_due_us(i_rant_discovery_state(n->discovery));
     if (timeout_ms < 0) timeout_ms = 0;
     if (!next || due < next) next = due;   /* due is a real time (0 = now), next 0 = none */
     /* the patterns tick */
@@ -1650,7 +1650,7 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
         if (want > n->meta_cap){
             if (i_rant_node_grow(n, n->max_peers, n->max_topics, want)){
                 n->meta_grow_failed = 0;
-                rant_discovery_solicit(rant_discovery_state(n->discovery));
+                i_rant_discovery_solicit(i_rant_discovery_state(n->discovery));
             } else
                 n->meta_grow_failed = want;
         }
@@ -1669,7 +1669,7 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
     /* discovery's socket joins the wait so an announce cuts a long sleep short. The fd is
        stable by value: a grow relocates structs, never sockets */
     disc_slot = nfds;
-    pfd[nfds].fd = rant_discovery_fd(n->discovery); pfd[nfds].events = RANT_POLLIN; nfds++;
+    pfd[nfds].fd = i_rant_discovery_fd(n->discovery); pfd[nfds].events = RANT_POLLIN; nfds++;
 
 #ifdef RANT_THREADS
     if (outer){
@@ -1704,7 +1704,7 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
 
     /* the discovery tick off this wait's readiness. A failed wait leaves revents zeroed,
        so the clock driven work still runs */
-    rant_discovery_service(n->discovery, (pfd[disc_slot].revents & RANT_POLLIN) != 0);
+    i_rant_discovery_service(n->discovery, (pfd[disc_slot].revents & RANT_POLLIN) != 0);
     if (pfd[0].revents & RANT_POLLIN)
         i_rant_node_rx_drain(n, n->fd, i_rant_plat_now_us() + RANT_RX_BUDGET_US);
 
@@ -1855,7 +1855,7 @@ typedef struct {
 static int i_rant_node_match_wait_done(RantNode *n, void *ctx, uint64_t now, uint64_t *deadline){
     i_RantMatchWait *c = (i_RantMatchWait*)ctx;
     *deadline = c->deadline;
-    c->matched = rant_transport_publisher_match_count(n->transport, c->index);
+    c->matched = i_rant_transport_publisher_match_count(n->transport, c->index);
     if (c->matched) return 1;
     return !i_rant_node_topic_unsettled(n, c->h, now);
 }
@@ -1894,10 +1894,10 @@ static int i_rant_node_pump_wait_done(RantNode *n, void *ctx, uint64_t now, uint
     *deadline = c->deadline;
     if (n->pump_probe && c->polled){
         c->polls++;
-        if (rant_transport_repair_pending(n->transport, c->index) == 0) c->polls_idle++;
+        if (i_rant_transport_repair_pending(n->transport, c->index) == 0) c->polls_idle++;
         if (now - c->sample_last >= c->interval){
             RantRepairStats sample_now; RantPumpSample sample;
-            rant_transport_repair_stats(n->transport, c->index, &sample_now);
+            i_rant_transport_repair_stats(n->transport, c->index, &sample_now);
             sample.topic           = c->index;
             sample.wait_elapsed_us = now - c->t0;
             sample.interval_us     = now - c->sample_last;
@@ -1909,7 +1909,7 @@ static int i_rant_node_pump_wait_done(RantNode *n, void *ctx, uint64_t now, uint
             c->prev = sample_now; c->sample_last = now; c->polls = 0; c->polls_idle = 0;
         }
     }
-    return !rant_transport_send_would_evict(n->transport, c->index);
+    return !i_rant_transport_send_would_evict(n->transport, c->index);
 }
 
 static void i_rant_node_pump_wait_tick(RantNode *n, void *ctx, uint64_t now){
@@ -1930,8 +1930,8 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
         if (th && th->schema && th->kind == RANT_KIND_TOPIC && !rant_schema_validate(th->schema, data))
             return RANT_ERR_SCHEMA;
     }
-    matched = rant_transport_publisher_match_count(n->transport, topic_index);
-    const RantQos *q = rant_transport_topic_qos(n->transport, topic_index);
+    matched = i_rant_transport_publisher_match_count(n->transport, topic_index);
+    const RantQos *q = i_rant_transport_topic_qos(n->transport, topic_index);
     /* the source stamp is ordinary payload, so every size rule here counts it. qos is
        immutable, so this stays valid across the waits that may re fetch q */
     size_t ts_bytes = (q && q->no_timestamp) ? 0u : (size_t)RANT_TIMESTAMP_BYTES;
@@ -1944,11 +1944,11 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
     if (!matched && topic_index < n->max_topics
         && !(q && q->reliability == RANT_RELIABLE && q->catch_up > 0)){
         RantTopic *h = n->handles[topic_index];
-        if (h && rant_role_pubs(h->role)
+        if (h && i_rant_role_pubs(h->role)
               && i_rant_node_topic_unsettled(n, h, i_rant_plat_now_us())){
             if (may_wait && n->match_wait_us){
                 matched = i_rant_node_match_wait(n, topic_index, h, 1);
-                q = rant_transport_topic_qos(n->transport, topic_index);     /* the arena may move */
+                q = i_rant_transport_topic_qos(n->transport, topic_index);     /* the arena may move */
             } else {
                 RantEvent e; memset(&e, 0, sizeof e);
                 e.kind = RANT_ERROR; e.error = RANT_E_UNMATCHED_SEND;
@@ -1963,14 +1963,14 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
 #endif
     /* the bounded backpressure wait: until a slow reader acks or the wait elapses, then send
        anyway. It sleeps on the service thread's progress when one runs and pumps otherwise */
-    if (matched && may_wait && q && q->backpressure_wait_us && rant_transport_send_would_evict(n->transport, topic_index)){
+    if (matched && may_wait && q && q->backpressure_wait_us && i_rant_transport_send_would_evict(n->transport, topic_index)){
         i_RantPumpWait c = { 0 }; i_RantWait w = { 0 };
         c.index = topic_index;
         c.t0 = i_rant_plat_now_us();
         c.deadline = c.t0 + q->backpressure_wait_us;
         c.sample_last = c.t0;
         c.interval = n->pump_probe_interval_us ? n->pump_probe_interval_us : 200000u;
-        if (n->pump_probe) rant_transport_repair_stats(n->transport, topic_index, &c.prev);
+        if (n->pump_probe) i_rant_transport_repair_stats(n->transport, topic_index, &c.prev);
         w.done = i_rant_node_pump_wait_done; w.periodic = i_rant_node_pump_wait_tick;
         w.ctx = &c;
         w.pump_ms = 1;   /* a nested tick: the lock stays held */
@@ -1979,8 +1979,8 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
         n->backpressure_total_us += i_rant_plat_now_us() - c.t0;
         n->backpressure_wait_count++;
         /* a mid pump grow relocates the arena: re derive the cached pointers */
-        q = rant_transport_topic_qos(n->transport, topic_index);
-        matched = rant_transport_publisher_match_count(n->transport, topic_index);
+        q = i_rant_transport_topic_qos(n->transport, topic_index);
+        matched = i_rant_transport_publisher_match_count(n->transport, topic_index);
     }
 
     /* a send that evicts never sent history is surfaced. The state is read before the
@@ -1988,14 +1988,14 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
     {
         uint64_t evict_base = 0; uint32_t evict_count = 0;
         int will_evict = guarded &&
-            rant_transport_send_would_evict_unsent(n->transport, topic_index, &evict_base, &evict_count);
+            i_rant_transport_send_would_evict_unsent(n->transport, topic_index, &evict_base, &evict_count);
         int r;
 #ifdef RANT_SHM
         /* only a message that would fragment gains from SHM, below the fragment size
            inline UDP is strictly cheaper. See spec/transport.md */
-        if (!directed && n->shm_capable && len > rant_transport_frag(n->transport)
+        if (!directed && n->shm_capable && len > i_rant_transport_frag(n->transport)
             && topic_index < n->shm_n_topics && matched
-            && rant_transport_publisher_shm_eligible(n->transport, topic_index)){
+            && i_rant_transport_publisher_shm_eligible(n->transport, topic_index)){
             uint16_t keep_last = (q && q->keep_last) ? q->keep_last : 1u;
             /* a hint pins the topic to one class, else each message uses its own size
                class's segment. Per topic either way */
@@ -2005,7 +2005,7 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
                send occupies, so chunk i binds slot i */
             if (k < RANT_SHM_N_CLASSES && (uint32_t)len <= i_rant_shm_class_bytes(k)){
                 i_RantShmPool *pool = i_rant_node_shm_topic_pool(n, topic_index, k, keep_last);
-                uint16_t slot = rant_transport_topic_hist_head(n->transport, topic_index);
+                uint16_t slot = i_rant_transport_topic_hist_head(n->transport, topic_index);
                 void *chunk_ptr = pool ? i_rant_shm_chunk(pool, slot, NULL) : NULL;
                 if (chunk_ptr){
                     i_RantShmDesc d; uint8_t desc[RANT_SHM_DESC_WIRE];
@@ -2021,7 +2021,7 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
                     memcpy((uint8_t*)chunk_ptr + ts_bytes + cap_bytes + hdr.len, data.data, data.len);
                     i_rant_shm_stamp(pool, slot, (uint32_t)len, &d);
                     i_rant_shm_desc_encode(&d, desc);
-                    if (rant_transport_send_shm(n->transport, topic_index, rant_bytes(chunk_ptr, len), desc, i_rant_plat_now_us())==0){
+                    if (i_rant_transport_send_shm(n->transport, topic_index, rant_bytes(chunk_ptr, len), desc, i_rant_plat_now_us())==0){
                         n->shm_tx++;
                         r = RANT_OK;
                         goto committed;
@@ -2030,9 +2030,9 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
             }
         }
 #endif
-        r = directed ? rant_transport_send_to(n->transport, topic_index, to_peer, hdr, data,
+        r = directed ? i_rant_transport_send_to(n->transport, topic_index, to_peer, hdr, data,
                                               capture_us, i_rant_plat_now_us())
-                     : rant_transport_send_hdr(n->transport, topic_index, hdr, data,
+                     : i_rant_transport_send_hdr(n->transport, topic_index, hdr, data,
                                                capture_us, i_rant_plat_now_us());
 #ifdef RANT_SHM
 committed:
@@ -2082,7 +2082,7 @@ int i_rant_topic_send_hdr(RantTopic *topic, RantBytes hdr, RantBytes data){
 }
 
 uint64_t i_rant_topic_seqno(RantTopic *topic){
-    return topic ? rant_transport_topic_seqno(topic->n->transport, topic->index) : 0;
+    return topic ? i_rant_transport_topic_seqno(topic->n->transport, topic->index) : 0;
 }
 
 void i_rant_node_flush_tx(RantNode *n){
@@ -2119,11 +2119,11 @@ int i_rant_topic_match_wait(RantTopic *topic){
     if (!topic) return 0;
     n = topic->n;
     acquired = i_rant_node_lock(n);
-    matched = rant_transport_publisher_match_count(n->transport, topic->index);
+    matched = i_rant_transport_publisher_match_count(n->transport, topic->index);
     /* wait only when it can help and can run: a match still forming, the knob on, a
        publishing role, and not from a callback. Converged matching returns at once */
     if (acquired && !matched && n->match_wait_us
-        && rant_role_pubs(topic->role)
+        && i_rant_role_pubs(topic->role)
         && i_rant_node_topic_unsettled(n, topic, i_rant_plat_now_us()))
         matched = i_rant_node_match_wait(n, topic->index, topic, 0);
     i_rant_node_unlock(n, acquired);
@@ -2192,7 +2192,7 @@ int i_rant_topic_live_match_count(RantTopic *topic){
     int acquired, r;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = rant_transport_publisher_live_matches(topic->n->transport, topic->index);
+    r = i_rant_transport_publisher_live_matches(topic->n->transport, topic->index);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
@@ -2200,7 +2200,7 @@ int i_rant_topic_peer_matched(RantTopic *topic, uint32_t peer){
     int acquired, r;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = rant_transport_publisher_peer_matched(topic->n->transport, topic->index, peer);
+    r = i_rant_transport_publisher_peer_matched(topic->n->transport, topic->index, peer);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
@@ -2210,7 +2210,7 @@ int i_rant_topic_source_match_count(RantTopic *topic){
     int acquired, r;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = rant_transport_subscriber_match_count(topic->n->transport, topic->index);
+    r = i_rant_transport_subscriber_match_count(topic->n->transport, topic->index);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
@@ -2220,13 +2220,13 @@ uint32_t i_rant_topic_oldest_match(RantTopic *topic){
     uint32_t r; int acquired;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = rant_transport_publisher_oldest_match(topic->n->transport, topic->index);
+    r = i_rant_transport_publisher_oldest_match(topic->n->transport, topic->index);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
 
 const uint8_t *i_rant_node_uuid(RantNode *n){
-    return n ? rant_discovery_uuid(rant_discovery_state(n->discovery)) : NULL;
+    return n ? i_rant_discovery_uuid(i_rant_discovery_state(n->discovery)) : NULL;
 }
 
 /* Reflection getters for the patterns layer's entity enumeration. */
@@ -2238,10 +2238,10 @@ int i_rant_node_peer_uuid(RantNode *n, uint32_t peer, uint8_t out[16]){
     RantDiscoveryPeer v;
     if (!n) return 0;
     acquired = i_rant_node_lock(n);
-    st = rant_discovery_state(n->discovery);
-    np = rant_discovery_max_peers(st);
+    st = i_rant_discovery_state(n->discovery);
+    np = i_rant_discovery_max_peers(st);
     for (q = 0; q < np; q++)
-        if (rant_discovery_peer_at(st, q, &v) && v.id == peer){ memcpy(out, v.uuid, 16); found = 1; break; }
+        if (i_rant_discovery_peer_at(st, q, &v) && v.id == peer){ memcpy(out, v.uuid, 16); found = 1; break; }
     i_rant_node_unlock(n, acquired);
     return found;
 }
@@ -2277,10 +2277,10 @@ int rant_topic_set_role(RantTopic *topic, RantRole role){
     }
     /* a log builtin is queued before its subscribe side goes live, so the catch up replay
        can never race the first take into the inline path. See spec/node.md */
-    if (rant_role_subs((uint8_t)role) && !topic->q
+    if (i_rant_role_subs((uint8_t)role) && !topic->q
         && i_rant_node_is_log_topic(topic->n, topic->index))
         (void)i_rant_node_queue_ensure(topic->n, topic, NULL);
-    r = rant_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
+    r = i_rant_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
     if (r == 0){
         topic->role = (uint8_t)role;
         topic->came_up_us = i_rant_plat_now_us();
@@ -2306,7 +2306,7 @@ int rant_topic_retire(RantTopic *topic){
         return RANT_ERR_STATE;
     }
     idx = topic->index;
-    if (rant_transport_topic_retire(n->transport, idx) != 0){
+    if (i_rant_transport_topic_retire(n->transport, idx) != 0){
         i_rant_node_unlock(n, acquired);
         return RANT_ERR_STATE;
     }
@@ -2344,7 +2344,7 @@ int rant_node_peers_next(RantNode *n, RantIter *it, RantPeerInfo *out){
     r = i_rant_node_core_peers_next(n->core, it, out);
     if (r){   /* the transport's path measurement, folded in since the core is sans transport */
         RantPeerRtt e;
-        if (rant_transport_peer_rtt(n->transport, out->id, &e)){
+        if (i_rant_transport_peer_rtt(n->transport, out->id, &e)){
             out->rtt_us = e.rtt_us; out->rtt_jitter_us = e.rtt_jitter_us;
             out->rtt_min_us = e.rtt_min_us; out->rtt_samples = e.samples;
         }
@@ -2400,7 +2400,7 @@ int i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reli
         copy = rant_schema_parse(w.data, w.len, i_rant_node_alloc, n);
         if (!copy) return RANT_ERR_OOM;
     }
-    if (rant_transport_topic_retire(n->transport, idx) != 0){
+    if (i_rant_transport_topic_retire(n->transport, idx) != 0){
         if (copy) rant_schema_free(copy, i_rant_node_alloc, n);
         return RANT_ERR_STATE;
     }
@@ -2412,8 +2412,8 @@ int i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reli
     def.name = topic->name; def.role = topic->role; def.kind = topic->kind;
     def.prefix_bytes = topic->prefix_bytes; def.directed = topic->directed; def.attrs = topic->attrs;
     def.qos = topic->qos;
-    rb = rant_discovery_meta_version(rant_discovery_state(n->discovery)) + 1u;
-    rc = rant_transport_topic_reuse(n->transport, idx, &def, 1, rb);
+    rb = i_rant_discovery_meta_version(i_rant_discovery_state(n->discovery)) + 1u;
+    rc = i_rant_transport_topic_reuse(n->transport, idx, &def, 1, rb);
     if (rc != 0) return rc == -4 ? RANT_ERR_OOM : RANT_ERR_STATE;
     i_rant_node_core_topic_rebound(n->core, idx);
     i_rant_node_core_set_topic_schema(n->core, idx, topic->schema);
@@ -2431,7 +2431,7 @@ int rant_topic_refresh(RantTopic *topic){
     acquired = i_rant_node_lock(n);
     if (!acquired){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* from a callback: lanes are live */
     if (i_rant_node_core_reflect_pick(n->core, RANT_ENTITY_TOPIC, topic->name, 0,
-                                      rant_role_pubs(topic->role), &ms, &rel, &gen)
+                                      i_rant_role_pubs(topic->role), &ms, &rel, &gen)
         && gen != topic->generation){
         r = i_rant_topic_retype(topic, ms, rel ? RANT_RELIABLE : RANT_BEST_EFFORT);
         if (r == 0){ topic->generation = gen; r = 1; }
@@ -2492,7 +2492,7 @@ void rant_node_mem_stats(RantNode *n, size_t *in_use, size_t *peak, uint64_t *al
 void rant_topic_repair_stats(RantTopic *topic, RantRepairStats *out){
     if (topic){
         int acquired = i_rant_node_lock(topic->n);
-        rant_transport_repair_stats(topic->n->transport, topic->index, out);
+        i_rant_transport_repair_stats(topic->n->transport, topic->index, out);
         i_rant_node_unlock(topic->n, acquired);
     } else if (out) memset(out, 0, sizeof *out);
 }
@@ -2531,7 +2531,7 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
         rant_map_put_uint(w, "evicted_unsent", n->evicted_unsent);
         rant_map_put_uint(w, "bp_waited_us", n->backpressure_total_us);
         rant_map_put_uint(w, "bp_waits", n->backpressure_wait_count);
-        rant_map_put_uint(w, "peers", rant_discovery_peer_count(rant_discovery_state(n->discovery)));
+        rant_map_put_uint(w, "peers", i_rant_discovery_peer_count(i_rant_discovery_state(n->discovery)));
         rant_map_put_uint(w, "max_peers", n->max_peers);
         /* app topics only: the @rant/ builtins are hidden, so neither the counts nor the
            topics array below surface them */
@@ -2592,12 +2592,12 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
         rant_map_open_array(w, "topics");
         for (i = 0; i < hi; i++){
             RantTopic *h = n->handles[i];
-            const RantQos *q = rant_transport_topic_qos(n->transport, i);
+            const RantQos *q = i_rant_transport_topic_qos(n->transport, i);
             RantRepairStats rs;
             if (!h) continue;
             if (n->n_builtin && i >= n->builtin_lo
                              && i < (uint16_t)(n->builtin_lo + n->n_builtin)) continue;
-            rant_transport_repair_stats(n->transport, i, &rs);
+            i_rant_transport_repair_stats(n->transport, i, &rs);
             rant_map_open_map(w, NULL);
             rant_map_put_uint(w, "index", i);
             rant_map_put_string(w, "name", rant_string(h->name, h->name_len));
@@ -2606,8 +2606,8 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
             rant_map_put_bool(w, "reliable", q && q->reliability == RANT_RELIABLE);
             rant_map_put_uint(w, "keep_last", q ? q->keep_last : 0);
             rant_map_put_uint(w, "catch_up", q ? q->catch_up : 0);
-            rant_map_put_uint(w, "subs", (uint64_t)rant_transport_publisher_match_count(n->transport, i));
-            rant_map_put_uint(w, "pubs", (uint64_t)rant_transport_subscriber_match_count(n->transport, i));
+            rant_map_put_uint(w, "subs", (uint64_t)i_rant_transport_publisher_match_count(n->transport, i));
+            rant_map_put_uint(w, "pubs", (uint64_t)i_rant_transport_subscriber_match_count(n->transport, i));
             rant_map_put_uint(w, "pending", pend ? (uint64_t)pend[i]
                                                  : (uint64_t)i_rant_node_core_topic_unresolved(n->core, i));
             rant_map_put_uint(w, "tx_msgs", h->tx_msgs);
@@ -2633,12 +2633,12 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
     }
     if (sections & RANT_META_PEERS){
         uint16_t cnt = 0, i;
-        const RantDiscoveryPeer *ps = rant_discovery_peers(n->discovery, &cnt);
+        const RantDiscoveryPeer *ps = i_rant_discovery_peers(n->discovery, &cnt);
         rant_map_open_array(w, "peers");
         for (i = 0; i < cnt; i++){
             uint16_t pub_to = 0, recv_from = 0;
             char ip[16]; int ln = 0;
-            rant_transport_peer_match_counts(n->transport, ps[i].id, &pub_to, &recv_from);
+            i_rant_transport_peer_match_counts(n->transport, ps[i].id, &pub_to, &recv_from);
             rant_map_open_map(w, NULL);
             rant_map_put_uint(w, "id", ps[i].id);
             rant_map_put_string(w, "name", ps[i].name);
@@ -2652,7 +2652,7 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
             rant_map_put_uint(w, "publish_to", pub_to);
             rant_map_put_uint(w, "receive_from", recv_from);
             {   RantPeerRtt e;     /* the measured round trip, absent until the first sample */
-                if (rant_transport_peer_rtt(n->transport, ps[i].id, &e) && e.samples){
+                if (i_rant_transport_peer_rtt(n->transport, ps[i].id, &e) && e.samples){
                     rant_map_put_uint(w, "rtt_us", e.rtt_us);
                     rant_map_put_uint(w, "rtt_jitter_us", e.rtt_jitter_us);
                     rant_map_put_uint(w, "rtt_min_us", e.rtt_min_us);
@@ -2702,7 +2702,7 @@ int rant_topic_subscriber_progress(RantTopic *topic, uint32_t peer,
     int r, acquired;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = rant_transport_subscriber_progress(topic->n->transport, topic->index, peer, base_seqno, have, total);
+    r = i_rant_transport_subscriber_progress(topic->n->transport, topic->index, peer, base_seqno, have, total);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
@@ -2723,7 +2723,7 @@ static int i_rant_node_drain_wait_done(RantNode *n, void *ctx, uint64_t now, uin
     i_RantDrainWait *c = (i_RantDrainWait*)ctx;
     (void)now;
     *deadline = c->deadline;
-    return rant_transport_send_drained(n->transport, c->index) != 0;
+    return i_rant_transport_send_drained(n->transport, c->index) != 0;
 }
 
 int rant_topic_drain(RantTopic *topic, int timeout_ms){
@@ -2746,7 +2746,7 @@ int rant_topic_match_count(RantTopic *topic){
     int r, acquired;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = rant_transport_publisher_match_count(topic->n->transport, topic->index);
+    r = i_rant_transport_publisher_match_count(topic->n->transport, topic->index);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
@@ -2766,7 +2766,7 @@ int rant_topic_ready(RantTopic *topic){
     int r, acquired;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = rant_transport_publisher_match_count(topic->n->transport, topic->index) > 0
+    r = i_rant_transport_publisher_match_count(topic->n->transport, topic->index) > 0
      || !i_rant_node_topic_unsettled(topic->n, topic, i_rant_plat_now_us());
     i_rant_node_unlock(topic->n, acquired);
     return r;
@@ -2777,7 +2777,7 @@ int rant_topic_ready(RantTopic *topic){
 static int i_rant_node_settled(RantNode *n, uint64_t start, uint64_t now){
     uint64_t quiet = n->announce_us < 300000u ? n->announce_us : 300000u;
     uint16_t i, count = 0;
-    const RantDiscoveryPeer *peers = rant_discovery_peers(n->discovery, &count);
+    const RantDiscoveryPeer *peers = i_rant_discovery_peers(n->discovery, &count);
     int any = 0;
     for (i = 0; i < count; i++){
         if (peers[i].liveness != RANT_PEER_ACTIVE) continue;     /* dropped: not expected to answer */
@@ -2806,7 +2806,7 @@ static int i_rant_node_settle_wait_done(RantNode *n, void *ctx, uint64_t now, ui
 static void i_rant_node_settle_wait_solicit(RantNode *n, void *ctx, uint64_t now){
     i_RantSettleWait *c = (i_RantSettleWait*)ctx;
     if (now - c->last_solicit < 250000u) return;
-    rant_discovery_solicit(rant_discovery_state(n->discovery));
+    i_rant_discovery_solicit(i_rant_discovery_state(n->discovery));
     c->last_solicit = now;
     i_rant_node_wait_kick(n, ctx, now);
 }
@@ -3232,7 +3232,7 @@ int rant_node_close(RantNode *n, int send_bye){
         f(n->sys_user);
     }
     /* discovery frees peer blobs via our hook, so it must close before the pool is copied out */
-    if (n->discovery) rant_discovery_close(n->discovery, send_bye);
+    if (n->discovery) i_rant_discovery_close(n->discovery, send_bye);
     if (n->fd != RANT_SOCK_BAD) i_rant_plat_close(n->fd);
 #ifdef RANT_SHM
     if (n->shm_capable){                              /* the pool reset unmaps nothing */

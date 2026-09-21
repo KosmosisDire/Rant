@@ -44,7 +44,7 @@ blob feeds the unchanged interest apply. A match wait treats a fetch in flight a
 resolving, so a permanent poisoning by an unresolvable peer is impossible.
 
 Rule: every consumer of a peer's interest reads through `interest_of` or
-`rant_node_peer_interest_next`, never `rant_meta_interest(v.meta)` directly. The
+`rant_node_peer_interest_next`, never `i_rant_meta_interest(v.meta)` directly. The
 reflection walk once read the blob directly and showed zero entities for an external
 peer. Observers key cached reflection walks on the per peer interest epoch, which bumps
 at the one funnel for inline apply, external assembly and fresh verdicts.
@@ -77,7 +77,7 @@ one request datagram, not a lane.
 The gotcha that cache caused: a DISSOLVED verdict (details arrived, no local topic
 matched) is judged against the local topic set, which grows. A `fetch_details` observer
 dissolves every index the moment a peer appears, so a later subscribe created the topic
-but the cached non match made apply skip it forever. `rant_transport_topic_define` sends
+but the cached non match made apply skip it forever. `i_rant_transport_topic_define` sends
 every dissolved verdict of every peer back to pending (name bound verdicts stay), and
 create's replay re requests them. Cleared indices are only re fetched if the hash matches
 a local topic. Re pending must not clear cached peer attrs: an observer never re asks a
@@ -161,7 +161,7 @@ at the older of the fresh match join point and its acked floor, so a sample comm
 inside the re create window is re pushed. A genuine unsubscribe and resubscribe keeps
 late joiner semantics (its announce change re forms the writer proxy, epoch 0).
 
-`rant_transport_topic_seqno` is the slot's next write seqno. It continues across retire
+`i_rant_transport_topic_seqno` is the slot's next write seqno. It continues across retire
 and reuse so a successor can seed its counters above everything its predecessor
 published. Gotchas: destroy must skip NULL history (retired slots freed theirs), and an
 untyped reuse over a typed retired slot must still clear the schema or the stale
@@ -201,11 +201,11 @@ a blocking create (100 creates would be 100 serialized round trips).
 
 ## Sans-IO surface
 
-A sans-IO caller runs the exchange itself: `rant_transport_build_interest` and
-`rant_transport_apply_peer_interest` for announces, the detail codec
-(`rant_transport_detail_wants`, `rant_detail_req_build`, `rant_transport_detail_respond`,
-`rant_transport_apply_peer_details`), and the paging codec (`rant_interest_req_build`,
-`rant_interest_resp_head`, `rant_interest_resp_parse`, `rant_transport_interest_size`).
+A sans-IO caller runs the exchange itself: `i_rant_transport_build_interest` and
+`i_rant_transport_apply_peer_interest` for announces, the detail codec
+(`i_rant_transport_detail_wants`, `i_rant_detail_req_build`, `i_rant_transport_detail_respond`,
+`i_rant_transport_apply_peer_details`), and the paging codec (`i_rant_interest_req_build`,
+`i_rant_interest_resp_head`, `i_rant_interest_resp_parse`, `i_rant_transport_interest_size`).
 The interest codec measures and builds in one walk (a NULL out means measure). The node
 wires all of it into discovery and its data socket. The transport's linear hash to topic
 scans run only per PENDING entry and cost about 25 us per announce at 1600 by 1600. A
@@ -222,7 +222,7 @@ The interest blob is `[u16 n]` then one `[u32 hash][u8 flags]` cell per slot up 
 highest announced one, where a run of undefined or retired slots collapses to one cell
 flagged with bit 7 whose hash field is the run length. Then the rate section
 `[u16 n][(u16 index)(u16 rate_hz)]*` and the generation section
-`[u16 n][(u16 index)(u8 gen)]*`. `rant_interest_max` bounds it at 5 bytes per slot plus
+`[u16 n][(u16 index)(u8 gen)]*`. `i_rant_interest_max` bounds it at 5 bytes per slot plus
 both sections at every topic.
 
 Every uDTL datagram starts with `['u','D','T','L'][u8 kind][u8 ver 2][u16 domain]

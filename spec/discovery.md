@@ -32,7 +32,7 @@ at the next poll and solicits a re announce. Per peer blobs are hook allocated a
 actual length and reused across occupants. The event carries the overlay when the
 datagram arrived whole and a NULL data pointer when the OS truncated it.
 
-Unicast discovery traffic leaves the DATA socket (`rant_discovery_set_tx_fd`). Group sends
+Unicast discovery traffic leaves the DATA socket (`i_rant_discovery_set_tx_fd`). Group sends
 stay on the multicast socket. So each announce is identity plus return path in one
 datagram. Per peer unicast goes to one port: the peer's data port once its blob named
 one, else the discovery port. Discovery always runs inside a node, so the locator it
@@ -57,7 +57,7 @@ overlay capacity defaults to `RANT_DISCOVERY_META_MAX` (64) bytes and the name t
 
 The first announce is phased by a hash of the uuid within one interval, so nodes do not
 announce in lockstep, and a solicit goes out at startup. Peer timeout sweeps run on the
-announce cadence, so detection lags by at most one interval. `rant_discovery_next_due_us`
+announce cadence, so detection lags by at most one interval. `i_rant_discovery_next_due_us`
 tells a driving loop when the next timer is due. The defaults are a 3 s interval, a 12 s
 peer timeout, a 2 min gone timeout and 16 peers. The interval, the peer count, the group
 and the port are stated once in `common/types.h`. A BYE is sent three times
@@ -115,7 +115,7 @@ ranks them: 169.254 link local scores 0 (checked first, or its own /16 makes eve
 address look same subnet), on one of our subnets scores 2, otherwise 1. At equal rank the
 incumbent is kept while it was heard within two announce intervals, so a genuine renumber
 still converges. The IO layer feeds its subnets in with
-`rant_discovery_set_local_subnets`. A sans-IO caller that does not gets only the routed
+`i_rant_discovery_set_local_subnets`. A sans-IO caller that does not gets only the routed
 versus link local half of the ranking.
 
 ## Stated locators
@@ -130,7 +130,7 @@ open with `RANT_E_BAD_ADDRESS`.
 A `unicast_only` node joins no group, announces only to seed peers and known peers, and
 marks every announce `RELAY_ME`. It also skips the join, the group sends and the ttl and
 loop options, so a device with no multicast can open at all. A node that hears a
-`RELAY_ME` announce DIRECTLY re announces it: `rant_discovery_poll_relay` builds an
+`RELAY_ME` announce DIRECTLY re announces it: `i_rant_discovery_poll_relay` builds an
 announce on behalf of that peer (its uuid, its blob at the origin's version, and the
 locator we know it at stated outright) and the IO layer sends it out every path. This is
 one hop and the relay only introduces. Data is unicast point to point as always, and once
@@ -174,7 +174,7 @@ it with no new wire kinds.
    internal gateway, which is the only endpoint replies are known to reach. For the same
    reason a unicast only node never lets an arrival source override a locator it already
    holds. The gateway source sits on the container's own subnet, so it would win the
-   ranking and black hole every send to that peer. `rant_discovery_addr_of_id` (the
+   ranking and black hole every send to that peer. `i_rant_discovery_addr_of_id` (the
    node's one data and detail destination) returns `obs_data`, then `obs_disc`, then the
    locator. Discovery TX targets `obs_disc`, then `obs_data`, then the locator, exactly,
    never expanded to conventional ports. Attribution (`id_for_addr`) accepts observed
@@ -185,7 +185,7 @@ it with no new wire kinds.
    authoritative and clears observed sources. A proxy always embeds a locator and must
    never set the stated flag.
 3. The NAT'd side must speak first, so relays also run introductions
-   (`rant_discovery_poll_introduce`): each relay me peer is sent proxied announces of the
+   (`i_rant_discovery_poll_introduce`): each relay me peer is sent proxied announces of the
    peers we hear directly (the `heard_direct` flag, one hop). This is change triggered
    (once when it appears, again when any direct peer appears, resumes or moves, plus a
    repair sweep every `RANT_DISCOVERY_INTRODUCE_SWEEP` = 10 announce intervals), never

@@ -30,8 +30,8 @@ extern "C" {
 #define RANT_STAMP_MASK        0x7FFFFFFFFFFFFFFFull
 
 /* Shared by every matching, announce and reflection walk, so a flipped test is impossible. */
-static inline int rant_role_pubs(uint8_t role){ return role == RANT_PUBSUB || role == RANT_PUB_ONLY; }
-static inline int rant_role_subs(uint8_t role){ return role == RANT_PUBSUB || role == RANT_SUB_ONLY; }
+static inline int i_rant_role_pubs(uint8_t role){ return role == RANT_PUBSUB || role == RANT_PUB_ONLY; }
+static inline int i_rant_role_subs(uint8_t role){ return role == RANT_PUBSUB || role == RANT_SUB_ONLY; }
 
 /* What a topic carries. A same name under a different kind is a disjoint entity and the
  * pairing is refused. The kind rides the interest flags and is immutable per topic. */
@@ -80,7 +80,7 @@ typedef int (*i_RantShmMsgFn)(void *user, uint16_t topic_index, uint32_t from_pe
  * scales with traffic and matches. Static mode passes rant_allocator_alloc over a static one. */
 
 /* topics set: defined at init. topics NULL: n_topics reserved slots, all INACTIVE, filled
- * later by rant_transport_topic_define. */
+ * later by i_rant_transport_topic_define. */
 typedef struct {
     const RantTopicDef *topics;       /* NULL = reserve mode */
     uint16_t                n_topics;   /* defined count, or the reserved capacity */
@@ -109,42 +109,42 @@ typedef struct {
 
 typedef struct RantTransportState RantTransportState;
 
-size_t      rant_transport_required_memory(const RantConfig *cfg);
-RantTransportState *rant_transport_init(void *mem, size_t mem_size, const RantConfig *cfg);
+size_t      i_rant_transport_required_memory(const RantConfig *cfg);
+RantTransportState *i_rant_transport_init(void *mem, size_t mem_size, const RantConfig *cfg);
 /* Relocates a live transport, re striding its tables and carrying reliability state. The
  * caller frees the old arena block but must not destroy old. NULL leaves old intact. */
-RantTransportState *rant_transport_migrate(RantTransportState *old, void *new_mem, size_t new_cap,
+RantTransportState *i_rant_transport_migrate(RantTransportState *old, void *new_mem, size_t new_cap,
                                  uint16_t new_max_peers, uint16_t new_n_topics);
 /* Frees every hook allocation. The arena stays the caller's. */
-void        rant_transport_destroy(RantTransportState *st);
+void        i_rant_transport_destroy(RantTransportState *st);
 
 /* The FNV-1a identity of a name. */
-uint64_t    rant_topic_id(const char *name);
-uint64_t    rant_topic_identity(const RantTopicDef *def);       /* rant_topic_id(def->name) */
+uint64_t    i_rant_topic_id(const char *name);
+uint64_t    i_rant_topic_identity(const RantTopicDef *def);       /* i_rant_topic_id(def->name) */
 
 /* 0 to RANT_FRAG_SIZE, then clamp to [MIN, MAX]. Shared with the node's announce. */
-uint16_t    rant_clamp_frag(uint16_t frag_size);
+uint16_t    i_rant_clamp_frag(uint16_t frag_size);
 
 /* Our fragment size. The node uses it as the SHM cutoff. */
-uint16_t    rant_transport_frag(RantTransportState *st);
+uint16_t    i_rant_transport_frag(RantTransportState *st);
 
 /* A new peer matches nothing until apply_peer_interest. peer_frag is its advertised
  * fragment size, 0 = RANT_FRAG_SIZE, clamped to [MIN, MAX]. */
-void        rant_transport_peer_add     (RantTransportState *st, uint32_t peer_id, uint16_t peer_frag);
-void        rant_transport_peer_remove(RantTransportState *st, uint32_t peer_id);
+void        i_rant_transport_peer_add     (RantTransportState *st, uint32_t peer_id, uint16_t peer_frag);
+void        i_rant_transport_peer_remove(RantTransportState *st, uint32_t peer_id);
 
 /* A silent peer goes DORMANT: out of flow control, proxies and positions kept. resume re
  * includes it and re reports reader positions. Both no ops for an unknown peer. */
-void        rant_transport_peer_dormant(RantTransportState *st, uint32_t peer_id);
-void        rant_transport_peer_resume (RantTransportState *st, uint32_t peer_id);
+void        i_rant_transport_peer_dormant(RantTransportState *st, uint32_t peer_id);
+void        i_rant_transport_peer_resume (RantTransportState *st, uint32_t peer_id);
 /* A peer's blob may arrive after first contact. Clamped, a no op for an unknown peer. */
-void        rant_transport_peer_set_frag(RantTransportState *st, uint32_t peer_id, uint16_t peer_frag);
+void        i_rant_transport_peer_set_frag(RantTransportState *st, uint32_t peer_id, uint16_t peer_frag);
 
 /* The interest exchange. The list is hash only and positional, a hash overlap only
  * nominates, and the detail exchange below verifies. See spec/interest.md. */
-size_t      rant_interest_max(uint16_t n_topics);
-size_t      rant_transport_build_interest(RantTransportState *st, void *out, size_t cap);
-void        rant_transport_apply_peer_interest(RantTransportState *st, uint32_t peer_id, RantBytes blob);
+size_t      i_rant_interest_max(uint16_t n_topics);
+size_t      i_rant_transport_build_interest(RantTransportState *st, void *out, size_t cap);
+void        i_rant_transport_apply_peer_interest(RantTransportState *st, uint32_t peer_id, RantBytes blob);
 
 /* The announce overlay: a version prefix (fragment size, SHM capability and host) plus
  * the interest list, or the INTEREST_EXTERNAL bootstrap when it does not fit one datagram. */
@@ -156,21 +156,21 @@ typedef struct {
 } RantMetaSchema;
 
 /* Worst case overlay bytes for n_topics, capped to one datagram. Sizes discovery's meta_cap. */
-uint16_t    rant_meta_cap(uint16_t n_topics);
+uint16_t    i_rant_meta_cap(uint16_t n_topics);
 /* Exact bytes the next inline build emits, so a caller sizes to content. */
-uint16_t    rant_transport_meta_size(RantTransportState *st);
-uint16_t    rant_transport_meta_bootstrap_size(void);
+uint16_t    i_rant_transport_meta_size(RantTransportState *st);
+uint16_t    i_rant_transport_meta_bootstrap_size(void);
 /* Builds the overlay. interest_external writes the bootstrap only. The node inlines while
  * the whole announce fits one datagram. Returns the bytes. */
-uint16_t    rant_transport_meta_build(RantTransportState *st, uint8_t *out, uint16_t cap,
+uint16_t    i_rant_transport_meta_build(RantTransportState *st, uint8_t *out, uint16_t cap,
                                 uint16_t frag_size, int shm_capable, const uint8_t host[16],
                                 int interest_external);
 /* 0 if malformed. */
-uint16_t    rant_meta_frag(RantBytes meta);
+uint16_t    i_rant_meta_frag(RantBytes meta);
 /* 1 = the peer serves its interest through paging. */
-int         rant_meta_interest_external(RantBytes meta);
+int         i_rant_meta_interest_external(RantBytes meta);
 /* {NULL, 0} if absent or external, so a bootstrap never reads as an empty interest list. */
-RantBytes rant_meta_interest(RantBytes meta);
+RantBytes i_rant_meta_interest(RantBytes meta);
 
 /* One advertised direction of a topic. A PUBSUB topic yields twice, pub first. */
 typedef struct {
@@ -193,11 +193,11 @@ typedef struct {
 
 /* Walks one direction at a time and stops at the end or at a malformed blob. interest_next
  * walks a bare blob, meta_interest_next the one inside an overlay. */
-int         rant_interest_next(RantBytes interest, RantInterestIter *it, RantTopicEntry *out);
-int         rant_meta_interest_next(RantBytes meta, RantInterestIter *it, RantTopicEntry *out);
+int         i_rant_interest_next(RantBytes interest, RantInterestIter *it, RantTopicEntry *out);
+int         i_rant_meta_interest_next(RantBytes meta, RantInterestIter *it, RantTopicEntry *out);
 #ifdef RANT_SHM
 /* 1 and host filled when the peer is SHM capable. */
-int         rant_meta_shm(RantBytes meta, uint8_t host[16]);
+int         i_rant_meta_shm(RantBytes meta, uint8_t host[16]);
 #endif
 
 /* The pairwise detail exchange, uDTL. The responder is stateless and answers the
@@ -214,40 +214,40 @@ typedef struct {
 } RantDetailWant;
 
 /* Safe on any buffer. kind is 0 for anything that is not a well formed uDTL header. */
-int         rant_detail_kind(RantBytes dgram);
-uint16_t    rant_detail_domain(RantBytes dgram);
-uint32_t    rant_detail_meta_version(RantBytes dgram);
+int         i_rant_detail_kind(RantBytes dgram);
+uint16_t    i_rant_detail_domain(RantBytes dgram);
+uint32_t    i_rant_detail_meta_version(RantBytes dgram);
 
 /* Interest paging carries byte ranges of the build_interest blob. The requester keeps one
  * cursor per peer and a changed version restarts it. See spec/interest.md. */
 #define RANT_INTEREST_RESP_HEAD 24u     /* the family header plus total, offset and chunk_len */
 
 /* Exact bytes of our current interest blob, the total_len paging serves. */
-uint32_t    rant_transport_interest_size(RantTransportState *st);
+uint32_t    i_rant_transport_interest_size(RantTransportState *st);
 /* 18 bytes, or 0 if cap is too small. peer_meta_version is advisory. */
-size_t      rant_interest_req_build(uint16_t domain, uint32_t peer_meta_version,
+size_t      i_rant_interest_req_build(uint16_t domain, uint32_t peer_meta_version,
                                 uint32_t offset, void *out, size_t cap);
 /* 1 and *offset for a well formed INTEREST_REQ, else 0. */
-int         rant_interest_req_offset(RantBytes dgram, uint32_t *offset);
+int         i_rant_interest_req_offset(RantBytes dgram, uint32_t *offset);
 /* Writes one page header. The caller lays the chunk right after it. */
-size_t      rant_interest_resp_head(uint16_t domain, uint32_t meta_version, uint32_t total_len,
+size_t      i_rant_interest_resp_head(uint16_t domain, uint32_t meta_version, uint32_t total_len,
                                 uint32_t offset, uint16_t chunk_len, void *out, size_t cap);
 /* 1 and the fields, chunk a bounds checked view into dgram, else 0. */
-int         rant_interest_resp_parse(RantBytes dgram, uint32_t *total_len, uint32_t *offset,
+int         i_rant_interest_resp_parse(RantBytes dgram, uint32_t *total_len, uint32_t *offset,
                                 RantBytes *chunk);
 
 /* 0 if cap cannot hold every want (14 plus 10 each). Batch per peer. */
-size_t      rant_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
+size_t      i_rant_detail_req_build(uint16_t domain, uint32_t peer_meta_version,
                                 const RantDetailWant *wants, uint16_t n_wants,
                                 void *out, size_t cap);
 
 /* Bytes one response page takes, 0 if req is malformed. One datagram, except that a lone
  * oversized entry rides its own page. */
-size_t      rant_transport_detail_resp_size(RantTransportState *st, const RantMetaSchema *schemas,
+size_t      i_rant_transport_detail_resp_size(RantTransportState *st, const RantMetaSchema *schemas,
                                 RantBytes req);
 /* Answers req into out with one entry per advertised requested index, the wire inlined
  * only where the hashes differ. Truncates at an entry boundary. Does not check the domain. */
-size_t      rant_transport_detail_respond(RantTransportState *st, const RantMetaSchema *schemas,
+size_t      i_rant_transport_detail_respond(RantTransportState *st, const RantMetaSchema *schemas,
                                 uint32_t meta_version, RantBytes req, void *out, size_t cap);
 
 /* One topic's details. name and schema_wire point into the response. */
@@ -267,120 +267,120 @@ typedef struct {
 } RantDetailIter;
 
 /* Walks a DETAIL_RESP. Stops at the end or at a malformed response. */
-int         rant_detail_next(RantBytes resp, RantDetailIter *it, RantDetail *out);
+int         i_rant_detail_next(RantBytes resp, RantDetailIter *it, RantDetail *out);
 
 /* The pending candidates of a peer, up to max_wants (out NULL just counts). Re run it on
  * every announce from the peer while it returns nonzero. */
-uint16_t    rant_transport_detail_wants(RantTransportState *st, const RantMetaSchema *schemas,
+uint16_t    i_rant_transport_detail_wants(RantTransportState *st, const RantMetaSchema *schemas,
                                 uint32_t peer_id, RantBytes interest,
                                 RantDetailWant *out, uint16_t max_wants);
 /* Ingests a DETAIL_RESP and caches the verdicts. Returns the newly decided count, after
  * which the caller re applies the peer's interest so the matches form. */
-uint16_t    rant_transport_apply_peer_details(RantTransportState *st, uint32_t peer_id,
+uint16_t    i_rant_transport_apply_peer_details(RantTransportState *st, uint32_t peer_id,
                                 RantBytes resp);
 
 /* Entries of a peer that nominate this topic and are still undecided. Feeds the match wait. */
-uint16_t    rant_transport_topic_unresolved(RantTransportState *st, uint16_t topic_index,
+uint16_t    i_rant_transport_topic_unresolved(RantTransportState *st, uint16_t topic_index,
                                 uint32_t peer_id, RantBytes interest);
 /* The bulk form: every topic's unresolved count against one peer in a single walk. */
-void        rant_transport_peer_unresolved_fill(RantTransportState *st, uint32_t peer_id,
+void        i_rant_transport_peer_unresolved_fill(RantTransportState *st, uint32_t peer_id,
                                 RantBytes interest, uint16_t *counts, uint16_t n);
 
 /* Rematches peers locally. The caller re advertises. 0 ok, negative unknown. */
-int         rant_transport_set_role(RantTransportState *st, uint16_t topic_index, uint8_t role);
+int         i_rant_transport_set_role(RantTransportState *st, uint16_t topic_index, uint8_t role);
 
 /* Defines a reserved slot: name, qos, role, a history ring and a rematch. 0 ok, -1 bad
  * index, name or slot, -4 out of memory. Re advertise after. */
-int         rant_transport_topic_define(RantTransportState *st, uint16_t topic_index, const RantTopicDef *def);
+int         i_rant_transport_topic_define(RantTransportState *st, uint16_t topic_index, const RantTopicDef *def);
 
 /* Slot lifecycle, see spec/interest.md. retire parks a defined slot: 0 ok, -1 unknown or
  * already retired. Re advertise after. */
-int         rant_transport_topic_retire(RantTransportState *st, uint16_t topic_index);
+int         i_rant_transport_topic_retire(RantTransportState *st, uint16_t topic_index);
 /* The slot a new define should reuse: 2 = a retired slot with the same identity and
  * kind, 1 = another retired slot, 0 = none. */
-int         rant_transport_topic_reuse_find(RantTransportState *st, const char *name, uint8_t kind,
+int         i_rant_transport_topic_reuse_find(RantTransportState *st, const char *name, uint8_t kind,
                                 uint16_t *index_out);
 /* Re defines a retired slot. binding_changed bumps the generation and holds writer lanes
  * until each peer names rebind_version in a request. 0 ok, -1 refused, -4 out of memory. */
-int         rant_transport_topic_reuse(RantTransportState *st, uint16_t topic_index,
+int         i_rant_transport_topic_reuse(RantTransportState *st, uint16_t topic_index,
                                 const RantTopicDef *def, int binding_changed, uint32_t rebind_version);
 /* Records the highest version of our blob a peer named in a request. 1 when a held lane formed. */
-int         rant_transport_peer_seen_version(RantTransportState *st, uint32_t peer_id, uint32_t version);
+int         i_rant_transport_peer_seen_version(RantTransportState *st, uint32_t peer_id, uint32_t version);
 
 /* The next write seqno. It continues across retire and reuse. */
-uint64_t    rant_transport_topic_seqno(RantTransportState *st, uint16_t topic_index);
+uint64_t    i_rant_transport_topic_seqno(RantTransportState *st, uint16_t topic_index);
 
 /* {NULL,0} if undefined. A local lookup, never on the data path. */
-RantString rant_transport_topic_name(RantTransportState *st, uint16_t topic_index);
+RantString i_rant_transport_topic_name(RantTransportState *st, uint16_t topic_index);
 
 /* 0 if the peer advertised no_timestamp for this topic. An unknown peer answers 1. */
-int         rant_transport_peer_timestamped(RantTransportState *st, uint16_t topic_index,
+int         i_rant_transport_peer_timestamped(RantTransportState *st, uint16_t topic_index,
                                 uint32_t peer_id);
 
 /* The peer's cached attrs byte for its topic, 0 until its details arrive. */
-uint8_t     rant_transport_peer_attrs(RantTransportState *st, uint32_t peer_id,
+uint8_t     i_rant_transport_peer_attrs(RantTransportState *st, uint32_t peer_id,
                                 uint16_t their_index);
 
 /* Publishes to every matched subscriber. */
-int         rant_transport_send(RantTransportState *st, uint16_t topic_index, RantBytes data, uint64_t now_us);
+int         i_rant_transport_send(RantTransportState *st, uint16_t topic_index, RantBytes data, uint64_t now_us);
 
 /* Matched subscribers excluding dormant peers. O(matched lanes). */
-int         rant_transport_publisher_live_matches(RantTransportState *st, uint16_t topic_index);
+int         i_rant_transport_publisher_live_matches(RantTransportState *st, uint16_t topic_index);
 /* Is the peer a matched subscriber lane of this topic. The patterns layer's directed backstop. */
-int         rant_transport_publisher_peer_matched(RantTransportState *st, uint16_t topic_index,
+int         i_rant_transport_publisher_peer_matched(RantTransportState *st, uint16_t topic_index,
                                                          uint32_t peer_id);
 /* The oldest live matched subscriber, 0 = none. The auto direct target for task requests. */
-uint32_t    rant_transport_publisher_oldest_match(RantTransportState *st, uint16_t topic_index);
+uint32_t    i_rant_transport_publisher_oldest_match(RantTransportState *st, uint16_t topic_index);
 /* Matched publishers feeding our subscription side. */
-int         rant_transport_subscriber_match_count(RantTransportState *st, uint16_t topic_index);
+int         i_rant_transport_subscriber_match_count(RantTransportState *st, uint16_t topic_index);
 
 /* hdr rides in front of data as one message, byte identical to sending the concatenation.
  * capture_us 0 sends no capture slot. */
-int         rant_transport_send_hdr(RantTransportState *st, uint16_t topic_index,
+int         i_rant_transport_send_hdr(RantTransportState *st, uint16_t topic_index,
                                RantBytes hdr, RantBytes data, uint64_t capture_us, uint64_t now_us);
 /* Publishes to one peer. Every other matched reliable lane skips the seqno through its
  * HB floor. A no op delivery when the peer is not a matched subscriber. */
-int         rant_transport_send_to(RantTransportState *st, uint16_t topic_index, uint32_t to_peer,
+int         i_rant_transport_send_to(RantTransportState *st, uint16_t topic_index, uint32_t to_peer,
                                RantBytes hdr, RantBytes data, uint64_t capture_us, uint64_t now_us);
 
 #ifdef RANT_SHM
 /* The payload lives in an external chunk, fragmented for remote peers and described to
  * SHM peers. The chunk is the whole wire sample and must stay valid until it leaves history. */
-int         rant_transport_send_shm(RantTransportState *st, uint16_t topic_index, RantBytes chunk,
+int         i_rant_transport_send_shm(RantTransportState *st, uint16_t topic_index, RantBytes chunk,
                                const uint8_t *desc, uint64_t now_us);
 /* Whether a peer can receive SHM-DATA. The node sets it on attach. */
-void        rant_transport_peer_set_shm(RantTransportState *st, uint32_t peer_id, int is_shm);
+void        i_rant_transport_peer_set_shm(RantTransportState *st, uint32_t peer_id, int is_shm);
 /* 1 if every matched subscriber is SHM capable. */
-int         rant_transport_publisher_shm_eligible(RantTransportState *st, uint16_t topic_index);
+int         i_rant_transport_publisher_shm_eligible(RantTransportState *st, uint16_t topic_index);
 /* The history slot the next publish occupies, to bind a chunk to it. */
-uint16_t    rant_transport_topic_hist_head(RantTransportState *st, uint16_t topic_index);
+uint16_t    i_rant_transport_topic_hist_head(RantTransportState *st, uint16_t topic_index);
 #endif
 
 /* NULL if unknown. */
-const RantQos *rant_transport_topic_qos(RantTransportState *st, uint16_t topic_index);
+const RantQos *i_rant_transport_topic_qos(RantTransportState *st, uint16_t topic_index);
 /* 0 = none or undefined. */
-uint8_t     rant_transport_topic_attrs(RantTransportState *st, uint16_t topic_index);
+uint8_t     i_rant_transport_topic_attrs(RantTransportState *st, uint16_t topic_index);
 
 /* 1 if the next send would overwrite history not yet acked by every subscriber. */
-int         rant_transport_send_would_evict(RantTransportState *st, uint16_t topic_index);
+int         i_rant_transport_send_would_evict(RantTransportState *st, uint16_t topic_index);
 
 /* 1 if the next send would overwrite history never handed to the wire, best effort
  * included. Fills the evicted sample's base and count. */
-int         rant_transport_send_would_evict_unsent(RantTransportState *st, uint16_t topic_index,
+int         i_rant_transport_send_would_evict_unsent(RantTransportState *st, uint16_t topic_index,
                                                           uint64_t *evict_base, uint32_t *evict_count);
 
 /* 1 if every live subscriber acked everything. Best effort and unknown return 1. */
-int         rant_transport_send_drained(RantTransportState *st, uint16_t topic_index);
+int         i_rant_transport_send_drained(RantTransportState *st, uint16_t topic_index);
 
 /* Matched subscribers, dormant included. O(1). */
-int         rant_transport_publisher_match_count(RantTransportState *st, uint16_t topic_index);
+int         i_rant_transport_publisher_match_count(RantTransportState *st, uint16_t topic_index);
 
 /* Topics we publish to and receive from this peer. Both 0 for an unknown peer. */
-void        rant_transport_peer_match_counts(RantTransportState *st, uint32_t peer_id,
+void        i_rant_transport_peer_match_counts(RantTransportState *st, uint32_t peer_id,
                                           uint16_t *publish_to, uint16_t *receive_from);
 
 /* Zeroed if the topic is out of range. */
-void        rant_transport_repair_stats(RantTransportState *st, uint16_t topic_index, RantRepairStats *out);
+void        i_rant_transport_repair_stats(RantTransportState *st, uint16_t topic_index, RantRepairStats *out);
 
 /* The per peer round trip estimate, RFC 6298 shape, fed by the reliable path with no
  * probe traffic. samples 0 means no estimate yet. See spec/transport.md. */
@@ -392,34 +392,34 @@ typedef struct {
     uint32_t samples;
 } RantPeerRtt;
 /* 1 and *out for a known peer, else 0 and *out zeroed. */
-int         rant_transport_peer_rtt(RantTransportState *st, uint32_t peer_id, RantPeerRtt *out);
+int         i_rant_transport_peer_rtt(RantTransportState *st, uint32_t peer_id, RantPeerRtt *out);
 
 /* Subscriber lanes of this topic with a repair request to service. */
-int         rant_transport_repair_pending(RantTransportState *st, uint16_t topic_index);
+int         i_rant_transport_repair_pending(RantTransportState *st, uint16_t topic_index);
 
 /* The in progress message from peer: its base seqno, fragments held and fragments needed.
  * 1 if a message is mid reassembly. Any out pointer may be NULL. */
-int         rant_transport_subscriber_progress(RantTransportState *st, uint16_t topic_index, uint32_t peer,
+int         i_rant_transport_subscriber_progress(RantTransportState *st, uint16_t topic_index, uint32_t peer,
                                      uint64_t *base_seqno, uint32_t *have, uint32_t *total);
 
 /* Retries the parked samples of a topic when downstream capacity frees, then flush
  * poll_send so the acks go out. Returns the lanes still parked. */
-uint32_t    rant_transport_deliver_parked(RantTransportState *st, uint16_t topic_index, uint64_t now_us);
+uint32_t    i_rant_transport_deliver_parked(RantTransportState *st, uint16_t topic_index, uint64_t now_us);
 
 /* Feeds a received datagram tagged with its peer. */
-void        rant_transport_on_datagram(RantTransportState *st, uint32_t from_peer, RantBytes datagram,
+void        i_rant_transport_on_datagram(RantTransportState *st, uint32_t from_peer, RantBytes datagram,
                                   uint64_t now_us);
 
 /* One outgoing datagram, batched per peer. 1 and the outs, or 0. Loop until 0 with a
  * RANT_DGRAM_MAX cap. */
-int         rant_transport_poll_send(RantTransportState *st, uint32_t *to_peer, void *out, size_t cap,
+int         i_rant_transport_poll_send(RantTransportState *st, uint32_t *to_peer, void *out, size_t cap,
                                 size_t *out_len, uint64_t now_us);
 
 /* The next armed timer, or 0. Cap a blocking poll at it. */
-uint64_t    rant_transport_next_deadline_us(RantTransportState *st);
+uint64_t    i_rant_transport_next_deadline_us(RantTransportState *st);
 
 /* 1 while any lane holds work for poll_send. O(1). */
-int         rant_transport_tx_pending(RantTransportState *st);
+int         i_rant_transport_tx_pending(RantTransportState *st);
 
 #ifdef __cplusplus
 }

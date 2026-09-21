@@ -53,7 +53,7 @@ static int i_rant_pat_peer_entity(RantNode *n, uint32_t peer, RantTopic *channel
     RantIter it; size_t len = nm.len;
     char buf[RANT_TOPIC_NAME_MAX + 1]; uint32_t hash;
     memcpy(buf, nm.data, nm.len); buf[nm.len] = '\0';
-    hash = (uint32_t)rant_topic_id(buf);             /* the primary channel's announce hash */
+    hash = (uint32_t)i_rant_topic_id(buf);             /* the primary channel's announce hash */
     if (len >= 5 && nm.data[len - 4] == '@') len -= 4;
     memset(&it, 0, sizeof it);
     while (rant_node_entities_next(n, peer, &it, out)){
@@ -1744,7 +1744,7 @@ static uint32_t i_rant_pat_auth_hash(RantTopic *primary){
     RantString nm = i_rant_topic_name(primary);
     char buf[RANT_TOPIC_NAME_MAX + 1];
     memcpy(buf, nm.data, nm.len); buf[nm.len] = '\0';
-    return (uint32_t)rant_topic_id(buf);             /* what the announce carries for it */
+    return (uint32_t)i_rant_topic_id(buf);             /* what the announce carries for it */
 }
 
 /* rebuilds the sorted authority index from the entity lists, a shell sort. 0 on OOM */

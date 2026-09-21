@@ -2,7 +2,7 @@
 #include "internal.h"
 
 
-int rant_transport_subscriber_progress(RantTransportState *st, uint16_t topic_index, uint32_t peer,
+int i_rant_transport_subscriber_progress(RantTransportState *st, uint16_t topic_index, uint32_t peer,
                          uint64_t *base_seqno, uint32_t *have, uint32_t *total){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     int peer_slot; i_RantReaderProxy *r;
@@ -394,7 +394,7 @@ size_t i_rant_reader_emit(RantTransportState *st, int topic_index, int peer_slot
 
 /* Retries every parked lane of a topic. The callbacks may re enter the transport, so lane
  * pointers are re derived after each call. */
-uint32_t rant_transport_deliver_parked(RantTransportState *st, uint16_t topic_index, uint64_t now){
+uint32_t i_rant_transport_deliver_parked(RantTransportState *st, uint16_t topic_index, uint64_t now){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li, still = 0;
     (void)now;

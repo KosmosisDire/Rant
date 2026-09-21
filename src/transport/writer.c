@@ -138,20 +138,20 @@ static int i_rant_writer_send(RantTransportState *st, uint16_t topic_index,
 }
 
 
-int rant_transport_send(RantTransportState *st, uint16_t topic_index, RantBytes data, uint64_t now){
+int i_rant_transport_send(RantTransportState *st, uint16_t topic_index, RantBytes data, uint64_t now){
     RantBytes nohdr; nohdr.data=NULL; nohdr.len=0;
-    return rant_transport_send_hdr(st, topic_index, nohdr, data, 0, now);
+    return i_rant_transport_send_hdr(st, topic_index, nohdr, data, 0, now);
 }
 
 
-int rant_transport_send_hdr(RantTransportState *st, uint16_t topic_index, RantBytes hdr,
+int i_rant_transport_send_hdr(RantTransportState *st, uint16_t topic_index, RantBytes hdr,
                             RantBytes data, uint64_t capture_us, uint64_t now){
     (void)now;
     return i_rant_writer_send(st, topic_index, hdr, data, capture_us, RANT__DEST_ALL);
 }
 
 
-int rant_transport_send_to(RantTransportState *st, uint16_t topic_index, uint32_t to_peer,
+int i_rant_transport_send_to(RantTransportState *st, uint16_t topic_index, uint32_t to_peer,
                            RantBytes hdr, RantBytes data, uint64_t capture_us, uint64_t now){
     int peer_slot = i_rant_peer_slot(st, to_peer);     /* unknown: sent to nobody, seqno consumed */
     (void)now;
@@ -163,7 +163,7 @@ int rant_transport_send_to(RantTransportState *st, uint16_t topic_index, uint32_
 
 /* The chunk is the whole wire sample, the caller wrote the stamp and any header into it,
  * so nothing is gathered or copied here. */
-int rant_transport_send_shm(RantTransportState *st, uint16_t topic_index, RantBytes chunk,
+int i_rant_transport_send_shm(RantTransportState *st, uint16_t topic_index, RantBytes chunk,
                   const uint8_t *desc, uint64_t now){
     i_RantTopic *topic; i_RantWriterSample *slot; size_t len = chunk.len;
     (void)now;
@@ -181,7 +181,7 @@ int rant_transport_send_shm(RantTransportState *st, uint16_t topic_index, RantBy
 #endif
 
 
-int rant_transport_send_would_evict(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_send_would_evict(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     i_RantWriterSample *slot; uint32_t li;
     if (!topic || topic->qos.reliability != RANT_RELIABLE) return 0;
@@ -196,7 +196,7 @@ int rant_transport_send_would_evict(RantTransportState *st, uint16_t topic_index
 }
 
 
-int rant_transport_send_would_evict_unsent(RantTransportState *st, uint16_t topic_index,
+int i_rant_transport_send_would_evict_unsent(RantTransportState *st, uint16_t topic_index,
                                             uint64_t *evict_base, uint32_t *evict_count){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     i_RantWriterSample *slot; uint32_t li;
@@ -217,7 +217,7 @@ int rant_transport_send_would_evict_unsent(RantTransportState *st, uint16_t topi
 }
 
 
-int rant_transport_send_drained(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_send_drained(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li;
     if (!topic || topic->qos.reliability != RANT_RELIABLE) return 1;    /* no acks to await */
@@ -230,21 +230,21 @@ int rant_transport_send_drained(RantTransportState *st, uint16_t topic_index){
 }
 
 
-int rant_transport_publisher_match_count(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_publisher_match_count(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     return topic ? (int)topic->matched_writers : 0;   /* cached at match time, O(1) */
 }
 
 
 /* O(1) from the cached count. */
-int rant_transport_subscriber_match_count(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_subscriber_match_count(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     return topic ? (int)topic->matched_readers : 0;
 }
 
 
 /* Dormant excluded. O(matches), for liveness decisions, not the send path. */
-int rant_transport_publisher_live_matches(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_publisher_live_matches(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li; int cnt = 0;
     if (!topic) return 0;
@@ -256,7 +256,7 @@ int rant_transport_publisher_live_matches(RantTransportState *st, uint16_t topic
 }
 
 
-int rant_transport_publisher_peer_matched(RantTransportState *st, uint16_t topic_index,
+int i_rant_transport_publisher_peer_matched(RantTransportState *st, uint16_t topic_index,
                                           uint32_t peer_id){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li; int slot;
@@ -272,7 +272,7 @@ int rant_transport_publisher_peer_matched(RantTransportState *st, uint16_t topic
 
 
 /* The chain is newest first, so the last live hit is the oldest. */
-uint32_t rant_transport_publisher_oldest_match(RantTransportState *st, uint16_t topic_index){
+uint32_t i_rant_transport_publisher_oldest_match(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li, id = 0;
     if (!topic) return 0;
@@ -284,7 +284,7 @@ uint32_t rant_transport_publisher_oldest_match(RantTransportState *st, uint16_t 
 }
 
 
-int rant_transport_repair_pending(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_repair_pending(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li; int cnt = 0;
     if (!topic) return 0;
@@ -298,7 +298,7 @@ int rant_transport_repair_pending(RantTransportState *st, uint16_t topic_index){
 #ifdef RANT_SHM
 
 /* One remote reader forces inline UDP for the whole message. */
-int rant_transport_publisher_shm_eligible(RantTransportState *st, uint16_t topic_index){
+int i_rant_transport_publisher_shm_eligible(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     uint32_t li; int any=0;
     if (!topic) return 0;
@@ -313,7 +313,7 @@ int rant_transport_publisher_shm_eligible(RantTransportState *st, uint16_t topic
 #endif
 
 #ifdef RANT_SHM
-uint16_t rant_transport_topic_hist_head(RantTransportState *st, uint16_t topic_index){
+uint16_t i_rant_transport_topic_hist_head(RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     return topic ? topic->history_head : 0;
 }

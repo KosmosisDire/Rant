@@ -99,7 +99,7 @@ static uint32_t i_rant_discovery_fnv(const uint8_t *d, size_t n){
     return h;
 }
 
-void rant_discovery_make_uuid(uint8_t out[16], RantBytes stable, uint64_t seed){
+void i_rant_discovery_make_uuid(uint8_t out[16], RantBytes stable, uint64_t seed){
     uint64_t x = 1469598103934665603ull; size_t i; int k;
     for (i=0;i<stable.len;i++){ x = (x ^ stable.data[i]) * 1099511628211ull; }
     x ^= seed;
@@ -114,7 +114,7 @@ void rant_discovery_make_uuid(uint8_t out[16], RantBytes stable, uint64_t seed){
     out[8] = (uint8_t)((out[8] & 0x3Fu) | 0x80u);  /* variant 10x */
 }
 
-const uint8_t *rant_discovery_uuid(const RantDiscoveryState *st){
+const uint8_t *i_rant_discovery_uuid(const RantDiscoveryState *st){
     return st ? st->cfg.uuid : NULL;
 }
 
@@ -127,7 +127,7 @@ static uint16_t i_rant_discovery_user_stride(const RantDiscoveryCoreConfig *cfg)
     return cfg->peer_user_bytes ? (uint16_t)((cfg->peer_user_bytes + 7u) & ~7u) : 0u;
 }
 
-void rant_discovery_config_defaults(RantDiscoveryCoreConfig *cfg){
+void i_rant_discovery_config_defaults(RantDiscoveryCoreConfig *cfg){
     if (!cfg) return;
     if (cfg->announce_interval_us == 0) cfg->announce_interval_us = RANT_ANNOUNCE_INTERVAL_US;
     if (cfg->peer_timeout_us == 0)      cfg->peer_timeout_us = RANT_ANNOUNCE_INTERVAL_US * 4u;   /* 12 s */
@@ -135,7 +135,7 @@ void rant_discovery_config_defaults(RantDiscoveryCoreConfig *cfg){
     if (cfg->max_peers == 0)            cfg->max_peers = RANT_MAX_PEERS;
 }
 
-uint32_t rant_discovery_wire_size(uint16_t meta_cap){
+uint32_t i_rant_discovery_wire_size(uint16_t meta_cap){
     uint32_t cap = meta_cap ? meta_cap : RANT_DISCOVERY_META_MAX;
     /* the blob is the discovery section plus the overlay */
     uint32_t w = (uint32_t)RANT_DISCOVERY_META_OFF + RANT_DISCOVERY_DISC_MAX + cap;
@@ -155,7 +155,7 @@ static void i_rant_discovery_layout(i_RantBump *b, const RantDiscoveryCoreConfig
     o->user_pool = user_stride ? (uint8_t*)i_rant_bump_take(b, (size_t)cfg->max_peers * user_stride, 8) : NULL;
 }
 
-size_t rant_discovery_required_memory(const RantDiscoveryCoreConfig *cfg){
+size_t i_rant_discovery_required_memory(const RantDiscoveryCoreConfig *cfg){
     i_RantBump b; i_RantDiscoveryBlocks blk;
     if (!cfg) return 0;
     memset(&b, 0, sizeof b);
@@ -163,14 +163,14 @@ size_t rant_discovery_required_memory(const RantDiscoveryCoreConfig *cfg){
     return b.offset + 8u;     /* slack to align the caller's mem up to base */
 }
 
-RantDiscoveryState *rant_discovery_init(void *mem, size_t cap, const RantDiscoveryCoreConfig *cfg){
+RantDiscoveryState *i_rant_discovery_init(void *mem, size_t cap, const RantDiscoveryCoreConfig *cfg){
     i_RantBump b; i_RantDiscoveryBlocks blk; RantDiscoveryState *st; uint16_t i, meta_cap;
     if (!mem || !cfg || cfg->max_peers == 0) return NULL;
     if (cfg->announce_interval_us == 0 || cfg->peer_timeout_us == 0) return NULL;
     meta_cap = i_rant_discovery_meta_cap(cfg);
     if (cfg->meta.len > meta_cap) return NULL;
     if (cfg->meta.len && !cfg->meta.data) return NULL;
-    if (cap < rant_discovery_required_memory(cfg)) return NULL;
+    if (cap < i_rant_discovery_required_memory(cfg)) return NULL;
 
     memset(&b, 0, sizeof b);
     b.base = (uint8_t*)(((uintptr_t)mem + 7u) & ~(uintptr_t)7u);
@@ -208,13 +208,13 @@ RantDiscoveryState *rant_discovery_init(void *mem, size_t cap, const RantDiscove
 
 /* Not a re init: the uuid, blob version, id counter and peer table survive, or peers
  * would treat us as a new node. self_meta is the node core's new blob address. */
-RantDiscoveryState *rant_discovery_core_migrate(RantDiscoveryState *old, void *new_mem,
+RantDiscoveryState *i_rant_discovery_core_migrate(RantDiscoveryState *old, void *new_mem,
         size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_cap,
         const uint8_t *self_meta, void *peer_cb_user){
     i_RantBump b; i_RantDiscoveryBlocks blk; RantDiscoveryState *st; RantDiscoveryCoreConfig dc; uint16_t i, omp;
     if (!old) return NULL;
     dc = old->cfg; dc.max_peers = new_max_peers; dc.meta_cap = new_meta_cap;
-    if (new_cap < rant_discovery_required_memory(&dc)) return NULL;
+    if (new_cap < i_rant_discovery_required_memory(&dc)) return NULL;
     memset(&b,0,sizeof b);
     b.base = (uint8_t*)(((uintptr_t)new_mem + 7u) & ~(uintptr_t)7u);
     b.cap  = new_cap - (size_t)(b.base - (uint8_t*)new_mem);
@@ -254,7 +254,7 @@ RantDiscoveryState *rant_discovery_core_migrate(RantDiscoveryState *old, void *n
     return st;
 }
 
-void rant_discovery_destroy(RantDiscoveryState *st){
+void i_rant_discovery_destroy(RantDiscoveryState *st){
     uint16_t i;
     if (!st || !st->cfg.alloc) return;   /* pool mode has nothing hook allocated */
     for (i=0;i<st->cap_peers;i++)
@@ -416,7 +416,7 @@ static int i_rant_discovery_disc_dest(const i_RantDiscoveryPeer *peer, RantAddr 
     return 1;
 }
 
-void rant_discovery_on_datagram(RantDiscoveryState *st, const RantAddr *src,
+void i_rant_discovery_on_datagram(RantDiscoveryState *st, const RantAddr *src,
                        RantDiscoveryVia via, RantBytes datagram, uint64_t now){
     const uint8_t *p = datagram.data; size_t len = datagram.len;
     const uint8_t *src_ip = (src && (src->ip_len==4 || src->ip_len==16)) ? src->ip : NULL;
@@ -645,7 +645,7 @@ void rant_discovery_on_datagram(RantDiscoveryState *st, const RantAddr *src,
         peer->reply_due = 1;   /* answer the solicit with a unicast announce and blob */
 }
 
-size_t rant_discovery_update(RantDiscoveryState *st, uint64_t now, void *out, size_t cap){
+size_t i_rant_discovery_update(RantDiscoveryState *st, uint64_t now, void *out, size_t cap){
     uint16_t i;
     if (!st->started){
         st->started = 1;
@@ -701,12 +701,12 @@ size_t rant_discovery_update(RantDiscoveryState *st, uint64_t now, void *out, si
     return 0;
 }
 
-uint64_t rant_discovery_next_due_us(const RantDiscoveryState *st){
+uint64_t i_rant_discovery_next_due_us(const RantDiscoveryState *st){
     if (!st || !st->started || st->want_solicit) return 0;
     return st->next_announce_us;   /* 0 after an advertise: announce now */
 }
 
-void rant_discovery_set_meta(RantDiscoveryState *st, RantBytes meta){
+void i_rant_discovery_set_meta(RantDiscoveryState *st, RantBytes meta){
     if (!st || meta.len > st->meta_cap) return;   /* the node sizes meta_cap to fit */
     st->self_meta         = meta;
     st->self_meta_version++;
@@ -714,11 +714,11 @@ void rant_discovery_set_meta(RantDiscoveryState *st, RantBytes meta){
     st->next_announce_us  = 0;   /* announce the change now */
 }
 
-uint32_t rant_discovery_meta_version(const RantDiscoveryState *st){
+uint32_t i_rant_discovery_meta_version(const RantDiscoveryState *st){
     return st ? st->self_meta_version : 0;
 }
 
-void rant_discovery_set_local_subnets(RantDiscoveryState *st, const RantDiscoverySubnet *nets, uint8_t n){
+void i_rant_discovery_set_local_subnets(RantDiscoveryState *st, const RantDiscoverySubnet *nets, uint8_t n){
     uint8_t i, k = 0;
     if (!st) return;
     if (n > RANT_DISCOVERY_MAX_SUBNETS) n = RANT_DISCOVERY_MAX_SUBNETS;
@@ -730,7 +730,7 @@ void rant_discovery_set_local_subnets(RantDiscoveryState *st, const RantDiscover
     st->n_local_nets = k;
 }
 
-size_t rant_discovery_poll_targeted(RantDiscoveryState *st, void *out, size_t cap,
+size_t i_rant_discovery_poll_targeted(RantDiscoveryState *st, void *out, size_t cap,
                                     RantAddr *to, int *exact){
     uint16_t n = st->cap_peers, k;
     if (n == 0) return 0;
@@ -755,7 +755,7 @@ size_t rant_discovery_poll_targeted(RantDiscoveryState *st, void *out, size_t ca
     return 0;
 }
 
-size_t rant_discovery_poll_introduce(RantDiscoveryState *st, void *out, size_t cap,
+size_t i_rant_discovery_poll_introduce(RantDiscoveryState *st, void *out, size_t cap,
                                      RantAddr *to, int *exact){
     uint16_t i;
     if (!st) return 0;
@@ -780,7 +780,7 @@ size_t rant_discovery_poll_introduce(RantDiscoveryState *st, void *out, size_t c
     return 0;
 }
 
-size_t rant_discovery_poll_relay(RantDiscoveryState *st, void *out, size_t cap){
+size_t i_rant_discovery_poll_relay(RantDiscoveryState *st, void *out, size_t cap){
     uint16_t n, k;
     if (!st) return 0;
     n = st->cap_peers;
@@ -799,10 +799,10 @@ size_t rant_discovery_poll_relay(RantDiscoveryState *st, void *out, size_t cap){
     return 0;
 }
 
-void rant_discovery_solicit(RantDiscoveryState *st){ if (st) st->want_solicit = 1; }
+void i_rant_discovery_solicit(RantDiscoveryState *st){ if (st) st->want_solicit = 1; }
 
 /* No version changes. The local side may now have a topic a held blob's interest matches. */
-void rant_discovery_replay_peers(RantDiscoveryState *st){
+void i_rant_discovery_replay_peers(RantDiscoveryState *st){
     uint16_t i;
     if (!st || !st->cfg.on_peer_up) return;
     for (i=0;i<st->cap_peers;i++){
@@ -814,15 +814,15 @@ void rant_discovery_replay_peers(RantDiscoveryState *st){
     }
 }
 
-uint16_t rant_discovery_peer_count(const RantDiscoveryState *st){
+uint16_t i_rant_discovery_peer_count(const RantDiscoveryState *st){
     uint16_t i, c = 0;   /* DROPPED entries linger for resume and are not members */
     for (i=0;i<st->cap_peers;i++) if (st->peers[i].used && !st->peers[i].dropped) c++;
     return c;
 }
 
-uint16_t rant_discovery_max_peers(const RantDiscoveryState *st){ return st->cap_peers; }
+uint16_t i_rant_discovery_max_peers(const RantDiscoveryState *st){ return st->cap_peers; }
 
-int rant_discovery_peer_at(const RantDiscoveryState *st, uint16_t slot, RantDiscoveryPeer *out){
+int i_rant_discovery_peer_at(const RantDiscoveryState *st, uint16_t slot, RantDiscoveryPeer *out){
     const i_RantDiscoveryPeer *p;
     if (slot >= st->cap_peers) return 0;
     p = &st->peers[slot];
@@ -849,14 +849,14 @@ static i_RantDiscoveryPeer *i_rant_discovery_by_id(const RantDiscoveryState *st,
     return NULL;
 }
 
-void *rant_discovery_peer_user(RantDiscoveryState *st, uint32_t id){
+void *i_rant_discovery_peer_user(RantDiscoveryState *st, uint32_t id){
     i_RantDiscoveryPeer *p;
     if (!st || !st->user_stride) return NULL;
     p = i_rant_discovery_by_id(st, id);
     return p ? p->user : NULL;
 }
 
-int rant_discovery_addr_of_id(const RantDiscoveryState *st, uint32_t id, RantAddr *out){
+int i_rant_discovery_addr_of_id(const RantDiscoveryState *st, uint32_t id, RantAddr *out){
     i_RantDiscoveryPeer *p = i_rant_discovery_by_id(st, id);
     if (!p) return 0;
     /* the observed data source when bound, else the locator. See spec/discovery.md */
@@ -866,20 +866,20 @@ int rant_discovery_addr_of_id(const RantDiscoveryState *st, uint32_t id, RantAdd
     return 1;
 }
 
-RantBytes rant_discovery_peer_meta(const RantDiscoveryState *st, uint32_t id, uint32_t *version){
+RantBytes i_rant_discovery_peer_meta(const RantDiscoveryState *st, uint32_t id, uint32_t *version){
     i_RantDiscoveryPeer *p = i_rant_discovery_by_id(st, id);
     if (version) *version = p ? p->meta_version : 0;
     if (!p || !p->meta_len) return rant_bytes(NULL, 0);
     return rant_bytes(p->meta, p->meta_len);
 }
 
-RantString rant_discovery_peer_name(const RantDiscoveryState *st, uint32_t id){
+RantString i_rant_discovery_peer_name(const RantDiscoveryState *st, uint32_t id){
     i_RantDiscoveryPeer *p = i_rant_discovery_by_id(st, id);
     if (!p) return rant_string(NULL, 0);                   /* unknown peer: .data NULL */
     return rant_string(p->name, p->name_len);              /* known: .data set, .len may be 0 */
 }
 
-int rant_discovery_id_for_addr(const RantDiscoveryState *st, const uint8_t *ip, uint8_t ip_len,
+int i_rant_discovery_id_for_addr(const RantDiscoveryState *st, const uint8_t *ip, uint8_t ip_len,
                                uint16_t port, uint32_t *id){
     uint16_t i;
     if (!ip || (ip_len != 4 && ip_len != 16)) return 0;
@@ -902,11 +902,11 @@ int rant_discovery_id_for_addr(const RantDiscoveryState *st, const uint8_t *ip, 
     return 0;
 }
 
-size_t rant_discovery_leave(RantDiscoveryState *st, void *out, size_t cap){
+size_t i_rant_discovery_leave(RantDiscoveryState *st, void *out, size_t cap){
     return i_rant_discovery_build(st, RANT_DISCOVERY_FLAG_BYE, 0, (uint8_t *)out, cap);
 }
 
-int rant_discovery_peer_addr(const RantDiscoveryState *st, uint16_t slot, RantAddr *out){
+int i_rant_discovery_peer_addr(const RantDiscoveryState *st, uint16_t slot, RantAddr *out){
     const i_RantDiscoveryPeer *p;
     if (slot >= st->cap_peers) return 0;
     p = &st->peers[slot];

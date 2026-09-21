@@ -717,7 +717,7 @@ static int st_fail = 0;
 /* the discovery peer table behind a node, for raw announce checks. The public walk is
    rant_node_peers_next */
 static const RantDiscoveryPeer *st_peers(RantNode *n, uint16_t *count){
-    return rant_discovery_peers(n->discovery, count);
+    return i_rant_discovery_peers(n->discovery, count);
 }
 /* cond is evaluated exactly once: a condition with side effects must not run twice, or
    the second evaluation fails silently after the first printed ok */
@@ -756,14 +756,14 @@ static void st_pump(RantNode *a, RantNode *b, int ms){         /* run both nodes
 static void st_apply_verified(RantTransportState *dst, uint32_t src_id, RantTransportState *src){
     uint8_t ib[512], rq[512], rp[2048]; size_t il, rl, pl; uint16_t nw;
     RantDetailWant wl[16];
-    il = rant_transport_build_interest(src, ib, sizeof ib);
-    rant_transport_apply_peer_interest(dst, src_id, rant_bytes(ib, il));
-    nw = rant_transport_detail_wants(dst, NULL, src_id, rant_bytes(ib, il), wl, 16);
+    il = i_rant_transport_build_interest(src, ib, sizeof ib);
+    i_rant_transport_apply_peer_interest(dst, src_id, rant_bytes(ib, il));
+    nw = i_rant_transport_detail_wants(dst, NULL, src_id, rant_bytes(ib, il), wl, 16);
     if (!nw) return;                       /* nothing shared (or already verified) */
-    rl = rant_detail_req_build(0, 0, wl, nw, rq, sizeof rq);
-    pl = rant_transport_detail_respond(src, NULL, 0, rant_bytes(rq, rl), rp, sizeof rp);
-    rant_transport_apply_peer_details(dst, src_id, rant_bytes(rp, pl));
-    rant_transport_apply_peer_interest(dst, src_id, rant_bytes(ib, il));
+    rl = i_rant_detail_req_build(0, 0, wl, nw, rq, sizeof rq);
+    pl = i_rant_transport_detail_respond(src, NULL, 0, rant_bytes(rq, rl), rp, sizeof rp);
+    i_rant_transport_apply_peer_details(dst, src_id, rant_bytes(rp, pl));
+    i_rant_transport_apply_peer_interest(dst, src_id, rant_bytes(ib, il));
 }
 
 /* Best effort rate throttle on the transport core with a controlled clock. The writer
@@ -779,13 +779,13 @@ static void rate_on_event(const RantEvent *ev){
 }
 static void rate_send(void){
     static unsigned char p[16];
-    rant_transport_send(rate_W, 0, rant_bytes(p, sizeof p), rate_clk);
+    i_rant_transport_send(rate_W, 0, rant_bytes(p, sizeof p), rate_clk);
 }
 static void rate_pump(uint64_t dt){   /* flush W to R, then advance the clock */
     uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t ol;
-    while (rant_transport_poll_send(rate_W,&to,buf,sizeof buf,&ol,rate_clk)){
+    while (i_rant_transport_poll_send(rate_W,&to,buf,sizeof buf,&ol,rate_clk)){
         if (rate_drop>0 && (buf[0]&0x07u)==1u){ rate_drop--; continue; }   /* drop this DATA */
-        rant_transport_on_datagram(rate_R, 1u, rant_bytes(buf, ol), rate_clk);
+        i_rant_transport_on_datagram(rate_R, 1u, rant_bytes(buf, ol), rate_clk);
     }
     rate_clk += dt;
 }
@@ -801,13 +801,13 @@ static void rate_checks(void){
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
     rc.allocator=rant_allocator_alloc; rc.user=&ra;
     rc.on_message=rate_on_msg; rc.on_event=rate_on_event;
-    nw=rant_transport_required_memory(&wc); mw=malloc(nw); rate_W=rant_transport_init(mw,nw,&wc);
-    nr=rant_transport_required_memory(&rc); mr=malloc(nr); rate_R=rant_transport_init(mr,nr,&rc);
+    nw=i_rant_transport_required_memory(&wc); mw=malloc(nw); rate_W=i_rant_transport_init(mw,nw,&wc);
+    nr=i_rant_transport_required_memory(&rc); mr=malloc(nr); rate_R=i_rant_transport_init(mr,nr,&rc);
     rate_clk=1000000;
-    rant_transport_peer_add(rate_W,2u,RANT_FRAG_SIZE); rant_transport_peer_add(rate_R,1u,RANT_FRAG_SIZE);
+    i_rant_transport_peer_add(rate_W,2u,RANT_FRAG_SIZE); i_rant_transport_peer_add(rate_R,1u,RANT_FRAG_SIZE);
     st_apply_verified(rate_R, 1u, rate_W);   /* reader learns the writer */
     st_apply_verified(rate_W, 2u, rate_R);   /* writer learns the reader + its advertised rate */
-    ST_CHECK(rant_transport_publisher_match_count(rate_W,0)>0, "rate: writer matched the throttled reader");
+    ST_CHECK(i_rant_transport_publisher_match_count(rate_W,0)>0, "rate: writer matched the throttled reader");
 
     /* decimation: publish 200 samples across ~100 ms of virtual time. At 100 Hz the reader
        gets ~10-12, not 200, and NO false loss (the paced skips are absorbed by wire_skip). */
@@ -827,7 +827,7 @@ static void rate_checks(void){
     ST_CHECK(rate_recv>=1 && rate_lost>=1,
              "rate: a dropped SENT sample IS reported as loss (recv=%d lost=%d)", rate_recv, rate_lost);
 
-    rant_transport_destroy(rate_W); rant_transport_destroy(rate_R); free(mw); free(mr);
+    i_rant_transport_destroy(rate_W); i_rant_transport_destroy(rate_R); free(mw); free(mr);
     rant_allocator_reset(&wa); rant_allocator_reset(&ra);
 }
 
@@ -846,24 +846,24 @@ static void lap_on_event(const RantEvent *ev){
 }
 static void lap_send(void){                       /* one 6-fragment message */
     static unsigned char p[6*RANT_FRAG_SIZE - 100];
-    rant_transport_send(lap_W, 0, rant_bytes(p, sizeof p), lap_clk);
+    i_rant_transport_send(lap_W, 0, rant_bytes(p, sizeof p), lap_clk);
 }
 /* R to W: collect now, feed later, so ACKNACKs armed at different points land in one pass */
 static void lap_collect_r(void){
     uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t ol;
-    while (lap_nh<8 && rant_transport_poll_send(lap_R,&to,buf,sizeof buf,&ol,lap_clk)){
+    while (lap_nh<8 && i_rant_transport_poll_send(lap_R,&to,buf,sizeof buf,&ol,lap_clk)){
         memcpy(lap_held[lap_nh], buf, ol); lap_hl[lap_nh++] = ol; }
 }
 static void lap_feed_w(void){
     int i;
-    for (i=0;i<lap_nh;i++) rant_transport_on_datagram(lap_W, 2u, rant_bytes(lap_held[i], lap_hl[i]), lap_clk);
+    for (i=0;i<lap_nh;i++) i_rant_transport_on_datagram(lap_W, 2u, rant_bytes(lap_held[i], lap_hl[i]), lap_clk);
     lap_nh = 0;
 }
 /* W to R, dropping DATA per the lap_drop switches, one message. After split_after DATA
    fragments R's pending ACKNACK is collected mid stream. A batched HB still passes. */
 static void lap_flush_w(int split_after){
     uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t ol; int fed=0;
-    while (rant_transport_poll_send(lap_W,&to,buf,sizeof buf,&ol,lap_clk)){
+    while (i_rant_transport_poll_send(lap_W,&to,buf,sizeof buf,&ol,lap_clk)){
         size_t off=0;
         if ((buf[0]&0x07u)==1u && !(buf[0]&RANT_F_SINGLE)){
             unsigned frag = (unsigned)buf[RANT_OFFSET_FRAG] | ((unsigned)buf[RANT_OFFSET_FRAG+1]<<8);
@@ -872,7 +872,7 @@ static void lap_flush_w(int split_after){
             if (frag==5) lap_drop_mask = 0;
             if (drop) off = sub; else fed++;
         }
-        if (off < ol) rant_transport_on_datagram(lap_R, 1u, rant_bytes(buf+off, ol-off), lap_clk);
+        if (off < ol) i_rant_transport_on_datagram(lap_R, 1u, rant_bytes(buf+off, ol-off), lap_clk);
         if (split_after && fed==split_after){ lap_collect_r(); split_after=0; }
     }
 }
@@ -892,13 +892,13 @@ static void lapped_checks(void){
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
     rc.allocator=rant_allocator_alloc; rc.user=&ra;
     rc.on_message=lap_on_msg; rc.on_event=lap_on_event;
-    nw=rant_transport_required_memory(&wc); mw=malloc(nw); lap_W=rant_transport_init(mw,nw,&wc);
-    nr=rant_transport_required_memory(&rc); mr=malloc(nr); lap_R=rant_transport_init(mr,nr,&rc);
+    nw=i_rant_transport_required_memory(&wc); mw=malloc(nw); lap_W=i_rant_transport_init(mw,nw,&wc);
+    nr=i_rant_transport_required_memory(&rc); mr=malloc(nr); lap_R=i_rant_transport_init(mr,nr,&rc);
     lap_clk=1000000; lap_nh=0; lap_drop_all=0; lap_drop_mask=0;
-    rant_transport_peer_add(lap_W,2u,RANT_FRAG_SIZE); rant_transport_peer_add(lap_R,1u,RANT_FRAG_SIZE);
+    i_rant_transport_peer_add(lap_W,2u,RANT_FRAG_SIZE); i_rant_transport_peer_add(lap_R,1u,RANT_FRAG_SIZE);
     st_apply_verified(lap_R, 1u, lap_W);
     st_apply_verified(lap_W, 2u, lap_R);
-    ST_CHECK(rant_transport_publisher_match_count(lap_W,0)>0, "lapped: writer matched reader");
+    ST_CHECK(i_rant_transport_publisher_match_count(lap_W,0)>0, "lapped: writer matched reader");
 
     /* [a] baseline */
     lap_recv=0; lap_lost=0; lap_send(); lap_pump(1000);
@@ -910,7 +910,7 @@ static void lapped_checks(void){
     lap_send(); lap_flush_w(2); lap_collect_r();
     ST_CHECK(lap_nh==2, "lapped: [b] two ACKNACKs collected in one pass (%d)", lap_nh);
     lap_feed_w(); lap_pump(1000);
-    rant_transport_repair_stats(lap_W, 0, &rs);
+    i_rant_transport_repair_stats(lap_W, 0, &rs);
     ST_CHECK(lap_recv==1 && rs.frags_resent==2,
              "lapped: [b] merged request: both holes resent at once, message complete (recv=%d resent=%llu)",
              lap_recv, (unsigned long long)rs.frags_resent);
@@ -934,10 +934,10 @@ static void lapped_checks(void){
     lap_run(30);                                       /* skip #2 while still fetching: lapped */
     ST_CHECK(lap_recv==0 && lap_lost==48, "lapped: [d] second skip gives up the cached window (lost=%d)", lap_lost);
     lap_drop_all=0;
-    rant_transport_repair_stats(lap_W, 0, &rs);
+    i_rant_transport_repair_stats(lap_W, 0, &rs);
     { unsigned long long resent0 = rs.frags_resent;
       lap_send(); lap_run(5);
-      rant_transport_repair_stats(lap_W, 0, &rs);
+      i_rant_transport_repair_stats(lap_W, 0, &rs);
       ST_CHECK(lap_recv==1 && lap_lost==48 && rs.frags_resent==resent0,
                "lapped: [d] rejoined at the head: next message in order, no repair (recv=%d lost=%d resent=%llu)",
                lap_recv, lap_lost, (unsigned long long)(rs.frags_resent-resent0)); }
@@ -951,7 +951,7 @@ static void lapped_checks(void){
     lap_run(120);
     ST_CHECK(lap_recv==4 && lap_lost==12, "lapped: [e] streak reset: a later skip repairs the window again (recv=%d lost=%d)", lap_recv, lap_lost);
 
-    rant_transport_destroy(lap_W); rant_transport_destroy(lap_R); free(mw); free(mr);
+    i_rant_transport_destroy(lap_W); i_rant_transport_destroy(lap_R); free(mw); free(mr);
     rant_allocator_reset(&wa); rant_allocator_reset(&ra);
 }
 
@@ -967,13 +967,13 @@ static int rt_on_msg(void *u, uint16_t ch, uint32_t from, RantBytes d){
 }
 static void rt_send(void){                       /* one 6-fragment message */
     static unsigned char p[6*RANT_FRAG_SIZE - 100];
-    rant_transport_send(rt_W, 0, rant_bytes(p, sizeof p), rt_clk);
+    i_rant_transport_send(rt_W, 0, rant_bytes(p, sizeof p), rt_clk);
 }
 /* one tick: W builds at clk, R hears it at clk plus L and answers, W hears that at clk
    plus 2L. DATA fragments drop per the rt_drop switches, rt_drop_ack drops R's ACKNACKs. */
 static void rt_pump(void){
     uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t ol;
-    while (rant_transport_poll_send(rt_W,&to,buf,sizeof buf,&ol,rt_clk)){
+    while (i_rant_transport_poll_send(rt_W,&to,buf,sizeof buf,&ol,rt_clk)){
         size_t off=0;
         if ((buf[0]&0x07u)==1u && !(buf[0]&RANT_F_SINGLE)){
             unsigned frag = (unsigned)buf[RANT_OFFSET_FRAG] | ((unsigned)buf[RANT_OFFSET_FRAG+1]<<8);
@@ -983,11 +983,11 @@ static void rt_pump(void){
             if (frag==5) rt_drop_mask = 0;
             if (drop) off = sub;
         } else if ((buf[0]&0x07u)==2u) rt_hb_seen++;
-        if (off < ol) rant_transport_on_datagram(rt_R, 1u, rant_bytes(buf+off, ol-off), rt_clk + rt_lat);
+        if (off < ol) i_rant_transport_on_datagram(rt_R, 1u, rant_bytes(buf+off, ol-off), rt_clk + rt_lat);
     }
-    while (rant_transport_poll_send(rt_R,&to,buf,sizeof buf,&ol,rt_clk + rt_lat)){
+    while (i_rant_transport_poll_send(rt_R,&to,buf,sizeof buf,&ol,rt_clk + rt_lat)){
         if (rt_drop_ack && (buf[0]&0x07u)==3u) continue;
-        rant_transport_on_datagram(rt_W, 2u, rant_bytes(buf, ol), rt_clk + 2u*rt_lat);
+        i_rant_transport_on_datagram(rt_W, 2u, rant_bytes(buf, ol), rt_clk + 2u*rt_lat);
     }
     rt_clk += 2u*rt_lat;
 }
@@ -1005,25 +1005,25 @@ static void rtt_checks(void){
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
     rc.allocator=rant_allocator_alloc; rc.user=&ra;
     rc.on_message=rt_on_msg;
-    nw=rant_transport_required_memory(&wc); mw=malloc(nw); rt_W=rant_transport_init(mw,nw,&wc);
-    nr=rant_transport_required_memory(&rc); mr=malloc(nr); rt_R=rant_transport_init(mr,nr,&rc);
+    nw=i_rant_transport_required_memory(&wc); mw=malloc(nw); rt_W=i_rant_transport_init(mw,nw,&wc);
+    nr=i_rant_transport_required_memory(&rc); mr=malloc(nr); rt_R=i_rant_transport_init(mr,nr,&rc);
     rt_clk=1000000; rt_lat=2500; rt_drop_all=0; rt_drop_mask=0; rt_drop_resend_of=0; rt_drop_ack=0;
-    rant_transport_peer_add(rt_W,2u,RANT_FRAG_SIZE); rant_transport_peer_add(rt_R,1u,RANT_FRAG_SIZE);
+    i_rant_transport_peer_add(rt_W,2u,RANT_FRAG_SIZE); i_rant_transport_peer_add(rt_R,1u,RANT_FRAG_SIZE);
     st_apply_verified(rt_R, 1u, rt_W);
     st_apply_verified(rt_W, 2u, rt_R);
-    ST_CHECK(rant_transport_publisher_match_count(rt_W,0)>0, "rtt: writer matched reader");
-    ST_CHECK(rant_transport_peer_rtt(rt_W, 2u, &e) && e.samples==0, "rtt: a fresh peer has no estimate");
-    ST_CHECK(!rant_transport_peer_rtt(rt_W, 9u, &e), "rtt: an unknown peer answers 0");
+    ST_CHECK(i_rant_transport_publisher_match_count(rt_W,0)>0, "rtt: writer matched reader");
+    ST_CHECK(i_rant_transport_peer_rtt(rt_W, 2u, &e) && e.samples==0, "rtt: a fresh peer has no estimate");
+    ST_CHECK(!i_rant_transport_peer_rtt(rt_W, 9u, &e), "rtt: an unknown peer answers 0");
 
     /* [a] writer side: every clean sample is push-to-ack = one round trip = 2L */
     rt_recv=0;
     for (i=0;i<10;i++){ rt_send(); rt_pump(); rt_pump(); }
-    rant_transport_peer_rtt(rt_W, 2u, &e);
+    i_rant_transport_peer_rtt(rt_W, 2u, &e);
     ST_CHECK(rt_recv==10 && e.samples==10 && e.rtt_us==5000 && e.rtt_min_us==5000 && e.rtt_last_us==5000,
              "rtt: [a] writer samples push-to-ack (samples=%u rtt=%u min=%u last=%u)",
              e.samples, e.rtt_us, e.rtt_min_us, e.rtt_last_us);
     ST_CHECK(e.rtt_jitter_us < 500, "rtt: [a] jitter decays on a steady path (%u)", e.rtt_jitter_us);
-    rant_transport_peer_rtt(rt_R, 1u, &e);
+    i_rant_transport_peer_rtt(rt_R, 1u, &e);
     ST_CHECK(e.samples==0, "rtt: [a] a reader that never repaired has no estimate (%u)", e.samples);
 
     /* [b] reader side, first loss: frag 2 and its resend are lost. No estimate yet, so the
@@ -1032,12 +1032,12 @@ static void rtt_checks(void){
     rt_send();
     for (n=0; n<40 && rt_recv==0; n++) rt_pump();
     ST_CHECK(rt_recv==1 && n>=10 && n<=13, "rtt: [b] unmeasured reader re-asks at the 50 ms default (%d ticks)", n);
-    rant_transport_peer_rtt(rt_R, 1u, &e);
+    i_rant_transport_peer_rtt(rt_R, 1u, &e);
     ST_CHECK(e.samples==0, "rtt: [b] a seqno asked twice yields no sample, Karn (samples=%u)", e.samples);
 
     /* [c] a few clean repairs (one lost frag each) build the reader's estimate ... */
     for (i=0;i<6;i++){ rt_recv=0; rt_drop_mask=(1u<<3); rt_send(); for (n=0;n<8 && rt_recv==0;n++) rt_pump(); }
-    rant_transport_peer_rtt(rt_R, 1u, &e);
+    i_rant_transport_peer_rtt(rt_R, 1u, &e);
     ST_CHECK(e.samples==6 && e.rtt_us==5000 && e.rtt_jitter_us < 1000,
              "rtt: [c] reader samples request-to-resend (samples=%u rtt=%u jitter=%u)", e.samples, e.rtt_us, e.rtt_jitter_us);
     /* ... and the same double loss now re-asks at the RTT bound (5 ms + max(1 ms, 4 x jitter),
@@ -1056,7 +1056,7 @@ static void rtt_checks(void){
     ST_CHECK(rt_hb_seen>=1 && n<=2, "rtt: [d] tail HB at the RTT bound, not the 20 ms default (%d ticks)", n);
     rt_drop_ack=0; rt_pump(); rt_pump();
 
-    rant_transport_destroy(rt_W); rant_transport_destroy(rt_R); free(mw); free(mr);
+    i_rant_transport_destroy(rt_W); i_rant_transport_destroy(rt_R); free(mw); free(mr);
     rant_allocator_reset(&wa); rant_allocator_reset(&ra);
 }
 
@@ -1082,22 +1082,22 @@ static void ah_on_event(const RantEvent *ev){
 static void ah_send(void){                       /* one 6-fragment message, tagged */
     static unsigned char p[6*RANT_FRAG_SIZE - 100];
     p[0] = (unsigned char)++ah_tag;
-    rant_transport_send(ah_W, 0, rant_bytes(p, sizeof p), ah_clk);
+    i_rant_transport_send(ah_W, 0, rant_bytes(p, sizeof p), ah_clk);
 }
 static uint64_t ah_base_of(unsigned tag){ return ah_first_base + 6u * (uint64_t)(tag - 1u); }
 static void ah_collect_r(void){
     uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t ol;
-    while (ah_nh<8 && rant_transport_poll_send(ah_R,&to,buf,sizeof buf,&ol,ah_clk)){
+    while (ah_nh<8 && i_rant_transport_poll_send(ah_R,&to,buf,sizeof buf,&ol,ah_clk)){
         memcpy(ah_held[ah_nh], buf, ol); ah_hl[ah_nh++] = ol; }
 }
 static void ah_feed_w(void){
     int i;
-    for (i=0;i<ah_nh;i++) rant_transport_on_datagram(ah_W, 2u, rant_bytes(ah_held[i], ah_hl[i]), ah_clk);
+    for (i=0;i<ah_nh;i++) i_rant_transport_on_datagram(ah_W, 2u, rant_bytes(ah_held[i], ah_hl[i]), ah_clk);
     ah_nh = 0;
 }
 static void ah_flush_w(void){
     uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t ol;
-    while (rant_transport_poll_send(ah_W,&to,buf,sizeof buf,&ol,ah_clk)){
+    while (i_rant_transport_poll_send(ah_W,&to,buf,sizeof buf,&ol,ah_clk)){
         size_t off=0;
         if ((buf[0]&0x07u)==1u && !(buf[0]&RANT_F_SINGLE)){
             uint64_t seqno = i_rant_le_r64(buf+RANT_OFFSET_SEQNO);
@@ -1109,7 +1109,7 @@ static void ah_flush_w(void){
             if (frag==5) ah_drop_mask = 0;
             if (drop) off = sub;
         }
-        if (off < ol) rant_transport_on_datagram(ah_R, 1u, rant_bytes(buf+off, ol-off), ah_clk);
+        if (off < ol) i_rant_transport_on_datagram(ah_R, 1u, rant_bytes(buf+off, ol-off), ah_clk);
     }
 }
 static void ah_pump(uint64_t dt){ ah_flush_w(); ah_collect_r(); ah_feed_w(); ah_clk += dt; }
@@ -1128,14 +1128,14 @@ static void ahead_checks(void){
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
     rc.allocator=rant_allocator_alloc; rc.user=&ra;
     rc.on_message=ah_on_msg; rc.on_event=ah_on_event;
-    nw=rant_transport_required_memory(&wc); mw=malloc(nw); ah_W=rant_transport_init(mw,nw,&wc);
-    nr=rant_transport_required_memory(&rc); mr=malloc(nr); ah_R=rant_transport_init(mr,nr,&rc);
+    nw=i_rant_transport_required_memory(&wc); mw=malloc(nw); ah_W=i_rant_transport_init(mw,nw,&wc);
+    nr=i_rant_transport_required_memory(&rc); mr=malloc(nr); ah_R=i_rant_transport_init(mr,nr,&rc);
     ah_clk=1000000; ah_nh=0; ah_drop_mask=0; ah_drop_lo=ah_drop_hi=0; ah_refuse=0;
     ah_tag=0; ah_last=0; ah_order_bad=0; ah_have_first=0;
-    rant_transport_peer_add(ah_W,2u,RANT_FRAG_SIZE); rant_transport_peer_add(ah_R,1u,RANT_FRAG_SIZE);
+    i_rant_transport_peer_add(ah_W,2u,RANT_FRAG_SIZE); i_rant_transport_peer_add(ah_R,1u,RANT_FRAG_SIZE);
     st_apply_verified(ah_R, 1u, ah_W);
     st_apply_verified(ah_W, 2u, ah_R);
-    ST_CHECK(rant_transport_publisher_match_count(ah_W,0)>0, "ahead: writer matched reader");
+    ST_CHECK(i_rant_transport_publisher_match_count(ah_W,0)>0, "ahead: writer matched reader");
 
     /* [a] baseline */
     ah_recv=0; ah_lost=0; ah_send(); ah_pump(1000);
@@ -1143,49 +1143,49 @@ static void ahead_checks(void){
 
     /* [b] frag 2 of message 2 is lost and message 3 arrives whole before the resend: it is
        HELD, not dropped, and delivers right behind the repaired head. One resend, in order. */
-    rant_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
-    rant_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
+    i_rant_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
+    i_rant_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
     ah_recv=0; ah_drop_mask=(1u<<2);
     ah_send(); ah_send(); ah_pump(1000);
-    rant_transport_repair_stats(ah_R,0,&rs);
+    i_rant_transport_repair_stats(ah_R,0,&rs);
     ST_CHECK(ah_recv==0 && rs.frags_ahead==ahead0, "ahead: [b] the next message is held while the head repairs (recv=%d ahead=%llu)",
              ah_recv, (unsigned long long)(rs.frags_ahead-ahead0));
     ah_pump(1000);
-    rant_transport_repair_stats(ah_W,0,&ws);
+    i_rant_transport_repair_stats(ah_W,0,&ws);
     ST_CHECK(ah_recv==2 && ah_order_bad==0 && ws.frags_resent-resent0==1,
              "ahead: [b] one resend completes the head, the held message follows at once (recv=%d resent=%llu)",
              ah_recv, (unsigned long long)(ws.frags_resent-resent0));
 
     /* [c] two messages ahead: the first is held, the second is still dropped and comes back
        in order through repair (6 resends), everything in order */
-    rant_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
-    rant_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
+    i_rant_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
+    i_rant_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
     ah_recv=0; ah_drop_mask=(1u<<2);
     ah_send(); ah_send(); ah_send(); ah_pump(1000);
-    rant_transport_repair_stats(ah_R,0,&rs);
+    i_rant_transport_repair_stats(ah_R,0,&rs);
     ST_CHECK(ah_recv==0 && rs.frags_ahead-ahead0==6, "ahead: [c] the second future message is dropped (ahead=%llu)",
              (unsigned long long)(rs.frags_ahead-ahead0));
     ah_run(5);
-    rant_transport_repair_stats(ah_W,0,&ws);
+    i_rant_transport_repair_stats(ah_W,0,&ws);
     ST_CHECK(ah_recv==3 && ah_order_bad==0 && ws.frags_resent-resent0==7,
              "ahead: [c] head repaired, held one delivered, dropped one refetched (recv=%d resent=%llu)",
              ah_recv, (unsigned long long)(ws.frags_resent-resent0));
 
     /* [d] the consumer refuses the head (parked): the next message still fills the hold, and
        an accepted retry delivers both with no resend */
-    rant_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
-    rant_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
+    i_rant_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
+    i_rant_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
     ah_recv=0; ah_refuse=1;
     ah_send(); ah_pump(1000);
     ah_send(); ah_pump(1000);
-    rant_transport_repair_stats(ah_R,0,&rs);
-    ST_CHECK(ah_recv==0 && rs.frags_ahead==ahead0 && rant_transport_deliver_parked(ah_R,0,ah_clk)==1,
+    i_rant_transport_repair_stats(ah_R,0,&rs);
+    ST_CHECK(ah_recv==0 && rs.frags_ahead==ahead0 && i_rant_transport_deliver_parked(ah_R,0,ah_clk)==1,
              "ahead: [d] parked head, the next message held meanwhile (ahead=%llu)", (unsigned long long)(rs.frags_ahead-ahead0));
     ah_refuse=0;
-    ST_CHECK(rant_transport_deliver_parked(ah_R,0,ah_clk)==0 && ah_recv==2 && ah_order_bad==0,
+    ST_CHECK(i_rant_transport_deliver_parked(ah_R,0,ah_clk)==0 && ah_recv==2 && ah_order_bad==0,
              "ahead: [d] unpark delivers the head and the held message (recv=%d)", ah_recv);
     ah_pump(1000);
-    rant_transport_repair_stats(ah_W,0,&ws);
+    i_rant_transport_repair_stats(ah_W,0,&ws);
     ST_CHECK(ws.frags_resent==resent0, "ahead: [d] no resend was needed (resent=%llu)", (unsigned long long)(ws.frags_resent-resent0));
 
     /* [e] a message is lost whole and the next one is held. The writer evicts the lost one
@@ -1202,19 +1202,19 @@ static void ahead_checks(void){
 
     /* [f] a hold across a wholly lost message: 12 has a hole, 13 is lost whole once, 14 is
        held. 12 repairs, 13 is fetched in order, 14 delivers from the hold */
-    rant_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
-    rant_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
+    i_rant_transport_repair_stats(ah_W,0,&ws); resent0=ws.frags_resent;
+    i_rant_transport_repair_stats(ah_R,0,&rs); ahead0=rs.frags_ahead;
     ah_recv=0; ah_lost=0; ah_drop_mask=(1u<<2);
     ah_drop_lo=ah_base_of(ah_tag+2u); ah_drop_hi=ah_drop_lo+6u;
     ah_send(); ah_send(); ah_send(); ah_pump(1000);
     ah_drop_lo=ah_drop_hi=0;                     /* 13's resends get through */
     ah_run(5);
-    rant_transport_repair_stats(ah_W,0,&ws); rant_transport_repair_stats(ah_R,0,&rs);
+    i_rant_transport_repair_stats(ah_W,0,&ws); i_rant_transport_repair_stats(ah_R,0,&rs);
     ST_CHECK(ah_recv==3 && ah_lost==0 && ah_order_bad==0 && ws.frags_resent-resent0==7 && rs.frags_ahead==ahead0,
              "ahead: [f] hold across a lost message: repaired, fetched, delivered in order (recv=%d resent=%llu ahead=%llu)",
              ah_recv, (unsigned long long)(ws.frags_resent-resent0), (unsigned long long)(rs.frags_ahead-ahead0));
 
-    rant_transport_destroy(ah_W); rant_transport_destroy(ah_R); free(mw); free(mr);
+    i_rant_transport_destroy(ah_W); i_rant_transport_destroy(ah_R); free(mw); free(mr);
     rant_allocator_reset(&wa); rant_allocator_reset(&ra);
 }
 
@@ -1275,7 +1275,7 @@ static void dc_feed(RantDiscoveryState *st, const uint8_t ip[4], uint16_t sport,
     RantAddr src;
     memset(&src, 0, sizeof src);
     memcpy(src.ip, ip, 4); src.ip_len = 4; src.port = sport;
-    rant_discovery_on_datagram(st, &src,
+    i_rant_discovery_on_datagram(st, &src,
                                via ? RANT_DISCOVERY_VIA_DATA : RANT_DISCOVERY_VIA_DISCOVERY,
                                rant_bytes(buf, n), now);
 }
@@ -1290,38 +1290,38 @@ static void disc_core_checks(void){
     memset(c.uuid,0xEE,16);                        /* receiver uuid, distinct from senders */
     c.domain_id=99; c.announce_interval_us=1000000; c.peer_timeout_us=1000000; c.max_peers=2;
     c.on_peer_up=dc_up; c.on_peer_down=dc_down; c.on_event=dc_error;
-    st = rant_discovery_init(mem,sizeof mem,&c);
+    st = i_rant_discovery_init(mem,sizeof mem,&c);
     ST_CHECK(st!=NULL, "disc-core: init");
     if (!st) return;
-    rant_discovery_update(st, 1000, out, sizeof out);     /* start */
+    i_rant_discovery_update(st, 1000, out, sizeof out);     /* start */
 
     /* 1. two peers announce: two ups, both ACTIVE */
     dc_up_n=dc_down_n=dc_refused_n=0;
     n=dc_mk(buf,1,0,99,5001,1); dc_feed(st,sa,7400,0,buf,n,2000); idA=dc_up_id;
     n=dc_mk(buf,2,0,99,5002,1); dc_feed(st,sb,7400,0,buf,n,2000); idB=dc_up_id;
-    ST_CHECK(dc_up_n==2 && rant_discovery_peer_count(st)==2,
-             "disc-core: two peers up (ups=%u count=%u)", dc_up_n, rant_discovery_peer_count(st));
+    ST_CHECK(dc_up_n==2 && i_rant_discovery_peer_count(st)==2,
+             "disc-core: two peers up (ups=%u count=%u)", dc_up_n, i_rant_discovery_peer_count(st));
 
     /* 2. a new peer is REFUSED when the table is full of ACTIVE peers */
     dc_up_n=dc_refused_n=0;
     n=dc_mk(buf,3,0,99,5003,1); dc_feed(st,sc,7400,0,buf,n,2000);
-    ST_CHECK(dc_refused_n==1 && dc_up_n==0 && rant_discovery_peer_count(st)==2,
+    ST_CHECK(dc_refused_n==1 && dc_up_n==0 && i_rant_discovery_peer_count(st)==2,
              "disc-core: refuse new peer when full of active (refused=%u up=%u count=%u)",
-             dc_refused_n, dc_up_n, rant_discovery_peer_count(st));
+             dc_refused_n, dc_up_n, i_rant_discovery_peer_count(st));
 
     /* 3. silence past the timeout drops both, kept but excluded from the count */
     dc_down_n=0;
-    rant_discovery_update(st, 2002000, out, sizeof out);
-    ST_CHECK(dc_down_n==2 && dc_down_reason==(int)RANT_DISCOVERY_DROP && rant_discovery_peer_count(st)==0,
+    i_rant_discovery_update(st, 2002000, out, sizeof out);
+    ST_CHECK(dc_down_n==2 && dc_down_reason==(int)RANT_DISCOVERY_DROP && i_rant_discovery_peer_count(st)==0,
              "disc-core: timeout drops both (downs=%u reason=%d count=%u)",
-             dc_down_n, dc_down_reason, rant_discovery_peer_count(st));
+             dc_down_n, dc_down_reason, i_rant_discovery_peer_count(st));
 
     /* 4. the same uuid returns: RESUME under the same local_id */
     dc_up_n=0;
     n=dc_mk(buf,1,0,99,5001,1); dc_feed(st,sa,7400,0,buf,n,2100000);
-    ST_CHECK(dc_up_n==1 && dc_up_id==idA && rant_discovery_peer_count(st)==1,
+    ST_CHECK(dc_up_n==1 && dc_up_id==idA && i_rant_discovery_peer_count(st)==1,
              "disc-core: same uuid resumes same id (up=%u sameid=%d count=%u)",
-             dc_up_n, dc_up_id==idA, rant_discovery_peer_count(st));
+             dc_up_n, dc_up_id==idA, i_rant_discovery_peer_count(st));
 
     /* 5. a new peer now evicts the oldest DROPPED peer (B) as GONE */
     dc_down_n=dc_up_n=0;
@@ -1334,34 +1334,34 @@ static void disc_core_checks(void){
     dc_down_n=0;
     n=dc_mk(buf,1,0x01,99,5001,1); dc_feed(st,sa,7400,0,buf,n,2100000);
     ST_CHECK(dc_down_n==1 && dc_down_id==idA && dc_down_reason==(int)RANT_DISCOVERY_GONE
-             && rant_discovery_peer_count(st)==1,
+             && i_rant_discovery_peer_count(st)==1,
              "disc-core: BYE is GONE (downs=%u sameid=%d reason=%d count=%u)",
-             dc_down_n, dc_down_id==idA, dc_down_reason, rant_discovery_peer_count(st));
+             dc_down_n, dc_down_id==idA, dc_down_reason, i_rant_discovery_peer_count(st));
 
     /* 7. a new uuid announcing from an (ip, port) we already hold: that process restarted,
        so the predecessor is evicted as GONE rather than shadowing the newcomer's data */
     { uint32_t idP;
-      st = rant_discovery_init(mem,sizeof mem,&c);              /* fresh receiver */
-      rant_discovery_update(st, 1000, out, sizeof out);
+      st = i_rant_discovery_init(mem,sizeof mem,&c);              /* fresh receiver */
+      i_rant_discovery_update(st, 1000, out, sizeof out);
       dc_up_n=dc_down_n=0;
       n=dc_mk(buf,7,0,99,6001,1); dc_feed(st,sa,7400,0,buf,n,3000); idP=dc_up_id;
       dc_up_n=dc_down_n=0;
       n=dc_mk(buf,8,0,99,6001,1); dc_feed(st,sa,7400,0,buf,n,3100);  /* new uuid, same ip:port */
       ST_CHECK(dc_down_n==1 && dc_down_id==idP && dc_down_reason==(int)RANT_DISCOVERY_GONE
-               && dc_up_n==1 && rant_discovery_peer_count(st)==1,
+               && dc_up_n==1 && i_rant_discovery_peer_count(st)==1,
                "disc-core: new uuid at a held ip:port evicts the predecessor (downs=%u sameid=%d reason=%d up=%u count=%u)",
-               dc_down_n, dc_down_id==idP, dc_down_reason, dc_up_n, rant_discovery_peer_count(st));
+               dc_down_n, dc_down_id==idP, dc_down_reason, dc_up_n, i_rant_discovery_peer_count(st));
     }
 
     /* 8. RELAY, the rules the loopback phase cannot see: who enlists us, one hop only, and
        a proxied locator losing to a direct path we still hear */
     { uint32_t id9; RantAddr a; size_t pn; uint16_t pport;
-      st = rant_discovery_init(mem,sizeof mem,&c);              /* fresh receiver */
-      rant_discovery_update(st, 1000, out, sizeof out);
+      st = i_rant_discovery_init(mem,sizeof mem,&c);              /* fresh receiver */
+      i_rant_discovery_update(st, 1000, out, sizeof out);
       /* (a) a DIRECT relay-me announce enlists us: we owe a proxied announce for it */
       n=dc_mk(buf,9,0x04,99,7001,1); dc_feed(st,sa,7400,0,buf,n,3000);
       id9=dc_up_id;
-      pn = rant_discovery_poll_relay(st, out, sizeof out);
+      pn = i_rant_discovery_poll_relay(st, out, sizeof out);
       /* PROXIED is the loop stop, 8b proves it defeats enlistment even with RELAY_ME set.
          RELAY_ME rides along as origin info, so a stated locator is no endpoint identity */
       ST_CHECK(pn > 0 && (out[5] & 0x08) && (out[5] & 0x04),
@@ -1373,19 +1373,19 @@ static void disc_core_checks(void){
                memcmp(out+RANT_DISCOVERY_META_OFF+3, sa, 4)==0 && pport==7001,
                "disc-core: the proxy carries the ORIGIN's uuid + the locator we hold (uuid=%u port=%u)",
                (unsigned)(pn ? out[8] : 0), (unsigned)pport);
-      ST_CHECK(rant_discovery_poll_relay(st, out, sizeof out)==0,
+      ST_CHECK(i_rant_discovery_poll_relay(st, out, sizeof out)==0,
                "disc-core: one proxied announce per peer per interval");
       /* (b) a PROXIED announce never enlists a SECOND hop, even carrying RELAY_ME: a
              peer we know only second-hand is not ours to introduce (the loop stop) */
       n=dc_mk_ip(buf,11,(uint8_t)(0x08|0x04),99,7011,1,sc);
       dc_feed(st,sb,7400,0,buf,n,3100);
-      ST_CHECK(rant_discovery_peer_count(st)==2 && rant_discovery_poll_relay(st,out,sizeof out)==0,
+      ST_CHECK(i_rant_discovery_peer_count(st)==2 && i_rant_discovery_poll_relay(st,out,sizeof out)==0,
                "disc-core: a proxied announce never enlists a second relay hop");
       /* (c) a proxied locator is a CANDIDATE: the direct path we are still hearing wins,
              so a relay's view cannot flap the address a peer's data is unicast to */
       n=dc_mk_ip(buf,9,0x08,99,7001,2,sb);        /* the relay says peer 9 is at 10.0.0.2 */
       dc_feed(st,sc,7400,0,buf,n,3200);
-      memset(&a,0,sizeof a); rant_discovery_addr_of_id(st, id9, &a);
+      memset(&a,0,sizeof a); i_rant_discovery_addr_of_id(st, id9, &a);
       ST_CHECK(memcmp(a.ip, sa, 4)==0,
                "disc-core: a proxied locator never stomps a live direct one (%u.%u.%u.%u)",
                a.ip[0], a.ip[1], a.ip[2], a.ip[3]);
@@ -1393,7 +1393,7 @@ static void disc_core_checks(void){
              speaking for itself, which stays authoritative and does move it */
       n=dc_mk_ip(buf,9,0,99,7001,3,sb);
       dc_feed(st,sc,7400,0,buf,n,3300);
-      memset(&a,0,sizeof a); rant_discovery_addr_of_id(st, id9, &a);
+      memset(&a,0,sizeof a); i_rant_discovery_addr_of_id(st, id9, &a);
       ST_CHECK(memcmp(a.ip, sb, 4)==0,
                "disc-core: ...but a peer's OWN stated locator still is (%u.%u.%u.%u)",
                a.ip[0], a.ip[1], a.ip[2], a.ip[3]);
@@ -1405,10 +1405,10 @@ static void disc_core_checks(void){
       uint8_t pub_ip[4]={203,0,113,7}; uint32_t id12; size_t pn;
       sc2 = c;                                     /* same domain/timing, our own uuid */
       memcpy(sc2.self_ip, pub_ip, 4); sc2.self_ip_len = 4; sc2.data_port = 7400;
-      s2 = rant_discovery_init(mem,sizeof mem,&sc2);
+      s2 = i_rant_discovery_init(mem,sizeof mem,&sc2);
       ST_CHECK(s2!=NULL, "disc-core: self-ip core init");
       if (s2){
-          n = rant_discovery_update(s2, 1000, out, sizeof out);          /* start: solicit + blob */
+          n = i_rant_discovery_update(s2, 1000, out, sizeof out);          /* start: solicit + blob */
           ST_CHECK(n > (size_t)RANT_DISCOVERY_META_OFF + 3 &&
                    out[RANT_DISCOVERY_META_OFF+2]==4 &&
                    memcmp(out+RANT_DISCOVERY_META_OFF+3, pub_ip, 4)==0,
@@ -1416,16 +1416,16 @@ static void disc_core_checks(void){
       }
       /* the relay side: peer 12 announces RELAY_ME FROM sa while STATING pub_ip. The relay
          must hold (and hand on) the stated address, so the override survives the hop. */
-      st = rant_discovery_init(mem+4096,sizeof mem-4096,&c);
-      rant_discovery_update(st, 1000, out, sizeof out);
+      st = i_rant_discovery_init(mem+4096,sizeof mem-4096,&c);
+      i_rant_discovery_update(st, 1000, out, sizeof out);
       n=dc_mk_ip(buf,12,0x04,99,7400,1,pub_ip);
       dc_feed(st,sa,7400,0,buf,n,4000);      /* source sa, states pub_ip */
       id12=dc_up_id;
-      memset(&a,0,sizeof a); rant_discovery_addr_of_id(st, id12, &a);
+      memset(&a,0,sizeof a); i_rant_discovery_addr_of_id(st, id12, &a);
       ST_CHECK(memcmp(a.ip, pub_ip, 4)==0,
                "disc-core: a stated locator beats the source it arrived from (%u.%u.%u.%u)",
                a.ip[0], a.ip[1], a.ip[2], a.ip[3]);
-      pn = rant_discovery_poll_relay(st, out, sizeof out);
+      pn = i_rant_discovery_poll_relay(st, out, sizeof out);
       ST_CHECK(pn > 0 && memcmp(out+RANT_DISCOVERY_META_OFF+3, pub_ip, 4)==0,
                "disc-core: the relay proxies the STATED locator, not the source it saw");
     }
@@ -1436,22 +1436,22 @@ static void disc_core_checks(void){
       uint8_t na[4]={192,168,1,50}, sx[4]={192,168,1,200}, su[4]={192,168,1,51};
       size_t pn; int ex;
       c4 = c; c4.max_peers = 4;
-      st = rant_discovery_init(mem,sizeof mem,&c4);
-      rant_discovery_update(st, 1000, out, sizeof out);
+      st = i_rant_discovery_init(mem,sizeof mem,&c4);
+      i_rant_discovery_update(st, 1000, out, sizeof out);
       /* (a) bind and route: a RELAY_ME announce arrives on our data channel from (na, 33333).
          Data goes to the observed source, attribution refuses the phantom locator. */
       dc_up_n=0;
       n=dc_mk(buf,20,0x04,99,6000,1); dc_feed(st,na,33333,1,buf,n,5000); id20=dc_up_id;
-      memset(&a,0,sizeof a); rant_discovery_addr_of_id(st, id20, &a);
+      memset(&a,0,sizeof a); i_rant_discovery_addr_of_id(st, id20, &a);
       ST_CHECK(dc_up_n==1 && a.port==33333 && memcmp(a.ip,na,4)==0,
                "disc-core: data routes to the observed source, not the locator (port=%u)", a.port);
-      ST_CHECK(rant_discovery_id_for_addr(st,na,4,33333,NULL) &&
-               !rant_discovery_id_for_addr(st,na,4,6000,NULL),
+      ST_CHECK(i_rant_discovery_id_for_addr(st,na,4,33333,NULL) &&
+               !i_rant_discovery_id_for_addr(st,na,4,6000,NULL),
                "disc-core: attribution accepts the observed source, refuses the phantom locator");
       /* (b) the discovery channel binds independently: the same announce heard on our
          discovery socket from another flow, so discovery TX hits exactly that endpoint */
       n=dc_mk(buf,20,0x04,99,6000,1); dc_feed(st,na,44444,0,buf,n,5001);
-      { int k = rant_discovery_peer_addr(st, 0, &a);
+      { int k = i_rant_discovery_peer_addr(st, 0, &a);
         ST_CHECK(k==2 && a.port==44444,
                  "disc-core: discovery TX targets the discovery-channel source exactly (k=%d port=%u)",
                  k, a.port); }
@@ -1459,19 +1459,19 @@ static void disc_core_checks(void){
          Sends follow at once and no peer_up refires. */
       dc_up_n=0;
       n=dc_mk(buf,20,0x04,99,6000,1); dc_feed(st,na,55555,1,buf,n,5002);
-      memset(&a,0,sizeof a); rant_discovery_addr_of_id(st, id20, &a);
+      memset(&a,0,sizeof a); i_rant_discovery_addr_of_id(st, id20, &a);
       ST_CHECK(a.port==55555 && dc_up_n==0,
                "disc-core: a rebound mapping redirects sends quietly (port=%u ups=%u)", a.port, dc_up_n);
       /* (d) two NAT'd containers on ONE device advertise the SAME phantom locator: they
          must coexist (neither is that endpoint), distinguished by their observed sources */
       dc_down_n=0; dc_up_n=0;
       n=dc_mk(buf,21,0x04,99,6000,1); dc_feed(st,na,55666,1,buf,n,5003); id21=dc_up_id;
-      ST_CHECK(dc_up_n==1 && dc_down_n==0 && rant_discovery_peer_count(st)==2,
+      ST_CHECK(dc_up_n==1 && dc_down_n==0 && i_rant_discovery_peer_count(st)==2,
                "disc-core: same phantom locator never evicts a NAT'd sibling (downs=%u count=%u)",
-               dc_down_n, rant_discovery_peer_count(st));
+               dc_down_n, i_rant_discovery_peer_count(st));
       { uint32_t got=0;
-        ST_CHECK(rant_discovery_id_for_addr(st,na,4,55666,&got) && got==id21 &&
-                 rant_discovery_id_for_addr(st,na,4,55555,&got) && got==id20,
+        ST_CHECK(i_rant_discovery_id_for_addr(st,na,4,55666,&got) && got==id21 &&
+                 i_rant_discovery_id_for_addr(st,na,4,55555,&got) && got==id20,
                  "disc-core: observed sources tell the siblings apart"); }
       /* (e) ...but a NEW uuid arriving from an endpoint held as some peer's OBSERVED
          source is that socket reused by a new process: the old occupant is evicted */
@@ -1485,28 +1485,28 @@ static void disc_core_checks(void){
          asserted locator, even for a RELAY_ME sender */
       { uint8_t pub2[4]={203,0,113,9};
         n=dc_mk_ip(buf,23,0x04,99,6001,1,pub2); dc_feed(st,su,60123,1,buf,n,5005);
-        memset(&a,0,sizeof a); rant_discovery_addr_of_id(st, dc_up_id, &a);
+        memset(&a,0,sizeof a); i_rant_discovery_addr_of_id(st, dc_up_id, &a);
         ST_CHECK(memcmp(a.ip,pub2,4)==0 && a.port==6001,
                  "disc-core: a stated self_ip beats the observed source (%u.%u.%u.%u:%u)",
                  a.ip[0],a.ip[1],a.ip[2],a.ip[3],a.port); }
       /* (g) INTRODUCTIONS: the inbound half of relaying. A relay-me peer is told who we
          hear directly, at its observed source, and re-told when someone new appears. */
       c4.max_peers = 6;
-      st = rant_discovery_init(mem,sizeof mem,&c4);          /* fresh relayer */
-      rant_discovery_update(st, 1000, out, sizeof out);
+      st = i_rant_discovery_init(mem,sizeof mem,&c4);          /* fresh relayer */
+      i_rant_discovery_update(st, 1000, out, sizeof out);
       n=dc_mk(buf,30,0,99,7000,1); dc_feed(st,sx,7400,0,buf,n,6000); idX=dc_up_id;   /* peer X */
       n=dc_mk(buf,31,0x04,99,6000,1); dc_feed(st,su,50001,1,buf,n,6001); idU=dc_up_id; /* relay U */
-      pn = rant_discovery_poll_introduce(st, out, sizeof out, &a, &ex);
+      pn = i_rant_discovery_poll_introduce(st, out, sizeof out, &a, &ex);
       ST_CHECK(pn > 0 && out[8]==30 && ex==1 && a.port==50001 && memcmp(a.ip,su,4)==0,
                "disc-core: a new relay-me peer is introduced to everyone we hear (uuid=%u to=%u)",
                (unsigned)(pn?out[8]:0), a.port);
-      ST_CHECK(rant_discovery_poll_introduce(st, out, sizeof out, &a, &ex)==0,
+      ST_CHECK(i_rant_discovery_poll_introduce(st, out, sizeof out, &a, &ex)==0,
                "disc-core: ...exactly once (change-triggered, not periodic)");
       /* a newcomer re-triggers a walk to every relay-me peer */
       n=dc_mk(buf,32,0,99,7002,1); dc_feed(st,sx,7401,0,buf,n,6002);
       { int saw32=0, k2;
         for (k2=0;k2<8;k2++){
-            pn = rant_discovery_poll_introduce(st, out, sizeof out, &a, &ex);
+            pn = i_rant_discovery_poll_introduce(st, out, sizeof out, &a, &ex);
             if (!pn) break;
             if (out[8]==32) saw32=1;
         }
@@ -1516,7 +1516,7 @@ static void disc_core_checks(void){
       { int saw33=0, k2;
         n=dc_mk(buf,34,0,99,7004,1); dc_feed(st,sx,7402,0,buf,n,6004);   /* re-trigger a walk */
         for (k2=0;k2<8;k2++){
-            pn = rant_discovery_poll_introduce(st, out, sizeof out, &a, &ex);
+            pn = i_rant_discovery_poll_introduce(st, out, sizeof out, &a, &ex);
             if (!pn) break;
             if (out[8]==33) saw33=1;
         }
@@ -1528,13 +1528,13 @@ static void disc_core_checks(void){
        plain liveness, so the entry outlives the origin by one timeout, then dies. */
     { RantDiscoveryCoreConfig c5; uint64_t t; size_t pn; int round, relayed;
       c5 = c; c5.max_peers = 4;
-      st = rant_discovery_init(mem,sizeof mem,&c5);
-      rant_discovery_update(st, 1000, out, sizeof out);
+      st = i_rant_discovery_init(mem,sizeof mem,&c5);
+      i_rant_discovery_update(st, 1000, out, sizeof out);
       n=dc_mk(buf,40,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,1000);     /* direct relay-me */
       n=dc_mk(buf,40,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,900000);   /* still direct */
       t = 1001000;                       /* first announce tick: direct heard 101ms ago */
-      rant_discovery_update(st, t, out, sizeof out);
-      pn = rant_discovery_poll_relay(st, out, sizeof out);
+      i_rant_discovery_update(st, t, out, sizeof out);
+      pn = i_rant_discovery_poll_relay(st, out, sizeof out);
       ST_CHECK(pn > 0 && out[8]==40, "disc-core: a directly heard relay-me peer is relayed");
       /* the origin dies while other relays' PROXIED announces keep arriving. They keep the
          entry alive but must never keep us relaying it. */
@@ -1543,24 +1543,24 @@ static void disc_core_checks(void){
           t += 1000000;
           n=dc_mk_ip(buf,40,(uint8_t)(0x08|0x04),99,8000,1,sa);
           dc_feed(st,sb,7400,0,buf,n,t);
-          rant_discovery_update(st, t + 1000, out, sizeof out);
-          if (rant_discovery_poll_relay(st, out, sizeof out)) relayed = 1;
+          i_rant_discovery_update(st, t + 1000, out, sizeof out);
+          if (i_rant_discovery_poll_relay(st, out, sizeof out)) relayed = 1;
       }
-      ST_CHECK(!relayed && rant_discovery_peer_count(st)==1,
+      ST_CHECK(!relayed && i_rant_discovery_peer_count(st)==1,
                "disc-core: proxies keep a peer alive but never sustain relaying (count=%u)",
-               rant_discovery_peer_count(st));
+               i_rant_discovery_peer_count(st));
       /* nor is a direct-stale origin introduced to a newly appearing relay-me peer */
       n=dc_mk(buf,41,0x04,99,8001,1); dc_feed(st,sb,50002,1,buf,n,t + 2000);
       { int saw40=0, k2; RantAddr a2; int ex2;
         for (k2=0;k2<8;k2++){
-            pn = rant_discovery_poll_introduce(st, out, sizeof out, &a2, &ex2);
+            pn = i_rant_discovery_poll_introduce(st, out, sizeof out, &a2, &ex2);
             if (!pn) break;
             if (out[8]==40) saw40=1;
         }
         ST_CHECK(!saw40, "disc-core: a direct-stale peer is not ours to introduce"); }
       /* the proxies stop (every relay's own direct went stale): the ghost now times out */
       dc_down_n=0;
-      rant_discovery_update(st, t + 2200000, out, sizeof out);
+      i_rant_discovery_update(st, t + 2200000, out, sizeof out);
       ST_CHECK(dc_down_n>=1, "disc-core: the ghost dies once proxies cease (downs=%u)", dc_down_n);
     }
 
@@ -1571,28 +1571,28 @@ static void disc_core_checks(void){
       static const uint8_t gw[4]={10,0,2,2}, real_ip[4]={192,168,1,106};
       static const uint8_t net_ip[4]={10,0,2,0}, net_mask[4]={255,255,255,0};
       c6 = c; c6.max_peers = 4; c6.relay_me = 1;         /* we are the NAT'd node */
-      st = rant_discovery_init(mem,sizeof mem,&c6);
+      st = i_rant_discovery_init(mem,sizeof mem,&c6);
       memcpy(net.ip, net_ip, 4); memcpy(net.mask, net_mask, 4);
-      rant_discovery_set_local_subnets(st, &net, 1);       /* the container's own subnet */
-      rant_discovery_update(st, 1000, out, sizeof out);
+      i_rant_discovery_set_local_subnets(st, &net, 1);       /* the container's own subnet */
+      i_rant_discovery_update(st, 1000, out, sizeof out);
       /* (a) an introduction states the peer's true routed locator */
       n=dc_mk_ip(buf,50,0x08,99,5555,1,real_ip); dc_feed(st,sa,7400,0,buf,n,9000);
       id50=dc_up_id;
       /* (b) its direct announce arrives through our port forward: the source is the gateway
          on our own subnet, rank 2 against the real address's rank 1. The locator must not move. */
       n=dc_mk(buf,50,0,99,5555,2); dc_feed(st,gw,33445,1,buf,n,9001);
-      { int have = rant_discovery_peer_at(st, 0, &v);
+      { int have = i_rant_discovery_peer_at(st, 0, &v);
         ST_CHECK(have && memcmp(v.addr.ip,real_ip,4)==0 && v.addr.port==5555,
                  "disc-core: a forwarded source never overrides the held locator (%u.%u.%u.%u:%u)",
                  v.addr.ip[0],v.addr.ip[1],v.addr.ip[2],v.addr.ip[3],v.addr.port); }
       /* (c) ...but it IS the peer's return path: bound as the observed source even for
          an ordinary (non-relay-me) peer, routing data + attribution through the flow */
       memset(&a,0,sizeof a);
-      ST_CHECK(rant_discovery_addr_of_id(st, id50, &a) && a.port==33445 && memcmp(a.ip,gw,4)==0,
+      ST_CHECK(i_rant_discovery_addr_of_id(st, id50, &a) && a.port==33445 && memcmp(a.ip,gw,4)==0,
                "disc-core: a unicast-only node routes every peer via its observed return path (port=%u)",
                a.port);
       got=0;
-      ST_CHECK(rant_discovery_id_for_addr(st,gw,4,33445,&got) && got==id50,
+      ST_CHECK(i_rant_discovery_id_for_addr(st,gw,4,33445,&got) && got==id50,
                "disc-core: ...and attributes arrivals from that flow to the peer");
     }
 
@@ -1601,10 +1601,10 @@ static void disc_core_checks(void){
     { RantDiscoveryCoreConfig c7; uint8_t mine[RANT_DISCOVERY_WIRE_MAX];
       size_t mn, pn2;
       c7 = c; c7.max_peers = 4;
-      st = rant_discovery_init(mem,sizeof mem,&c7);
-      rant_discovery_update(st, 1000, out, sizeof out);
+      st = i_rant_discovery_init(mem,sizeof mem,&c7);
+      i_rant_discovery_update(st, 1000, out, sizeof out);
       n=dc_mk(buf,60,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,1000);   /* direct relay-me */
-      mn = rant_discovery_poll_relay(st, mine, sizeof mine);
+      mn = i_rant_discovery_poll_relay(st, mine, sizeof mine);
       ST_CHECK(mn > 16 && mine[8]==60 && memcmp(mine + mn - 16, c7.uuid, 16)==0,
                "disc-core: our proxy carries our relayer trailer (n=%u)", (unsigned)mn);
       /* our own echo comes back, plus ONE foreign proxy (old-style, trailer-less) */
@@ -1612,28 +1612,28 @@ static void disc_core_checks(void){
       n=dc_mk_ip(buf,60,(uint8_t)(0x08|0x04),99,8000,1,sa);
       dc_feed(st,sb,7400,0,buf,n,2001);                                    /* 1 foreign */
       n=dc_mk(buf,60,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,900000);  /* stay direct-fresh */
-      rant_discovery_update(st, 1001000, out, sizeof out);
-      ST_CHECK(rant_discovery_poll_relay(st, out, sizeof out) > 0,
+      i_rant_discovery_update(st, 1001000, out, sizeof out);
+      ST_CHECK(i_rant_discovery_poll_relay(st, out, sizeof out) > 0,
                "disc-core: one foreign proxy does not suppress; a self echo never counts");
       /* two foreign proxies within the interval: quorum exists, we sit this one out */
       n=dc_mk_ip(buf,60,(uint8_t)(0x08|0x04),99,8000,1,sa);
       dc_feed(st,sb,7400,0,buf,n,1500000);
       dc_feed(st,sc,7400,0,buf,n,1600000);
       n=dc_mk(buf,60,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,1900000);
-      rant_discovery_update(st, 2001000, out, sizeof out);
-      ST_CHECK(rant_discovery_poll_relay(st, out, sizeof out) == 0,
+      i_rant_discovery_update(st, 2001000, out, sizeof out);
+      ST_CHECK(i_rant_discovery_poll_relay(st, out, sizeof out) == 0,
                "disc-core: a relay quorum suppresses our periodic emission");
       /* the quorum went quiet: the next tick re-enlists us */
       n=dc_mk(buf,60,0x04,99,8000,1); dc_feed(st,sa,7400,0,buf,n,2900000);
-      rant_discovery_update(st, 3001000, out, sizeof out);
-      pn2 = rant_discovery_poll_relay(st, out, sizeof out);
+      i_rant_discovery_update(st, 3001000, out, sizeof out);
+      pn2 = i_rant_discovery_poll_relay(st, out, sizeof out);
       ST_CHECK(pn2 > 0, "disc-core: relay silence re-enlists us at the next tick");
       /* a CHANGED origin bypasses suppression: news beats steady-state thinning */
       n=dc_mk_ip(buf,60,(uint8_t)(0x08|0x04),99,8000,1,sa);
       dc_feed(st,sb,7400,0,buf,n,3200000);
       dc_feed(st,sc,7400,0,buf,n,3200001);
       n=dc_mk(buf,60,0x04,99,8000,2); dc_feed(st,sa,7400,0,buf,n,3300000);  /* blob v2 */
-      ST_CHECK(rant_discovery_poll_relay(st, out, sizeof out) > 0,
+      ST_CHECK(i_rant_discovery_poll_relay(st, out, sizeof out) > 0,
                "disc-core: a changed origin is relayed at once despite a quorum");
     }
 }
@@ -1684,7 +1684,7 @@ static void node_core_checks(void){
     memset(ch,0,sizeof ch); ch[0].name="nc/topic";
     memset(&tc,0,sizeof tc); tc.topics=ch; tc.n_topics=1; tc.max_peers=2;
     tc.allocator=rant_allocator_alloc; tc.user=&A;
-    tr = rant_transport_init(tmem, sizeof tmem, &tc);
+    tr = i_rant_transport_init(tmem, sizeof tmem, &tc);
     ST_CHECK(tr!=NULL, "node-core: transport init");
     if (!tr) return;
 
@@ -1702,18 +1702,18 @@ static void node_core_checks(void){
     dcfg.domain_id=99; dcfg.announce_interval_us=1000000; dcfg.peer_timeout_us=1000000; dcfg.max_peers=2;
     dcfg.peer_user_bytes=i_rant_node_core_peer_user_bytes();
     i_rant_node_core_discovery_hooks(nc, &dcfg);
-    st = rant_discovery_init(dmem, sizeof dmem, &dcfg);
+    st = i_rant_discovery_init(dmem, sizeof dmem, &dcfg);
     ST_CHECK(st!=NULL, "node-core: discovery init");
     if (!st) return;
     i_rant_node_core_bind_discovery(nc, st);
-    rant_discovery_update(st, 1000, out, sizeof out);     /* start */
+    i_rant_discovery_update(st, 1000, out, sizeof out);     /* start */
 
     /* build-meta still works (uses the transport, not any peer table) */
     {   RantBytes mb;
         i_rant_node_core_build_meta(nc);
         mb = i_rant_node_core_meta(nc);
-        ST_CHECK(mb.len>=5 && rant_meta_frag(mb)==1200,
-                 "node-core: builds overlay (frag=%u)", rant_meta_frag(mb)); }
+        ST_CHECK(mb.len>=5 && i_rant_meta_frag(mb)==1200,
+                 "node-core: builds overlay (frag=%u)", i_rant_meta_frag(mb)); }
 
     /* 1. two peers announce: two ups, discovery assigns the ids, resolve each way */
     nc_up_n=nc_down_n=nc_refused_n=0;
@@ -1743,7 +1743,7 @@ static void node_core_checks(void){
 
     /* 3. silence past the timeout DROPS both: a PEER_DOWN each, but the slots are kept (resolve) */
     nc_down_n=0;
-    rant_discovery_update(st, 1003000, out, sizeof out);
+    i_rant_discovery_update(st, 1003000, out, sizeof out);
     ST_CHECK(nc_down_n==2, "node-core: timeout drops both (downs=%u)", nc_down_n);
     ST_CHECK(i_rant_node_core_resolve(nc,idA,&d)==1, "node-core: dropped peer kept (resolves)");
 
@@ -1817,18 +1817,18 @@ static void shml_on_event(const RantEvent *ev){ if (ev->kind==RANT_MSG_LOST) shm
 static void shml_pump(int n){
     uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t ol; int i;
     for (i=0;i<n;i++){
-        while (rant_transport_poll_send(shml_W,&to,buf,sizeof buf,&ol,shml_now)){
+        while (i_rant_transport_poll_send(shml_W,&to,buf,sizeof buf,&ol,shml_now)){
             if (shml_drop>0 && (buf[0]&0x20u)){ shml_drop--; continue; }   /* drop SHM-DATA */
-            rant_transport_on_datagram(shml_R, 1u, rant_bytes(buf, ol), shml_now);
+            i_rant_transport_on_datagram(shml_R, 1u, rant_bytes(buf, ol), shml_now);
         }
-        while (rant_transport_poll_send(shml_R,&to,buf,sizeof buf,&ol,shml_now))
-            rant_transport_on_datagram(shml_W, 2u, rant_bytes(buf, ol), shml_now);
+        while (i_rant_transport_poll_send(shml_R,&to,buf,sizeof buf,&ol,shml_now))
+            i_rant_transport_on_datagram(shml_W, 2u, rant_bytes(buf, ol), shml_now);
         shml_now += 30000;   /* 30 ms: past repair_delay (20ms), lets heartbeats fire */
     }
 }
 static void shml_send(void){
     static unsigned char chunk[2048]; unsigned char desc[RANT_SHM_DESC_WIRE];
-    memset(desc,0,sizeof desc); rant_transport_send_shm(shml_W, 0, rant_bytes(chunk, 1000), desc, shml_now);
+    memset(desc,0,sizeof desc); i_rant_transport_send_shm(shml_W, 0, rant_bytes(chunk, 1000), desc, shml_now);
 }
 static void shm_loss_checks(void){
     RantTopicDef cw, cr; RantConfig wc, rc; void *mw, *mr; size_t nw, nr;
@@ -1843,14 +1843,14 @@ static void shm_loss_checks(void){
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
     rc.allocator=rant_allocator_alloc; rc.user=&ra;
     rc.on_shm=shml_on_shm; rc.on_event=shml_on_event;
-    nw=rant_transport_required_memory(&wc); mw=malloc(nw); shml_W=rant_transport_init(mw,nw,&wc);
-    nr=rant_transport_required_memory(&rc); mr=malloc(nr); shml_R=rant_transport_init(mr,nr,&rc);
+    nw=i_rant_transport_required_memory(&wc); mw=malloc(nw); shml_W=i_rant_transport_init(mw,nw,&wc);
+    nr=i_rant_transport_required_memory(&rc); mr=malloc(nr); shml_R=i_rant_transport_init(mr,nr,&rc);
     shml_now=1000000;
-    rant_transport_peer_add(shml_W,2u,RANT_FRAG_SIZE); rant_transport_peer_add(shml_R,1u,RANT_FRAG_SIZE);
+    i_rant_transport_peer_add(shml_W,2u,RANT_FRAG_SIZE); i_rant_transport_peer_add(shml_R,1u,RANT_FRAG_SIZE);
     st_apply_verified(shml_R, 1u, shml_W);
     st_apply_verified(shml_W, 2u, shml_R);
-    rant_transport_peer_set_shm(shml_W,2u,1);
-    ST_CHECK(rant_transport_publisher_match_count(shml_W,0)>0, "shm-loss: writer matched reader");
+    i_rant_transport_peer_set_shm(shml_W,2u,1);
+    ST_CHECK(i_rant_transport_publisher_match_count(shml_W,0)>0, "shm-loss: writer matched reader");
     shml_ok=1; shml_recv=0; shml_lost=0; shml_drop=0; shml_send(); shml_pump(5);
     ST_CHECK(shml_recv==1 && shml_lost==0, "shm-loss: [a] normal delivered");
     shml_recv=0; shml_lost=0; shml_drop=1; shml_send(); shml_pump(10);
@@ -1863,7 +1863,7 @@ static void shm_loss_checks(void){
     ST_CHECK(shml_recv==0 && shml_lost>=1, "shm-loss: [d] persistent -> skip + MSG_LOST");
     shml_ok=1; shml_recv=0; shml_send(); shml_pump(6);
     ST_CHECK(shml_recv==1, "shm-loss: [d] not wedged, next delivered");
-    rant_transport_destroy(shml_W); rant_transport_destroy(shml_R); free(mw); free(mr);
+    i_rant_transport_destroy(shml_W); i_rant_transport_destroy(shml_R); free(mw); free(mr);
     rant_allocator_reset(&wa); rant_allocator_reset(&ra);
 }
 
@@ -1938,13 +1938,13 @@ static void shm_node_checks(void){
 /* Unit checks for the small pure helpers: the fragment clamp, the send result codes and
  * the shared little endian packing. No sockets, straight against the transport core. */
 static void unit_checks(void){
-    /* rant_clamp_frag: 0 = default, else clamp into [MIN, MAX] */
-    ST_CHECK(rant_clamp_frag(0) == RANT_FRAG_SIZE,
-             "clamp: 0 -> default frag (%u)", (unsigned)rant_clamp_frag(0));
-    ST_CHECK(rant_clamp_frag(65535) == RANT_FRAG_SIZE_MAX,
-             "clamp: above-max -> MAX (%u)", (unsigned)rant_clamp_frag(65535));
-    ST_CHECK(rant_clamp_frag(1) >= RANT_FRAG_SIZE_MIN,
-             "clamp: tiny -> >= MIN (%u)", (unsigned)rant_clamp_frag(1));
+    /* i_rant_clamp_frag: 0 = default, else clamp into [MIN, MAX] */
+    ST_CHECK(i_rant_clamp_frag(0) == RANT_FRAG_SIZE,
+             "clamp: 0 -> default frag (%u)", (unsigned)i_rant_clamp_frag(0));
+    ST_CHECK(i_rant_clamp_frag(65535) == RANT_FRAG_SIZE_MAX,
+             "clamp: above-max -> MAX (%u)", (unsigned)i_rant_clamp_frag(65535));
+    ST_CHECK(i_rant_clamp_frag(1) >= RANT_FRAG_SIZE_MIN,
+             "clamp: tiny -> >= MIN (%u)", (unsigned)i_rant_clamp_frag(1));
 
     /* shared little-endian helpers: byte order + round-trip */
     {   uint8_t b[8];
@@ -1960,8 +1960,8 @@ static void unit_checks(void){
     }
 
     /* topic identity: deterministic and name-distinct */
-    ST_CHECK(rant_topic_id("alpha") == rant_topic_id("alpha")
-             && rant_topic_id("alpha") != rant_topic_id("beta"),
+    ST_CHECK(i_rant_topic_id("alpha") == i_rant_topic_id("alpha")
+             && i_rant_topic_id("alpha") != i_rant_topic_id("beta"),
              "topic-id: deterministic and name-distinct");
 
     /* send result codes on the transport core: the size check precedes the role check, and
@@ -1974,17 +1974,17 @@ static void unit_checks(void){
         uch[1].name = "u/sub"; uch[1].role = RANT_SUB_ONLY;
         memset(&tc, 0, sizeof tc);
         tc.topics = uch; tc.n_topics = 2; tc.max_peers = 2;
-        ST_CHECK(rant_transport_init(tmem, sizeof tmem, &tc) == NULL, "result: init without an allocator refused");
+        ST_CHECK(i_rant_transport_init(tmem, sizeof tmem, &tc) == NULL, "result: init without an allocator refused");
         tc.allocator = rant_allocator_alloc; tc.user = &A;
-        ts = rant_transport_init(tmem, sizeof tmem, &tc);
+        ts = i_rant_transport_init(tmem, sizeof tmem, &tc);
         ST_CHECK(ts != NULL, "result: transport init");
         if (ts){
-            size_t wire_cap = 65535u * (size_t)rant_transport_frag(ts);     /* checked before copy */
+            size_t wire_cap = 65535u * (size_t)i_rant_transport_frag(ts);     /* checked before copy */
             memset(buf, 0, sizeof buf);
-            ST_CHECK(rant_transport_send(ts, 5, rant_bytes(buf, 16),      0) == RANT_ERR_NO_TOPIC, "result: out-of-range topic -> NO_CHANNEL");
-            ST_CHECK(rant_transport_send(ts, 1, rant_bytes(buf, 16),      0) == RANT_ERR_ROLE,         "result: sub-only topic -> ROLE");
-            ST_CHECK(rant_transport_send(ts, 0, rant_bytes(buf, wire_cap + 1u), 0) == RANT_ERR_TOO_BIG, "result: past the wire cap -> TOO_BIG");
-            ST_CHECK(rant_transport_send(ts, 0, rant_bytes(buf, 16),      0) == RANT_OK,               "result: valid publish -> OK");
+            ST_CHECK(i_rant_transport_send(ts, 5, rant_bytes(buf, 16),      0) == RANT_ERR_NO_TOPIC, "result: out-of-range topic -> NO_CHANNEL");
+            ST_CHECK(i_rant_transport_send(ts, 1, rant_bytes(buf, 16),      0) == RANT_ERR_ROLE,         "result: sub-only topic -> ROLE");
+            ST_CHECK(i_rant_transport_send(ts, 0, rant_bytes(buf, wire_cap + 1u), 0) == RANT_ERR_TOO_BIG, "result: past the wire cap -> TOO_BIG");
+            ST_CHECK(i_rant_transport_send(ts, 0, rant_bytes(buf, 16),      0) == RANT_OK,               "result: valid publish -> OK");
         }
     }
 }
@@ -2166,15 +2166,15 @@ static void qos_pair(int wrel, int rrel, uint16_t *recv_out, unsigned long *evt_
     wc.allocator=rant_allocator_alloc; wc.user=&wa;
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2; rc.on_event=qos_on_event;
     rc.allocator=rant_allocator_alloc; rc.user=&ra;
-    nw=rant_transport_required_memory(&wc); mw=malloc(nw); W=rant_transport_init(mw,nw,&wc);
-    nr=rant_transport_required_memory(&rc); mr=malloc(nr); R=rant_transport_init(mr,nr,&rc);
-    rant_transport_peer_add(W,2u,RANT_FRAG_SIZE); rant_transport_peer_add(R,1u,RANT_FRAG_SIZE);
+    nw=i_rant_transport_required_memory(&wc); mw=malloc(nw); W=i_rant_transport_init(mw,nw,&wc);
+    nr=i_rant_transport_required_memory(&rc); mr=malloc(nr); R=i_rant_transport_init(mr,nr,&rc);
+    i_rant_transport_peer_add(W,2u,RANT_FRAG_SIZE); i_rant_transport_peer_add(R,1u,RANT_FRAG_SIZE);
     qos_incompat_n=0;
     st_apply_verified(R, 1u, W);
-    rant_transport_peer_match_counts(R,1u,&pub,&recv);
+    i_rant_transport_peer_match_counts(R,1u,&pub,&recv);
     if (recv_out) *recv_out=recv;
     if (evt_out)  *evt_out=qos_incompat_n;
-    rant_transport_destroy(W); rant_transport_destroy(R); free(mw); free(mr);
+    i_rant_transport_destroy(W); i_rant_transport_destroy(R); free(mw); free(mr);
     rant_allocator_reset(&wa); rant_allocator_reset(&ra);
 }
 static void qos_match_checks(void){
@@ -2205,14 +2205,14 @@ static int beff_would_evict(int rrel){
     wc.allocator=rant_allocator_alloc; wc.user=&wa;
     memset(&rc,0,sizeof rc); rc.topics=&cr; rc.n_topics=1; rc.max_peers=2;
     rc.allocator=rant_allocator_alloc; rc.user=&ra;
-    nw=rant_transport_required_memory(&wc); mw=malloc(nw); W=rant_transport_init(mw,nw,&wc);
-    nr=rant_transport_required_memory(&rc); mr=malloc(nr); R=rant_transport_init(mr,nr,&rc);
-    rant_transport_peer_add(W,2u,RANT_FRAG_SIZE); rant_transport_peer_add(R,1u,RANT_FRAG_SIZE);
+    nw=i_rant_transport_required_memory(&wc); mw=malloc(nw); W=i_rant_transport_init(mw,nw,&wc);
+    nr=i_rant_transport_required_memory(&rc); mr=malloc(nr); R=i_rant_transport_init(mr,nr,&rc);
+    i_rant_transport_peer_add(W,2u,RANT_FRAG_SIZE); i_rant_transport_peer_add(R,1u,RANT_FRAG_SIZE);
     st_apply_verified(W, 2u, R);   /* W learns (and verifies) that R subscribes */
     memset(payload,0x5A,sizeof payload);
-    for (i=0;i<5;i++) rant_transport_send(W,0,rant_bytes(payload,sizeof payload),1000u+(uint64_t)i);
-    evict = rant_transport_send_would_evict(W,0);
-    rant_transport_destroy(W); rant_transport_destroy(R); free(mw); free(mr);
+    for (i=0;i<5;i++) i_rant_transport_send(W,0,rant_bytes(payload,sizeof payload),1000u+(uint64_t)i);
+    evict = i_rant_transport_send_would_evict(W,0);
+    i_rant_transport_destroy(W); i_rant_transport_destroy(R); free(mw); free(mr);
     rant_allocator_reset(&wa); rant_allocator_reset(&ra);
     return evict;
 }
@@ -2660,9 +2660,9 @@ static void schema_advert_checks(void){
     RantAllocator ma = rant_allocator_heap(0);       /* caller side schema */
     RantNodeOpts po, so; RantNode *P=NULL, *S=NULL; RantTopic *pc;
     RantTopicOpts co; RantAddr seed; RantSchema *sch=NULL;
-    uint32_t pose_h = (uint32_t)rant_topic_id("sch/pose");
-    uint32_t raw_h  = (uint32_t)rant_topic_id("sch/raw");
-    uint32_t late_h = (uint32_t)rant_topic_id("sch/late");
+    uint32_t pose_h = (uint32_t)i_rant_topic_id("sch/pose");
+    uint32_t raw_h  = (uint32_t)i_rant_topic_id("sch/raw");
+    uint32_t late_h = (uint32_t)i_rant_topic_id("sch/late");
     int t, pose_ok=0, raw_ok=0;
     const RantDiscoveryPeer *peers; uint16_t n_peers=0;
 
@@ -3733,7 +3733,7 @@ static void detail_codec_checks(void){
     ch[2].name="dt/off"; ch[2].role=RANT_INACTIVE;
     memset(&tc,0,sizeof tc); tc.topics=ch; tc.n_topics=3; tc.max_peers=2;
     tc.allocator=rant_allocator_alloc; tc.user=&ma;
-    tr = rant_transport_init(tmem, sizeof tmem, &tc);
+    tr = i_rant_transport_init(tmem, sizeof tmem, &tc);
     ST_CHECK(tr!=NULL && S!=NULL, "detail: transport + schema ready");
     if (!tr || !S){ rant_allocator_reset(&ma); return; }
     memset(schemas,0,sizeof schemas);
@@ -3744,25 +3744,25 @@ static void detail_codec_checks(void){
     wants[1].index=1; wants[1].schema_hash=0;
     wants[2].index=2; wants[2].schema_hash=0;
     wants[3].index=9; wants[3].schema_hash=0;
-    rl = rant_detail_req_build(77, 5, wants, 4, req, sizeof req);
+    rl = i_rant_detail_req_build(77, 5, wants, 4, req, sizeof req);
     ST_CHECK(rl == 14u+4u*10u, "detail: req builds (%u bytes)", (unsigned)rl);
-    ST_CHECK(rant_detail_kind(rant_bytes(req,rl))==RANT_DETAIL_REQ
-          && rant_detail_domain(rant_bytes(req,rl))==77
-          && rant_detail_meta_version(rant_bytes(req,rl))==5,
+    ST_CHECK(i_rant_detail_kind(rant_bytes(req,rl))==RANT_DETAIL_REQ
+          && i_rant_detail_domain(rant_bytes(req,rl))==77
+          && i_rant_detail_meta_version(rant_bytes(req,rl))==5,
              "detail: req header round-trips (kind/domain/version)");
-    ST_CHECK(rant_detail_req_build(77,5,wants,4,req,20)==0, "detail: req refuses a short buffer");
+    ST_CHECK(i_rant_detail_req_build(77,5,wants,4,req,20)==0, "detail: req refuses a short buffer");
 
-    need = rant_transport_detail_resp_size(tr, schemas, rant_bytes(req,rl));
-    len  = rant_transport_detail_respond(tr, schemas, 9, rant_bytes(req,rl), resp, sizeof resp);
+    need = i_rant_transport_detail_resp_size(tr, schemas, rant_bytes(req,rl));
+    len  = i_rant_transport_detail_respond(tr, schemas, 9, rant_bytes(req,rl), resp, sizeof resp);
     ST_CHECK(need==len && len>14u, "detail: resp_size == respond, byte for byte (%u)", (unsigned)len);
-    ST_CHECK(rant_detail_kind(rant_bytes(resp,len))==RANT_DETAIL_RESP
-          && rant_detail_domain(rant_bytes(resp,len))==77
-          && rant_detail_meta_version(rant_bytes(resp,len))==9,
+    ST_CHECK(i_rant_detail_kind(rant_bytes(resp,len))==RANT_DETAIL_RESP
+          && i_rant_detail_domain(rant_bytes(resp,len))==77
+          && i_rant_detail_meta_version(rant_bytes(resp,len))==9,
              "detail: resp header carries the responder version");
     {   RantDetailIter it; RantDetail d; int n=0, ok_typed=0, ok_raw=0;
         RantBytes wire = rant_bytes(NULL, 0);
         memset(&it,0,sizeof it);
-        while (rant_detail_next(rant_bytes(resp,len), &it, &d)){
+        while (i_rant_detail_next(rant_bytes(resp,len), &it, &d)){
             n++;
             if (d.index==0){
                 ok_typed = d.name.len==8 && memcmp(d.name.data,"dt/typed",8)==0
@@ -3786,10 +3786,10 @@ static void detail_codec_checks(void){
 
     /* identical hash: hash-only entry, zero wire bytes (identical wire is implied) */
     wants[0].schema_hash = rant_schema_hash(S);
-    rl  = rant_detail_req_build(77, 5, wants, 2, req, sizeof req);
-    len = rant_transport_detail_respond(tr, schemas, 9, rant_bytes(req,rl), resp, sizeof resp);
+    rl  = i_rant_detail_req_build(77, 5, wants, 2, req, sizeof req);
+    len = i_rant_transport_detail_respond(tr, schemas, 9, rant_bytes(req,rl), resp, sizeof resp);
     {   RantDetailIter it; RantDetail d; int hash_only=0; memset(&it,0,sizeof it);
-        while (rant_detail_next(rant_bytes(resp,len), &it, &d))
+        while (i_rant_detail_next(rant_bytes(resp,len), &it, &d))
             if (d.index==0) hash_only = d.schema_wire.len==0 && d.schema_hash==rant_schema_hash(S);
         ST_CHECK(hash_only, "detail: identical hash rides hash-only (no wire)");
     }
@@ -3797,24 +3797,24 @@ static void detail_codec_checks(void){
     /* a cap one byte short of full truncates at an entry boundary: still parseable,
        holding exactly the leading entries that fit (the requester re-asks for the rest) */
     wants[0].schema_hash = 0;
-    rl = rant_detail_req_build(77, 5, wants, 2, req, sizeof req);
-    {   size_t full = rant_transport_detail_resp_size(tr, schemas, rant_bytes(req,rl));
-        size_t cut  = rant_transport_detail_respond(tr, schemas, 9, rant_bytes(req,rl), out2, full-1);
+    rl = i_rant_detail_req_build(77, 5, wants, 2, req, sizeof req);
+    {   size_t full = i_rant_transport_detail_resp_size(tr, schemas, rant_bytes(req,rl));
+        size_t cut  = i_rant_transport_detail_respond(tr, schemas, 9, rant_bytes(req,rl), out2, full-1);
         RantDetailIter it; RantDetail d; int n=0; uint16_t first=0xFFFF;
         memset(&it,0,sizeof it);
-        while (rant_detail_next(rant_bytes(out2,cut), &it, &d)){ if (!n) first=d.index; n++; }
+        while (i_rant_detail_next(rant_bytes(out2,cut), &it, &d)){ if (!n) first=d.index; n++; }
         ST_CHECK(cut>0 && cut<full && n==1 && first==0,
                  "detail: truncation stops at an entry boundary (paging: %d/%d entries)", n, 2);
     }
 
     /* malformed input is rejected wholesale, never partially trusted */
-    ST_CHECK(rant_transport_detail_respond(tr, schemas, 9, rant_bytes(req, rl-1), out2, sizeof out2)==0,
+    ST_CHECK(i_rant_transport_detail_respond(tr, schemas, 9, rant_bytes(req, rl-1), out2, sizeof out2)==0,
              "detail: truncated req rejected");
-    ST_CHECK(rant_transport_detail_respond(tr, schemas, 9, rant_bytes(resp, len), out2, sizeof out2)==0,
+    ST_CHECK(i_rant_transport_detail_respond(tr, schemas, 9, rant_bytes(resp, len), out2, sizeof out2)==0,
              "detail: a RESP fed to the responder is refused (kind gate)");
     {   uint8_t junk[32]; memset(junk, 0x5A, sizeof junk);
-        ST_CHECK(rant_detail_kind(rant_bytes(junk, sizeof junk))==0
-              && rant_detail_kind(rant_bytes(req, 4))==0,
+        ST_CHECK(i_rant_detail_kind(rant_bytes(junk, sizeof junk))==0
+              && i_rant_detail_kind(rant_bytes(req, 4))==0,
                  "detail: non-detail bytes yield kind 0");
     }
     rant_allocator_reset(&ma);
@@ -3833,9 +3833,9 @@ static void detail_paging_checks(void){
     S = rant_schema_compile(rant_allocator_alloc, &ma, "Pose { stamp: u64, x: f64, y: f64 }", NULL);
     memset(&tc, 0, sizeof tc);
     tc.topics = NULL; tc.n_topics = DP_N; tc.max_peers = 2; tc.allocator = rant_allocator_alloc; tc.user = &ma;
-    { size_t need = rant_transport_required_memory(&tc);         /* dynamic reserve mode */
+    { size_t need = i_rant_transport_required_memory(&tc);         /* dynamic reserve mode */
       void *mem = rant_allocator_alloc(&ma, NULL, need);
-      tr = mem ? rant_transport_init(mem, need, &tc) : NULL; }
+      tr = mem ? i_rant_transport_init(mem, need, &tc) : NULL; }
     ST_CHECK(tr != NULL && S != NULL, "detail-paging: transport + schema ready");
     if (!tr || !S){ rant_allocator_reset(&ma); return; }
 
@@ -3845,24 +3845,24 @@ static void detail_paging_checks(void){
         snprintf(names[i], sizeof names[i],
                  "paging.detail.regression.topic.with.a.long.name.%02d", i);
         d.name = names[i]; d.role = RANT_PUB_ONLY;
-        rant_transport_topic_define(tr, (uint16_t)i, &d);
+        i_rant_transport_topic_define(tr, (uint16_t)i, &d);
         schemas[i].hash = rant_schema_hash(S); schemas[i].wire = rant_schema_wire(S);
     }
 
     /* the requester's paging loop: ask for the unresolved indices, take one page, mark what
-       it carried, repeat. Exactly what rant_transport_detail_wants drives live. */
+       it carried, repeat. Exactly what i_rant_transport_detail_wants drives live. */
     memset(done, 0, sizeof done);
     for (rounds = 0, resolved = 0; resolved < DP_N && rounds < DP_N; rounds++){
         uint16_t nw = 0; size_t rl, page, len; RantDetailIter it; RantDetail dd; int got = 0;
         for (i = 0; i < DP_N; i++) if (!done[i]){ wants[nw].index = (uint16_t)i; wants[nw].schema_hash = 0; nw++; }
-        rl = rant_detail_req_build(3, 1, wants, nw, req, sizeof req);
+        rl = i_rant_detail_req_build(3, 1, wants, nw, req, sizeof req);
         if (!rl) break;
-        page = rant_transport_detail_resp_size(tr, schemas, rant_bytes(req, rl));
+        page = i_rant_transport_detail_resp_size(tr, schemas, rant_bytes(req, rl));
         if (page > (size_t)max_page) max_page = (int)page;
         if (page > RANT_DGRAM_MAX){ ST_CHECK(0, "detail-paging: a page exceeded one datagram (%u)", (unsigned)page); break; }
-        len = rant_transport_detail_respond(tr, schemas, 1, rant_bytes(req, rl), buf, page);
+        len = i_rant_transport_detail_respond(tr, schemas, 1, rant_bytes(req, rl), buf, page);
         memset(&it, 0, sizeof it);
-        while (rant_detail_next(rant_bytes(buf, len), &it, &dd))
+        while (i_rant_detail_next(rant_bytes(buf, len), &it, &dd))
             if (dd.index < DP_N && !done[dd.index]){ done[dd.index] = 1; resolved++; got++; }
         if (!got) break;                                 /* no forward progress: wedged */
     }
@@ -3885,21 +3885,21 @@ static void detail_paging_checks(void){
                  (unsigned)(B ? rant_schema_wire(B).len : 0));
         memset(&c2, 0, sizeof c2);
         c2.topics = NULL; c2.n_topics = 1; c2.max_peers = 1; c2.allocator = rant_allocator_alloc; c2.user = &mb;
-        need2 = rant_transport_required_memory(&c2);
-        t2 = B ? rant_transport_init(rant_allocator_alloc(&mb, NULL, need2), need2, &c2) : NULL;
+        need2 = i_rant_transport_required_memory(&c2);
+        t2 = B ? i_rant_transport_init(rant_allocator_alloc(&mb, NULL, need2), need2, &c2) : NULL;
         if (t2){
             memset(&d, 0, sizeof d); d.name = "big/schema"; d.role = RANT_PUB_ONLY;
-            rant_transport_topic_define(t2, 0, &d);
+            i_rant_transport_topic_define(t2, 0, &d);
             memset(&sc, 0, sizeof sc); sc.hash = rant_schema_hash(B); sc.wire = rant_schema_wire(B);
             w.index = 0; w.schema_hash = 0;   /* requester untyped: forces the wire inline */
-            rl2 = rant_detail_req_build(3, 1, &w, 1, rq, sizeof rq);
-            page2 = rant_transport_detail_resp_size(t2, &sc, rant_bytes(rq, rl2));
+            rl2 = i_rant_detail_req_build(3, 1, &w, 1, rq, sizeof rq);
+            page2 = i_rant_transport_detail_resp_size(t2, &sc, rant_bytes(rq, rl2));
             ST_CHECK(page2 > RANT_DGRAM_MAX, "detail-paging: the oversize entry is measured whole (%u)", (unsigned)page2);
             big = (uint8_t*)rant_allocator_alloc(&mb, NULL, page2 + 8);
-            len2 = big ? rant_transport_detail_respond(t2, &sc, 1, rant_bytes(rq, rl2), big, page2) : 0;
+            len2 = big ? i_rant_transport_detail_respond(t2, &sc, 1, rant_bytes(rq, rl2), big, page2) : 0;
             {   RantDetailIter it; RantDetail dd; int n = 0; uint64_t h = 0;
                 memset(&it, 0, sizeof it);
-                while (big && rant_detail_next(rant_bytes(big, len2), &it, &dd)){ n++; h = dd.schema_hash; }
+                while (big && i_rant_detail_next(rant_bytes(big, len2), &it, &dd)){ n++; h = dd.schema_hash; }
                 ST_CHECK(n == 1 && h == rant_schema_hash(B),
                          "detail-paging: the lone oversize entry rides its own page (n=%d)", n);
             }
@@ -3958,9 +3958,9 @@ static void detail_live_checks(void){
             while (nw<4 && i_rant_node_peer_interest_next(pp, &it, &tp)){
                 if (!tp.is_pub) continue;
                 oalias[nw] = tp.index;
-                if (tp.hash == (uint32_t)rant_topic_id("dt/pose")){
+                if (tp.hash == (uint32_t)i_rant_topic_id("dt/pose")){
                     onlen[nw]=7; memcpy(oname[nw],"dt/pose",7);  ohash[nw]=rant_schema_hash(W);
-                } else if (tp.hash == (uint32_t)rant_topic_id("dt/plain")){
+                } else if (tp.hash == (uint32_t)i_rant_topic_id("dt/plain")){
                     onlen[nw]=8; memcpy(oname[nw],"dt/plain",8); ohash[nw]=0;
                 } else continue;
                 nw++;
@@ -4058,10 +4058,10 @@ static void detail_live_checks(void){
         RantDetailWant wants[4]; uint16_t k;
         i_rant_plat_set_nonblock(q);
         for (k=0;k<nw;k++){ wants[k].index=oalias[k]; wants[k].schema_hash=0; }
-        rl = rant_detail_req_build(dom, pversion, wants, nw, req, sizeof req);
+        rl = i_rant_detail_req_build(dom, pversion, wants, nw, req, sizeof req);
 
         /* a wrong-domain request is ignored (the node core's domain gate) */
-        {   uint8_t bad[128]; size_t bl = rant_detail_req_build((uint16_t)(dom+1), pversion,
+        {   uint8_t bad[128]; size_t bl = i_rant_detail_req_build((uint16_t)(dom+1), pversion,
                                                                 wants, nw, bad, sizeof bad);
             i_rant_plat_send(q, bad, bl, pip, pport);
             for (t=0;t<50;t++){ rant_node_poll(P,1); rant_node_poll(S,1);
@@ -4080,11 +4080,11 @@ static void detail_live_checks(void){
         if (n1>0){
             RantBytes rb = rant_bytes(r1, (size_t)n1);
             RantDetailIter it; RantDetail d; int n=0, names_ok=1, hashes_ok=1, wire_ok=0;
-            ST_CHECK(rant_detail_kind(rb)==RANT_DETAIL_RESP && rant_detail_domain(rb)==dom
-                  && rant_detail_meta_version(rb)==pversion,
+            ST_CHECK(i_rant_detail_kind(rb)==RANT_DETAIL_RESP && i_rant_detail_domain(rb)==dom
+                  && i_rant_detail_meta_version(rb)==pversion,
                      "detail-live: header matches the announced version (%u)", pversion);
             memset(&it,0,sizeof it);
-            while (rant_detail_next(rb, &it, &d)){
+            while (i_rant_detail_next(rb, &it, &d)){
                 for (k=0;k<nw;k++) if (oalias[k]==d.index) break;
                 if (k==nw){ names_ok=0; continue; }
                 if (d.name.len!=onlen[k] || memcmp(d.name.data, oname[k], onlen[k])!=0) names_ok=0;
@@ -6429,7 +6429,7 @@ static void dup_authority_checks(void){
       RantFunction *fa = rant_node_create_function_definition(A, "dupfn", NULL, NULL, pf_empty_handler, NULL, NULL);
       ST_CHECK(va && fa, "dup: first authorities created");
       /* wait until B holds A's interest: the create-time sweep's precondition */
-      { uint32_t want = (uint32_t)rant_topic_id("dupvar"); int seen = 0;
+      { uint32_t want = (uint32_t)i_rant_topic_id("dupvar"); int seen = 0;
         for (t=0;t<2000 && !seen;t++){
             const RantDiscoveryPeer *ps; uint16_t pc;
             pf_pump(A,B,2);
@@ -6779,7 +6779,7 @@ static void varwait_checks(void){
 
     /* C must hold P's announce nominating vw before the accessor exists, since candidates
        come from the cached blob. Verdicts are not yet fetched. */
-    { uint32_t want = (uint32_t)rant_topic_id("vw"); int seen = 0;
+    { uint32_t want = (uint32_t)i_rant_topic_id("vw"); int seen = 0;
       for (t=0;t<2000 && !seen;t++){
           const RantDiscoveryPeer *ps; uint16_t pc;
           pf_pump(P,C,2);
@@ -6925,8 +6925,8 @@ static void churn_checks(void){
     rant_node_mem_stats(C, &c_mem0, &peak, &calls);
     rant_node_mem_stats(U, &u_mem0, &peak, &calls);
     p_hi0 = i_rant_node_topic_count(P); c_hi0 = i_rant_node_topic_count(C);
-    p_int0 = rant_transport_interest_size(P->transport);
-    c_int0 = rant_transport_interest_size(C->transport);
+    p_int0 = i_rant_transport_interest_size(P->transport);
+    c_int0 = i_rant_transport_interest_size(C->transport);
 
     /* A: identical binding churn. Every cycle must reuse the slot, relink with no round
        trip, and deliver. Nothing may grow. */
@@ -6949,7 +6949,7 @@ static void churn_checks(void){
       ST_CHECK(mem <= c_mem0 + 1024, "churn-A: subscriber memory plateaus (%u -> %u)",
                (unsigned)c_mem0, (unsigned)mem);
       ST_CHECK(i_rant_node_topic_count(P) == p_hi0, "churn-A: topic table did not grow");
-      ST_CHECK(rant_transport_interest_size(P->transport) == p_int0,
+      ST_CHECK(i_rant_transport_interest_size(P->transport) == p_int0,
                "churn-A: announce size unchanged (%u)", p_int0); }
 
     /* B: retype churn. The publisher rebinds the slot to an incompatible schema: the typed
@@ -6973,8 +6973,8 @@ static void churn_checks(void){
           if (!csub || rant_topic_index(csub) != c_idx){ idx_ok = 0; break; }
           for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,3,2);
           if (ch_c_last != ch_seq){ deliver_ok = 0; break; }
-          if (cyc == 0){ p_int1 = rant_transport_interest_size(P->transport);
-                         c_int1 = rant_transport_interest_size(C->transport); }
+          if (cyc == 0){ p_int1 = i_rant_transport_interest_size(P->transport);
+                         c_int1 = i_rant_transport_interest_size(C->transport); }
           if (cyc == 1){ rant_node_mem_stats(P, &p_memb, &peak, &calls);
                          rant_node_mem_stats(C, &c_memb, &peak, &calls); }
       }
@@ -6983,10 +6983,10 @@ static void churn_checks(void){
       ST_CHECK(iso_ok, "churn-B: no cross-schema delivery to the typed subscriber");
       ST_CHECK(u_ok, "churn-B: untyped subscriber follows every shape");
       ST_CHECK(deliver_ok, "churn-B: adopted re-create receives the current value (catch-up)");
-      ST_CHECK(p_int1 == p_int0 + 3 && rant_transport_interest_size(P->transport) == p_int1,
+      ST_CHECK(p_int1 == p_int0 + 3 && i_rant_transport_interest_size(P->transport) == p_int1,
                "churn-B: announce grows once by the 3 B gen entry, then holds (%u -> %u)",
                p_int0, p_int1);
-      ST_CHECK(c_int1 == c_int0 + 3 && rant_transport_interest_size(C->transport) == c_int1,
+      ST_CHECK(c_int1 == c_int0 + 3 && i_rant_transport_interest_size(C->transport) == c_int1,
                "churn-B: subscriber announce likewise (%u -> %u)", c_int0, c_int1);
       /* the plateau is judged against the warmed baseline two full retype round trips in,
          after the one time allocations, and the 8 cycles after it must add nothing */
@@ -7848,50 +7848,50 @@ static void interest_codec_checks(void){
     ch[2].name="ic/c";
     memset(&tc,0,sizeof tc); tc.topics=ch; tc.n_topics=3; tc.max_peers=2;
     tc.allocator=rant_allocator_alloc; tc.user=&ma;
-    tr = rant_transport_init(tmem, sizeof tmem, &tc);
+    tr = i_rant_transport_init(tmem, sizeof tmem, &tc);
     ST_CHECK(tr!=NULL, "icodec: transport init");
     if (!tr){ rant_allocator_reset(&ma); return; }
 
     /* inline overlay: flag clear, interest present, all three size views agree */
-    ml = rant_transport_meta_build(tr, meta, sizeof meta, 1200, 0, NULL, 0);
-    ST_CHECK(ml == rant_transport_meta_size(tr), "icodec: inline build == meta_size (%u)", ml);
-    ST_CHECK(rant_meta_frag(rant_bytes(meta,ml))==1200, "icodec: frag survives");
-    ST_CHECK(!rant_meta_interest_external(rant_bytes(meta,ml)), "icodec: inline -> external flag clear");
-    {   RantBytes in = rant_meta_interest(rant_bytes(meta,ml));
-        ST_CHECK(in.data && in.len == rant_transport_interest_size(tr),
+    ml = i_rant_transport_meta_build(tr, meta, sizeof meta, 1200, 0, NULL, 0);
+    ST_CHECK(ml == i_rant_transport_meta_size(tr), "icodec: inline build == meta_size (%u)", ml);
+    ST_CHECK(i_rant_meta_frag(rant_bytes(meta,ml))==1200, "icodec: frag survives");
+    ST_CHECK(!i_rant_meta_interest_external(rant_bytes(meta,ml)), "icodec: inline -> external flag clear");
+    {   RantBytes in = i_rant_meta_interest(rant_bytes(meta,ml));
+        ST_CHECK(in.data && in.len == i_rant_transport_interest_size(tr),
                  "icodec: interest slice == interest_size (%u)", (unsigned)in.len); }
 
     /* bootstrap overlay: fixed size, flag set, interest NULL (never read as empty) */
-    ml = rant_transport_meta_build(tr, meta, sizeof meta, 1200, 0, NULL, 1);
-    ST_CHECK(ml == rant_transport_meta_bootstrap_size(), "icodec: bootstrap size (%u)", ml);
-    ST_CHECK(rant_meta_interest_external(rant_bytes(meta,ml)), "icodec: bootstrap -> external flag set");
-    ST_CHECK(rant_meta_interest(rant_bytes(meta,ml)).data == NULL, "icodec: bootstrap interest is NULL");
-    ST_CHECK(rant_meta_frag(rant_bytes(meta,ml))==1200, "icodec: bootstrap still carries frag");
+    ml = i_rant_transport_meta_build(tr, meta, sizeof meta, 1200, 0, NULL, 1);
+    ST_CHECK(ml == i_rant_transport_meta_bootstrap_size(), "icodec: bootstrap size (%u)", ml);
+    ST_CHECK(i_rant_meta_interest_external(rant_bytes(meta,ml)), "icodec: bootstrap -> external flag set");
+    ST_CHECK(i_rant_meta_interest(rant_bytes(meta,ml)).data == NULL, "icodec: bootstrap interest is NULL");
+    ST_CHECK(i_rant_meta_frag(rant_bytes(meta,ml))==1200, "icodec: bootstrap still carries frag");
 
     /* REQ roundtrip + header gating */
-    {   size_t rl = rant_interest_req_build(7, 42u, 123u, req, sizeof req);
+    {   size_t rl = i_rant_interest_req_build(7, 42u, 123u, req, sizeof req);
         ST_CHECK(rl==18u, "icodec: req builds (%u bytes)", (unsigned)rl);
-        ST_CHECK(rant_detail_kind(rant_bytes(req,rl))==RANT_INTEREST_REQ
-              && rant_detail_domain(rant_bytes(req,rl))==7
-              && rant_detail_meta_version(rant_bytes(req,rl))==42u, "icodec: req header decodes");
-        ST_CHECK(rant_interest_req_offset(rant_bytes(req,rl), &off) && off==123u, "icodec: req offset rides");
-        ST_CHECK(!rant_interest_req_offset(rant_bytes(req,rl-1u), &off), "icodec: short req rejected");
-        ST_CHECK(rant_interest_req_build(7,42u,0u,req,17u)==0u, "icodec: tiny cap refused"); }
+        ST_CHECK(i_rant_detail_kind(rant_bytes(req,rl))==RANT_INTEREST_REQ
+              && i_rant_detail_domain(rant_bytes(req,rl))==7
+              && i_rant_detail_meta_version(rant_bytes(req,rl))==42u, "icodec: req header decodes");
+        ST_CHECK(i_rant_interest_req_offset(rant_bytes(req,rl), &off) && off==123u, "icodec: req offset rides");
+        ST_CHECK(!i_rant_interest_req_offset(rant_bytes(req,rl-1u), &off), "icodec: short req rejected");
+        ST_CHECK(i_rant_interest_req_build(7,42u,0u,req,17u)==0u, "icodec: tiny cap refused"); }
 
     /* RESP page roundtrip + bounds */
     {   uint8_t blob[40]; size_t hl; unsigned i;
         for (i=0;i<sizeof blob;i++) blob[i]=(uint8_t)i;
-        hl = rant_interest_resp_head(7, 42u, 40u, 10u, 20u, page, sizeof page);
+        hl = i_rant_interest_resp_head(7, 42u, 40u, 10u, 20u, page, sizeof page);
         ST_CHECK(hl==RANT_INTEREST_RESP_HEAD, "icodec: resp head builds");
         memcpy(page+hl, blob+10, 20);
-        ST_CHECK(rant_interest_resp_parse(rant_bytes(page, hl+20u), &total, &off, &chunk)
+        ST_CHECK(i_rant_interest_resp_parse(rant_bytes(page, hl+20u), &total, &off, &chunk)
               && total==40u && off==10u && chunk.len==20u && chunk.data[0]==10u,
                  "icodec: resp page parses (total=%u off=%u len=%u)", total, off, (unsigned)chunk.len);
-        ST_CHECK(!rant_interest_resp_parse(rant_bytes(page, hl+19u), &total, &off, &chunk),
+        ST_CHECK(!i_rant_interest_resp_parse(rant_bytes(page, hl+19u), &total, &off, &chunk),
                  "icodec: truncated page rejected");
-        rant_interest_resp_head(7, 42u, 40u, 30u, 20u, page, sizeof page);     /* 30+20 > 40 */
+        i_rant_interest_resp_head(7, 42u, 40u, 30u, 20u, page, sizeof page);     /* 30+20 > 40 */
         memcpy(page+RANT_INTEREST_RESP_HEAD, blob, 20);
-        ST_CHECK(!rant_interest_resp_parse(rant_bytes(page, RANT_INTEREST_RESP_HEAD+20u), &total, &off, &chunk),
+        ST_CHECK(!i_rant_interest_resp_parse(rant_bytes(page, RANT_INTEREST_RESP_HEAD+20u), &total, &off, &chunk),
                  "icodec: out-of-blob range rejected"); }
     rant_allocator_reset(&ma);
 }
@@ -8230,20 +8230,20 @@ static int selftest_main(void){
       { unsigned long s0 = st_samples[ST_CH_DYN];
         uint32_t wid = 0; uint16_t k; uint8_t ib[256]; size_t il;
         for (k=0;k<i_rant_node_core_max_peers(r->core);k++) if (i_rant_node_core_peer_at(r->core,k,&wid,NULL,NULL,NULL)) break;
-        rant_transport_peer_remove(r->transport, wid);
-        rant_transport_peer_add(r->transport, wid,RANT_FRAG_SIZE);
-        il = rant_transport_build_interest(w->transport, ib, sizeof ib);
-        rant_transport_apply_peer_interest(r->transport, wid, rant_bytes(ib, il));
+        i_rant_transport_peer_remove(r->transport, wid);
+        i_rant_transport_peer_add(r->transport, wid,RANT_FRAG_SIZE);
+        il = i_rant_transport_build_interest(w->transport, ib, sizeof ib);
+        i_rant_transport_apply_peer_interest(r->transport, wid, rant_bytes(ib, il));
         /* the apply only nominates, since peer_remove dropped the cached verdicts. Run the sans
            IO detail exchange by hand so the flapped reader re verifies and rematches */
         {   RantDetailWant wl[8]; uint8_t rq[256], rp[1024]; uint16_t nw2, verified; size_t rl2, pl2;
-            nw2 = rant_transport_detail_wants(r->transport, NULL, wid, rant_bytes(ib, il), wl, 8);
+            nw2 = i_rant_transport_detail_wants(r->transport, NULL, wid, rant_bytes(ib, il), wl, 8);
             ST_CHECK(nw2 > 0, "flap: re-added peer nominates pending candidates (%u)", nw2);
-            rl2 = rant_detail_req_build(ST_DOMAIN, 0, wl, nw2, rq, sizeof rq);
-            pl2 = rant_transport_detail_respond(w->transport, NULL, 0, rant_bytes(rq, rl2), rp, sizeof rp);
-            verified = rant_transport_apply_peer_details(r->transport, wid, rant_bytes(rp, pl2));
+            rl2 = i_rant_detail_req_build(ST_DOMAIN, 0, wl, nw2, rq, sizeof rq);
+            pl2 = i_rant_transport_detail_respond(w->transport, NULL, 0, rant_bytes(rq, rl2), rp, sizeof rp);
+            verified = i_rant_transport_apply_peer_details(r->transport, wid, rant_bytes(rp, pl2));
             ST_CHECK(verified == nw2, "flap: details verify every candidate (%u/%u)", verified, nw2);
-            rant_transport_apply_peer_interest(r->transport, wid, rant_bytes(ib, il));
+            i_rant_transport_apply_peer_interest(r->transport, wid, rant_bytes(ib, il));
         }
         st_pump(w, r, 600);
         ST_CHECK(st_samples[ST_CH_DYN] == s0+ST_DEPTH,
@@ -8260,14 +8260,14 @@ static int selftest_main(void){
         uint32_t wid = 0, rid = 0; uint16_t k;
         for (k=0;k<i_rant_node_core_max_peers(r->core);k++) if (i_rant_node_core_peer_at(r->core,k,&wid,NULL,NULL,NULL)) break;
         for (k=0;k<i_rant_node_core_max_peers(w->core);k++) if (i_rant_node_core_peer_at(w->core,k,&rid,NULL,NULL,NULL)) break;
-        rant_transport_peer_dormant(w->transport, rid);     /* drops the reader from flow control */
-        rant_transport_peer_dormant(r->transport, wid);     /* reader stops acking the writer */
+        i_rant_transport_peer_dormant(w->transport, rid);     /* drops the reader from flow control */
+        i_rant_transport_peer_dormant(r->transport, wid);     /* reader stops acking the writer */
         for (i=0;i<3;i++) rant_node_send(w, ST_CH_DYN, payload, sizeof payload);
         st_pump(w, r, 300);
         ST_CHECK(st_samples[ST_CH_DYN] == s0, "resume: dormant peer withholds sends (%lu, want %lu)",
                  st_samples[ST_CH_DYN], s0);
-        rant_transport_peer_resume(w->transport, rid);
-        rant_transport_peer_resume(r->transport, wid);
+        i_rant_transport_peer_resume(w->transport, rid);
+        i_rant_transport_peer_resume(r->transport, wid);
         st_pump(w, r, 400);
         ST_CHECK(st_samples[ST_CH_DYN] == s0+3,
                  "resume: backlog replays from preserved position (%lu, want %lu)",
@@ -8351,7 +8351,7 @@ static int selftest_main(void){
     { static uint8_t mem_cw[1<<20], mem_cr[1<<20];
       const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both hash to 23f58aa8628b1cce */
       RantTopicDef cw, cr; RantNodeOpts wo3, ro3; RantNode *w3, *r3;
-      ST_CHECK(rant_topic_id(A)==rant_topic_id(B) && strcmp(A,B)!=0,
+      ST_CHECK(i_rant_topic_id(A)==i_rant_topic_id(B) && strcmp(A,B)!=0,
                "collision: test pair still shares one identity (else regen via collide)");
       memset(&cw,0,sizeof cw);
       cw.name=A; cw.role=RANT_PUB_ONLY;

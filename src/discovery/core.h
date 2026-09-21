@@ -87,7 +87,7 @@ typedef struct {
     RantEventFn on_event;
     void *user;
     /* Optional hook. Per peer blobs are then allocated at their actual length instead of
-     * a fixed max_peers x meta_cap pool. Pair with rant_discovery_destroy. */
+     * a fixed max_peers x meta_cap pool. Pair with i_rant_discovery_destroy. */
     RantAllocFn alloc;
     void       *alloc_user;
 } RantDiscoveryCoreConfig;
@@ -95,83 +95,83 @@ typedef struct {
 typedef struct RantDiscoveryState RantDiscoveryState;
 
 /* Fills every zero timing and size field with its default. Idempotent. */
-void           rant_discovery_config_defaults(RantDiscoveryCoreConfig *cfg);
+void           i_rant_discovery_config_defaults(RantDiscoveryCoreConfig *cfg);
 
 /* Bytes one datagram scratch buffer needs for meta_cap (0 = the default). */
-uint32_t       rant_discovery_wire_size(uint16_t meta_cap);
+uint32_t       i_rant_discovery_wire_size(uint16_t meta_cap);
 
-size_t         rant_discovery_required_memory(const RantDiscoveryCoreConfig *cfg);
-RantDiscoveryState *rant_discovery_init(void *mem, size_t mem_size, const RantDiscoveryCoreConfig *cfg);
+size_t         i_rant_discovery_required_memory(const RantDiscoveryCoreConfig *cfg);
+RantDiscoveryState *i_rant_discovery_init(void *mem, size_t mem_size, const RantDiscoveryCoreConfig *cfg);
 /* Frees the hook allocated peer blobs. A no op without a hook. The arena stays the caller's. */
-void           rant_discovery_destroy(RantDiscoveryState *st);
+void           i_rant_discovery_destroy(RantDiscoveryState *st);
 /* Relocates a live core into a bigger block, keeping the uuid, versions, ids and peers.
  * self_meta is the announce blob's new address. The caller frees the old block after. */
-RantDiscoveryState *rant_discovery_core_migrate(RantDiscoveryState *old, void *new_mem,
+RantDiscoveryState *i_rant_discovery_core_migrate(RantDiscoveryState *old, void *new_mem,
                  size_t new_cap, uint16_t new_max_peers, uint16_t new_meta_cap,
                  const uint8_t *self_meta, void *peer_cb_user);
 /* src NULL or port 0 means the IO layer cannot say, so the locator comes from the blob
  * alone and no observed source binds. via says which local socket it arrived on. */
-void           rant_discovery_on_datagram(RantDiscoveryState *st, const RantAddr *src,
+void           i_rant_discovery_on_datagram(RantDiscoveryState *st, const RantAddr *src,
                                         RantDiscoveryVia via, RantBytes datagram, uint64_t now_us);
-size_t         rant_discovery_update(RantDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
+size_t         i_rant_discovery_update(RantDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
 /* When update next wants to run its timers. 0 means now. Peer timeout sweeps ride the
  * announce cadence. */
-uint64_t       rant_discovery_next_due_us(const RantDiscoveryState *st);
-size_t         rant_discovery_leave(RantDiscoveryState *st, void *out, size_t cap);
+uint64_t       i_rant_discovery_next_due_us(const RantDiscoveryState *st);
+size_t         i_rant_discovery_leave(RantDiscoveryState *st, void *out, size_t cap);
 /* Queues a one shot solicit. The next update asks peers to announce now. */
-void           rant_discovery_solicit(RantDiscoveryState *st);
+void           i_rant_discovery_solicit(RantDiscoveryState *st);
 /* Re fires peer up for every live peer with the blob we hold, so a caller that changed
  * its own advertised data re applies every peer's interest. */
-void           rant_discovery_replay_peers(RantDiscoveryState *st);
+void           i_rant_discovery_replay_peers(RantDiscoveryState *st);
 /* Replaces the overlay and bumps its version so peers re fetch it. meta must stay valid. */
-void           rant_discovery_set_meta(RantDiscoveryState *st, RantBytes meta);
+void           i_rant_discovery_set_meta(RantDiscoveryState *st, RantBytes meta);
 /* The version our announces advertise, 0 if none. Detail responses are stamped with it. */
-uint32_t       rant_discovery_meta_version(const RantDiscoveryState *st);
+uint32_t       i_rant_discovery_meta_version(const RantDiscoveryState *st);
 /* Our own subnets, for locator ranking. Re callable when the interface set changes. A
  * zero mask is ignored. */
-void           rant_discovery_set_local_subnets(RantDiscoveryState *st,
+void           i_rant_discovery_set_local_subnets(RantDiscoveryState *st,
                                       const RantDiscoverySubnet *nets, uint8_t n);
 /* Drains one unicast datagram: a solicit reply or a re fetch request. Returns bytes and
  * fills *to, or 0. *exact 1 means *to is an observed source, send exactly there. */
-size_t         rant_discovery_poll_targeted(RantDiscoveryState *st, void *out, size_t cap,
+size_t         i_rant_discovery_poll_targeted(RantDiscoveryState *st, void *out, size_t cap,
                                       RantAddr *to, int *exact);
 /* Drains one proxied announce built on behalf of a relay me peer. The runtime sends it
  * on every path. Loop until 0. */
-size_t         rant_discovery_poll_relay(RantDiscoveryState *st, void *out, size_t cap);
+size_t         i_rant_discovery_poll_relay(RantDiscoveryState *st, void *out, size_t cap);
 /* Drains one introduction: a proxied announce of a peer we hear directly, addressed to
  * one relay me peer. *to and *exact as in poll_targeted. Loop until 0. */
-size_t         rant_discovery_poll_introduce(RantDiscoveryState *st, void *out, size_t cap,
+size_t         i_rant_discovery_poll_introduce(RantDiscoveryState *st, void *out, size_t cap,
                                       RantAddr *to, int *exact);
 /* Live peers, DROPPED entries excluded. */
-uint16_t       rant_discovery_peer_count(const RantDiscoveryState *st);
+uint16_t       i_rant_discovery_peer_count(const RantDiscoveryState *st);
 /* Table capacity, the slot range for peer_addr and peer_at. */
-uint16_t       rant_discovery_max_peers(const RantDiscoveryState *st);
+uint16_t       i_rant_discovery_max_peers(const RantDiscoveryState *st);
 /* Discovery TX destination for the ACTIVE peer in a slot. 0 none, 1 the locator, which
  * the runtime expands to both ports, 2 an observed source, send exactly there. */
-int            rant_discovery_peer_addr(const RantDiscoveryState *st, uint16_t slot,
+int            i_rant_discovery_peer_addr(const RantDiscoveryState *st, uint16_t slot,
                                       RantAddr *out);
 /* Read only view of the peer in a slot, ACTIVE or DROPPED. 1 if it holds one. */
-int            rant_discovery_peer_at(const RantDiscoveryState *st, uint16_t slot,
+int            i_rant_discovery_peer_at(const RantDiscoveryState *st, uint16_t slot,
                                       RantDiscoveryPeer *out);
 
 /* By id lookups, DROPPED peers included. The node keys its state on the id and uses
  * these instead of a second peer table. */
-void          *rant_discovery_peer_user(RantDiscoveryState *st, uint32_t id);
+void          *i_rant_discovery_peer_user(RantDiscoveryState *st, uint32_t id);
 /* The overlay we hold and, through *version, the version it is at. A view until the next poll. */
-RantBytes        rant_discovery_peer_meta(const RantDiscoveryState *st, uint32_t id,
+RantBytes        i_rant_discovery_peer_meta(const RantDiscoveryState *st, uint32_t id,
                                       uint32_t *version);
 /* The one address to send data to: the observed data source when bound, else the locator. */
-int            rant_discovery_addr_of_id(const RantDiscoveryState *st, uint32_t id,
+int            i_rant_discovery_addr_of_id(const RantDiscoveryState *st, uint32_t id,
                                       RantAddr *out);
 /* {NULL,0} for an unknown peer. */
-RantString       rant_discovery_peer_name(const RantDiscoveryState *st, uint32_t id);
+RantString       i_rant_discovery_peer_name(const RantDiscoveryState *st, uint32_t id);
 /* Maps a source back to a peer id. A peer with observed sources matches only those. */
-int            rant_discovery_id_for_addr(const RantDiscoveryState *st, const uint8_t *ip,
+int            i_rant_discovery_id_for_addr(const RantDiscoveryState *st, const uint8_t *ip,
                                       uint8_t ip_len, uint16_t port, uint32_t *id);
 /* Deterministic RFC 9562 v8 uuid from a stable input plus a boot seed. Not cryptographic. */
-void           rant_discovery_make_uuid(uint8_t out[16], RantBytes stable, uint64_t boot_seed);
+void           i_rant_discovery_make_uuid(uint8_t out[16], RantBytes stable, uint64_t boot_seed);
 /* Our own uuid, a view valid for the state's lifetime. */
-const uint8_t *rant_discovery_uuid(const RantDiscoveryState *st);
+const uint8_t *i_rant_discovery_uuid(const RantDiscoveryState *st);
 
 #ifdef __cplusplus
 }
