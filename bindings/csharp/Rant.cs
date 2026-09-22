@@ -545,6 +545,14 @@ namespace Rant
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_get_value(RantBytes msg, IntPtr s, ushort field, out RantValue outv);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_get_value_at(RantBytes msg, IntPtr s, ushort field, uint elem, out RantValue outv);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern uint rant_array_count_at(RantBytes msg, IntPtr s, ushort field);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_set_array_count(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, uint count);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_schema_field_index(IntPtr s, byte[] path);
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern uint rant_schema_msg_min(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern uint rant_schema_msg_len(IntPtr s, IntPtr buf, UIntPtr cap);
@@ -915,7 +923,8 @@ namespace Rant
     }
 
     /// <summary>Name the wire type of a message struct or class. Without it the class name is
-    /// the wire name, and peers must match it.</summary>
+    /// the wire name. A type nested in another is defined once under its name and every use,
+    /// as a field or an array element, takes the name, so peers spell the same name.</summary>
     [AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class)]
     public sealed class RantSchemaAttribute : Attribute
     {
@@ -941,9 +950,10 @@ namespace Rant
         public RantStringAttribute(int cap) { Cap = cap; }
     }
 
-    /// <summary>Name a field's type with a standard type (docs/stdtypes.md), so the name
-    /// narrows matching. The shape must be the canonical one or compiling fails.</summary>
-    [AttributeUsage(AttributeTargets.Field | AttributeTargets.Struct | AttributeTargets.Class)]
+    /// <summary>Name a plain field's type with a standard type (docs/stdtypes.md), such as a
+    /// long as Timestamp, so the name narrows matching. The shape must be the canonical one or
+    /// compiling fails. A struct names itself with [RantSchema].</summary>
+    [AttributeUsage(AttributeTargets.Field)]
     public sealed class RantTypeNameAttribute : Attribute
     {
         public string Name;
@@ -951,50 +961,51 @@ namespace Rant
     }
 
     // The standard composites as plain mirrors of their wire shape (docs/stdtypes.md). The
-    // [RantField] overrides give the canonical lowercase wire names every language agrees on.
-    [RantTypeName("Float2")] public struct Float2
+    // [RantField] overrides give the canonical lowercase wire names every language agrees on,
+    // and each compiles against the standard definition of its name, so a drift is refused.
+    [RantSchema("Float2")] public struct Float2
     { [RantField("x")] public float X; [RantField("y")] public float Y; }
-    [RantTypeName("Float3")] public struct Float3
+    [RantSchema("Float3")] public struct Float3
     { [RantField("x")] public float X; [RantField("y")] public float Y;
       [RantField("z")] public float Z; }
-    [RantTypeName("Float4")] public struct Float4
+    [RantSchema("Float4")] public struct Float4
     { [RantField("x")] public float X; [RantField("y")] public float Y;
       [RantField("z")] public float Z; [RantField("w")] public float W; }
-    [RantTypeName("Double2")] public struct Double2
+    [RantSchema("Double2")] public struct Double2
     { [RantField("x")] public double X; [RantField("y")] public double Y; }
-    [RantTypeName("Double3")] public struct Double3
+    [RantSchema("Double3")] public struct Double3
     { [RantField("x")] public double X; [RantField("y")] public double Y;
       [RantField("z")] public double Z; }
-    [RantTypeName("Double4")] public struct Double4
+    [RantSchema("Double4")] public struct Double4
     { [RantField("x")] public double X; [RantField("y")] public double Y;
       [RantField("z")] public double Z; [RantField("w")] public double W; }
-    [RantTypeName("Int2")] public struct Int2
+    [RantSchema("Int2")] public struct Int2
     { [RantField("x")] public int X; [RantField("y")] public int Y; }
-    [RantTypeName("Int3")] public struct Int3
+    [RantSchema("Int3")] public struct Int3
     { [RantField("x")] public int X; [RantField("y")] public int Y; [RantField("z")] public int Z; }
-    [RantTypeName("Int4")] public struct Int4
+    [RantSchema("Int4")] public struct Int4
     { [RantField("x")] public int X; [RantField("y")] public int Y;
       [RantField("z")] public int Z; [RantField("w")] public int W; }
-    [RantTypeName("Quaternion")] public struct Quaternion    // stored x, y, z, w
+    [RantSchema("Quaternion")] public struct Quaternion    // stored x, y, z, w
     { [RantField("x")] public double X; [RantField("y")] public double Y;
       [RantField("z")] public double Z; [RantField("w")] public double W; }
-    [RantTypeName("Color")] public struct Color              // sRGB, straight alpha
+    [RantSchema("Color")] public struct Color              // sRGB, straight alpha
     { [RantField("r")] public byte R; [RantField("g")] public byte G;
       [RantField("b")] public byte B; [RantField("a")] public byte A; }
-    [RantTypeName("Rect")] public struct Rect
+    [RantSchema("Rect")] public struct Rect
     { [RantField("x")] public float X; [RantField("y")] public float Y;
       [RantField("w")] public float W; [RantField("h")] public float H; }
-    [RantTypeName("RectI")] public struct RectI
+    [RantSchema("RectI")] public struct RectI
     { [RantField("x")] public int X; [RantField("y")] public int Y;
       [RantField("w")] public int W; [RantField("h")] public int H; }
     // Meters and radians. Parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
-    [RantTypeName("Transform")] public struct Transform
+    [RantSchema("Transform")] public struct Transform
     { [RantField("translation")] public Double3 Translation;
       [RantField("rotation")] public Quaternion Rotation;
       [RantField("parent")] [RantString(30)] public string Parent; }
-    [RantTypeName("Twist")] public struct Twist               // m/s and rad/s
+    [RantSchema("Twist")] public struct Twist               // m/s and rad/s
     { [RantField("linear")] public Double3 Linear; [RantField("angular")] public Double3 Angular; }
-    [RantTypeName("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
+    [RantSchema("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
     { [RantField("lat")] public double Lat; [RantField("lon")] public double Lon;
       [RantField("alt")] public double Alt; }
 
@@ -1009,12 +1020,12 @@ namespace Rant
     /// <summary>The protocol an ExternalVideoStream's url speaks.</summary>
     public enum VideoStreamKind : byte
     { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3, Rtp = 4, HttpMjpeg = 5, Other = 15 }
-    [RantTypeName("Image")] public struct Image               // stride 0 = packed rows
+    [RantSchema("Image")] public struct Image               // stride 0 = packed rows
     { [RantField("width")] public uint Width; [RantField("height")] public uint Height;
       [RantField("stride")] public uint Stride;
       [RantField("format")] public ImageFormat Format;
       [RantField("data")] public byte[] Data; }               // pixels, or the file bytes
-    [RantTypeName("VideoFrame")] public struct VideoFrame     // width/height 0 = unstated
+    [RantSchema("VideoFrame")] public struct VideoFrame     // width/height 0 = unstated
     { [RantField("codec")] public VideoCodec Codec;
       [RantField("width")] public uint Width; [RantField("height")] public uint Height;
       [RantField("keyframe")] public bool Keyframe;
@@ -1022,7 +1033,7 @@ namespace Rant
       [RantField("data")] public byte[] Data; }
     // Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. Codec,
     // Width and Height are hints for pickers, the stream stays authoritative once connected.
-    [RantTypeName("ExternalVideoStream")] public struct ExternalVideoStream
+    [RantSchema("ExternalVideoStream")] public struct ExternalVideoStream
     { [RantField("kind")] public VideoStreamKind Kind;
       [RantField("codec")] public VideoCodec Codec;
       [RantField("width")] public uint Width; [RantField("height")] public uint Height;
@@ -1033,7 +1044,7 @@ namespace Rant
     public enum DistortionModel : byte
     { NoDistortion = 0, BrownConrady = 1, Fisheye = 2, Rational = 3 }
     // The pinhole model and its lens distortion. Coeffs is zero filled past the model's count.
-    [RantTypeName("CameraIntrinsics")] public struct CameraIntrinsics
+    [RantSchema("CameraIntrinsics")] public struct CameraIntrinsics
     { [RantField("width")] public uint Width; [RantField("height")] public uint Height;
       [RantField("fx")] public double Fx; [RantField("fy")] public double Fy;
       [RantField("cx")] public double Cx; [RantField("cy")] public double Cy;
@@ -1041,12 +1052,12 @@ namespace Rant
       [RantField("coeffs")] [RantArray(8)] public double[] Coeffs; }
     // SI: radians or meters, per second, and newtons or newton meters. Velocity and Effort
     // may be empty. The names ride a JointNames variable, not every sample.
-    [RantTypeName("JointState")] public struct JointState
+    [RantSchema("JointState")] public struct JointState
     { [RantField("position")] public double[] Position;
       [RantField("velocity")] public double[] Velocity;
       [RantField("effort")] public double[] Effort; }
     // Published once as a variable. The order every JointState array follows.
-    [RantTypeName("JointNames")] public struct JointNames
+    [RantSchema("JointNames")] public struct JointNames
     { [RantField("name")] [RantString(32)] public string[] Name; }
 
     /// <summary>The Timestamp clock: microseconds since the Unix epoch UTC, the units of a
@@ -3998,10 +4009,11 @@ namespace Rant
             public byte Elem;      // array element kind, or (enum) the backing scalar kind
             public int Count;
             public int StrCap;
-            public Type Nested;
+            public Type Nested;    // the struct type of a STRUCT field or of a struct array's element
             public Type EnumType;  // enum fields: the C# enum type (names/values via reflection)
             public string TypeName; // a STANDARD type's name: the whole spelling
         }
+        private static bool IsStructArray(byte kind, byte elem) => (kind == ARR || kind == VARR) && elem == STRUCT;
         private sealed class TypeSpec { public string Name; public List<FieldPlan> Fields; }
         private static readonly Dictionary<Type, TypeSpec> s_specs = new Dictionary<Type, TypeSpec>();
 
@@ -4107,8 +4119,10 @@ namespace Rant
                         }
                         else if (et != null && ScalarKind.TryGetValue(et, out k))
                         { plan.Kind = ARR; plan.Elem = k; plan.Count = arr.Count; }
+                        else if (et != null && !IsMapType(et) && StructLike(et))
+                        { plan.Kind = ARR; plan.Elem = STRUCT; plan.Count = arr.Count; plan.Nested = et; }
                         else throw new SchemaException("array field " + f.Name
-                            + " element must be a scalar or a [RantString] string");
+                            + " element must be a scalar, a [RantString] string or a struct");
                     }
                     else if (f.FieldType.IsArray)   // T[] without [RantArray]: a variable array
                     {
@@ -4122,8 +4136,10 @@ namespace Rant
                         }
                         else if (et != null && ScalarKind.TryGetValue(et, out k))
                         { plan.Kind = VARR; plan.Elem = k; }
+                        else if (et != null && !IsMapType(et) && StructLike(et))
+                        { plan.Kind = VARR; plan.Elem = STRUCT; plan.Nested = et; }
                         else throw new SchemaException("variable array field " + f.Name
-                            + " element must be a scalar or a [RantString] string");
+                            + " element must be a scalar, a [RantString] string or a struct");
                     }
                     else if (f.FieldType == typeof(string))
                     {
@@ -4143,10 +4159,7 @@ namespace Rant
                         + " (use scalars, strings ([RantString] = capped, plain = variable), arrays "
                         + "([RantArray] = fixed, plain = variable), a Dictionary<string,object> map, "
                         + "or nested structs)");
-                    // a standard type names the field's type: on the field, or on its struct
                     var tn = (RantTypeNameAttribute)Attribute.GetCustomAttribute(f, typeof(RantTypeNameAttribute));
-                    if (tn == null && plan.Nested != null)
-                        tn = (RantTypeNameAttribute)Attribute.GetCustomAttribute(plan.Nested, typeof(RantTypeNameAttribute));
                     if (tn != null) plan.TypeName = tn.Name;
                     plans.Add(plan);
                 }
@@ -4158,6 +4171,8 @@ namespace Rant
             }
         }
 
+        // The text of a reflected type: every nested type as a definition of its own first,
+        // dependencies before their users and each name once, then the root.
         internal static string TypeDsl(Type t, string namelessAs)
         {
             var spec = Spec(t);
@@ -4167,6 +4182,29 @@ namespace Rant
                 throw new SchemaException(t + " has no wire name: use it as a handle's type, which"
                     + " names it after the handle, or compile a Schema from DSL text");
             var sb = new StringBuilder();
+            var done = new HashSet<Type> { t };
+            Hoist(spec, sb, done);
+            Define(sb, name, spec);
+            return sb.ToString();
+        }
+
+        // the definitions of the types nested under spec, unless a field names its type itself
+        private static void Hoist(TypeSpec spec, StringBuilder sb, HashSet<Type> done)
+        {
+            foreach (var f in spec.Fields)
+            {
+                if (f.Nested == null || f.TypeName != null || !done.Add(f.Nested)) continue;
+                var inner = Spec(f.Nested);
+                if (inner.Name.Length == 0)
+                    throw new SchemaException(f.Nested + " under field " + f.Field.Name
+                        + " has no wire name: a nested type is a struct or class, not a tuple");
+                Hoist(inner, sb, done);
+                Define(sb, inner.Name, inner);
+            }
+        }
+
+        private static void Define(StringBuilder sb, string name, TypeSpec spec)
+        {
             sb.Append(name).Append("\n{\n");
             for (int i = 0; i < spec.Fields.Count; i++)
             {
@@ -4174,24 +4212,18 @@ namespace Rant
                 sb.Append("    ").Append(FieldLine(spec.Fields[i]));
             }
             sb.Append("\n}\n");
-            return sb.ToString();
         }
 
         private static string FieldLine(FieldPlan f) => f.WireName + ": " + TypeToken(f);
 
-        // one field's type in DSL form (the whole schema when the root is a bare type)
+        // one field's type in DSL form (the whole schema when the root is a bare type). A
+        // nested type is its name, the definition is hoisted above.
         private static string TypeToken(FieldPlan f)
         {
             if (f.TypeName != null) return f.TypeName;   // a standard type spells as its name
-            if (f.Kind == STRUCT)
-            {
-                var nested = Spec(f.Nested).Fields;
-                var parts = new List<string>();
-                foreach (var g in nested) parts.Add(FieldLine(g));
-                return "{ " + string.Join(", ", parts) + " }";
-            }
-            if (f.Kind == ARR) return ElemToken(f.Elem, f.StrCap) + "[" + f.Count + "]";
-            if (f.Kind == VARR) return ElemToken(f.Elem, f.StrCap) + "[]";
+            if (f.Kind == STRUCT) return Spec(f.Nested).Name;
+            if (f.Kind == ARR) return ElemToken(f) + "[" + f.Count + "]";
+            if (f.Kind == VARR) return ElemToken(f) + "[]";
             if (f.Kind == STR) return "string<" + f.StrCap + ">";
             if (f.Kind == VSTR) return "string";
             if (f.Kind == MAP) return "map";
@@ -4199,6 +4231,8 @@ namespace Rant
             return Token[f.Kind];
         }
 
+        private static string ElemToken(FieldPlan f)
+            => f.Elem == STRUCT ? Spec(f.Nested).Name : ElemToken(f.Elem, f.StrCap);
         private static string ElemToken(byte elem, int strCap)
             => elem == STR ? "string<" + strCap + ">" : Token[elem];
 
@@ -4238,51 +4272,6 @@ namespace Rant
             RantSchemaFieldInfo info;
             if (Native.rant_schema_field_at(s, 0, out info) == 0) return false;
             return info.depth == 0 && (ulong)info.name.len == 0 && info.kind != STRUCT;
-        }
-
-        private static void EmitNodes(StringBuilder sb, List<object[]> nodes)
-        {
-            for (int i = 0; i < nodes.Count; i++)
-            {
-                if (i > 0) sb.Append(",\n");
-                sb.Append("    ").Append(NodeLine(nodes[i]));
-            }
-        }
-
-        private static string NodeLine(object[] node) => (string)node[0] + ": " + NodeType(node);
-
-        private static string NodeType(object[] node)
-        {
-            byte kind = (byte)node[1], elem = (byte)node[2];
-            int count = (int)node[3], strCap = (int)node[4];
-            var children = (List<object[]>)node[5];
-            if (kind == STRUCT)
-            {
-                var parts = new List<string>();
-                foreach (var c in children) parts.Add(NodeLine(c));
-                return "{ " + string.Join(", ", parts) + " }";
-            }
-            if (kind == ARR) return ElemToken(elem, strCap) + "[" + count + "]";
-            if (kind == VARR) return ElemToken(elem, strCap) + "[]";
-            if (kind == STR) return "string<" + strCap + ">";
-            if (kind == VSTR) return "string";
-            if (kind == MAP) return "map";
-            if (kind == ENUM) return "enum<" + Token[elem] + "> " + (string)node[6];
-            return Token[kind];
-        }
-
-        // `{ Name=value, ... }` reconstructed from a compiled schema's enum option table
-        private static string EnumBodyFromSchema(IntPtr s, ushort field)
-        {
-            var parts = new List<string>();
-            ushort n = Native.rant_schema_enum_count(s, field);
-            for (ushort k = 0; k < n; k++)
-            {
-                long val; RantStringView nm;
-                if (Native.rant_schema_enum_variant(s, field, k, out val, out nm) != 0)
-                    parts.Add(Str(nm) + "=" + val.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            }
-            return "{ " + string.Join(", ", parts) + " }";
         }
 
         // Encode: object to message bytes. One walk of the reflection spec resolves every value
@@ -4350,6 +4339,16 @@ namespace Rant
                 if (val == null) continue;   // keep the zeroed default from message_default
                 string path = prefix + fp.WireName;
                 if (fp.Kind == STRUCT) { Collect(s, Spec(fp.Nested), val, path + ".", ops, ref varBytes); continue; }
+                if (IsStructArray(fp.Kind, fp.Elem))
+                {
+                    var items = val as System.Collections.IList;
+                    if (items == null)
+                        throw new SchemaException(path + " is an array of structs and expects an array or list, got " + val.GetType().Name);
+                    int count = SizeElems(s, path, fp.Kind, fp.Count, items.Count, ops, ref varBytes);
+                    for (int i = 0; i < count; i++)
+                        if (items[i] != null) Collect(s, Spec(fp.Nested), items[i], path + "[" + i + "].", ops, ref varBytes);
+                    continue;
+                }
                 var op = new SetOp { Cpath = CStr(path), Path = path, Kind = fp.Kind, Elem = fp.Elem,
                                      Count = fp.Count, StrCap = fp.StrCap };
                 PrepareOp(op, val, ref varBytes);
@@ -4357,24 +4356,83 @@ namespace Rant
             }
         }
 
+        // The element count a struct array at path takes, at most the fixed count. A variable
+        // one gets a sizing op ahead of its members, since its frame must exist before they are set.
+        private static int SizeElems(IntPtr s, string path, byte kind, int fixedCount, int given,
+                                     List<SetOp> ops, ref long varBytes)
+        {
+            if (kind != VARR) return Math.Min(given, fixedCount);
+            int fi = Native.rant_schema_field_index(s, CStr(path));
+            RantSchemaFieldInfo info;
+            if (fi < 0 || Native.rant_schema_field_at(s, (ushort)fi, out info) == 0)
+                throw new SchemaException("no field " + path + " in the schema");
+            ops.Add(new SetOp { Cpath = CStr(path), Path = path, Kind = VARR, Elem = STRUCT, Count = given });
+            varBytes += (long)given * info.elem_size;
+            return given;
+        }
+
+        // the flat table read once, so a walk can look ahead at a struct array's members
+        private static RantSchemaFieldInfo[] Infos(IntPtr s)
+        {
+            ushort n = Native.rant_schema_field_count(s);
+            var infos = new RantSchemaFieldInfo[n];
+            for (ushort i = 0; i < n; i++) Native.rant_schema_field_at(s, i, out infos[i]);
+            return infos;
+        }
+
+        // one past the last member of the struct array at flat index i: the table flattens its
+        // element once, as the run of fields naming it as their array
+        private static int MemberRun(RantSchemaFieldInfo[] infos, int i)
+        {
+            int j = i + 1;
+            while (j < infos.Length && infos[j].arr_parent == i) j++;
+            return j;
+        }
+
         // a Dictionary source to ops: walk the compiled schema's flat field table pulling values
         // by name, nested structs from a nested dictionary of the same shape
         private static void CollectFromDict(IntPtr s, System.Collections.IDictionary root,
                                             List<SetOp> ops, ref long varBytes)
         {
+            var infos = Infos(s);
+            CollectMembers(s, infos, 0, infos.Length, 0, "", root, ops, ref varBytes);
+        }
+
+        // The fields infos[from..to) as the members of one struct at depth baseDepth, valued
+        // from src by name. prefix is that struct's path: "" at the root, "pts[2]." in an
+        // element. A struct array's members come from a list of dictionaries, one per element.
+        private static void CollectMembers(IntPtr s, RantSchemaFieldInfo[] infos, int from, int to, int baseDepth,
+                                           string prefix, System.Collections.IDictionary src,
+                                           List<SetOp> ops, ref long varBytes)
+        {
             var names = new List<string>();
-            var srcs = new List<System.Collections.IDictionary> { root };
-            ushort n = Native.rant_schema_field_count(s);
-            for (ushort i = 0; i < n; i++)
+            var srcs = new List<System.Collections.IDictionary> { src };
+            for (int i = from; i < to; i++)
             {
-                RantSchemaFieldInfo info;
-                Native.rant_schema_field_at(s, i, out info);
+                var info = infos[i];
                 string name = Str(info.name);
-                int d = info.depth;
+                int d = info.depth - baseDepth;
                 while (names.Count <= d) names.Add(null);
                 names[d] = name;
                 var parent = d < srcs.Count ? srcs[d] : null;
                 object val = (parent != null && parent.Contains(name)) ? parent[name] : null;
+                if (IsStructArray(info.kind, info.elem))
+                {
+                    int end = MemberRun(infos, i);
+                    if (val != null)
+                    {
+                        string path = prefix + string.Join(".", names.GetRange(0, d + 1));
+                        var items = val as System.Collections.IList;
+                        if (items == null)
+                            throw new SchemaException(path + " is an array of structs and expects a list of dictionaries, got " + val.GetType().Name);
+                        int count = SizeElems(s, path, info.kind, info.count, items.Count, ops, ref varBytes);
+                        for (int e = 0; e < count; e++)
+                            if (items[e] is System.Collections.IDictionary ed)
+                                CollectMembers(s, infos, i + 1, end, info.depth + 1, path + "[" + e + "].", ed, ops, ref varBytes);
+                    }
+                    i = end - 1;   // the element template was written through its array
+                    continue;
+                }
                 if (info.kind == STRUCT)
                 {
                     while (srcs.Count <= d + 1) srcs.Add(null);
@@ -4382,8 +4440,8 @@ namespace Rant
                     continue;
                 }
                 if (val == null) continue;
-                string path = string.Join(".", names.GetRange(0, d + 1));
-                var op = new SetOp { Cpath = CStr(path), Path = path, Kind = info.kind, Elem = info.elem,
+                string fpath = prefix + string.Join(".", names.GetRange(0, d + 1));
+                var op = new SetOp { Cpath = CStr(fpath), Path = fpath, Kind = info.kind, Elem = info.elem,
                                      Count = info.count, StrCap = info.str_cap };
                 PrepareOp(op, val, ref varBytes);
                 ops.Add(op);
@@ -4421,6 +4479,11 @@ namespace Rant
                     throw new SchemaException("string too long for " + op.Path + " (cap " + op.StrCap + ")");
             }
             else if (op.Kind == VSTR) SetBytesString(s, buf, cap, cpath, op.Prepared);
+            else if (op.Kind == VARR && op.Elem == STRUCT)
+            {
+                if (Native.rant_set_array_count(buf, cap, s, cpath, (uint)op.Count) == 0)
+                    throw new SchemaException("cannot size " + op.Path + " to " + op.Count + " elements");
+            }
             else if (op.Kind == ARR && op.Elem == STR)
             {
                 var strs = AsStringArray(op.Value);
@@ -4664,32 +4727,55 @@ namespace Rant
                     len = (UIntPtr)data.Length
                 };
                 var root = new Dictionary<string, object>();
-                var dests = new List<Dictionary<string, object>> { root };
-                ushort n = Native.rant_schema_field_count(s);
-                for (ushort i = 0; i < n; i++)
-                {
-                    RantSchemaFieldInfo info;
-                    Native.rant_schema_field_at(s, i, out info);
-                    string name = Str(info.name);
-                    int d = info.depth;
-                    var parent = dests[d];
-                    if (info.kind == STRUCT)
-                    {
-                        var child = new Dictionary<string, object>();
-                        parent[name] = child;
-                        while (dests.Count <= d + 1) dests.Add(null);
-                        dests[d + 1] = child;
-                    }
-                    else
-                    {
-                        RantValue v;
-                        Native.rant_get_value(mb, s, i, out v);
-                        parent[name] = ValueToObj(v);
-                    }
-                }
+                var infos = Infos(s);
+                DecodeMembers(mb, s, infos, 0, infos.Length, 0, -1, root);
                 return root;
             }
             finally { gh.Free(); }
+        }
+
+        // Reads infos[from..to) as the members of one struct at depth baseDepth into dest. A
+        // struct array becomes a list of dictionaries, one per live element, read through the
+        // element indexed getter: elem is that element, or -1 outside any array.
+        private static void DecodeMembers(RantBytes mb, IntPtr s, RantSchemaFieldInfo[] infos, int from, int to,
+                                          int baseDepth, int elem, Dictionary<string, object> dest)
+        {
+            var dests = new List<Dictionary<string, object>> { dest };
+            for (int i = from; i < to; i++)
+            {
+                var info = infos[i];
+                string name = Str(info.name);
+                int d = info.depth - baseDepth;
+                var parent = dests[d];
+                if (IsStructArray(info.kind, info.elem))
+                {
+                    int end = MemberRun(infos, i);
+                    var list = new List<Dictionary<string, object>>();
+                    uint count = Native.rant_array_count_at(mb, s, (ushort)i);
+                    for (uint e = 0; e < count; e++)
+                    {
+                        var ed = new Dictionary<string, object>();
+                        DecodeMembers(mb, s, infos, i + 1, end, info.depth + 1, (int)e, ed);
+                        list.Add(ed);
+                    }
+                    parent[name] = list;
+                    i = end - 1;
+                }
+                else if (info.kind == STRUCT)
+                {
+                    var child = new Dictionary<string, object>();
+                    parent[name] = child;
+                    while (dests.Count <= d + 1) dests.Add(null);
+                    dests[d + 1] = child;
+                }
+                else
+                {
+                    RantValue v;
+                    if (elem < 0) Native.rant_get_value(mb, s, (ushort)i, out v);
+                    else Native.rant_get_value_at(mb, s, (ushort)i, (uint)elem, out v);
+                    parent[name] = ValueToObj(v);
+                }
+            }
         }
 
         private static object ValueToObj(RantValue v)
@@ -4854,6 +4940,7 @@ namespace Rant
                 if (!dict.TryGetValue(fp.WireName, out val) || val == null) continue;
                 object set;
                 if (fp.Kind == STRUCT) set = ToObject(fp.Nested, (Dictionary<string, object>)val);
+                else if (IsStructArray(fp.Kind, fp.Elem)) set = ToArray(fp.Nested, val);
                 else if (fp.Kind == ARR || fp.Kind == VARR || fp.Kind == STR || fp.Kind == VSTR
                          || fp.Kind == MAP) set = val;   // already string / typed array / dict
                 else if (fp.Kind == ENUM) set = Enum.ToObject(fp.Field.FieldType, val);
@@ -4861,6 +4948,18 @@ namespace Rant
                 fp.Field.SetValue(obj, set);
             }
             return obj;
+        }
+
+        // a decoded struct array, one dictionary per element, as a typed array of the element type
+        private static Array ToArray(Type elemType, object val)
+        {
+            var items = val as System.Collections.IList;
+            if (items == null)
+                throw new SchemaException("expected a list of elements for " + elemType + "[], got " + val.GetType().Name);
+            var arr = Array.CreateInstance(elemType, items.Count);
+            for (int i = 0; i < items.Count; i++)
+                arr.SetValue(items[i] is Dictionary<string, object> d ? ToObject(elemType, d) : items[i], i);
+            return arr;
         }
     }
 }

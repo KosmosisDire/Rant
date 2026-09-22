@@ -60,8 +60,17 @@ array. `[RantString(cap)]` caps a string and a plain string is unbounded. On a `
 `[RantString]` alone gives a variable array of capped strings and with `[RantArray]` a
 fixed one. `[RantField("name")]` overrides a wire name, needed for lowercase interop
 names since C# fields are PascalCase. `[RantSchema("Name")]` overrides the type name.
-`[RantTypeName("Timestamp")]` names a field's type with a standard type, and the shape
-must be the canonical one or compiling fails. `node.Schema(typeof(T)).Dsl` prints the DSL.
+`[RantTypeName("Timestamp")]` names a plain field's type with a standard type, and the
+shape must be the canonical one or compiling fails. `node.Schema(typeof(T)).Dsl` prints
+the DSL.
+
+A struct field of another struct, or an array of structs (`Corner[]`, `[RantArray(4)]
+Corner[]`, `Float3[]`), takes that type's name on the wire: the reflected text defines the
+nested type once, as `Corner { X: f32, Y: f32 }`, and each use is the name, so a C or
+Python peer spells `Corner` too. A name has one shape per node, so a nested type called
+`Twist` with fields of its own is refused as the standard `Twist` already is, and the
+exception says so. A struct array's elements are fixed types only, and a dictionary
+source gives them as a list of dictionaries.
 
 A bare type used as a handle's type is the whole schema: `Publisher<bool>`,
 `Subscriber<float[]>`, `VariableDefinition<string>`, `Publisher<Dictionary<string, object>>`

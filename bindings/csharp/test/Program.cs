@@ -7,7 +7,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Rant;
 
-struct Twist { public float Dx; public float Dy; }
+// A nested type of the test's own. Twist would clash with the standard one and be refused.
+struct Velocity { public float Dx; public float Dy; }
 
 // A schema exercising the v4 variable-length kinds: a variable string, a variable
 // scalar array, a variable string array, and a self-describing map.
@@ -30,7 +31,17 @@ struct Pose
     [RantArray(4)] public byte[] Uuid;
     [RantString(16)] public string Frame;
     [RantArray(2), RantString(8)] public string[] Tags;
-    public Twist Vel;
+    public Velocity Vel;
+}
+
+// struct arrays: a nested type defined once and used by name, fixed, variable and standard
+struct Corner { public float X; public float Y; }
+struct Shape
+{
+    public Corner[] Corners;
+    [RantArray(2)] public Corner[] Bounds;
+    public Rant.Float3[] Normals;
+    public Corner Origin;
 }
 
 // patterns leg types
@@ -148,6 +159,50 @@ static class Program
             && Math.Abs(od.Samples[0] - 0.5) < 1e-6 && Math.Abs(od.Samples[1] - 1.5) < 1e-6);
         Check("dict labels (List)", od.Labels != null && od.Labels.Length == 2 && od.Labels[1] == "bb");
         Check("dict map", od.Extras != null && Convert.ToInt64(od.Extras["k"]) == 9);
+
+        // nested types are definitions: written once, used by name, and as array elements
+        {
+            var sh = node.Schema(typeof(Shape));
+            string dsl = sh.Dsl;
+            Console.WriteLine("Shape DSL:\n" + dsl);
+            Check("a nested type is defined once and used by name",
+                  dsl.IndexOf("Corner {") >= 0 && dsl.IndexOf("Corner {") == dsl.LastIndexOf("Corner {")
+                  && dsl.Contains("Corners: Corner[]") && dsl.Contains("Bounds: Corner[2]")
+                  && dsl.Contains("Normals: Float3[]") && dsl.Contains("Origin: Corner"));
+            var same = node.Schema("Corner { X: f32, Y: f32 }\n"
+                                 + "Shape { Corners: Corner[], Bounds: Corner[2], Normals: Float3[], Origin: Corner }");
+            Check("the reflected text is the spelled out text", same.Handle == sh.Handle);
+            var shape = new Shape
+            {
+                Corners = new[] { new Corner { X = 1, Y = 2 }, new Corner { X = 3, Y = 4 }, new Corner { X = 5, Y = 6 } },
+                Bounds = new[] { new Corner { X = -1, Y = -2 }, new Corner { X = 7, Y = 8 } },
+                Normals = new[] { new Rant.Float3 { X = 0, Y = 0, Z = 1 } },
+                Origin = new Corner { X = 9, Y = 10 },
+            };
+            var back = (Shape)sh.Decode(sh.Encode(shape));
+            Check("a variable struct array round trips", back.Corners != null && back.Corners.Length == 3
+                  && back.Corners[0].X == 1 && back.Corners[2].Y == 6);
+            Check("a fixed struct array round trips", back.Bounds != null && back.Bounds.Length == 2
+                  && back.Bounds[0].Y == -2 && back.Bounds[1].X == 7);
+            Check("a standard type array round trips", back.Normals != null && back.Normals.Length == 1
+                  && back.Normals[0].Z == 1);
+            Check("the nested member beside them", back.Origin.X == 9 && back.Origin.Y == 10);
+            var asDict = (Dictionary<string, object>)same.Decode(sh.Encode(shape));
+            Check("a struct array decodes as a list of dictionaries",
+                  asDict["Corners"] is List<Dictionary<string, object>> cl && cl.Count == 3
+                  && Convert.ToDouble(cl[1]["X"]) == 3 && asDict["Origin"] is Dictionary<string, object>);
+            var fromDict = (Shape)sh.Decode(sh.Encode(new Dictionary<string, object>
+            {
+                { "Corners", new List<object> { new Dictionary<string, object> { { "X", 11 }, { "Y", 12 } } } },
+                { "Bounds", new List<object> { new Dictionary<string, object> { { "X", 13 } } } },
+            }));
+            Check("a struct array encodes from a list of dictionaries",
+                  fromDict.Corners.Length == 1 && fromDict.Corners[0].Y == 12 && fromDict.Bounds.Length == 2
+                  && fromDict.Bounds[0].X == 13 && fromDict.Bounds[1].X == 0);
+            var empty = (Shape)sh.Decode(sh.Encode(new Shape()));
+            Check("an unset struct array is empty", empty.Corners != null && empty.Corners.Length == 0
+                  && empty.Bounds != null && empty.Bounds.Length == 2);
+        }
 
         // a tuple has no name of its own: only a handle can name it
         try { node.Schema(typeof((double, double))); Check("nameless tuple refused", false); }
@@ -988,7 +1043,7 @@ static class Program
             Uuid = new byte[] { 1, 2, 3, 4 },
             Frame = "map",
             Tags = new[] { "fast", "ok" },
-            Vel = new Twist { Dx = 0.5f, Dy = 0.25f },
+            Vel = new Velocity { Dx = 0.5f, Dy = 0.25f },
         };
 
         long captured = Timestamp.Now() - 5000;   // "true" 5 ms before the send, to read back
@@ -1021,6 +1076,7 @@ static class Program
             if (ok) Console.WriteLine("PASS");
             var s = pub.Schema(typeof(Pose));
             Console.WriteLine("Pose DSL (for C interop):\n" + s.Dsl);
+            if (!s.Dsl.Contains("Vel: Velocity")) { ok = false; Console.WriteLine("FAIL: the nested type is not named"); }
         }
         else
         {
