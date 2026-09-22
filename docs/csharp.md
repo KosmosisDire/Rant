@@ -61,7 +61,7 @@ array. `[RantString(cap)]` caps a string and a plain string is unbounded. On a `
 fixed one. `[RantField("name")]` overrides a wire name, needed for lowercase interop
 names since C# fields are PascalCase. `[RantSchema("Name")]` overrides the type name.
 `[RantTypeName("Timestamp")]` names a field's type with a standard type, and the shape
-must be the canonical one or compiling fails. `new Schema(typeof(T)).Dsl` prints the DSL.
+must be the canonical one or compiling fails. `node.Schema(typeof(T)).Dsl` prints the DSL.
 
 A bare type used as a handle's type is the whole schema: `Publisher<bool>`,
 `Subscriber<float[]>`, `VariableDefinition<string>`, `Publisher<Dictionary<string, object>>`
@@ -74,16 +74,22 @@ the handle names it after itself in PascalCase: `AddReq` and `AddRsp` on functio
 `AddPrg` on a task, `MotorSpeed` on a topic or variable named `motor/speed`. Every run of
 letters and digits is a word and everything else is dropped. Its fields are `Item1`,
 `Item2` and so on. Both ends of a C# pair derive the same name, and another language must
-spell it. `new Schema(typeof((double, double)))` on its own throws.
+spell it. `node.Schema(typeof((double, double)))` on its own throws.
 
 Every typed handle also takes its schema as an optional `Schema` argument (`schema:` on a
 topic or variable, `requestSchema:`, `responseSchema:` and `progressSchema:` on a function
-or task), usually compiled from DSL text. The type argument is then only the C# shape the
-values pass through and the wire type is exactly the given schema: `Subscriber<string[]>`
-with `new Schema("string<128>[]")` reads a bare capped string array, and a struct sent
+or task), usually compiled from DSL text with `node.Schema(text)`. The type argument is
+then only the C# shape the values pass through and the wire type is exactly the given
+schema: `Subscriber<string[]>`
+with `node.Schema("string<128>[]")` reads a bare capped string array, and a struct sent
 under a schema with a user named type carries that name. A `byte[]` type is the exception:
 it carries the encoded message bytes as is, so `Subscriber<byte[]>` with no schema is a raw
 topic and `RemoteFunction<byte[], byte[]>` with explicit schemas is the untyped form.
+
+`node.Schema(text)` compiles in the node's registry: every definition stays in scope for
+the node's later compiles, and a name on its own is a schema. The node owns every `Schema`
+for its life, one handle per shape, so there is nothing to dispose, and a read after
+`Close` throws.
 
 The standard types of docs/stdtypes.md ship as mirror structs with lowercase wire names,
 `Timestamp.Now()` is the Timestamp clock, and the video enums carry the wire values.

@@ -13,9 +13,6 @@ when full. `rant_allocator_heap(page_size)` is that over the process heap and is
 caller with no page source of its own uses, including every binding. Exhaustion surfaces
 as `RANT_E_OOM`. `max_bytes` is a runaway guard (0 = `RANT_MEM_DEFAULT_MAX`).
 
-`rant_heap_realloc` is the same heap in `RantAllocFn` shape, for `rant_schema_compile`
-and `rant_schema_free`.
-
 Two intents, explicit not size based. `rant_allocator_fixed` bumps a shared page,
 cheapest, never individually freed. `rant_allocator_alloc` is a `RantAllocFn` (pass `&a`
 as user) and returns a freeable block. Anything that grows uses the freeable form, so it

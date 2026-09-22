@@ -174,7 +174,8 @@ typedef enum {
     RANT_E_BAD_ADDRESS,        /* a configured address could not be parsed, refused at open */
     RANT_E_BAD_NAME,           /* a create's name is empty, too long or carries '@': .topic_name */
     RANT_E_STATE,              /* a create refused in this state: from a callback, or the reserve is full */
-    RANT_E_BAD_SCHEMA          /* a create's schema failed to parse: .topic_name */
+    RANT_E_BAD_SCHEMA          /* rant_node_schema refused a text or wire: .schema_detail says where.
+                                  Or a create's schema failed to parse: .topic_name */
 } RantErrorKind;
 
 typedef struct {

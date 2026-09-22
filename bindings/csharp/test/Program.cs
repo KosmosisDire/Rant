@@ -74,7 +74,8 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        using var s = new Schema(typeof(Sensor));
+        using var node = new RantNode("rt", Local(51, Threading.Manual));
+        var s = node.Schema(typeof(Sensor));
         Console.WriteLine("Sensor DSL:\n" + s.Dsl);
         var src = new Sensor
         {
@@ -125,7 +126,7 @@ static class Program
 
         // a text schema of the same shape decodes to a dictionary, the form bridges and
         // observers use, and it must surface the variable kinds too
-        using var text = new Schema(s.Dsl);
+        var text = node.Schema(s.Dsl);
         var fd = (Dictionary<string, object>)text.Decode(raw);
         Check("fields note", (string)fd["Note"] == src.Note);
         Check("fields samples", fd["Samples"] is float[] fs && fs.Length == 3);
@@ -149,7 +150,7 @@ static class Program
         Check("dict map", od.Extras != null && Convert.ToInt64(od.Extras["k"]) == 9);
 
         // a tuple has no name of its own: only a handle can name it
-        try { new Schema(typeof((double, double))); Check("nameless tuple refused", false); }
+        try { node.Schema(typeof((double, double))); Check("nameless tuple refused", false); }
         catch (SchemaException) { Check("nameless tuple refused", true); }
 
         // an over-cap element in a variable string array must throw
@@ -366,9 +367,9 @@ static class Program
             var xferR = cli.RemoteTask<XferReq, XferPrg, XferRsp>("xfer");
             var foreverR = cli.RemoteTask<XferReq, XferPrg, XferRsp>("forever");
             var stubbornR = cli.RemoteTask<XferReq, XferPrg, XferRsp>("stubborn");
-            var reqS = new Schema(typeof(XferReq));
-            var prgS = new Schema(typeof(XferPrg));
-            var rspS = new Schema(typeof(XferRsp));
+            var reqS = cli.Schema(typeof(XferReq));
+            var prgS = cli.Schema(typeof(XferPrg));
+            var rspS = cli.Schema(typeof(XferRsp));
             // the raw form: byte[] types carry the encoded messages as is under explicit schemas
             var xferRaw = cli.RemoteTask<byte[], byte[], byte[]>("xfer2",
                 requestSchema: reqS, progressSchema: prgS, responseSchema: rspS);
@@ -475,28 +476,34 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        using (var f3 = new Schema("Float3"))
-        using (var mirror = new Schema(typeof(Rant.Float3)))
+        using var a = new RantNode("sa", Local(52, Threading.Manual));
+        using var b = new RantNode("sb", Local(52, Threading.Manual));
         {
+            var f3 = a.Schema("Float3");
+            var mirror = a.Schema(typeof(Rant.Float3));
             Check("Float3 compiles by name alone, golden hash", f3.Hash == HashFloat3);
             Check("Float3 is 12 message bytes", SizeOf(f3) == 12);
             Check("the mirror struct IS that type", mirror.Hash == HashFloat3);
+            Check("the same text is the same handle", a.Schema("Float3").Handle == f3.Handle);
         }
         // a name narrows: an anonymous field of the same shape reads a Transform field, never
-        // the reverse, and Transform/Twist are distinct names never mistaken for each other
-        using (var named = new Schema("W { at: Transform }"))
-        using (var bare = new Schema("W { at: { translation: { x: f64, y: f64, z: f64 }," +
-                                     "         rotation: { x: f64, y: f64, z: f64, w: f64 }," +
-                                     "         parent: string<30> } }"))
-        using (var xform = new Schema("Transform"))
-        using (var twist = new Schema("Twist"))
+        // the reverse, and Transform/Twist are distinct names never mistaken for each other.
+        // Two shapes of W, so each goes on its own node
         {
+            var named = a.Schema("W { at: Transform }");
+            var bare = b.Schema("W { at: { translation: { x: f64, y: f64, z: f64 }," +
+                                "         rotation: { x: f64, y: f64, z: f64, w: f64 }," +
+                                "         parent: string<30> } }");
+            var xform = a.Schema("Transform");
+            var twist = a.Schema("Twist");
             Check("an anonymous field of the same shape reads a Transform field",
                   bare.CanRead(named) && !named.CanRead(bare));
             Check("Transform and Twist never cross-wire", !twist.CanRead(xform));
+            try { a.Schema("W { at: Twist }"); Check("a second shape of W on one node is refused", false); }
+            catch (SchemaException e) { Check("a second shape of W on one node is refused: " + e.Message, true); }
         }
-        using (var sch = new Schema(typeof(Track)))
         {
+            var sch = a.Schema(typeof(Track));
             string text = sch.Dsl;
             Check("the reflected schema spells the names, not the shapes",
                   text.Contains("at: Transform") && text.Contains("when: Timestamp")
@@ -528,8 +535,8 @@ static class Program
         };
         foreach (var (name, clr, gold) in video)
         {
-            using var text = new Schema(name);
-            using var mirror = new Schema(clr);
+            var text = a.Schema(name);
+            var mirror = a.Schema(clr);
             Console.WriteLine($"       {name}: text 0x{text.Hash:x16} mirror 0x{mirror.Hash:x16}");
             Check(name + " compiles by name alone, golden hash", text.Hash == gold);
             Check("the " + name + " mirror IS that type", mirror.Hash == gold);
@@ -639,9 +646,10 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        using (var sb = new Schema(typeof(bool)))
-        using (var sa = new Schema(typeof(float[])))
+        using var node = new RantNode("vr", Local(53, Threading.Manual));
         {
+            var sb = node.Schema(typeof(bool));
+            var sa = node.Schema(typeof(float[]));
             Check("bool canonical hash", sb.Hash == HashBool);
             Check("float[] canonical hash", sa.Hash == HashF32Arr);
             Check("bool dsl", sb.Dsl == "bool\n");
@@ -649,8 +657,8 @@ static class Program
             var f = sb.Fields;
             Check("bare root is one anonymous field",
                   f.Length == 1 && sb.Name == "" && f[0].Name == "" && f[0].Kind == FieldType.Bool);
-            using (var text = new Schema("bool"))
-                Check("text `bool` == typeof(bool)", text.Hash == sb.Hash);
+            var text = node.Schema("bool");
+            Check("text `bool` == typeof(bool)", text.Hash == sb.Hash);
         }
         // every bare kind round-trips as a plain value
         (Type, object)[] cases =
@@ -661,17 +669,17 @@ static class Program
         };
         foreach (var (t, v) in cases)
         {
-            using var s = new Schema(t);
+            var s = node.Schema(t);
             object back = s.Decode(s.Encode(v));
             Check($"round-trip {s.Dsl.Trim()} -> {back}", Equals(back, v));
         }
-        using (var s = new Schema(typeof(float[])))
         {
+            var s = node.Schema(typeof(float[]));
             var back = (float[])s.Decode(s.Encode(new[] { 1.5f, -2.5f }));
             Check("round-trip f32[]", back.Length == 2 && back[0] == 1.5f && back[1] == -2.5f);
         }
-        using (var s = new Schema(typeof(Dictionary<string, object>)))
         {
+            var s = node.Schema(typeof(Dictionary<string, object>));
             var back = (Dictionary<string, object>)s.Decode(
                 s.Encode(new Dictionary<string, object> { { "battery", 87 } }));
             Check("round-trip map", back.Count == 1 && Convert.ToInt64(back["battery"]) == 87);
@@ -1011,8 +1019,8 @@ static class Program
                                   + $" written={Received.WrittenUs} recv={Received.RecvUs}");
             }
             if (ok) Console.WriteLine("PASS");
-            using (var s = new Schema(typeof(Pose)))
-                Console.WriteLine("Pose DSL (for C interop):\n" + s.Dsl);
+            var s = pub.Schema(typeof(Pose));
+            Console.WriteLine("Pose DSL (for C interop):\n" + s.Dsl);
         }
         else
         {

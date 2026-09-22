@@ -80,8 +80,6 @@ typedef void (*RantMsgFn)(const RantMsg *msg);
 /* The process heap as an allocator, for a caller with no page source of its own.
  * page_size 0 is the default. spec/allocation.md explains the modes. */
 RANT_API RantAllocator rant_allocator_heap(uint32_t page_size);
-/* The process heap as a RantAllocFn, for rant_schema_compile and rant_schema_free. */
-RANT_API void           *rant_heap_realloc(void *user, void *ptr, size_t size);
 
 /* Opens a node on alloc, which it copies and resets on close, so use one per node. alloc
  * is required and NULL refuses the open with RANT_E_OOM. name NULL gives an auto name,
@@ -113,15 +111,29 @@ RANT_API void           rant_node_unlock(RantNode *n);
 /* Sends that evicted never sent history after the bounded wait, since open. */
 RANT_API uint32_t       rant_node_evicted_unsent(RantNode *n);
 
+/* Compiles schema text in the node's registry. Every definition stays in scope for each
+ * later compile on this node, and a name on its own is a schema. The node owns the result,
+ * one handle per shape, freed at close. NULL fires RANT_E_BAD_SCHEMA, the place is in
+ * rant_last_error(n).schema_detail. docs/stdtypes.md has the text. */
+RANT_API const RantSchema *rant_node_schema(RantNode *n, const char *text);
+/* The same from a schema's wire bytes, such as a peer's, bounds checked. Defines no name. */
+RANT_API const RantSchema *rant_node_schema_parse(RantNode *n, const void *wire, size_t wire_len);
+
 #ifndef RANT_NO_STDTYPES
 /* The two standard type values that need a platform: the wall clock a Timestamp counts
  * from, and a random version 4 Uuid. Neither needs a node. */
 RANT_API RantTimestamp rant_timestamp_now(void);
 RANT_API void              rant_uuid_new(RantUuid *out);
+/* Recognizes a standard type in a schema we did not write: the name and the shape must
+ * both match the registry's. The result is stable per schema, so cache it. */
+RANT_API RantStdType rant_std_recognize(RantNode *n, const RantSchema *s);
+RANT_API RantStdType rant_std_recognize_field(RantNode *n, const RantSchema *s, uint16_t field);
+RANT_API RantStdType rant_std_recognize_elem(RantNode *n, const RantSchema *s, uint16_t field);
 #endif
 
-/* Creates a topic. name is the identity, schema is copied in, NULL means raw bytes. A
- * retired slot is reused. NULL when the reserve is full, the name is bad or out of memory. */
+/* Creates a topic. name is the identity, schema is registered in this node, NULL means raw
+ * bytes. A retired slot is reused. NULL when the reserve is full, the name is bad or out of
+ * memory. */
 RANT_API RantTopic *rant_node_create_topic(RantNode *n, const char *name, RantRole role,
                                                const RantSchema *schema, const RantTopicOpts *opts);
 

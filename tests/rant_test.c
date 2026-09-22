@@ -153,6 +153,13 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
 #define RANT_IMPLEMENTATION
 #include "rant.h"   /* discovery + transport + node runtime */
 
+/* compiles text in a throwaway registry on a, so the schema lives until a is reset */
+static RantSchema *tcompile(RantAllocator *a, const char *text, const char **err){
+    i_RantRegistry r;
+    i_rant_registry_init(&r, rant_allocator_alloc, a);
+    return i_rant_registry_compile(&r, text, err);
+}
+
 #undef setsockopt
 #ifdef _WIN32
 #undef sendto
@@ -2230,7 +2237,7 @@ static void schema_print_roundtrip(RantAllocator *ma, RantSchema *s, const char 
     rant_schema_print(s, buf, sizeof buf);
     ST_CHECK(need > 0 && need < sizeof buf && strlen(buf) == (size_t)need,
              "schema-print: %s measures (%u) and matches the written length", label, need);
-    back = rant_schema_compile(rant_allocator_alloc, ma, buf, NULL);
+    back = tcompile(ma, buf, NULL);
     ST_CHECK(back && rant_schema_hash(back) == rant_schema_hash(s),
              "schema-print: %s DSL recompiles to the same wire (hash)", label);
 }
@@ -2250,7 +2257,7 @@ static void schema_dsl_checks(void){
         "    velocity: { dx: f32, dy: f32 }\n"
         "}";
     RantSchema *txt;
-    txt = rant_schema_compile(rant_allocator_alloc, &ma, POSE, NULL);
+    txt = tcompile(&ma, POSE, NULL);
     ST_CHECK(txt != NULL, "schema-dsl: compiles");
     /* pinned: the wire of a nested struct plus a fixed array must never drift */
     ST_CHECK(txt && rant_schema_hash(txt) == 0xf9a92ce466a346fdULL,
@@ -2314,7 +2321,7 @@ static void schema_dsl_checks(void){
         static const char TAGGED[] =
             "Tagged { id: u32, name: string<12>, labels: string<8>[3], meta: { note: string<4> } }";
         RantSchema *ts;
-        ts = rant_schema_compile(rant_allocator_alloc, &ma, TAGGED, NULL);
+        ts = tcompile(&ma, TAGGED, NULL);
         ST_CHECK(ts != NULL, "schema-dsl: strings compile");
         ST_CHECK(ts && rant_schema_hash(ts) == 0x36a9acceb68c37c9ULL,
                  "schema-dsl: Tagged canonical hash %016llx", (unsigned long long)(ts ? rant_schema_hash(ts) : 0));
@@ -2370,8 +2377,8 @@ static void schema_dsl_checks(void){
                          (unsigned)v.len);
             }
         }
-        {   RantSchema *r_ok    = rant_schema_compile(rant_allocator_alloc, &ma, "Tagged { name: string<12> }", NULL);
-            RantSchema *r_bad = rant_schema_compile(rant_allocator_alloc, &ma, "Tagged { name: string<10> }", NULL);
+        {   RantSchema *r_ok    = tcompile(&ma, "Tagged { name: string<12> }", NULL);
+            RantSchema *r_bad = tcompile(&ma, "Tagged { name: string<10> }", NULL);
             ST_CHECK(r_ok && r_bad && ts && rant_schema_subset(r_ok, ts) && !rant_schema_subset(r_bad, ts),
                      "schema-dsl: string subset needs the same cap");
         }
@@ -2381,7 +2388,7 @@ static void schema_dsl_checks(void){
         static const char VDSL[] =
             "Var { id: u32, note: string, samples: f32[], labels: string<6>[], extras: map, tail: u8 }";
         RantSchema *vs;
-        vs = rant_schema_compile(rant_allocator_alloc, &ma, VDSL, NULL);
+        vs = tcompile(&ma, VDSL, NULL);
         ST_CHECK(vs != NULL, "schema-var: compiles");
         ST_CHECK(vs && rant_schema_hash(vs) == 0x1c5e7551f4343dbfULL,
                  "schema-var: Var canonical hash %016llx", (unsigned long long)(vs ? rant_schema_hash(vs) : 0));
@@ -2494,17 +2501,17 @@ static void schema_dsl_checks(void){
                      "schema-var: shrinking a frame memmoves the tail intact");
 
             {   /* subset + rebase: the reader skips frames it does not declare */
-                RantSchema *sub = rant_schema_compile(rant_allocator_alloc, &ma,
+                RantSchema *sub = tcompile(&ma,
                     "Var { tail: u8, samples: f32[], extras: map }", NULL);
-                RantSchema *bad1 = rant_schema_compile(rant_allocator_alloc, &ma,
+                RantSchema *bad1 = tcompile(&ma,
                     "Var { note: string<8> }", NULL);     /* capped vs variable */
-                RantSchema *bad2 = rant_schema_compile(rant_allocator_alloc, &ma,
+                RantSchema *bad2 = tcompile(&ma,
                     "Var { samples: f64[] }", NULL);      /* element kind differs */
                 ST_CHECK(sub && rant_schema_subset(sub, vs), "schema-var: variable subset matches");
                 ST_CHECK(bad1 && !rant_schema_subset(bad1, vs)
                       && bad2 && !rant_schema_subset(bad2, vs),
                          "schema-var: capped-vs-variable and element mismatches refused");
-                {   RantSchema *rb = rant_schema_rebase(sub, vs, rant_allocator_alloc, &ma);
+                {   RantSchema *rb = i_rant_schema_rebase(sub, vs, rant_allocator_alloc, &ma);
                     ST_CHECK(rb != NULL, "schema-var: rebase");
                     if (rb){
                         uint32_t rlen = rant_schema_msg_len(rb, m, sizeof m);
@@ -2525,7 +2532,7 @@ static void schema_dsl_checks(void){
         }
     }
     {   /* schema-print: two struct levels deep, and a struct followed by more top-level fields */
-        RantSchema *deep = rant_schema_compile(rant_allocator_alloc, &ma,
+        RantSchema *deep = tcompile(&ma,
             "Deep { a: u32, g: { b: u16, inner: { c: i8, d: f64 }, e: u8 }, z: string<5>, arr: i32[3] }", NULL);
         schema_print_roundtrip(&ma, deep, "Deep (two nesting levels)");
     }
@@ -2553,12 +2560,12 @@ static void schema_dsl_checks(void){
         unsigned i, ok = 1;
         for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
             const char *ep = NULL;
-            RantSchema *s = rant_schema_compile(rant_allocator_alloc, &ma, bad[i], &ep);
+            RantSchema *s = tcompile(&ma, bad[i], &ep);
             if (s || !ep || ep < bad[i] || ep > bad[i] + strlen(bad[i])) ok = 0;
         }
         ST_CHECK(ok, "schema-dsl: malformed text rejected with a position");
     }
-    {   RantSchema *anon = rant_schema_compile(rant_allocator_alloc, &ma, "{ x: f64 }", NULL);
+    {   RantSchema *anon = tcompile(&ma, "{ x: f64 }", NULL);
         ST_CHECK(anon && rant_schema_name(anon).len == 0 && rant_schema_field_index(anon, "x") == 0,
                  "schema-dsl: a struct body on its own is an anonymous struct");
     }
@@ -2568,7 +2575,7 @@ static void schema_dsl_checks(void){
             "Robot { id: u32,"
             " mode: enum<u8> { Idle=0, Running=1, Charging=2, Fault=3 },"
             " step: enum<i8> { Back=-1, Hold, Fwd } }";   /* auto: Hold=0, Fwd=1 */
-        RantSchema *es = rant_schema_compile(rant_allocator_alloc, &ma, EDSL, NULL);
+        RantSchema *es = tcompile(&ma, EDSL, NULL);
         ST_CHECK(es != NULL, "schema-enum: compiles");
         if (es){
             RantSchemaFieldInfo fi; int mi = rant_schema_field_index(es, "mode");
@@ -2615,9 +2622,9 @@ static void schema_dsl_checks(void){
 
             {   /* subset: the same width is compatible despite a different option table, a width
                    mismatch is refused */
-                RantSchema *rd = rant_schema_compile(rant_allocator_alloc, &ma,
+                RantSchema *rd = tcompile(&ma,
                     "Robot { mode: enum<u8> { Idle=0, Down=7 } }", NULL);   /* fewer options */
-                RantSchema *bw = rant_schema_compile(rant_allocator_alloc, &ma,
+                RantSchema *bw = tcompile(&ma,
                     "Robot { mode: enum<u16> { Idle=0 } }", NULL);            /* wrong width */
                 ST_CHECK(rd && rant_schema_subset(rd, es), "schema-enum: same-width subset (names advisory)");
                 ST_CHECK(bw && !rant_schema_subset(bw, es), "schema-enum: backing-width mismatch refused");
@@ -2641,7 +2648,7 @@ static void schema_advert_checks(void){
     int t, pose_ok=0, raw_ok=0;
     const i_RantDiscoveryPeerView *peers; uint16_t n_peers=0;
 
-    sch = rant_schema_compile(rant_allocator_alloc, &ma, "Pose { x: f64, y: f64, tags: u8[16] }", NULL);
+    sch = tcompile(&ma, "Pose { x: f64, y: f64, tags: u8[16] }", NULL);
     ST_CHECK(sch!=NULL, "announce: schema compiles");
     if (!sch) return;
 
@@ -2658,7 +2665,21 @@ static void schema_advert_checks(void){
     rant_node_create_topic(P, "sch/raw",  RANT_PUB_ONLY, NULL, &co);         /* index 1, raw */
     rant_node_create_topic(S, "sch/pose", RANT_SUB_ONLY, sch, &co);
     ST_CHECK(pc!=NULL, "announce: topics created");
-    rant_schema_free(sch, rant_allocator_alloc, &ma);       /* node owns its copy: caller's freed NOW */
+    {   RantEvent le; RantBytes w = rant_schema_wire(sch);
+        ST_CHECK(pc && rant_node_schema_parse(P, w.data, w.len) == rant_topic_schema(pc),
+                 "announce: a create registers its schema in the node, one handle per shape");
+        ST_CHECK(rant_node_schema(P, "RantLog { x: u8 }") == NULL, "announce: a builtin name is reserved");
+        le = rant_last_error(P);
+        ST_CHECK(le.error == RANT_E_BAD_SCHEMA && le.schema_detail
+                 && strstr(le.schema_detail, "near: RantLog") != NULL,
+                 "announce: the refusal says where (%s)", le.schema_detail ? le.schema_detail : "null");
+        ST_CHECK(rant_node_schema(P, "Open {") == NULL && rant_last_error(P).schema_detail
+                 && strstr(rant_last_error(P).schema_detail, "at the end") != NULL,
+                 "announce: a truncated text is refused at the end");
+        ST_CHECK(rant_node_schema(P, "Pose { x: f64 }") != NULL && rant_node_schema(P, "Pose") != NULL,
+                 "announce: a definition made on the node names the next compile");
+    }
+    i_rant_schema_free(sch, rant_allocator_alloc, &ma);       /* the node registered its own: freed NOW */
 
     /* a typed-typed match through hash nomination + detail verification */
     for (t=0;t<800 && rant_topic_match_count(pc)==0;t++){ rant_node_poll(P,2); rant_node_poll(S,2); }
@@ -2727,12 +2748,12 @@ static void schema_bind_checks(void){
     RantTopic *pc, *pc_bad; RantTopicOpts co; RantAddr seed;
     RantSchema *W, *R, *WB, *RB; int t;
     /* writer: the full Pose. reader: a reordered subset of it */
-    W  = rant_schema_compile(rant_allocator_alloc, &ma,
+    W  = tcompile(&ma,
              "Pose { stamp: u64, x: f64, y: f64, tag: u8 }", NULL);      /* 25 B */
-    R  = rant_schema_compile(rant_allocator_alloc, &ma,
+    R  = tcompile(&ma,
              "Pose { y: f64, stamp: u64 }", NULL);
-    WB = rant_schema_compile(rant_allocator_alloc, &ma, "Bad { v: u64 }", NULL);
-    RB = rant_schema_compile(rant_allocator_alloc, &ma, "Bad { v: f64 }", NULL);
+    WB = tcompile(&ma, "Bad { v: u64 }", NULL);
+    RB = tcompile(&ma, "Bad { v: f64 }", NULL);
     ST_CHECK(W && R && WB && RB, "schema-bind: schemas compile");
     ST_CHECK(W && R && rant_schema_subset(R, W) && !rant_schema_subset(W, R),
              "schema-bind: subset is one-way (reader within writer)");
@@ -2804,7 +2825,7 @@ static RantSchema *be_build_schema(RantAllocator *a){
     int i, at = sprintf(text, "Jobs { id: u32, job: enum<u16> {");
     for (i=0;i<BE_N;i++) at += sprintf(text + at, " job_%04d,", i);
     sprintf(text + at, " } }");
-    return rant_schema_compile(rant_allocator_alloc, a, text, NULL);
+    return tcompile(a, text, NULL);
 }
 static void schema_bigenum_checks(void){
     RantAllocator pa = rant_allocator_heap(0);
@@ -2831,11 +2852,11 @@ static void schema_bigenum_checks(void){
         wire = rant_schema_wire(es);
         ST_CHECK(wire.len > RANT_DGRAM_MAX,
                  "bigenum: schema wire exceeds one datagram (%u bytes)", (unsigned)wire.len);
-        back = rant_schema_parse(wire.data, wire.len, rant_allocator_alloc, &ma);
+        back = i_rant_schema_parse(wire.data, wire.len, rant_allocator_alloc, &ma);
         ST_CHECK(back && rant_schema_hash(back)==rant_schema_hash(es)
                  && rant_schema_enum_count(back,(uint16_t)ji)==BE_N,
                  "bigenum: wire round-trips (parse preserves hash + count)");
-        if (back) rant_schema_free(back, rant_allocator_alloc, &ma);
+        if (back) i_rant_schema_free(back, rant_allocator_alloc, &ma);
     }
 
     memset(&co,0,sizeof co); co.qos.keep_last=4;
@@ -2848,7 +2869,7 @@ static void schema_bigenum_checks(void){
     S = rant_node_open(&sa, "be-sub", be_on_message, NULL, &so);
     ST_CHECK(P&&S, "bigenum: nodes open");
     if (!(P&&S)){ if(P)rant_node_close(P,0); if(S)rant_node_close(S,0);
-                  rant_schema_free(es,rant_allocator_alloc,&ma); rant_allocator_reset(&ma); return; }
+                  i_rant_schema_free(es,rant_allocator_alloc,&ma); rant_allocator_reset(&ma); return; }
     pc = rant_node_create_topic(P, "be/jobs", RANT_PUB_ONLY, es, &co);
     rant_node_create_topic(S, "be/jobs", RANT_SUB_ONLY, es, &co);
     ST_CHECK(pc!=NULL, "bigenum: topic created");
@@ -2868,7 +2889,7 @@ static void schema_bigenum_checks(void){
                  (long long)be_val, be_label);
     }
     rant_node_close(P,1); rant_node_close(S,1);
-    rant_schema_free(es, rant_allocator_alloc, &ma);
+    i_rant_schema_free(es, rant_allocator_alloc, &ma);
     rant_allocator_reset(&ma);
 }
 
@@ -2881,7 +2902,7 @@ static const uint64_t SR_HASH_F32ARR = 0x314844e3386a1fc4ULL;  /* `f32[]` canoni
    same wire, and reflects as a single anonymous field with the expected layout */
 static void sr_root_case(RantAllocator *ma, const char *text, uint8_t kind,
                          uint32_t size, uint32_t msg_min){
-    RantSchema *s = rant_schema_compile(rant_allocator_alloc, ma, text, NULL);
+    RantSchema *s = tcompile(ma, text, NULL);
     RantSchema *back = NULL; RantSchemaFieldInfo fi; char buf[128];
     ST_CHECK(s != NULL, "schema-root: '%s' compiles", text);
     if (!s) return;
@@ -2890,7 +2911,7 @@ static void sr_root_case(RantAllocator *ma, const char *text, uint8_t kind,
              "schema-root: '%s' prints back bare (got '%s')", text, buf);
     ST_CHECK(rant_schema_print(s, NULL, 0) == (uint32_t)strlen(buf),
              "schema-root: '%s' print measures with (NULL,0)", text);
-    back = rant_schema_compile(rant_allocator_alloc, ma, buf, NULL);
+    back = tcompile(ma, buf, NULL);
     ST_CHECK(back && rant_schema_hash(back) == rant_schema_hash(s),
              "schema-root: '%s' print recompiles to the same wire (hash)", text);
     ST_CHECK(rant_schema_field_count(s) == 1 && rant_schema_field_at(s, 0, &fi)
@@ -2902,8 +2923,8 @@ static void sr_root_case(RantAllocator *ma, const char *text, uint8_t kind,
     ST_CHECK(rant_schema_size(s) == size && rant_schema_msg_min(s) == msg_min,
              "schema-root: '%s' layout (size=%u min=%u)", text,
              rant_schema_size(s), rant_schema_msg_min(s));
-    if (back) rant_schema_free(back, rant_allocator_alloc, ma);
-    rant_schema_free(s, rant_allocator_alloc, ma);
+    if (back) i_rant_schema_free(back, rant_allocator_alloc, ma);
+    i_rant_schema_free(s, rant_allocator_alloc, ma);
 }
 
 static int sr_flag_recv, sr_flag_val, sr_note_recv, sr_samples_recv, sr_map_recv, sr_enum_recv;
@@ -2991,13 +3012,13 @@ static void schema_root_checks(void){
     sr_root_case(&ma, "map",    RANT_MAP,    0, 4);
     sr_root_case(&ma, "enum<u8> { Idle = 0, Run = 1, Fault = 2 }", RANT_ENUM, 1, 1);
 
-    sb    = rant_schema_compile(rant_allocator_alloc, &ma, "bool", NULL);
-    su8   = rant_schema_compile(rant_allocator_alloc, &ma, "u8", NULL);
-    sstr  = rant_schema_compile(rant_allocator_alloc, &ma, "string", NULL);
-    sarr  = rant_schema_compile(rant_allocator_alloc, &ma, "f32[]", NULL);
-    smap  = rant_schema_compile(rant_allocator_alloc, &ma, "map", NULL);
-    senum = rant_schema_compile(rant_allocator_alloc, &ma, "enum<u8> { Idle, Run, Fault }", NULL);
-    swrap = rant_schema_compile(rant_allocator_alloc, &ma, "Wrap { v: bool }", NULL);
+    sb    = tcompile(&ma, "bool", NULL);
+    su8   = tcompile(&ma, "u8", NULL);
+    sstr  = tcompile(&ma, "string", NULL);
+    sarr  = tcompile(&ma, "f32[]", NULL);
+    smap  = tcompile(&ma, "map", NULL);
+    senum = tcompile(&ma, "enum<u8> { Idle, Run, Fault }", NULL);
+    swrap = tcompile(&ma, "Wrap { v: bool }", NULL);
     ST_CHECK(sb && su8 && sstr && sarr && smap && senum && swrap,
              "schema-root: the e2e schemas compile");
     if (!(sb && su8 && sstr && sarr && smap && senum && swrap)){ rant_allocator_reset(&ma); return; }
@@ -3011,28 +3032,28 @@ static void schema_root_checks(void){
     ST_CHECK(rant_schema_wire(sb).len == 3, "schema-root: `bool` wire is 3 bytes (%u)",
              (unsigned)rant_schema_wire(sb).len);
 
-    ST_CHECK(rant_schema_compile(rant_allocator_alloc, &ma, "Temperature: f32", NULL) == NULL
-          && rant_schema_compile(rant_allocator_alloc, &ma, "bool bool", NULL) == NULL,
+    ST_CHECK(tcompile(&ma, "Temperature: f32", NULL) == NULL
+          && tcompile(&ma, "bool bool", NULL) == NULL,
              "schema-root: a named bare root and trailing garbage are compile errors");
     {   /* the wire: a bare root round trips, a named one is an alias, but the name may only
            ride the header, so a named type in root position stays refused */
         RantBytes w = rant_schema_wire(sarr);
-        RantSchema *rt = rant_schema_parse(w.data, w.len, rant_allocator_alloc, &ma);
+        RantSchema *rt = i_rant_schema_parse(w.data, w.len, rant_allocator_alloc, &ma);
         RantSchema *alias; uint8_t named[6];
         ST_CHECK(rt && rant_schema_hash(rt) == rant_schema_hash(sarr)
                  && rant_schema_field_count(rt) == 1,
                  "schema-root: a bare root parses back from its wire");
-        if (rt) rant_schema_free(rt, rant_allocator_alloc, &ma);
+        if (rt) i_rant_schema_free(rt, rant_allocator_alloc, &ma);
         named[0] = (uint8_t)RANT_SCHEMA_WIRE_VERSION;     /* [ver][namelen 1]['x'][BOOL] */
         named[1] = 1; named[2] = 'x'; named[3] = (uint8_t)RANT_BOOL;
-        alias = rant_schema_parse(named, 4, rant_allocator_alloc, &ma);
+        alias = i_rant_schema_parse(named, 4, rant_allocator_alloc, &ma);
         ST_CHECK(alias && rant_schema_name(alias).len == 1
                  && rant_schema_hash(alias) != rant_schema_hash(sb),
                  "schema-root: a named bare root on the wire is an alias, distinct from `bool`");
-        if (alias) rant_schema_free(alias, rant_allocator_alloc, &ma);
+        if (alias) i_rant_schema_free(alias, rant_allocator_alloc, &ma);
         named[1] = 0;                                   /* [ver][0][NAMED][1]['x'][BOOL] */
         named[2] = (uint8_t)RANT_NAMED; named[3] = 1; named[4] = 'x'; named[5] = (uint8_t)RANT_BOOL;
-        ST_CHECK(rant_schema_parse(named, sizeof named, rant_allocator_alloc, &ma) == NULL,
+        ST_CHECK(i_rant_schema_parse(named, sizeof named, rant_allocator_alloc, &ma) == NULL,
                  "schema-root: a NAMED type in root position is refused (the header names it)");
     }
 
@@ -3090,10 +3111,10 @@ static void schema_root_checks(void){
         rant_schema_subset_why(swrap, sb, why, sizeof why);
         ST_CHECK(strcmp(why, "root: reader struct 'Wrap', writer bool") == 0,
                  "schema-root: subset_why explains struct vs bare ('%s')", why);
-        rb = rant_schema_rebase(sarr, sarr, rant_allocator_alloc, &ma);
+        rb = i_rant_schema_rebase(sarr, sarr, rant_allocator_alloc, &ma);
         ST_CHECK(rb && rant_schema_field_count(rb) == 1 && rant_schema_msg_min(rb) == 4,
                  "schema-root: rebase of a bare root stays valid");
-        if (rb) rant_schema_free(rb, rant_allocator_alloc, &ma);
+        if (rb) i_rant_schema_free(rb, rant_allocator_alloc, &ma);
     }
 
     /* ---- end to end: one topic per root kind, plus the two refusals ---- */
@@ -3189,9 +3210,9 @@ static void schema_root_checks(void){
    members at any depth, and the static stride refusals. Everything round trips print. */
 static RantAllocator sv_ma;
 static RantSchema *sv(const char *text){                      /* compile, or NULL */
-    return rant_schema_compile(rant_allocator_alloc, &sv_ma, text, NULL);
+    return tcompile(&sv_ma, text, NULL);
 }
-static void sv_free(RantSchema *s){ if (s) rant_schema_free(s, rant_allocator_alloc, &sv_ma); }
+static void sv_free(RantSchema *s){ if (s) i_rant_schema_free(s, rant_allocator_alloc, &sv_ma); }
 /* rant_schema_subset over two texts: 1 yes, 0 refused, -1 a text failed to compile */
 static int sv_sub(const char *sub, const char *pub){
     RantSchema *a = sv(sub), *b = sv(pub); int r = -1;
@@ -3335,7 +3356,7 @@ static void schema_v8_checks(void){
     {   RantSchema *pub = sv("A { pad: u64, v: { a: f32, note: string }, p: Float3[2], t: string }");
         RantSchema *sub = sv("A { v: { a: f32, note: string }, t: string }");
         RantSchema *rb = NULL; uint8_t m[256]; RantBytes b;
-        if (pub && sub) rb = rant_schema_rebase(sub, pub, rant_allocator_alloc, &sv_ma);
+        if (pub && sub) rb = i_rant_schema_rebase(sub, pub, rant_allocator_alloc, &sv_ma);
         ST_CHECK(rb != NULL, "schema-v8: rebase of a nested/array subset");
         if (rb){
             rant_schema_message_default(pub, m, sizeof m);
@@ -3372,7 +3393,7 @@ static void schema_v8_checks(void){
         unsigned i, ok = 1;
         for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
             const char *ep = NULL;
-            RantSchema *s = rant_schema_compile(rant_allocator_alloc, &sv_ma, bad[i], &ep);
+            RantSchema *s = tcompile(&sv_ma, bad[i], &ep);
             if (s){ ok = 0; sv_free(s); }
             else if (!ep) ok = 0;
         }
@@ -3407,16 +3428,16 @@ static void schema_v8_checks(void){
         w[0] = (uint8_t)RANT_SCHEMA_WIRE_VERSION; w[1] = 0;
         w[2] = (uint8_t)RANT_NAMED; w[3] = 1; w[4] = 'A'; w[5] = (uint8_t)RANT_NAMED;
         w[6] = 1; w[7] = 'B';
-        ST_CHECK(rant_schema_parse(w, 8, rant_allocator_alloc, &sv_ma) == NULL,
+        ST_CHECK(i_rant_schema_parse(w, 8, rant_allocator_alloc, &sv_ma) == NULL,
                  "schema-v8: a doubly-wrapped NAMED is refused");
         w[2] = (uint8_t)RANT_NAMED; w[3] = 0; w[4] = (uint8_t)RANT_BOOL;
-        ST_CHECK(rant_schema_parse(w, 5, rant_allocator_alloc, &sv_ma) == NULL,
+        ST_CHECK(i_rant_schema_parse(w, 5, rant_allocator_alloc, &sv_ma) == NULL,
                  "schema-v8: a NAMED with an empty name is refused");
         w[2] = (uint8_t)RANT_ARR; w[3] = 2; w[4] = 0; w[5] = (uint8_t)RANT_VSTR;
-        ST_CHECK(rant_schema_parse(w, 6, rant_allocator_alloc, &sv_ma) == NULL,
+        ST_CHECK(i_rant_schema_parse(w, 6, rant_allocator_alloc, &sv_ma) == NULL,
                  "schema-v8: a variable array element is refused on the wire");
         w[5] = (uint8_t)RANT_NAMED; w[6] = 1; w[7] = 'A';
-        s = rant_schema_parse(w, 8, rant_allocator_alloc, &sv_ma);
+        s = i_rant_schema_parse(w, 8, rant_allocator_alloc, &sv_ma);
         ST_CHECK(s == NULL, "schema-v8: a truncated NAMED element is refused");
         sv_free(s);
     }
@@ -3440,21 +3461,25 @@ static void schema_v8_checks(void){
         sv_free(s);
     }
 
-    /* ---- compile_env: another schema's root name becomes a type word ---- */
-    {   RantSchema *w = sv("Widget { id: u32, tag: Color }");
-        const RantSchema *env[1]; RantSchema *p = NULL;
-        env[0] = w;
-        if (w) p = rant_schema_compile_env(rant_allocator_alloc, &sv_ma,
-                                           "Panel { w: Widget, more: Widget[2] }", env, 1, NULL);
-        ST_CHECK(p != NULL, "schema-v8: compile_env resolves an environment schema by root name");
-        if (p){
-            ST_CHECK(rant_schema_size(p) == 24 && rant_schema_field_index(p, "w.tag.r") >= 0
-                     && rant_schema_field_index(p, "more[1].id") >= 0,
-                     "schema-v8: the environment type nests and arrays like any other");
-        }
-        ST_CHECK(sv("Panel { w: Widget }") == NULL,
-                 "schema-v8: without the environment that name does not resolve");
-        sv_free(p); sv_free(w);
+    /* ---- the registry: definitions persist across compiles, a failed text keeps nothing ---- */
+    {   i_RantRegistry reg; RantSchema *w, *p; const char *ep = NULL;
+        i_rant_registry_init(&reg, rant_allocator_alloc, &sv_ma);
+        w = i_rant_registry_compile(&reg, "Widget { id: u32, tag: Color }", NULL);
+        p = i_rant_registry_compile(&reg, "Panel { w: Widget, more: Widget[2] }", NULL);
+        ST_CHECK(w && p, "registry: a definition stays in scope for the next compile");
+        ST_CHECK(p && rant_schema_size(p) == 24 && rant_schema_field_index(p, "w.tag.r") >= 0
+                 && rant_schema_field_index(p, "more[1].id") >= 0,
+                 "registry: the earlier type nests and arrays like any other");
+        ST_CHECK(sv("Panel { w: Widget }") == NULL, "registry: a fresh registry does not know the name");
+        ST_CHECK(w && i_rant_registry_compile(&reg, "Widget", NULL) == w
+                 && i_rant_registry_compile(&reg, "Widget { id: u32, tag: Color }", NULL) == w,
+                 "registry: one handle per shape, by name or spelled out");
+        ST_CHECK(i_rant_registry_compile(&reg, "Gadget { a: u8 }\nWidget { id: u64 }", &ep) == NULL
+                 && ep && strncmp(ep, "Widget", 6) == 0
+                 && i_rant_registry_compile(&reg, "Gadget", NULL) == NULL,
+                 "registry: a failed text keeps none of its definitions");
+        ST_CHECK(i_rant_registry_compile(&reg, "Gadget { a: u8 }", NULL) != NULL,
+                 "registry: it compiles again after a failure");
     }
     rant_allocator_reset(&sv_ma);
 }
@@ -3489,6 +3514,7 @@ static void sd_on_event(const RantEvent *ev){
 }
 static void stdtypes_checks(void){
     RantAllocator ma = rant_allocator_heap(0);
+    i_RantRegistry reg;
     RantAllocator pa = rant_allocator_heap(0);
     RantAllocator sa = rant_allocator_heap(0);
     RantNodeOpts po, so; RantNode *P = NULL, *S = NULL;
@@ -3496,23 +3522,24 @@ static void stdtypes_checks(void){
     RantTopic *ppose, *pimg, *pbad; RantSchema *SPose, *SImg, *SBad, *SBadSub;
     int t;
 
+    i_rant_registry_init(&reg, rant_allocator_alloc, &ma);
     /* the whole roster compiles by name alone, and each recognizes itself */
     {   int i, ok = 1, rec = 1;
         for (i = 1; i < (int)RANT_STD_COUNT; i++){
-            RantSchema *s = rant_std_schema((RantStdType)i, rant_allocator_alloc, &ma);
+            RantSchema *s = tcompile(&ma, rant_std_name((RantStdType)i), NULL);
             RantString n;
             if (!s){ ok = 0; continue; }
             n = rant_schema_name(s);
             if (n.len != strlen(rant_std_name((RantStdType)i))) ok = 0;
-            if (rant_std_recognize(s, rant_allocator_alloc, &ma) != (RantStdType)i) rec = 0;
-            rant_schema_free(s, rant_allocator_alloc, &ma);
+            if (i_rant_std_recognize(&reg, s) != (RantStdType)i) rec = 0;
+            i_rant_schema_free(s, rant_allocator_alloc, &ma);
         }
         ST_CHECK(ok, "stdtypes: every standard type compiles from its name alone");
         ST_CHECK(rec, "stdtypes: every standard type recognizes itself");
     }
     /* GOLDEN BYTES: the canonical wire and hash every wrapper mirrors. Change these only
        with a deliberate wire bump. */
-    {   RantSchema *s = rant_std_schema(RANT_STD_FLOAT3, rant_allocator_alloc, &ma);
+    {   RantSchema *s = tcompile(&ma, "Float3", NULL);
         static const uint8_t want[] = {
             8, 6, 'F','l','o','a','t','3', 12, 3,
             1, 'x', 8,  1, 'y', 8,  1, 'z', 8
@@ -3524,47 +3551,47 @@ static void stdtypes_checks(void){
                  "stdtypes: Float3 golden hash %016llx",
                  (unsigned long long)rant_schema_hash(s));
         ST_CHECK(s && rant_schema_size(s) == 12, "stdtypes: Float3 is 12 message bytes");
-        if (s) rant_schema_free(s, rant_allocator_alloc, &ma);
+        if (s) i_rant_schema_free(s, rant_allocator_alloc, &ma);
     }
     /* recognition verifies the SHAPE, so a peer's same-named impostor never converts */
-    {   RantSchema *good = rant_schema_compile(rant_allocator_alloc, &ma,
+    {   RantSchema *good = tcompile(&ma,
             "A { at: Transform, id: Uuid, pts: Float3[], plain: f32 }", NULL);
-        RantSchema *bad = rant_schema_compile(rant_allocator_alloc, &ma,
+        RantSchema *bad = tcompile(&ma,
             "Uuid = u8[16]\nB { id: Uuid }", NULL);
-        RantSchema *lie = rant_schema_parse(bad ? rant_schema_wire(bad).data : NULL,
+        RantSchema *lie = i_rant_schema_parse(bad ? rant_schema_wire(bad).data : NULL,
                                             bad ? rant_schema_wire(bad).len : 0,
                                             rant_allocator_alloc, &ma);
         ST_CHECK(good && bad && lie, "stdtypes: recognition fixtures compile");
         if (good){
-            ST_CHECK(rant_std_recognize_field(good, (uint16_t)rant_schema_field_index(good, "at"),
-                                              rant_allocator_alloc, &ma) == RANT_STD_TRANSFORM
-                     && rant_std_recognize_field(good, (uint16_t)rant_schema_field_index(good, "id"),
-                                              rant_allocator_alloc, &ma) == RANT_STD_UUID,
+            ST_CHECK(i_rant_std_recognize_field(&reg, good, (uint16_t)rant_schema_field_index(good, "at"))
+                        == RANT_STD_TRANSFORM
+                     && i_rant_std_recognize_field(&reg, good, (uint16_t)rant_schema_field_index(good, "id"))
+                        == RANT_STD_UUID,
                      "stdtypes: a named field recognizes by name AND shape");
-            ST_CHECK(rant_std_recognize_elem(good, (uint16_t)rant_schema_field_index(good, "pts"),
-                                             rant_allocator_alloc, &ma) == RANT_STD_FLOAT3,
+            ST_CHECK(i_rant_std_recognize_elem(&reg, good, (uint16_t)rant_schema_field_index(good, "pts"))
+                        == RANT_STD_FLOAT3,
                      "stdtypes: an array's ELEMENT recognizes");
-            ST_CHECK(rant_std_recognize_field(good, (uint16_t)rant_schema_field_index(good, "plain"),
-                                              rant_allocator_alloc, &ma) == RANT_STD_NONE
-                     && rant_std_recognize(good, rant_allocator_alloc, &ma) == RANT_STD_NONE,
+            ST_CHECK(i_rant_std_recognize_field(&reg, good, (uint16_t)rant_schema_field_index(good, "plain"))
+                        == RANT_STD_NONE
+                     && i_rant_std_recognize(&reg, good) == RANT_STD_NONE,
                      "stdtypes: an anonymous field and a user root are not standard types");
         }
-        if (good) rant_schema_free(good, rant_allocator_alloc, &ma);
-        if (bad)  rant_schema_free(bad,    rant_allocator_alloc, &ma);
-        if (lie)  rant_schema_free(lie,    rant_allocator_alloc, &ma);
+        if (good) i_rant_schema_free(good, rant_allocator_alloc, &ma);
+        if (bad)  i_rant_schema_free(bad,    rant_allocator_alloc, &ma);
+        if (lie)  i_rant_schema_free(lie,    rant_allocator_alloc, &ma);
     }
     {   /* a hand-built wire that calls itself Uuid but is 15 bytes: refused by shape */
         uint8_t w[10]; RantSchema *s;
         w[0] = (uint8_t)RANT_SCHEMA_WIRE_VERSION; w[1] = 4;
         w[2] = 'U'; w[3] = 'u'; w[4] = 'i'; w[5] = 'd';
         w[6] = (uint8_t)RANT_ARR; w[7] = 15; w[8] = 0; w[9] = (uint8_t)RANT_U8;
-        s = rant_schema_parse(w, sizeof w, rant_allocator_alloc, &ma);
-        ST_CHECK(s && rant_std_recognize(s, rant_allocator_alloc, &ma) == RANT_STD_NONE,
+        s = i_rant_schema_parse(w, sizeof w, rant_allocator_alloc, &ma);
+        ST_CHECK(s && i_rant_std_recognize(&reg, s) == RANT_STD_NONE,
                  "stdtypes: a same-named wrong-shaped peer type is NOT recognized");
-        if (s) rant_schema_free(s, rant_allocator_alloc, &ma);
+        if (s) i_rant_schema_free(s, rant_allocator_alloc, &ma);
     }
     /* the C mirrors line up with the wire, byte for byte */
-    {   RantSchema *sp = rant_std_schema(RANT_STD_TRANSFORM, rant_allocator_alloc, &ma);
+    {   RantSchema *sp = tcompile(&ma, "Transform", NULL);
         RantTransform p = rant_transform_identity(); uint8_t m[sizeof(RantTransform)];
         p.translation = rant_double3(1.0, 2.0, 3.0);
         memcpy(m, &p, sizeof p);
@@ -3577,7 +3604,7 @@ static void stdtypes_checks(void){
                      && rant_get_f64(b, sp, "rotation.w") == 1.0,
                      "stdtypes: a memcpy'd RantTransform reads back through the schema");
         }
-        if (sp) rant_schema_free(sp, rant_allocator_alloc, &ma);
+        if (sp) i_rant_schema_free(sp, rant_allocator_alloc, &ma);
     }
     {   RantColor c = rant_color_from_hex(0x11223344u);
         RantDouble3 v = rant_quaternion_rotate(rant_quaternion(0.0, 0.0, 1.0, 0.0),
@@ -3603,10 +3630,10 @@ static void stdtypes_checks(void){
     }
 
     /* ---- end to end: Transform and Image over two nodes, plus a shape impostor refused ---- */
-    SPose = rant_std_schema(RANT_STD_TRANSFORM, rant_allocator_alloc, &ma);
-    SImg  = rant_std_schema(RANT_STD_IMAGE, rant_allocator_alloc, &ma);
-    SBad  = rant_schema_compile(rant_allocator_alloc, &ma, "Twist", NULL);
-    SBadSub = rant_std_schema(RANT_STD_TRANSFORM, rant_allocator_alloc, &ma);
+    SPose = tcompile(&ma, "Transform", NULL);
+    SImg  = tcompile(&ma, "Image", NULL);
+    SBad  = tcompile(&ma, "Twist", NULL);
+    SBadSub = tcompile(&ma, "Transform", NULL);
     ST_CHECK(SPose && SImg && SBad && SBadSub, "stdtypes: e2e schemas compile");
     if (!(SPose && SImg && SBad && SBadSub)){ rant_allocator_reset(&ma); return; }
 
@@ -3686,7 +3713,7 @@ static void detail_codec_checks(void){
     uint8_t req[256], resp[1024], out2[1024];
     size_t rl, need, len;
 
-    S = rant_schema_compile(rant_allocator_alloc, &ma, "Pose { stamp: u64, x: f64 }", NULL);
+    S = tcompile(&ma, "Pose { stamp: u64, x: f64 }", NULL);
     memset(ch,0,sizeof ch);
     ch[0].name="dt/typed"; ch[1].name="dt/raw";
     ch[2].name="dt/off"; ch[2].role=RANT_INACTIVE;
@@ -3736,7 +3763,7 @@ static void detail_codec_checks(void){
         ST_CHECK(n==2, "detail: advertised indices answered, INACTIVE + unknown skipped (n=%d)", n);
         ST_CHECK(ok_typed, "detail: typed entry carries name + hash + inlined wire");
         ST_CHECK(ok_raw, "detail: raw entry carries name, no schema");
-        {   RantSchema *P2 = wire.len ? rant_schema_parse(wire.data, wire.len,
+        {   RantSchema *P2 = wire.len ? i_rant_schema_parse(wire.data, wire.len,
                                                           rant_allocator_alloc, &ma) : NULL;
             ST_CHECK(P2 && rant_schema_hash(P2)==rant_schema_hash(S),
                      "detail: inlined wire parses back to the same identity");
@@ -3789,7 +3816,7 @@ static void detail_paging_checks(void){
     char names[DP_N][RANT_TOPIC_NAME_MAX + 1];
     int done[DP_N], i, rounds, resolved, max_page = 0;
 
-    S = rant_schema_compile(rant_allocator_alloc, &ma, "Pose { stamp: u64, x: f64, y: f64 }", NULL);
+    S = tcompile(&ma, "Pose { stamp: u64, x: f64, y: f64 }", NULL);
     memset(&tc, 0, sizeof tc);
     tc.topics = NULL; tc.n_topics = DP_N; tc.max_peers = 2; tc.allocator = rant_allocator_alloc; tc.user = &ma;
     { size_t need = i_rant_transport_required_memory(&tc);         /* dynamic reserve mode */
@@ -3840,7 +3867,7 @@ static void detail_paging_checks(void){
         len2 = (size_t)sprintf(bigtext, "Big {");
         for (k = 0; k < 200; k++) len2 += (size_t)sprintf(bigtext + len2, " field%03d: f64,", k);
         sprintf(bigtext + len2, " }");
-        B = rant_schema_compile(rant_allocator_alloc, &mb, bigtext, NULL);
+        B = tcompile(&mb, bigtext, NULL);
         ST_CHECK(B && rant_schema_wire(B).len > RANT_DGRAM_MAX,
                  "detail-paging: built a schema wire over one datagram (%u)",
                  (unsigned)(B ? rant_schema_wire(B).len : 0));
@@ -3885,7 +3912,7 @@ static void detail_live_checks(void){
     uint16_t dom = ST_DOMAIN+10;
     int t;
 
-    W = rant_schema_compile(rant_allocator_alloc, &ma, "Pose { stamp: u64, x: f64 }", NULL);
+    W = tcompile(&ma, "Pose { stamp: u64, x: f64 }", NULL);
     memset(&co,0,sizeof co); co.qos.keep_last=2;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
     memset(&po,0,sizeof po); po.domain=dom; po.discovery.max_peers=4;
@@ -4051,7 +4078,7 @@ static void detail_live_checks(void){
                 if (d.name.len!=onlen[k] || memcmp(d.name.data, oname[k], onlen[k])!=0) names_ok=0;
                 if (d.schema_hash != ohash[k]) hashes_ok=0;
                 if (ohash[k] && d.schema_wire.len){
-                    RantSchema *ps2 = rant_schema_parse(d.schema_wire.data, d.schema_wire.len,
+                    RantSchema *ps2 = i_rant_schema_parse(d.schema_wire.data, d.schema_wire.len,
                                                         rant_allocator_alloc, &ma);
                     if (ps2 && rant_schema_hash(ps2)==ohash[k]) wire_ok=1;
                 }
@@ -5374,7 +5401,7 @@ static void patterns_checks(void){
     { /* typed variable, remote force and unforce: the op only unforce must pass the schema
          gate through the empty payload exemption, and remote sets while forced absorb */
       RantAllocator ma = rant_allocator_heap(0);
-      RantSchema *ts = rant_schema_compile(rant_allocator_alloc, &ma, "T { v: u32 }", NULL);
+      RantSchema *ts = tcompile(&ma, "T { v: u32 }", NULL);
       RantVariable *to, *ta; RantBytes gv; uint8_t b[4]; int fr, ur;
       ST_CHECK(ts != NULL, "var: typed schema compiles");
       i_rant_le_w32(b,10);
@@ -5947,9 +5974,9 @@ static void taskx_checks(void){
     ns[0]=P; ns[1]=P2; ns[2]=C1; ns[3]=C2; ns[4]=X;
 
     /* three DISTINCT schemas so a crossed req/prg/rsp plumb cannot hide */
-    req_s = rant_schema_compile(rant_allocator_alloc, &ma, "TmReq { tag: u32 }", NULL);
-    prg_s = rant_schema_compile(rant_allocator_alloc, &ma, "TmPrg { tag: u32, v: u32 }", NULL);
-    rsp_s = rant_schema_compile(rant_allocator_alloc, &ma, "TmRsp { tag: u32, v: u32, note: u32 }", NULL);
+    req_s = tcompile(&ma, "TmReq { tag: u32 }", NULL);
+    prg_s = tcompile(&ma, "TmPrg { tag: u32, v: u32 }", NULL);
+    rsp_s = tcompile(&ma, "TmRsp { tag: u32, v: u32, note: u32 }", NULL);
     ST_CHECK(req_s && prg_s && rsp_s, "taskx: schemas compiled");
 
     /* X's raw wire, the explorer's recipe. A normal remote handle on top of it is refused,
@@ -6558,7 +6585,7 @@ static void loud_checks(void){
     ST_CHECK(le.topic_name && strcmp(le.topic_name,"a@b")==0,
              "loud: the last error keeps the name (%s)", le.topic_name ? le.topic_name : "null");
 
-    pose = rant_schema_compile(rant_heap_realloc, NULL, "LoudPose { x: f32, y: f32 }", NULL);
+    pose = tcompile(&aa, "LoudPose { x: f32, y: f32 }", NULL);
     ST_CHECK(pose != NULL, "loud: schema compiled");
     {   RantTopic *tp = rant_node_create_topic(A, "loud/pose", RANT_PUB_ONLY, pose, NULL);
         RantTopic *twin = rant_node_create_topic(A, "loud/pose", RANT_SUB_ONLY, pose, NULL);
@@ -6658,7 +6685,6 @@ static void loud_checks(void){
         rant_node_stop(A); rant_node_stop(B);
     }
 #endif
-    if (pose) rant_schema_free(pose, rant_heap_realloc, NULL);
     rant_node_close(A,0); rant_node_close(B,0);
     rant_allocator_reset(&aa); rant_allocator_reset(&ba);
 }
@@ -6829,9 +6855,9 @@ static void churn_checks(void){
 
     ch_c_recv = ch_u_recv = ch_t_recv = ch_c_mismatch = 0;
     ch_c_last = 0; ch_seq = 100;
-    G1 = rant_schema_compile(rant_allocator_alloc, &ma, "Beat { v: u32 }", NULL);
-    G2 = rant_schema_compile(rant_allocator_alloc, &ma, "Beat { w: u32 }", NULL);
-    G3 = rant_schema_compile(rant_allocator_alloc, &ma, "Beat { v: u32, extra: u32 }", NULL);
+    G1 = tcompile(&ma, "Beat { v: u32 }", NULL);
+    G2 = tcompile(&ma, "Beat { w: u32 }", NULL);
+    G3 = tcompile(&ma, "Beat { v: u32, extra: u32 }", NULL);
     ST_CHECK(G1 && G2 && G3, "churn: schemas compile");
     if (!(G1 && G2 && G3)){ rant_allocator_reset(&ma); return; }
 

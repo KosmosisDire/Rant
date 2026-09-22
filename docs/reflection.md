@@ -55,7 +55,8 @@ declaration, which every reader accepts. Untyped when nobody advertises one.
 and, when the entity's generation moved, re type the handle in place: same handle, same
 index, peers re verify, outstanding calls answered CANCELLED first. It is never
 automatic, because a retire is visible to peers, so the app picks the moment.
-`rant_schema_copy` gives an owned copy of any node owned schema.
+`rant_node_schema_parse` registers a walk's schema view in a node, which then owns it
+for its life.
 
 The same walks are in every binding: C++ `Peer` and `Entity`, C# `RantPeer` and `RantEntity`
 (docs/csharp.md), Python `Peer` and `Entity` on `node.reflection` (docs/python.md), and the

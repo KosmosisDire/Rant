@@ -415,7 +415,6 @@ def bind(lib):
     F = lambda fn, args, ret: (setattr(getattr(lib, fn), "argtypes", args),
                                setattr(getattr(lib, fn), "restype", ret))
     F("rant_allocator_heap", [c_uint32], RantAllocator)
-    F("rant_heap_realloc", [c_void_p, c_void_p, c_size_t], c_void_p)
     F("rant_node_open", [POINTER(RantAllocator), c_char_p, MsgFn, EvtFn,
                          POINTER(RantNodeOpts)], c_void_p)
     F("rant_last_error", [c_void_p], RantEvent)
@@ -500,18 +499,15 @@ def bind(lib):
     F("rant_variable_on_change", [c_void_p, VarFn, c_void_p], c_int)
     F("rant_variable_on_write", [c_void_p, VarFn, c_void_p], c_int)
     # serialize / schema
-    F("rant_schema_compile", [AllocFn, c_void_p, c_char_p, POINTER(c_char_p)], c_void_p)
-    F("rant_schema_free", [c_void_p, AllocFn, c_void_p], None)
-    F("rant_schema_copy", [c_void_p, AllocFn, c_void_p], c_void_p)
+    F("rant_node_schema", [c_void_p, c_char_p], c_void_p)
+    F("rant_node_schema_parse", [c_void_p, c_void_p, c_size_t], c_void_p)
+    F("rant_schema_wire", [c_void_p], RantBytes)
     F("rant_schema_hash", [c_void_p], c_uint64)
     F("rant_schema_name", [c_void_p], RantStringView)
     F("rant_schema_print", [c_void_p, c_char_p, c_size_t], c_uint32)
     F("rant_schema_subset", [c_void_p, c_void_p], c_int)
     F("rant_std_name", [c_int], c_char_p)
     F("rant_std_by_name", [RantStringView], c_int)
-    F("rant_std_recognize", [c_void_p, AllocFn, c_void_p], c_int)
-    F("rant_std_recognize_field", [c_void_p, c_uint16, AllocFn, c_void_p], c_int)
-    F("rant_std_recognize_elem", [c_void_p, c_uint16, AllocFn, c_void_p], c_int)
     F("rant_timestamp_now", [], c_int64)
     F("rant_schema_field_count", [c_void_p], c_uint16)
     F("rant_schema_field_at", [c_void_p, c_uint16, POINTER(RantSchemaFieldInfo)], c_int)
@@ -563,15 +559,3 @@ def load():
             bind(lib)
             LIB = lib
     return LIB
-
-
-# The schema layer needs a realloc style hook. rant_heap_realloc is the library's own,
-# so a schema allocation stays in native code with no callback into Python.
-SCHEMA_ALLOC = None
-
-
-def schema_alloc():
-    global SCHEMA_ALLOC
-    if SCHEMA_ALLOC is None:
-        SCHEMA_ALLOC = cast(load().rant_heap_realloc, AllocFn)
-    return SCHEMA_ALLOC

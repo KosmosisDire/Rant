@@ -59,8 +59,8 @@ allowed, and poll, create, drain and stop are refused with `SendStatus::State`.
 
 Memory is configured on `NodeOptions::memory`: a buffer plus size means static mode, where
 the node draws all its memory from the buffer, never grows, and turns the shared memory
-path off. A typed topic copies its schema into that buffer, so pair it with the
-`Schema::compile(text, scratch, size)` overload for a heap free node.
+path off. The node's schemas live in that buffer too, so a static node is heap free end
+to end.
 
 ## Topics and messages
 
@@ -80,8 +80,11 @@ string or any contiguous range of byte sized elements, and converts to `string_v
 `string`, `vector` and `std::span` where available. Multi byte element types are rejected,
 pass their raw bytes with `Bytes(ptr, len)`.
 
-`Schema::compile(text)` returns an empty optional on error and fills an optional error
-string. `MessageBuilder` sets fields by name or dotted path, grows for variable fields,
+`node.schema(text)` compiles in the node's registry and returns a `Schema`, a handle
+valid for the node's life. It throws `rant::Error`, or without exceptions returns an empty
+handle with `last_error()` saying where. Every definition stays in scope for the node's
+later compiles, and `node.schema_from_wire(bytes)` registers a peer's wire. The typed
+codec of `RANT_SCHEMA` is built once per node and type. `MessageBuilder` sets fields by name or dotted path, grows for variable fields,
 and refuses an over cap value by flipping `ok()` to false rather than truncating. Reads go
 through `FieldView`, the surface shared by `MessageView`, `Request<rant::Bytes>` and
 `ResponseView<rant::Bytes>`, so a typed read looks the same everywhere. Every handler

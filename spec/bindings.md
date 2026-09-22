@@ -40,8 +40,8 @@ about a wrapper API, this file wins.
 - An owning message copies its payload, since the transport buffer is reused after the
   callback, but decodes only when the fields or the typed value are read. A handler that
   wants the bytes must not pay for the topic's schema. The decode outlives the callback,
-  so the wrapper holds its own `rant_schema_copy` of the publisher's schema, made once
-  per distinct hash and released with the last message that names it, never at close.
+  so the wrapper registers the publisher's schema in the node (`rant_node_schema_parse`),
+  once per distinct hash, and invalidates its wrappers at close since the node frees them.
 - An owning type is a plain noun, a view type has a `View` suffix, "Taken" is banned:
   `Message`, `MessageView`, `MessageBuilder`, `Response`, `ResponseView`.
 - `Peer::entities` replaces any `Peer::topics`. No dual surfaces.
@@ -88,7 +88,8 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   `ResponseView`, `Event`, `Peer`, `Entity`, `Bytes`, `Qos`, `NodeOptions`, `MapWriter`,
   `MapReader`. Every typed handle has an untyped `<void>` twin for the bridge and explorer.
 - `RANT_SCHEMA(T, fields...)` synthesizes DSL text and compiles it through
-  `rant_schema_compile`, so the C compiler stays the single source of wire truth. It builds
+  `rant_node_schema`, once per node and type, so the C compiler stays the single source of
+  wire truth. It builds
   a flat codec table and uses memcpy only when the type is trivially copyable, little
   endian and padding free. The decode cache is keyed per incoming schema pointer, not per
   hash, because a rebased schema keeps our hash with the publisher's offsets.
@@ -104,7 +105,7 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   `!defined(__cplusplus)`.
 - Memory is configured on `NodeOptions`: a buffer plus size means static mode, otherwise
   dynamic. One allocator per node, never shared, because open copies it and close resets
-  it. `Schema::compile` has a zero heap static scratch overload.
+  it. The node's schemas and typed codecs live in that memory too.
 - Strings are `std::string_view`. `Bytes` is a contiguous range convertible to
   string_view, string and vector, with `std::span` where available. Field name parameters
   stay `const char*` on purpose.
@@ -145,8 +146,7 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
 - Callbacks are static trampolines dispatched by an int id in `user_data`, marked
   `[MonoPInvokeCallback]` for IL2CPP. Allocators are managed callbacks over
   `Marshal.ReAllocHGlobal`, which pays a native to managed transition per page.
-  `rant_allocator_heap` and `rant_heap_realloc` are the library's own heap hooks and cost
-  no transition.
+  `rant_allocator_heap` is the library's own heap hook and costs no transition.
 - Stale DLL trap: a stale `rant.dll` presents as memory corruption or peers that never
   match. Check the timestamp of the copy next to the executable against
   `dist/native/<rid>/`, which the `rant_shared` target overwrites on every build.
@@ -204,4 +204,4 @@ platform serves every interpreter.
 - Task handlers run on a daemon thread per call. Raising `rant.CancelledError` completes
   CANCELLED.
 - `node.reflection` carries the walks as `Peer` and `Entity` dataclasses whose schemas
-  are `rant_schema_copy` owned copies freed by the `Schema` finalizer.
+  are registered in the node through `rant_node_schema_parse`.

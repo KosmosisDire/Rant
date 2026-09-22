@@ -80,9 +80,9 @@ Rant as a subproject or finds the installed package.
   which only Windows needs. GNU toolchains also take `-fvisibility=hidden` so the
   internals stay in. The declaration carries the attribute and the definition in the `.c`
   stays plain: the amalgamation puts both in one translation unit, declaration first.
-- `rant_allocator_heap` and `rant_heap_realloc` are the process heap as an allocator and
-  as a `RantAllocFn`. They exist so a binding over the shared library never has to reach
-  for an internal symbol or route allocation back through its own runtime.
+- `rant_allocator_heap` is the process heap as an allocator. It exists so a binding over
+  the shared library never has to reach for an internal symbol or route allocation back
+  through its own runtime.
 - The `RANT_THREADS` and `RANT_SHM` detection blocks live identically in both
   `platform/core.h` and `transport/core.h`, because every translation unit must agree
   whichever header it saw first. Edit both together. Code guards are `#ifdef RANT_THREADS`,

@@ -139,6 +139,9 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
         p=i_rant_event_append_str(p,end,"state "); p=i_rant_event_append_topic(p,end,ev);
         p=i_rant_event_append_str(p,end,": create refused from a callback or the topic reserve is full"); break;
     case RANT_E_BAD_SCHEMA:
+        if (ev->schema_detail){     /* a refused text or wire, see rant_node_schema */
+            p=i_rant_event_append_str(p,end,"bad-schema: "); p=i_rant_event_append_str(p,end,ev->schema_detail); break;
+        }
         p=i_rant_event_append_str(p,end,"bad-schema "); p=i_rant_event_append_topic(p,end,ev);
         p=i_rant_event_append_str(p,end,": the schema failed to parse, create refused"); break;
     case RANT_E_NONE:
@@ -404,12 +407,12 @@ static RantSchema *i_rant_node_core_intern(i_RantNodeCore *c, uint64_t hash, Ran
             }
     }
     if (!wire.data || wire.len == 0 || !c->alloc) return NULL;
-    p = rant_schema_parse(wire.data, wire.len, c->alloc, c->alloc_user);
+    p = i_rant_schema_parse(wire.data, wire.len, c->alloc, c->alloc_user);
     if (!p) return NULL;
     if (rant_schema_hash(p) != hash ||
         !i_rant_node_core_array_reserve(c, (void**)&c->interned, &c->cap_interned,
                                         c->n_interned + 1u, sizeof *c->interned)){
-        rant_schema_free(p, c->alloc, c->alloc_user);
+        i_rant_schema_free(p, c->alloc, c->alloc_user);
         return NULL;
     }
     c->interned[c->n_interned].hash = hash;
@@ -424,11 +427,11 @@ static RantSchema *i_rant_node_core_bind(i_RantNodeCore *c, uint64_t hash, uint1
     uint32_t i; RantSchema *rb;
     for (i = 0; i < c->n_binds; i++)
         if (c->binds[i].hash == hash && c->binds[i].topic == topic_index) return c->binds[i].rebased;
-    rb = rant_schema_rebase(ours, pub, c->alloc, c->alloc_user);
+    rb = i_rant_schema_rebase(ours, pub, c->alloc, c->alloc_user);
     if (!rb) return NULL;
     if (!i_rant_node_core_array_reserve(c, (void**)&c->binds, &c->cap_binds,
                                         c->n_binds + 1u, sizeof *c->binds)){
-        rant_schema_free(rb, c->alloc, c->alloc_user);
+        i_rant_schema_free(rb, c->alloc, c->alloc_user);
         return NULL;
     }
     c->binds[c->n_binds].hash = hash;
@@ -569,7 +572,7 @@ void i_rant_node_core_topic_rebound(i_RantNodeCore *c, uint16_t topic_index){
     i = 0;
     while (i < c->n_binds){
         if (c->binds[i].topic == topic_index){
-            if (c->binds[i].rebased) rant_schema_free(c->binds[i].rebased, c->alloc, c->alloc_user);
+            if (c->binds[i].rebased) i_rant_schema_free(c->binds[i].rebased, c->alloc, c->alloc_user);
             c->binds[i] = c->binds[--c->n_binds];
         } else i++;
     }

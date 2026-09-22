@@ -4,8 +4,8 @@ A small library of the types applications keep re inventing, shipped with Rant s
 two programs that both mean "a 3D point" say so with the same name and the same bytes.
 
 ```c
-RantSchema *s = rant_schema_compile(alloc, user,
-    "Waypoint { at: Transform, when: Timestamp, tag: Color }", NULL);
+const RantSchema *s = rant_node_schema(node,
+    "Waypoint { at: Transform, when: Timestamp, tag: Color }");
 ```
 
 No imports, no registration. Every name below is always in scope in the schema DSL. Strip
@@ -162,7 +162,7 @@ the media section).
 ```c
 #include "rant.h"
 
-RantSchema *s = rant_schema_compile(alloc, user, "Track { at: Transform, id: Uuid }", NULL);
+const RantSchema *s = rant_node_schema(node, "Track { at: Transform, id: Uuid }");
 
 uint8_t msg[256];
 RantTransform p = rant_transform_identity();
@@ -238,8 +238,13 @@ name (`Probe`, `Transform`), a bare type (`bool`, `f32[3]`) or an anonymous stru
 (`{ x: f32 }`). A definition taken by its name is the same schema, with the same hash, as
 its struct written out.
 
-`rant_schema_compile_env` additionally puts a set of already compiled schemas in scope,
-referenceable by their root names, for a program that builds its schemas in layers.
+Every compile goes through a node (`rant_node_schema`, C# `node.Schema`, C++
+`node.schema`, Python `node.schema`) and the node keeps every definition: a name defined
+in one text is in scope for every later text on that node, so a shared type is written
+once and later handles take just its name. A failed text leaves no definition behind. The
+node owns each schema it hands out, one handle per shape, and frees them at close, so
+nothing is ever freed by hand. A refused text fires `RANT_E_BAD_SCHEMA` and
+`rant_last_error(node).schema_detail` says where.
 
 ### The names are reserved
 

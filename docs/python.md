@@ -91,9 +91,11 @@ string, a fixed or variable array and a pinned enum width are spelled
 `Annotated[T, "<dsl field type>"]`, the Python type for the checker and the DSL for the
 wire: `Annotated[str, "string<16>"]`, `Annotated[bytes, "u8[4]"]`,
 `Annotated[list[float], "f32[]"]`, `Annotated[Mode, "u8"]`. In a value position the same
-DSL text does it: `rant.Schema("u8[4]")`.
+DSL text does it: `node.schema("u8[4]")`.
 
-`Schema(text)`, `Schema(cls)` and `Schema(bare_type)` compile explicitly. `encode` and
+`node.schema(text)`, `node.schema(cls)` and `node.schema(bare_type)` compile explicitly,
+in the node's registry: every definition stays in scope for the node's later compiles, and
+the node owns the result for its life. `encode` and
 `decode` walk the compiled flat field table, so they work for any schema including a
 peer's. `fields` lists `Schema.Field` records whose kinds are `Schema.FieldType`, and
 `enum_variants(field)` the options of an enum field, for a tool that renders a schema it

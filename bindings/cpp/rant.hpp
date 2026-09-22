@@ -361,46 +361,15 @@ template <> struct VariableOptions<Bytes> {
 };
 #endif /* !RANT_NO_PATTERNS */
 
-/* Schema: an owned, compiled message schema (see the DSL in schema.h). */
+/* Schema: a compiled message schema the node owns, from Node::schema. A value that stays
+ * valid for the node's life, copyable and cheap. */
 class Schema {
 public:
-    /* Compile a schema from DSL text. nullopt on error, and err receives a short message
-     * pointing near the offending text. The compiled schema is freed with the Schema. */
-    static std::optional<Schema> compile(std::string_view text, std::string* err = nullptr) {
-        return compile_with(detail::rant_allocator_heap(0), text, err);
-    }
-    /* Zero heap variant: compile into scratch, which must outlive this Schema. Once a create
-     * has copied the schema into the node the scratch may be reused. nullopt if too small. */
-    static std::optional<Schema> compile(std::string_view text, void* scratch, size_t scratch_size,
-                                         std::string* err = nullptr) {
-        if (!scratch || scratch_size == 0) { if (err) *err = "scratch buffer missing"; return std::nullopt; }
-        return compile_with(detail::rant_allocator_static(scratch, scratch_size), text, err);
-    }
-
     /* An EMPTY schema (empty() true, raw() null): what an untyped entity reports, and the
      * state a default-constructed member holds until assigned. */
     Schema() = default;
-    /* An owned copy of any compiled schema, ours or one reflected off the mesh. */
-    static Schema adopt(const detail::RantSchema* raw) {
-        Schema s;
-        if (!raw) return s;
-        s.alloc_ = detail::rant_allocator_heap(0);
-        s.schema_ = detail::rant_schema_copy(raw, detail::rant_allocator_alloc, &s.alloc_);
-        if (!s.schema_) detail::rant_allocator_reset(&s.alloc_);
-        return s;
-    }
-    Schema(const Schema& o) : Schema(adopt(o.schema_)) {}
-    Schema& operator=(const Schema& o) { if (this != &o) *this = adopt(o.schema_); return *this; }
-    Schema(Schema&& o) noexcept : alloc_(o.alloc_), schema_(o.schema_) {
-        std::memset(&o.alloc_, 0, sizeof o.alloc_);
-        o.schema_ = nullptr;
-    }
-    Schema& operator=(Schema&& o) noexcept {
-        if (this != &o) { reset(); alloc_ = o.alloc_; schema_ = o.schema_;
-                          std::memset(&o.alloc_, 0, sizeof o.alloc_); o.schema_ = nullptr; }
-        return *this;
-    }
-    ~Schema() { reset(); }
+    /* Wraps a schema a node holds, such as one a raw C call returned. */
+    explicit Schema(const detail::RantSchema* raw) : schema_(raw) {}
 
     bool empty() const noexcept { return schema_ == nullptr; }
     explicit operator bool() const noexcept { return schema_ != nullptr; }
@@ -431,7 +400,7 @@ public:
         return buf;
     }
     /* Spell the schema back as compile-ready DSL text (the inverse of compile), with
-     * every named type it uses hoisted to a leading `Name = type` definition. */
+     * every named type it uses hoisted to a leading definition. */
     std::string to_dsl() const {
         if (!schema_) return {};
         uint32_t n = detail::rant_schema_print(schema_, nullptr, 0);
@@ -488,23 +457,7 @@ public:
     const detail::RantSchema* raw() const { return schema_; }
 
 private:
-    static std::optional<Schema> compile_with(detail::RantAllocator a, std::string_view text, std::string* err) {
-        Schema s;
-        s.alloc_ = a;
-        std::string t(text);   /* NUL-terminate for the C API */
-        const char* e = nullptr;
-        s.schema_ = detail::rant_schema_compile(detail::rant_allocator_alloc, &s.alloc_, t.c_str(), &e);
-        if (!s.schema_) {
-            if (err) *err = (e && *e) ? (std::string("schema error near: ") + e)
-                                      : "schema error at the end of the text";
-            detail::rant_allocator_reset(&s.alloc_);
-            return std::nullopt;
-        }
-        return s;
-    }
-    void reset() { if (alloc_.page_realloc || alloc_.shared) detail::rant_allocator_reset(&alloc_); schema_ = nullptr; }
-    detail::RantAllocator alloc_{};
-    detail::RantSchema*     schema_ = nullptr;
+    const detail::RantSchema* schema_ = nullptr;
 };
 
 /* The self describing tagged value tree of a map field: a thin layer over the C map codec.
@@ -1503,13 +1456,13 @@ template <class U> constexpr bool is_value_type() {
         || is_std_array<U>::value || is_std_vector<U>::value || is_var_string<U>::value;
 }
 
-/* the per-T registration: schema + copy table + rebase cache, built once, immortal */
+/* the per node, per T registration: schema, copy table and rebase cache, built once per
+ * node and freed with it */
 struct TypeCodec {
     bool                      ok = false;
     bool                      memcpy_ok = false;      /* our own layout coincides with our wire */
     bool                      memcpy_capable = false; /* trivially copyable + little-endian host */
-    std::optional<Schema>     schema;
-    const detail::RantSchema* raw = nullptr;
+    const detail::RantSchema* raw = nullptr;          /* the node's schema for T */
     uint64_t                  hash = 0;
     uint32_t                  wire_size = 0;   /* the fixed section, all of it when no tails */
     uint32_t                  msg_min = 0;            /* fixed section + one empty frame per tail */
@@ -1522,6 +1475,8 @@ struct TypeCodec {
     struct Rebased { std::vector<Leaf> leaves; uint32_t size = 0; bool ok = false, coincide = false; };
     std::mutex                                       mu;
     std::map<const detail::RantSchema*, Rebased>       rebased;
+
+    Schema schema() const { return Schema(raw); }
 
     const Rebased* rebased_for(const detail::RantSchema* s) {
         std::lock_guard<std::mutex> g(mu);
@@ -1547,7 +1502,7 @@ inline std::string strip_namespaces(const char* type_name) {
     return p == std::string::npos ? n : n.substr(p + 1);
 }
 
-template <class T> TypeCodec* build_codec() {
+template <class T> TypeCodec* build_codec(detail::RantNode* node) {
     static_assert(std_type<T>::name != nullptr || is_reflected<T>::value || is_value_type<T>(),
                   "type has no RANT_SCHEMA(T, fields...) declaration and is not a bare wire type");
     auto* c = new TypeCodec();
@@ -1571,10 +1526,9 @@ template <class T> TypeCodec* build_codec() {
     }
     c->leaves = std::move(b.leaves);
     c->tails  = std::move(b.tails);
-    c->schema = Schema::compile(b.dsl);
-    if (!c->schema) return c;
-    c->raw         = c->schema->raw();
-    c->hash        = c->schema->hash();
+    c->raw = detail::rant_node_schema(node, b.dsl.c_str());
+    if (!c->raw) return c;
+    c->hash        = detail::rant_schema_hash(c->raw);
     c->wire_size   = detail::rant_schema_size(c->raw);
     c->msg_min     = detail::rant_schema_msg_min(c->raw);
     c->struct_size = (uint32_t)sizeof(T);
@@ -1589,22 +1543,21 @@ template <class T> TypeCodec* build_codec() {
     return c;
 }
 
-template <class T> TypeCodec& type_codec() {
-    static TypeCodec* c = build_codec<T>();   /* immortal: schemas are referenced by topics */
-    return *c;
-}
+/* the codec for T in one node, built on first use there. Defined after Node. */
+template <class T> TypeCodec* type_codec(Node& n);
+inline bool codec_ok(const TypeCodec* c) { return c && c->ok; }
 
-/* the compiled Schema for T, registered on first use. nullptr if the synthesized DSL failed
- * to compile, a codec bug the handle constructors surface */
-template <class T> const Schema* schema_of() {
-    TypeCodec& c = type_codec<T>();
-    return c.ok ? &*c.schema : nullptr;
+/* the compiled Schema for T in node n. nullopt if the synthesized DSL failed to compile,
+ * a codec bug the handle constructors surface */
+template <class T> std::optional<Schema> schema_of(Node& n) {
+    TypeCodec* c = type_codec<T>(n);
+    if (!codec_ok(c)) return std::nullopt;
+    return c->schema();
 }
 
 /* struct to wire. The memcpy path returns a view of the struct itself, else the field loop
  * packs into scratch, tails in declaration order. Empty Bytes = codec invalid. */
-template <class T> Bytes encode(const T& v, std::vector<uint8_t>& scratch) {
-    TypeCodec& c = type_codec<T>();
+template <class T> Bytes encode(TypeCodec& c, const T& v, std::vector<uint8_t>& scratch) {
     if (!c.ok) return Bytes();
     if (c.memcpy_ok) return Bytes(&v, sizeof(T));
     const bool le = host_le();
@@ -1630,8 +1583,7 @@ template <class T> Bytes encode(const T& v, std::vector<uint8_t>& scratch) {
 
 /* wire to struct. Offsets always come from the delivered schema and are cached per schema
  * pointer, with the memcpy path when that layout matches. nullptr assumes our own layout. */
-template <class T> bool decode(T& out, Bytes data, const detail::RantSchema* schema) {
-    TypeCodec& c = type_codec<T>();
+template <class T> bool decode(TypeCodec& c, T& out, Bytes data, const detail::RantSchema* schema) {
     if (!c.ok) return false;
     const detail::RantSchema* sch = c.raw;
     const std::vector<Leaf>* lv = &c.leaves;
@@ -2193,7 +2145,7 @@ public:
         detail::RantIter it; std::memset(&it, 0, sizeof it);
         detail::RantEntityInfo ei;
         while (detail::rant_node_entities_next(impl_->node, peer, &it, &ei))
-            out.push_back(entity_from(ei));
+            out.push_back(entity_from(impl_->node, ei));
         return out;
     }
 
@@ -2206,7 +2158,7 @@ public:
         detail::RantIter it; std::memset(&it, 0, sizeof it);
         detail::RantEntityInfo ei;
         while (detail::rant_node_mesh_next(impl_->node, &it, &ei))
-            out.push_back(entity_from(ei));
+            out.push_back(entity_from(impl_->node, ei));
         return out;
     }
     std::optional<Entity> mesh_find(EntityKind kind, std::string_view name) const {
@@ -2216,7 +2168,7 @@ public:
         std::string nm(name);
         if (!detail::rant_node_mesh_find(impl_->node, static_cast<detail::RantEntityKind>(kind),
                                          nm.c_str(), &ei)) return std::nullopt;
-        return entity_from(ei);
+        return entity_from(impl_->node, ei);
     }
     /* Bumps on every reflected change anywhere in the mesh: re-walk iff it moved. */
     uint32_t mesh_epoch() const { return valid() ? detail::rant_node_mesh_epoch(impl_->node) : 0; }
@@ -2247,6 +2199,24 @@ public:
     }
     ErrorKind last_error_kind() const {
         return static_cast<ErrorKind>(detail::rant_last_error(valid() ? impl_->node : nullptr).error);
+    }
+
+    /* Compiles schema text in this node's registry: every definition stays in scope for the
+     * node's later compiles, and a name on its own is a schema. The node owns the result for
+     * its life, one handle per shape. Throws rant::Error, or under -fno-exceptions returns an
+     * empty Schema, with last_error() saying where. */
+    Schema schema(std::string_view text) {
+        std::string t(text);
+        const detail::RantSchema* s = valid() ? detail::rant_node_schema(impl_->node, t.c_str()) : nullptr;
+        if (!s) priv::raise_last(valid() ? impl_->node : nullptr, "rant::Node::schema");
+        return Schema(s);
+    }
+    /* The same from a schema's wire bytes, such as a peer's. */
+    Schema schema_from_wire(Bytes wire) {
+        const detail::RantSchema* s = valid()
+            ? detail::rant_node_schema_parse(impl_->node, wire.data(), wire.size()) : nullptr;
+        if (!s) priv::raise_last(valid() ? impl_->node : nullptr, "rant::Node::schema_from_wire");
+        return Schema(s);
     }
 
     /* Publish an already formatted line on a level's built in log topic, truncated at
@@ -2335,6 +2305,10 @@ private:
 #ifndef RANT_NO_PATTERNS
         std::unordered_set<void*> async_live;                  /* outstanding AsyncBox* */
 #endif
+        /* the typed codecs, one per T, keyed by a per T address. codec_mu is held while a
+         * codec compiles through the node, never inside a callback */
+        std::mutex codec_mu;
+        std::map<const void*, std::unique_ptr<priv::TypeCodec>> codecs;
 
         ~Impl() {
             if (node) detail::rant_node_close(node, /*send_bye=*/1);
@@ -2408,8 +2382,15 @@ private:
 #endif
     }
 
+    /* a schema view from a walk, registered in the node so it outlives the poll */
+    static Schema keep_schema(detail::RantNode* node, const detail::RantSchema* view) {
+        if (!view) return Schema();
+        detail::RantBytes w = detail::rant_schema_wire(view);
+        return Schema(detail::rant_node_schema_parse(node, w.data, w.len));
+    }
+
     /* one entity view (valid under the node lock the walk holds) into an owned Entity */
-    static Entity entity_from(const detail::RantEntityInfo& ei) {
+    static Entity entity_from(detail::RantNode* node, const detail::RantEntityInfo& ei) {
         Entity e;
         e.kind = static_cast<EntityKind>(ei.kind);
         if (ei.name.data) e.name.assign(ei.name.data, ei.name.len);
@@ -2433,9 +2414,9 @@ private:
         e.consumers  = ei.consumers;
         e.provider   = ei.provider;
         if (ei.from.data) e.from.assign(ei.from.data, ei.from.len);
-        e.schema          = Schema::adopt(ei.schema);
-        e.rsp_schema      = Schema::adopt(ei.rsp_schema);
-        e.progress_schema = Schema::adopt(ei.progress_schema);
+        e.schema          = keep_schema(node, ei.schema);
+        e.rsp_schema      = keep_schema(node, ei.rsp_schema);
+        e.progress_schema = keep_schema(node, ei.progress_schema);
         e.generation = ei.generation;
         return e;
     }
@@ -2485,6 +2466,7 @@ private:
     }
 
     friend class priv::TopicCore;
+    template <class A> friend priv::TypeCodec* priv::type_codec(Node& n);
     template <class A, class B> friend class FunctionDefinition;
     template <class A, class B> friend class RemoteFunction;
     template <class A, class B, class C> friend class TaskDefinition;
@@ -2497,6 +2479,19 @@ private:
 
 /* Create, or share the same name slot with a widened role. A live same name topic with a
  * different schema refuses, since two modules disagreeing is a bug. retire() first. */
+namespace priv {
+template <class T> inline const char codec_key = 0;   /* one address per T, the codec map key */
+}
+template <class T> priv::TypeCodec* priv::type_codec(Node& n) {
+    Node::Impl* impl = n.impl_.get();
+    if (!impl) return nullptr;
+    std::lock_guard<std::mutex> g(impl->codec_mu);
+    auto it = impl->codecs.find(&codec_key<T>);
+    if (it != impl->codecs.end()) return it->second.get();
+    std::unique_ptr<TypeCodec> c(build_codec<T>(impl->node));
+    return impl->codecs.emplace(&codec_key<T>, std::move(c)).first->second.get();
+}
+
 inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos)
     : TopicCore(node, name, role, nullptr, qos, /*reflect=*/true) {}
 
@@ -3323,7 +3318,7 @@ private:
  * Request<Bytes> for the callback lifetime and adds the typed reply. */
 template <class Rsp> class Request {
 public:
-    explicit Request(Request<Bytes>& core) : core_(core) {}
+    Request(Request<Bytes>& core, priv::TypeCodec* rsp) : core_(core), rsp_(rsp) {}
     Bytes            data()          const { return core_.data(); }
     uint32_t         caller()        const { return core_.caller(); }
     std::string_view caller_name()   const { return core_.caller_name(); }
@@ -3333,32 +3328,34 @@ public:
 
     void reply(const Rsp& v) {
         std::vector<uint8_t> s;
-        core_.reply(priv::encode(v, s));
+        core_.reply(priv::encode(*rsp_, v, s));
     }
     void reply(Bytes raw)     { core_.reply(raw); }
     void fail(std::string_view message = {}, Bytes raw = {}) { core_.fail(message, raw); }
-    Deferred<Rsp> defer()     { return Deferred<Rsp>(core_.defer()); }
+    Deferred<Rsp> defer()     { return Deferred<Rsp>(core_.defer(), rsp_); }
 
 private:
     Request<Bytes>& core_;
+    priv::TypeCodec* rsp_;
 };
 
 /* Deferred<Rsp>: the typed parked reply. */
 template <class Rsp> class Deferred {
 public:
     Deferred() = default;
-    Deferred(Deferred<Bytes>&& core) : core_(std::move(core)) {}
+    Deferred(Deferred<Bytes>&& core, priv::TypeCodec* rsp) : core_(std::move(core)), rsp_(rsp) {}
     Deferred(Deferred&&) noexcept = default;
     Deferred& operator=(Deferred&&) noexcept = default;
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
     bool complete(const Rsp& v, std::string_view message = {}) {
         std::vector<uint8_t> s;
-        return core_.complete(priv::encode(v, s), message);
+        return core_.complete(priv::encode(*rsp_, v, s), message);
     }
     bool fail(std::string_view message = {}) { return core_.fail(message); }
 private:
     Deferred<Bytes> core_;
+    priv::TypeCodec* rsp_ = nullptr;
 };
 
 /* Response<Rsp>: the owning typed call outcome. value() is meaningful when ok(). */
@@ -3417,10 +3414,11 @@ public:
     template <class H>
     FunctionDefinition(Node& n, std::string_view name, H&& handler,
                        const FunctionOptions& o = {}) {
-        const Schema* rq = priv::schema_of<Req>();
-        const Schema* rs = priv::schema_of<Rsp>();
-        if (!rq || !rs) { priv::raise_msg("rant::FunctionDefinition: RANT_SCHEMA compile failed"); return; }
-        core_ = FunctionDefinition<Bytes, Bytes>(n, name, rq, rs, adapt(std::forward<H>(handler)), o);
+        priv::TypeCodec* cq = priv::type_codec<Req>(n);
+        priv::TypeCodec* cr = priv::type_codec<Rsp>(n);
+        if (!priv::codec_ok(cq) || !priv::codec_ok(cr)) { priv::raise_msg("rant::FunctionDefinition: RANT_SCHEMA compile failed"); return; }
+        Schema rq = cq->schema(), rs = cr->schema();
+        core_ = FunctionDefinition<Bytes, Bytes>(n, name, &rq, &rs, adapt(std::forward<H>(handler), cq, cr), o);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3429,24 +3427,25 @@ public:
 
 private:
     template <class H>
-    static typename FunctionDefinition<Bytes, Bytes>::Handler adapt(H&& h) {
+    static typename FunctionDefinition<Bytes, Bytes>::Handler adapt(H&& h, priv::TypeCodec* cq,
+                                                                    priv::TypeCodec* cr) {
         if constexpr (std::is_invocable_v<std::decay_t<H>&, const Req&, Request<Rsp>&>) {
-            return [f = std::forward<H>(h)](Request<Bytes>& u) mutable {
+            return [f = std::forward<H>(h), cq, cr](Request<Bytes>& u) mutable {
                 Req q{};
-                if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
-                Request<Rsp> tr(u);
+                if (!priv::decode(*cq, q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
+                Request<Rsp> tr(u, cr);
                 f(q, tr);
             };
         } else if constexpr (std::is_invocable_v<std::decay_t<H>&, const Req&>) {
             static_assert(std::is_convertible_v<
                               std::invoke_result_t<std::decay_t<H>&, const Req&>, Rsp>,
                           "simple function handler must return Rsp");
-            return [f = std::forward<H>(h)](Request<Bytes>& u) mutable {
+            return [f = std::forward<H>(h), cq, cr](Request<Bytes>& u) mutable {
                 Req q{};
-                if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
+                if (!priv::decode(*cq, q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
                 Rsp r = f(q);
                 std::vector<uint8_t> s;
-                u.reply(priv::encode(r, s));
+                u.reply(priv::encode(*cr, r, s));
             };
         } else {
             static_assert(priv::always_false<H>,
@@ -3462,10 +3461,11 @@ template <class Req, class Rsp> class RemoteFunction {
 public:
     RemoteFunction() = default;
     RemoteFunction(Node& n, std::string_view name, const FunctionOptions& o = {}) {
-        const Schema* rq = priv::schema_of<Req>();
-        const Schema* rs = priv::schema_of<Rsp>();
-        if (!rq || !rs) { priv::raise_msg("rant::RemoteFunction: RANT_SCHEMA compile failed"); return; }
-        core_ = RemoteFunction<Bytes, Bytes>(n, name, rq, rs, o);
+        cq_ = priv::type_codec<Req>(n);
+        cr_ = priv::type_codec<Rsp>(n);
+        if (!priv::codec_ok(cq_) || !priv::codec_ok(cr_)) { priv::raise_msg("rant::RemoteFunction: RANT_SCHEMA compile failed"); return; }
+        Schema rq = cq_->schema(), rs = cr_->schema();
+        core_ = RemoteFunction<Bytes, Bytes>(n, name, &rq, &rs, o);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3473,23 +3473,23 @@ public:
     /* Blocking call, see RemoteFunction<Bytes, Bytes>::call. Decodes into the owning Response. */
     Response<Rsp> call(const Req& req, int timeout_ms = -1, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        Response<Bytes> ur = core_.call(priv::encode(req, s), timeout_ms, opts);
+        Response<Bytes> ur = core_.call(priv::encode(*cq_, req, s), timeout_ms, opts);
         Response<Rsp> r;
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
         r.message_.assign(ur.message());   /* own it: ur dies with this frame */
-        if (ur.ok()) (void)priv::decode(r.v_, ur.data(), ur.raw_schema());
+        if (ur.ok()) (void)priv::decode(*cr_, r.v_, ur.data(), ur.raw_schema());
         return r;
     }
     SendStatus call_async(const Req& req, std::function<void(const ResponseView<Rsp>&)> cb,
                           const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        return core_.call_async(priv::encode(req, s),
-            [cb = std::move(cb)](const ResponseView<Bytes>& uv) {
+        return core_.call_async(priv::encode(*cq_, req, s),
+            [cb = std::move(cb), cr = cr_](const ResponseView<Bytes>& uv) {
                 ResponseView<Rsp> tv;
                 tv.st_ = uv.status(); tv.provider_ = uv.provider(); tv.written_ = uv.written_us();
                 tv.message_ = uv.message();
-                if (uv.ok()) (void)priv::decode(tv.v_, uv.data(), uv.raw_schema());
+                if (uv.ok()) (void)priv::decode(*cr, tv.v_, uv.data(), uv.raw_schema());
                 cb(tv);
             }, opts);
     }
@@ -3499,13 +3499,16 @@ public:
 
 private:
     RemoteFunction<Bytes, Bytes> core_;
+    priv::TypeCodec* cq_ = nullptr;
+    priv::TypeCodec* cr_ = nullptr;
 };
 
 /* The typed view of a request inside a task handler. Wraps the untyped TaskRequest<Bytes, Bytes> for
  * the callback lifetime and adds the typed verbs. */
 template <class Prg, class Rsp> class TaskRequest {
 public:
-    explicit TaskRequest(TaskRequest<Bytes, Bytes>& core) : core_(core) {}
+    TaskRequest(TaskRequest<Bytes, Bytes>& core, priv::TypeCodec* prg, priv::TypeCodec* rsp)
+        : core_(core), prg_(prg), rsp_(rsp) {}
     Bytes            data()        const { return core_.data(); }
     uint32_t         caller()      const { return core_.caller(); }
     std::string_view caller_name() const { return core_.caller_name(); }
@@ -3515,22 +3518,25 @@ public:
 
     void reply(const Rsp& v) {
         std::vector<uint8_t> s;
-        core_.reply(priv::encode(v, s));
+        core_.reply(priv::encode(*rsp_, v, s));
     }
     void reply(Bytes raw) { core_.reply(raw); }
     void fail(std::string_view message = {}, Bytes raw = {}) { core_.fail(message, raw); }
     SendStatus start() { return core_.start(); }
-    PendingTask<Prg, Rsp> defer() { return PendingTask<Prg, Rsp>(core_.defer()); }
+    PendingTask<Prg, Rsp> defer() { return PendingTask<Prg, Rsp>(core_.defer(), prg_, rsp_); }
 
 private:
     TaskRequest<Bytes, Bytes>& core_;
+    priv::TypeCodec* prg_;
+    priv::TypeCodec* rsp_;
 };
 
 /* PendingTask<Prg,Rsp>: the typed deferred task (see the untyped core's contract). */
 template <class Prg, class Rsp> class PendingTask {
 public:
     PendingTask() = default;
-    PendingTask(PendingTask<Bytes, Bytes>&& core) : core_(std::move(core)) {}
+    PendingTask(PendingTask<Bytes, Bytes>&& core, priv::TypeCodec* prg, priv::TypeCodec* rsp)
+        : core_(std::move(core)), prg_(prg), rsp_(rsp) {}
     PendingTask(PendingTask&&) noexcept = default;
     PendingTask& operator=(PendingTask&&) noexcept = default;
     bool valid() const noexcept { return core_.valid(); }
@@ -3538,23 +3544,25 @@ public:
 
     SendStatus progress(const Prg& v) {
         std::vector<uint8_t> s;
-        return core_.progress(priv::encode(v, s));
+        return core_.progress(priv::encode(*prg_, v, s));
     }
     bool cancelled() const { return core_.cancelled(); }
     SendStatus complete(const Rsp& v, std::string_view message = {}) {
         std::vector<uint8_t> s;
-        return core_.complete(priv::encode(v, s), message);
+        return core_.complete(priv::encode(*rsp_, v, s), message);
     }
     SendStatus fail(std::string_view message = {}) { return core_.fail(message); }
     SendStatus complete_cancelled(std::string_view message = {}) { return core_.complete_cancelled(message); }
     /* honor a cancel and still carry a typed partial result */
     SendStatus complete_cancelled(std::string_view message, const Rsp& partial) {
         std::vector<uint8_t> s;
-        return core_.complete_cancelled(message, priv::encode(partial, s));
+        return core_.complete_cancelled(message, priv::encode(*rsp_, partial, s));
     }
 
 private:
     PendingTask<Bytes, Bytes> core_;
+    priv::TypeCodec* prg_ = nullptr;
+    priv::TypeCodec* rsp_ = nullptr;
 };
 
 /* The typed progress update, valid for the callback. value() is meaningful only when
@@ -3586,11 +3594,12 @@ public:
     TaskDefinition() = default;
     template <class H>
     TaskDefinition(Node& n, std::string_view name, H&& handler, const TaskOptions& o = {}) {
-        const Schema* rq = priv::schema_of<Req>();
-        const Schema* pg = priv::schema_of<Prg>();
-        const Schema* rs = priv::schema_of<Rsp>();
-        if (!rq || !pg || !rs) { priv::raise_msg("rant::TaskDefinition: RANT_SCHEMA compile failed"); return; }
-        core_ = TaskDefinition<Bytes, Bytes, Bytes>(n, name, rq, pg, rs, adapt(std::forward<H>(handler)), o);
+        priv::TypeCodec* cq = priv::type_codec<Req>(n);
+        priv::TypeCodec* cp = priv::type_codec<Prg>(n);
+        priv::TypeCodec* cr = priv::type_codec<Rsp>(n);
+        if (!priv::codec_ok(cq) || !priv::codec_ok(cp) || !priv::codec_ok(cr)) { priv::raise_msg("rant::TaskDefinition: RANT_SCHEMA compile failed"); return; }
+        Schema rq = cq->schema(), pg = cp->schema(), rs = cr->schema();
+        core_ = TaskDefinition<Bytes, Bytes, Bytes>(n, name, &rq, &pg, &rs, adapt(std::forward<H>(handler), cq, cp, cr), o);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3600,13 +3609,14 @@ public:
 
 private:
     template <class H>
-    static typename TaskDefinition<Bytes, Bytes, Bytes>::Handler adapt(H&& h) {
+    static typename TaskDefinition<Bytes, Bytes, Bytes>::Handler adapt(H&& h, priv::TypeCodec* cq,
+                                                                       priv::TypeCodec* cp, priv::TypeCodec* cr) {
         static_assert(std::is_invocable_v<std::decay_t<H>&, const Req&, TaskRequest<Prg, Rsp>&>,
                       "task handler must be void(const Req&, rant::TaskRequest<Prg,Rsp>&)");
-        return [f = std::forward<H>(h)](TaskRequest<Bytes, Bytes>& u) mutable {
+        return [f = std::forward<H>(h), cq, cp, cr](TaskRequest<Bytes, Bytes>& u) mutable {
             Req q{};
-            if (!priv::decode(q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
-            TaskRequest<Prg, Rsp> tr(u);
+            if (!priv::decode(*cq, q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
+            TaskRequest<Prg, Rsp> tr(u, cp, cr);
             f(q, tr);
         };
     }
@@ -3620,11 +3630,12 @@ public:
 
     RemoteTask() = default;
     RemoteTask(Node& n, std::string_view name, const TaskOptions& o = {}) {
-        const Schema* rq = priv::schema_of<Req>();
-        const Schema* pg = priv::schema_of<Prg>();
-        const Schema* rs = priv::schema_of<Rsp>();
-        if (!rq || !pg || !rs) { priv::raise_msg("rant::RemoteTask: RANT_SCHEMA compile failed"); return; }
-        core_ = RemoteTask<Bytes, Bytes, Bytes>(n, name, rq, pg, rs, o);
+        cq_ = priv::type_codec<Req>(n);
+        cp_ = priv::type_codec<Prg>(n);
+        cr_ = priv::type_codec<Rsp>(n);
+        if (!priv::codec_ok(cq_) || !priv::codec_ok(cp_) || !priv::codec_ok(cr_)) { priv::raise_msg("rant::RemoteTask: RANT_SCHEMA compile failed"); return; }
+        Schema rq = cq_->schema(), pg = cp_->schema(), rs = cr_->schema();
+        core_ = RemoteTask<Bytes, Bytes, Bytes>(n, name, &rq, &pg, &rs, o);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3633,13 +3644,13 @@ public:
     Response<Rsp> call(const Req& req, ProgressHandler on_progress = {},
                        int timeout_ms = -1, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        Response<Bytes> ur = core_.call(priv::encode(req, s), adapt_progress(std::move(on_progress)),
+        Response<Bytes> ur = core_.call(priv::encode(*cq_, req, s), adapt_progress(std::move(on_progress), cp_),
                                    timeout_ms, opts);
         Response<Rsp> r;
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
         r.message_.assign(ur.message());   /* own it: ur dies with this frame */
-        if (ur.ok()) (void)priv::decode(r.v_, ur.data(), ur.raw_schema());
+        if (ur.ok()) (void)priv::decode(*cr_, r.v_, ur.data(), ur.raw_schema());
         return r;
     }
     /* Async form (see RemoteTask<Bytes, Bytes, Bytes>::call_async): returns the send status + call id. */
@@ -3647,13 +3658,13 @@ public:
                         std::function<void(const ResponseView<Rsp>&)> on_response,
                         const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        return core_.call_async(priv::encode(req, s), adapt_progress(std::move(on_progress)),
-            [cb = std::move(on_response)](const ResponseView<Bytes>& uv) {
+        return core_.call_async(priv::encode(*cq_, req, s), adapt_progress(std::move(on_progress), cp_),
+            [cb = std::move(on_response), cr = cr_](const ResponseView<Bytes>& uv) {
                 if (!cb) return;
                 ResponseView<Rsp> tv;
                 tv.st_ = uv.status(); tv.provider_ = uv.provider(); tv.written_ = uv.written_us();
                 tv.message_ = uv.message();
-                if (uv.ok()) (void)priv::decode(tv.v_, uv.data(), uv.raw_schema());
+                if (uv.ok()) (void)priv::decode(*cr, tv.v_, uv.data(), uv.raw_schema());
                 cb(tv);
             }, opts);
     }
@@ -3664,18 +3675,22 @@ public:
     SendStatus retire() { return core_.retire(); }
 
 private:
-    static RemoteTask<Bytes, Bytes, Bytes>::ProgressHandler adapt_progress(ProgressHandler h) {
+    static RemoteTask<Bytes, Bytes, Bytes>::ProgressHandler adapt_progress(ProgressHandler h,
+                                                                           priv::TypeCodec* cp) {
         if (!h) return {};
-        return [f = std::move(h)](const ProgressView<Bytes>& up) mutable {
+        return [f = std::move(h), cp](const ProgressView<Bytes>& up) mutable {
             ProgressView<Prg> tp;
             tp.call_id_ = up.call_id(); tp.provider_ = up.provider();
             tp.written_ = up.written_us(); tp.recv_ = up.recv_us();
             tp.has_ = up.has_value();
-            if (tp.has_ && !priv::decode(tp.v_, up.data(), up.raw_schema())) return;
+            if (tp.has_ && !priv::decode(*cp, tp.v_, up.data(), up.raw_schema())) return;
             f(tp);
         };
     }
     RemoteTask<Bytes, Bytes, Bytes> core_;
+    priv::TypeCodec* cq_ = nullptr;
+    priv::TypeCodec* cp_ = nullptr;
+    priv::TypeCodec* cr_ = nullptr;
 };
 
 /* VariableDefinition<T>: the typed authoritative value. */
@@ -3683,14 +3698,15 @@ template <class T> class VariableDefinition {
 public:
     VariableDefinition() = default;
     VariableDefinition(Node& n, std::string_view name, const VariableOptions<T>& o = {}) {
-        const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("rant::VariableDefinition: RANT_SCHEMA compile failed"); return; }
+        c_ = priv::type_codec<T>(n);
+        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::VariableDefinition: RANT_SCHEMA compile failed"); return; }
+        Schema sc = c_->schema();
         std::vector<uint8_t> scratch;
         VariableOptions<Bytes> uo;
-        if (o.initial) uo.initial = priv::encode(*o.initial, scratch);
+        if (o.initial) uo.initial = priv::encode(*c_, *o.initial, scratch);
         uo.read_only = o.read_only; uo.allow_force = o.allow_force;
         uo.catch_up = o.catch_up; uo.backpressure_wait_us = o.backpressure_wait_us;
-        core_ = VariableDefinition<Bytes>(n, name, sc, uo);
+        core_ = VariableDefinition<Bytes>(n, name, &sc, uo);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3700,11 +3716,11 @@ public:
         auto b = core_.get();
         if (!b) return std::nullopt;
         T v{};
-        if (!priv::decode(v, Bytes(b->data(), b->size()), nullptr)) return std::nullopt;
+        if (!priv::decode(*c_, v, Bytes(b->data(), b->size()), nullptr)) return std::nullopt;
         return v;
     }
-    SendStatus set(const T& v)   { std::vector<uint8_t> s; return core_.set(priv::encode(v, s)); }
-    SendStatus force(const T& v) { std::vector<uint8_t> s; return core_.force(priv::encode(v, s)); }
+    SendStatus set(const T& v)   { std::vector<uint8_t> s; return core_.set(priv::encode(*c_, v, s)); }
+    SendStatus force(const T& v) { std::vector<uint8_t> s; return core_.force(priv::encode(*c_, v, s)); }
     SendStatus unforce()         { return core_.unforce(); }
     bool forced()          const { return core_.forced(); }
     int  match_count()     const { return core_.match_count(); }
@@ -3714,21 +3730,21 @@ public:
     template <class H, class = std::enable_if_t<
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
-    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h))); }
+    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h), c_)); }
     template <class H, class = std::enable_if_t<
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
-    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h))); }
+    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h), c_)); }
     void on_change(std::nullptr_t) { core_.on_change({}); }
     void on_write (std::nullptr_t) { core_.on_write({}); }
     SendStatus retire() { return core_.retire(); }
 
 private:
     template <class H>
-    static std::function<void(const VariableUpdate&)> adapt(H&& h) {
-        return [f = std::forward<H>(h)](const VariableUpdate& u) mutable {
+    static std::function<void(const VariableUpdate&)> adapt(H&& h, priv::TypeCodec* c) {
+        return [f = std::forward<H>(h), c](const VariableUpdate& u) mutable {
             T v{};
-            if (!priv::decode(v, u.value(), u.raw_schema())) return;
+            if (!priv::decode(*c, v, u.value(), u.raw_schema())) return;
             if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>)
                 f(v, u);
             else
@@ -3736,6 +3752,7 @@ private:
         };
     }
     VariableDefinition<Bytes> core_;
+    priv::TypeCodec* c_ = nullptr;
 };
 
 /* RemoteVariable<T>: the typed accessor of a value owned elsewhere. */
@@ -3743,11 +3760,12 @@ template <class T> class RemoteVariable {
 public:
     RemoteVariable() = default;
     RemoteVariable(Node& n, std::string_view name, const VariableOptions<T>& o = {}) {
-        const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("rant::RemoteVariable: RANT_SCHEMA compile failed"); return; }
+        c_ = priv::type_codec<T>(n);
+        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::RemoteVariable: RANT_SCHEMA compile failed"); return; }
+        Schema sc = c_->schema();
         VariableOptions<Bytes> uo;
         uo.catch_up = o.catch_up; uo.backpressure_wait_us = o.backpressure_wait_us;
-        core_ = RemoteVariable<Bytes>(n, name, sc, uo);
+        core_ = RemoteVariable<Bytes>(n, name, &sc, uo);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3756,13 +3774,13 @@ public:
         auto b = core_.get();
         if (!b) return std::nullopt;
         T v{};
-        if (!priv::decode(v, Bytes(b->data(), b->size()), nullptr)) return std::nullopt;
+        if (!priv::decode(*c_, v, Bytes(b->data(), b->size()), nullptr)) return std::nullopt;
         return v;
     }
     /* Block (driving the node loop) until a value exists or timeout_ms elapses. */
     bool wait(int timeout_ms)    { return core_.wait(timeout_ms); }
-    SendStatus set(const T& v)   { std::vector<uint8_t> s; return core_.set(priv::encode(v, s)); }
-    SendStatus force(const T& v) { std::vector<uint8_t> s; return core_.force(priv::encode(v, s)); }
+    SendStatus set(const T& v)   { std::vector<uint8_t> s; return core_.set(priv::encode(*c_, v, s)); }
+    SendStatus force(const T& v) { std::vector<uint8_t> s; return core_.force(priv::encode(*c_, v, s)); }
     SendStatus unforce()         { return core_.unforce(); }
     bool forced()          const { return core_.forced(); }
     int  match_count()     const { return core_.match_count(); }
@@ -3772,21 +3790,21 @@ public:
     template <class H, class = std::enable_if_t<
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
-    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h))); }
+    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h), c_)); }
     template <class H, class = std::enable_if_t<
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
-    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h))); }
+    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h), c_)); }
     void on_change(std::nullptr_t) { core_.on_change({}); }
     void on_write (std::nullptr_t) { core_.on_write({}); }
     SendStatus retire() { return core_.retire(); }
 
 private:
     template <class H>
-    static std::function<void(const VariableUpdate&)> adapt(H&& h) {
-        return [f = std::forward<H>(h)](const VariableUpdate& u) mutable {
+    static std::function<void(const VariableUpdate&)> adapt(H&& h, priv::TypeCodec* c) {
+        return [f = std::forward<H>(h), c](const VariableUpdate& u) mutable {
             T v{};
-            if (!priv::decode(v, u.value(), u.raw_schema())) return;
+            if (!priv::decode(*c, v, u.value(), u.raw_schema())) return;
             if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>)
                 f(v, u);
             else
@@ -3794,6 +3812,7 @@ private:
         };
     }
     RemoteVariable<Bytes> core_;
+    priv::TypeCodec* c_ = nullptr;
 };
 
 #endif /* !RANT_NO_PATTERNS */
@@ -3803,16 +3822,17 @@ template <class T> class Publisher {
 public:
     Publisher() = default;
     Publisher(Node& n, std::string_view name, const Qos& qos = {}) {
-        const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("rant::Publisher: RANT_SCHEMA compile failed"); return; }
-        core_ = Publisher<Bytes>(n, name, sc, qos);
+        c_ = priv::type_codec<T>(n);
+        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::Publisher: RANT_SCHEMA compile failed"); return; }
+        Schema sc = c_->schema();
+        core_ = Publisher<Bytes>(n, name, &sc, qos);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
     SendStatus send(const T& v, Timestamp capture = {}) {
         std::vector<uint8_t> s;
-        return core_.send(priv::encode(v, s), capture);
+        return core_.send(priv::encode(*c_, v, s), capture);
     }
     int  match_count()   const { return core_.match_count(); }
     bool ready()         const { return core_.ready(); }
@@ -3821,6 +3841,7 @@ public:
 
 private:
     Publisher<Bytes> core_;
+    priv::TypeCodec* c_ = nullptr;
 };
 
 /* The typed subscribe side. Handler forms: void(const T&) or void(const T&, const
@@ -3832,9 +3853,10 @@ public:
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>>>
     Subscriber(Node& n, std::string_view name, H&& handler, const Qos& qos = {}) {
-        const Schema* sc = priv::schema_of<T>();
-        if (!sc) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
-        core_ = Subscriber<Bytes>(n, name, sc, adapt(std::forward<H>(handler)), qos);
+        priv::TypeCodec* c = priv::type_codec<T>(n);
+        if (!priv::codec_ok(c)) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
+        Schema sc = c->schema();
+        core_ = Subscriber<Bytes>(n, name, &sc, adapt(std::forward<H>(handler), c), qos);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3844,10 +3866,10 @@ public:
 
 private:
     template <class H>
-    static Node::MessageHandler adapt(H&& h) {
-        return [f = std::forward<H>(h)](const MessageView& m) mutable {
+    static Node::MessageHandler adapt(H&& h, priv::TypeCodec* c) {
+        return [f = std::forward<H>(h), c](const MessageView& m) mutable {
             T v{};
-            if (!priv::decode(v, m.data(), m.raw_schema())) return;
+            if (!priv::decode(*c, v, m.data(), m.raw_schema())) return;
             if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>)
                 f(v, m);
             else

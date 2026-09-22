@@ -28,8 +28,8 @@ static class Program
         // keep_last deep enough that a small per-loop burst is not evicted before it flushes.
         var ch = node.Publisher<Tick>("tick", new Qos { KeepLast = 64 });
         Console.WriteLine($"publishing 'tick' at {Hz} Hz on the default interface, domain 0 (Ctrl+C to stop)");
-        using (var s = new Schema(typeof(Tick)))
-            Console.WriteLine("schema: " + string.Join(" ", s.Dsl.Split((char[])null, StringSplitOptions.RemoveEmptyEntries)));
+        var s = node.Schema(typeof(Tick));
+        Console.WriteLine("schema: " + string.Join(" ", s.Dsl.Split((char[])null, StringSplitOptions.RemoveEmptyEntries)));
 
         bool stop = false;
         Console.CancelKeyPress += (o, e) => { e.Cancel = true; stop = true; };

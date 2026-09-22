@@ -10,6 +10,7 @@
 #endif
 #include "../common/arena.h"
 #include "../common/bytes.h"
+#include "../serialize/internal.h"
 #include <string.h>    /* heap access goes through the node pool, no stdlib.h here */
 #include <stdarg.h>    /* rant_node_log */
 #include <stdio.h>     /* vsnprintf for log text only, never the data path */
@@ -62,7 +63,7 @@ struct RantQueue {
 };
 
 struct RantTopic {
-    RantNode *n; uint16_t index; RantSchema *schema;       /* the schema is the node's own copy */
+    RantNode *n; uint16_t index; const RantSchema *schema;     /* registered in the node */
     i_RantMsgQueue *q;                    /* the consumer queue, NULL = inline callbacks */
     RantQueue *queue;                     /* the callback queue the topic was created with, or NULL */
     i_RantSysMsgFn sys_on_message;        /* the patterns layer's routing, NULL = a normal topic */
@@ -169,7 +170,8 @@ struct RantNode {
     char            last_error_detail[160];
     /* the built in @rant/log topics and the error mirror ring */
     RantTopic      *log_topics[3];       /* by RantLogLevel, all NULL under opts.disable_logs */
-    RantSchema     *log_schema;          /* RantLog { wall_us, mono_us, text }, node owned */
+    const RantSchema *log_schema;        /* RantLog { wall_us, mono_us, text } */
+    i_RantRegistry  registry;            /* every schema this node compiled or registered */
     uint8_t         log_errors;          /* the default on RANT_ERROR mirror */
     uint8_t         log_flushing;        /* reentrancy guard: a flush must not re enter the ring */
     uint8_t         log_pend_n;
@@ -928,11 +930,6 @@ RantAllocator rant_allocator_heap(uint32_t page_size){
     return rant_allocator_dynamic(i_rant_plat_realloc, page_size);
 }
 
-void *rant_heap_realloc(void *user, void *ptr, size_t size){
-    (void)user;
-    return i_rant_plat_realloc(ptr, size);
-}
-
 RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_message, RantEventFn on_event, const RantNodeOpts *opts){
     RantNodeOpts o; i_RantDiscoveryCoreConfig dc; i_RantTransportConfig tc; i_RantNodeBlocks blocks;
     uint16_t max_peers, max_topics, user_topics;
@@ -998,6 +995,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     n->fd = RANT_SOCK_BAD;
     n->user_data = o.user_data;      /* set early so emit can stamp any open time error */
     n->on_event = on_event;
+    i_rant_registry_init(&n->registry, i_rant_node_alloc, n);
 #ifdef RANT_THREADS
     i_rant_plat_mutex_init(&n->mu);
     i_rant_plat_cond_init(&n->cv);
@@ -1353,9 +1351,9 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
         }
         if (kind != RANT_KIND_TOPIC) h->q->reliable = 0;   /* state applied at receipt: never park the lane */
     }
-    if (schema){   /* copied into node memory so the caller's schema need not outlive the topic */
+    if (schema){   /* registered here, so another node's schema serves as well as our own */
         RantBytes w = rant_schema_wire(schema);
-        h->schema = rant_schema_parse(w.data, w.len, i_rant_node_alloc, n);
+        h->schema = i_rant_registry_parse(&n->registry, w.data, w.len);
         if (!h->schema){
             i_rant_node_create_fail(n, RANT_E_BAD_SCHEMA, name, 0, 1);
             i_rant_node_queue_drop(n, h);
@@ -1385,7 +1383,6 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
             /* the transport's verdict: -2 a live same name slot, -3 the name, -4 OOM */
             i_rant_node_create_fail(n, rc == -2 ? RANT_E_NAME_COLLISION : rc == -3 ? RANT_E_BAD_NAME
                                      : rc == -4 ? RANT_E_OOM : RANT_E_STATE, name, 0, 1);
-            if (h->schema) rant_schema_free(h->schema, i_rant_node_alloc, n);
             i_rant_node_queue_drop(n, h);
             i_rant_node_alloc(n, h, 0);
             i_rant_node_unlock(n, acquired);
@@ -1445,7 +1442,7 @@ static const char *const i_rant_log_topic_names[3] =
  * history, publish only, and no backpressure wait. NULL handles on OOM, never a failed open. */
 static void i_rant_node_logs_open(RantNode *n){
     RantTopicOpts topt; int lvl;
-    n->log_schema = rant_schema_compile(i_rant_node_alloc, n,
+    n->log_schema = i_rant_registry_compile(&n->registry,
         "RantLog { wall_us: u64, mono_us: u64, text: string }", NULL);
     if (!n->log_schema) return;
     for (lvl = 0; lvl < 3; lvl++){
@@ -2310,10 +2307,9 @@ int rant_topic_retire(RantTopic *topic){
         i_rant_node_unlock(n, acquired);
         return RANT_ERR_STATE;
     }
-    /* the slot keeps its schema hash as the reuse fingerprint, the parsed copy goes */
+    /* the slot keeps its schema hash as the reuse fingerprint, the registry keeps the schema */
     i_rant_node_core_retire_topic_schema(n->core, idx);
     i_rant_node_queue_drop(n, topic);
-    if (topic->schema) rant_schema_free(topic->schema, i_rant_node_alloc, n);
     n->handles[idx] = NULL;
     i_rant_node_alloc(n, topic, 0);           /* the handle is invalid from here */
     /* the slot rides the announce as a hole from the next blob on */
@@ -2390,22 +2386,18 @@ uint32_t rant_node_mesh_epoch(RantNode *n){
 }
 
 /* Re types a live topic in place: the slot is retired and reused at the same index under
- * a bumped generation, the schema copy replaced, the handle and queue kept. Lock held. */
+ * a bumped generation, the schema replaced, the handle and queue kept. Lock held. */
 int i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reliability){
-    RantNode *n = topic->n; i_RantTopicDef def; RantSchema *copy = NULL; uint16_t idx = topic->index;
+    RantNode *n = topic->n; i_RantTopicDef def; const RantSchema *copy = NULL; uint16_t idx = topic->index;
     uint32_t rb; int rc;
     i_rant_node_callbacks_settle(n);
     if (schema){
         RantBytes w = rant_schema_wire(schema);
-        copy = rant_schema_parse(w.data, w.len, i_rant_node_alloc, n);
+        copy = i_rant_registry_parse(&n->registry, w.data, w.len);
         if (!copy) return RANT_ERR_OOM;
     }
-    if (i_rant_transport_topic_retire(n->transport, idx) != 0){
-        if (copy) rant_schema_free(copy, i_rant_node_alloc, n);
-        return RANT_ERR_STATE;
-    }
+    if (i_rant_transport_topic_retire(n->transport, idx) != 0) return RANT_ERR_STATE;
     i_rant_node_core_retire_topic_schema(n->core, idx);
-    if (topic->schema) rant_schema_free(topic->schema, i_rant_node_alloc, n);
     topic->schema = copy;
     topic->qos.reliability = (RantReliability)reliability;
     memset(&def, 0, sizeof def);
@@ -2468,6 +2460,39 @@ uint32_t rant_node_evicted_unsent(RantNode *n){
     return v;
 }
 
+/* A refused schema text or wire: RANT_E_BAD_SCHEMA with the place in schema_detail. at
+ * NULL means the wire form. Lock held. */
+static void i_rant_node_schema_fail(RantNode *n, const char *text, const char *at){
+    RantEvent e; char detail[96];
+    memset(&e, 0, sizeof e);
+    e.kind = RANT_ERROR; e.error = RANT_E_BAD_SCHEMA;
+    if (!text) snprintf(detail, sizeof detail, "schema wire refused");
+    else if (!at || !*at) snprintf(detail, sizeof detail, "schema text refused at the end");
+    else snprintf(detail, sizeof detail, "schema text refused near: %.40s", at);
+    e.schema_detail = detail;
+    i_rant_node_emit(n, &e);
+}
+
+const RantSchema *rant_node_schema(RantNode *n, const char *text){
+    const RantSchema *s; const char *at = NULL; int acquired;
+    if (!n || !text) return NULL;
+    acquired = i_rant_node_lock(n);
+    s = i_rant_registry_compile(&n->registry, text, &at);
+    if (!s) i_rant_node_schema_fail(n, text, at);
+    i_rant_node_unlock(n, acquired);
+    return s;
+}
+
+const RantSchema *rant_node_schema_parse(RantNode *n, const void *wire, size_t wire_len){
+    const RantSchema *s; int acquired;
+    if (!n || !wire) return NULL;
+    acquired = i_rant_node_lock(n);
+    s = i_rant_registry_parse(&n->registry, wire, wire_len);
+    if (!s) i_rant_node_schema_fail(n, NULL, NULL);
+    i_rant_node_unlock(n, acquired);
+    return s;
+}
+
 #ifndef RANT_NO_STDTYPES
 /* The standard types that need a platform. They sit here so serialize/ keeps needing
  * nothing but memory. */
@@ -2478,6 +2503,31 @@ RantTimestamp rant_timestamp_now(void){
 void rant_uuid_new(RantUuid *out){
     /* one generator: the CSPRNG path, else the host identity mix a node's own uuid uses */
     if (out) i_rant_discovery_auto_uuid(out->bytes);
+}
+
+RantStdType rant_std_recognize(RantNode *n, const RantSchema *s){
+    RantStdType t; int acquired;
+    if (!n || !s) return RANT_STD_NONE;
+    acquired = i_rant_node_lock(n);
+    t = i_rant_std_recognize(&n->registry, s);
+    i_rant_node_unlock(n, acquired);
+    return t;
+}
+RantStdType rant_std_recognize_field(RantNode *n, const RantSchema *s, uint16_t field){
+    RantStdType t; int acquired;
+    if (!n || !s) return RANT_STD_NONE;
+    acquired = i_rant_node_lock(n);
+    t = i_rant_std_recognize_field(&n->registry, s, field);
+    i_rant_node_unlock(n, acquired);
+    return t;
+}
+RantStdType rant_std_recognize_elem(RantNode *n, const RantSchema *s, uint16_t field){
+    RantStdType t; int acquired;
+    if (!n || !s) return RANT_STD_NONE;
+    acquired = i_rant_node_lock(n);
+    t = i_rant_std_recognize_elem(&n->registry, s, field);
+    i_rant_node_unlock(n, acquired);
+    return t;
 }
 #endif
 

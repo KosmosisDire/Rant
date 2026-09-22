@@ -48,20 +48,20 @@ static void handle_event(const rant::Event& e) {
 int main(int argc, char** argv) {
     const char* name = (argc > 1) ? argv[1] : nullptr;
 
-    std::string err;
-    auto schema = rant::Schema::compile(CHAT_SCHEMA, &err);
-    if (!schema) { std::fprintf(stderr, "schema: %s\n", err.c_str()); return 1; }
-
 #if defined(__cpp_exceptions)
   try {
 #endif
     rant::Node node(name ? name : std::string_view{}, {}, handle_event);
     if (!node.valid()) { std::fprintf(stderr, "node: %s\n", node.last_error().c_str()); return 1; }
 
+    /* the node compiles and owns the schema */
+    rant::Schema schema = node.schema(CHAT_SCHEMA);
+    if (!schema) { std::fprintf(stderr, "schema: %s\n", node.last_error().c_str()); return 1; }
+
     /* a publisher and a subscriber on the same name share one topic slot */
     rant::Qos reliable{ rant::Reliability::Reliable };
-    rant::Publisher<rant::Bytes>  chat(node, "chat", &*schema, reliable);
-    rant::Subscriber<rant::Bytes> incoming(node, "chat", &*schema, handle_message, reliable);
+    rant::Publisher<rant::Bytes>  chat(node, "chat", &schema, reliable);
+    rant::Subscriber<rant::Bytes> incoming(node, "chat", &schema, handle_message, reliable);
     node.start();   /* background poll thread. Sends and creates are thread safe now */
 
     std::printf("typed chat on topic 'chat'. type a line to publish; ctrl-d/z to quit.\n");
@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
         if (!len) continue;
         if (len > 240) len = 240;
         rant::Color tint = rant::color_from_hex(0x3080C0FFu);       /* 0xRRGGBBAA */
-        rant::MessageBuilder msg(*schema);
+        rant::MessageBuilder msg(schema);
         msg.set_int("ts", rant::now().us)
            .set_uint("seq", ++seq)
            .set_uint("tint.r", tint.r).set_uint("tint.g", tint.g)

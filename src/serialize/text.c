@@ -1,19 +1,6 @@
 /* The text side: the type writer, the printer and the DSL parser. */
 #include "internal.h"
 
-/* The type writer: the growing buffer of wire type bytes that the parser fills. It holds a
- * type on its own, with no schema header, and a failure latches in err. */
-typedef struct {
-    RantAllocFn alloc; void *user;
-    uint8_t *buf;
-    size_t   cap;
-    size_t   len;                                /* wire bytes written so far */
-    int      err;                                /* 0 ok, nonzero latches failure */
-    uint16_t depth;                              /* open structs */
-    size_t   count_pos[RANT_SCHEMA_MAX_DEPTH]; /* wire offset of each open struct's nfields byte */
-    uint16_t field_count[RANT_SCHEMA_MAX_DEPTH];
-} i_RantSchemaBuilder;
-
 /* room for extra more bytes, growing the wire buffer through the hook */
 static int i_rant_schema_builder_reserve(i_RantSchemaBuilder *b, size_t extra){
     size_t newcap; uint8_t *nb;
@@ -97,17 +84,6 @@ static i_RantSchemaBuilder i_rant_schema_builder_begin(RantAllocFn alloc, void *
     b.buf = (uint8_t *)alloc(user, NULL, b.cap);
     if (!b.buf){ b.err = -1; b.cap = 0; }
     return b;
-}
-
-/* the root type bytes of a compiled schema, past [version][namelen][name] */
-static int i_rant_schema_root_type(const RantSchema *t, const uint8_t **bytes, size_t *len){
-    size_t off;
-    if (!t || !t->wire.data) return 0;
-    off = 2u + t->name.len;
-    if (off >= t->wire.len) return 0;
-    *bytes = t->wire.data + off;
-    *len   = t->wire.len - off;
-    return 1;
 }
 
 /* Streaming enum construction, so the parser never buffers the option list: open writes
@@ -380,7 +356,7 @@ uint32_t rant_schema_print(const RantSchema *s, char *buf, size_t cap){
 }
 
 /* The schema DSL. The grammar is in spec/schema.md. A type word that is not a built in
- * resolves against the definitions, the environment and the standard library. */
+ * resolves against the registry's definitions and then the standard library. */
 #ifndef RANT_NO_STDTYPES
 const char *i_rant_std_lookup(const char *name);     /* serialize/stdtypes.c */
 #else
@@ -389,16 +365,10 @@ const char *i_rant_std_lookup(const char *name);     /* serialize/stdtypes.c */
 
 typedef struct { const char *p; const char *err; } i_RantDsl;
 
-/* The definition registry: one arena holding each named type's name and compiled type,
- * plus an index. A definition compiles in its own scratch builder before it is appended. */
-#define I_RANT_DSL_MAX_DEFS 64u
-typedef struct {
-    i_RantSchemaBuilder arena;
-    struct { uint32_t noff, toff, tlen; uint8_t nlen; } e[I_RANT_DSL_MAX_DEFS];
-    uint16_t n;
-    uint16_t rec;                                  /* standard type expansion depth */
-    const RantSchema *const *env; size_t n_env;
-} i_RantDefs;
+void i_rant_registry_init(i_RantRegistry *r, RantAllocFn alloc, void *user){
+    memset(r, 0, sizeof *r);
+    r->arena = i_rant_schema_builder_begin(alloc, user);
+}
 
 static void i_rant_dsl_ws(i_RantDsl *d){
     for (;;){
@@ -495,39 +465,52 @@ static void i_rant_dsl_enum(i_RantDsl *d, i_RantSchemaBuilder *b){
     i_rant_schema_builder_enum_finish(b, count_pos, count);
 }
 
-static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *defs,
+static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegistry *defs,
                                   const char *name);
-static void i_rant_dsl_fields(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *defs);
+static void i_rant_dsl_fields(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegistry *defs);
+
+/* one more slot in a registry array, doubling through the arena's hook */
+static int i_rant_registry_room(i_RantRegistry *r, void **arr, uint32_t n, uint32_t *cap, size_t elem){
+    uint32_t want; void *na;
+    if (n < *cap) return 1;
+    want = *cap ? *cap * 2u : 16u;
+    na = r->arena.alloc(r->arena.user, *arr, (size_t)want * elem);
+    if (!na) return 0;
+    *arr = na; *cap = want;
+    return 1;
+}
 
 /* records a named type: its name bytes then its compiled type, both in the arena */
-static int i_rant_defs_add_bytes(i_RantDefs *defs, const char *name, size_t nlen,
+static int i_rant_defs_add_bytes(i_RantRegistry *defs, const char *name, size_t nlen,
                                  const uint8_t *type, size_t tlen){
     uint32_t noff, toff;
-    if (defs->n >= I_RANT_DSL_MAX_DEFS || nlen == 0 || nlen > 255 || tlen == 0) return 0;
+    if (nlen == 0 || nlen > 255 || tlen == 0) return 0;
+    if (!i_rant_registry_room(defs, (void **)&defs->defs, defs->n_defs, &defs->cap_defs,
+                              sizeof *defs->defs)) return 0;
     noff = (uint32_t)defs->arena.len;
     i_rant_schema_builder_put_raw(&defs->arena, name, nlen);
     toff = (uint32_t)defs->arena.len;
     i_rant_schema_builder_put_raw(&defs->arena, type, tlen);
     if (defs->arena.err) return 0;
-    defs->e[defs->n].noff = noff; defs->e[defs->n].nlen = (uint8_t)nlen;
-    defs->e[defs->n].toff = toff; defs->e[defs->n].tlen = (uint32_t)tlen;
-    defs->n++;
+    defs->defs[defs->n_defs].noff = noff; defs->defs[defs->n_defs].nlen = (uint8_t)nlen;
+    defs->defs[defs->n_defs].toff = toff; defs->defs[defs->n_defs].tlen = (uint32_t)tlen;
+    defs->n_defs++;
     return 1;
 }
 
-static int i_rant_defs_find(i_RantDefs *defs, const char *name, uint32_t *toff, uint32_t *tlen){
-    size_t nlen = strlen(name); uint16_t i;
-    for (i = 0; i < defs->n; i++)
-        if (defs->e[i].nlen == nlen &&
-            memcmp(defs->arena.buf + defs->e[i].noff, name, nlen) == 0){
-            *toff = defs->e[i].toff; *tlen = defs->e[i].tlen;
+static int i_rant_defs_find(i_RantRegistry *defs, const char *name, uint32_t *toff, uint32_t *tlen){
+    size_t nlen = strlen(name); uint32_t i;
+    for (i = 0; i < defs->n_defs; i++)
+        if (defs->defs[i].nlen == nlen &&
+            memcmp(defs->arena.buf + defs->defs[i].noff, name, nlen) == 0){
+            *toff = defs->defs[i].toff; *tlen = defs->defs[i].tlen;
             return 1;
         }
     return 0;
 }
 
 /* compiles one type spelling, a standard library entry or any type text, as a definition */
-static int i_rant_defs_add_text(i_RantDefs *defs, const char *name, const char *text){
+static int i_rant_defs_add_text(i_RantRegistry *defs, const char *name, const char *text){
     i_RantSchemaBuilder sb; i_RantDsl sd; int ok = 0;
     if (defs->rec >= 8u) return 0;                       /* the roster is acyclic, but be sure */
     defs->rec++;
@@ -543,24 +526,22 @@ static int i_rant_defs_add_text(i_RantDefs *defs, const char *name, const char *
     return ok;
 }
 
-/* Resolves a type name to its encoding in the arena: the text's own definitions first,
- * then the environment schemas, then the standard library. */
-static int i_rant_dsl_ref(i_RantDefs *defs, const char *name, uint32_t *toff, uint32_t *tlen){
-    size_t nlen = strlen(name), i;
+/* Resolves a type name to its encoding in the arena: the registry's definitions first,
+ * then the standard library, which is expanded into the registry on first use. */
+static int i_rant_dsl_ref(i_RantRegistry *defs, const char *name, uint32_t *toff, uint32_t *tlen){
     const char *std;
     if (i_rant_defs_find(defs, name, toff, tlen)) return 1;
-    for (i = 0; i < defs->n_env; i++){
-        const RantSchema *t = defs->env ? defs->env[i] : NULL;
-        const uint8_t *tb; size_t tl;
-        if (!t || t->name.len != nlen || memcmp(t->name.data, name, nlen) != 0) continue;
-        if (!i_rant_schema_root_type(t, &tb, &tl)) continue;
-        if (!i_rant_defs_add_bytes(defs, name, nlen, tb, tl)) return 0;
-        return i_rant_defs_find(defs, name, toff, tlen);
-    }
     std = i_rant_std_lookup(name);
     if (std && i_rant_defs_add_text(defs, name, std))
         return i_rant_defs_find(defs, name, toff, tlen);
     return 0;
+}
+
+int i_rant_registry_ref(i_RantRegistry *r, const char *name, const uint8_t **type, size_t *tlen){
+    uint32_t toff, tl;
+    if (!r || !name || !i_rant_dsl_ref(r, name, &toff, &tl)) return 0;
+    *type = r->arena.buf + toff; *tlen = tl;
+    return 1;
 }
 
 /* turns the type just written at b->buf[head..len) into an array of itself by splicing
@@ -596,7 +577,7 @@ static int i_rant_dsl_suffix(i_RantDsl *d, uint16_t *count, int *variable){
 }
 
 /* The type whose leading word is in tname, with at pointing at it for errors */
-static void i_rant_dsl_word_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *defs,
+static void i_rant_dsl_word_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegistry *defs,
                                  const char *tname, const char *at){
     RantSchemaTypeKind k; uint16_t cap; uint32_t toff, tlen; size_t nlen;
     if (strcmp(tname, "map") == 0){
@@ -633,7 +614,7 @@ static void i_rant_dsl_word_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDef
 
 /* One type plus the field it defines. The count follows the body in the text, so an array
  * suffix wraps what was just written. A type on its own passes name "". */
-static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *defs,
+static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegistry *defs,
                                   const char *name){
     char tname[256]; const char *at; size_t head; uint16_t cnt; int variable; uint8_t kind;
     i_rant_dsl_ws(d);
@@ -660,7 +641,7 @@ static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDe
 }
 
 /* the fields of one struct body, up to and not consuming the closing brace */
-static void i_rant_dsl_fields(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *defs){
+static void i_rant_dsl_fields(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegistry *defs){
     char name[256];
     for (;;){
         i_rant_dsl_ws(d);
@@ -678,7 +659,7 @@ static void i_rant_dsl_fields(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *
 /* One definition, with d->p on its { or =. Name { fields } defines a struct and Name = type
  * names any other type. The body compiles on its own, then is kept, or must match an
  * existing or standard definition of the name exactly. Leaves the type's place in the arena. */
-static void i_rant_dsl_def(i_RantDsl *d, i_RantDefs *defs, const char *name, const char *name_at,
+static void i_rant_dsl_def(i_RantDsl *d, i_RantRegistry *defs, const char *name, const char *name_at,
                            uint32_t *toff, uint32_t *tlen){
     i_RantSchemaBuilder sb; int ok = 0, exists, is_struct = *d->p == '{';
     const char *at;
@@ -707,27 +688,41 @@ static void i_rant_dsl_def(i_RantDsl *d, i_RantDefs *defs, const char *name, con
     if (!ok) i_rant_dsl_fail(d, name_at);              /* the name is taken by another shape */
 }
 
+RantSchema *i_rant_registry_parse(i_RantRegistry *r, const void *wire, size_t wire_len){
+    uint32_t i; RantSchema *s;
+    if (!r || !wire || !wire_len) return NULL;
+    for (i = 0; i < r->n_owned; i++)                    /* one schema per shape */
+        if (r->owned[i]->wire.len == wire_len && memcmp(r->owned[i]->wire.data, wire, wire_len) == 0)
+            return r->owned[i];
+    s = i_rant_schema_parse(wire, wire_len, r->arena.alloc, r->arena.user);
+    if (!s) return NULL;
+    if (!i_rant_registry_room(r, (void **)&r->owned, r->n_owned, &r->cap_owned, sizeof *r->owned)){
+        i_rant_schema_free(s, r->arena.alloc, r->arena.user);
+        return NULL;
+    }
+    r->owned[r->n_owned++] = s;
+    return s;
+}
+
 /* A text is a run of statements and compiles to its last one. A definition may be followed
- * by more statements. A type on its own (bool, f32[3], Pose, { x: f32 }) ends the text. */
-RantSchema *rant_schema_compile_env(RantAllocFn alloc, void *user, const char *text,
-                                    const RantSchema *const *env, size_t n_env,
-                                    const char **err){
-    i_RantDsl d; i_RantDefs defs; i_RantSchemaBuilder root;
+ * by more statements. A type on its own (bool, f32[3], Pose, { x: f32 }) ends the text. A
+ * failed text leaves no definition behind, so nothing is half kept. */
+RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, const char **err){
+    i_RantDsl d; i_RantSchemaBuilder root;
     RantSchema *s = NULL;
     char word[256];
     const char *rname = NULL; size_t rnlen = 0;
     const uint8_t *rtype = NULL; size_t rtlen = 0;
     uint32_t toff = 0, tlen = 0;
+    size_t kept_len; uint32_t kept_defs;           /* the rollback point */
     int have_type = 0, have_def = 0;
 
     if (err) *err = NULL;
-    if (!alloc || !text) return NULL;
-    memset(&defs, 0, sizeof defs);
-    defs.env = env; defs.n_env = n_env;
-    defs.arena = i_rant_schema_builder_begin(alloc, user);
-    root = i_rant_schema_builder_begin(alloc, user);
+    if (!defs || !text) return NULL;
+    kept_len = defs->arena.len; kept_defs = defs->n_defs;
+    root = i_rant_schema_builder_begin(defs->arena.alloc, defs->arena.user);
     d.p = text; d.err = NULL;
-    if (defs.arena.err || root.err) i_rant_dsl_fail(&d, text);
+    if (defs->arena.err || root.err) i_rant_dsl_fail(&d, text);
 
     while (!d.err){
         const char *at;
@@ -738,20 +733,20 @@ RantSchema *rant_schema_compile_env(RantAllocFn alloc, void *user, const char *t
             if (!i_rant_dsl_ident(&d, word)) break;
             i_rant_dsl_ws(&d);
             if (*d.p == '{' || *d.p == '='){
-                i_rant_dsl_def(&d, &defs, word, at, &toff, &tlen);
+                i_rant_dsl_def(&d, defs, word, at, &toff, &tlen);
                 have_def = 1;
                 continue;
             }
         }
         d.p = at;
-        i_rant_dsl_field_type(&d, &root, &defs, "");
+        i_rant_dsl_field_type(&d, &root, defs, "");
         have_type = 1;
         i_rant_dsl_ws(&d);
         if (*d.p) i_rant_dsl_fail(&d, d.p);                /* a type on its own ends the text */
         break;
     }
     if (!d.err && root.err) i_rant_dsl_fail(&d, d.p);
-    if (!d.err && defs.arena.err) i_rant_dsl_fail(&d, d.p);
+    if (!d.err && defs->arena.err) i_rant_dsl_fail(&d, d.p);
 
     if (!d.err){
         if (have_type){
@@ -765,29 +760,27 @@ RantSchema *rant_schema_compile_env(RantAllocFn alloc, void *user, const char *t
             }
         } else if (have_def){                            /* word still holds the last name */
             rname = word; rnlen = strlen(word);
-            rtype = defs.arena.buf + toff; rtlen = tlen;
+            rtype = defs->arena.buf + toff; rtlen = tlen;
         }
         if (!rtype || !rtlen) i_rant_dsl_fail(&d, d.p);
     }
     if (!d.err){
         size_t wlen = 2u + rnlen + rtlen;
-        uint8_t *w = (uint8_t *)alloc(user, NULL, wlen);
+        uint8_t *w = (uint8_t *)defs->arena.alloc(defs->arena.user, NULL, wlen);
         if (w){
             w[0] = (uint8_t)RANT_SCHEMA_WIRE_VERSION;
             w[1] = (uint8_t)rnlen;
             if (rnlen) memcpy(w + 2, rname, rnlen);
             memcpy(w + 2 + rnlen, rtype, rtlen);
-            s = rant_schema_parse(w, wlen, alloc, user);
-            alloc(user, w, 0);
+            s = i_rant_registry_parse(defs, w, wlen);
+            defs->arena.alloc(defs->arena.user, w, 0);
         }
         if (!s) i_rant_dsl_fail(&d, d.p);
     }
-    if (root.buf) alloc(user, root.buf, 0);
-    if (defs.arena.buf) alloc(user, defs.arena.buf, 0);
-    if (!s && err) *err = d.err ? d.err : d.p;
+    if (root.buf) defs->arena.alloc(defs->arena.user, root.buf, 0);
+    if (!s){
+        defs->arena.len = kept_len; defs->n_defs = kept_defs; defs->arena.err = 0;
+        if (err) *err = d.err ? d.err : d.p;
+    }
     return s;
-}
-
-RantSchema *rant_schema_compile(RantAllocFn alloc, void *user, const char *text, const char **err){
-    return rant_schema_compile_env(alloc, user, text, NULL, 0, err);
 }

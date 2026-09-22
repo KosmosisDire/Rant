@@ -1,5 +1,4 @@
-#include "stdtypes.h"
-#include <string.h>
+#include "internal.h"
 
 /* The roster: a name and the canonical spelling of its type. These strings are the one
  * definition, the DSL compiles them on demand. Order does not matter, resolution is recursive. */
@@ -84,23 +83,13 @@ const char *i_rant_std_lookup(const char *name){
     return 0;
 }
 
-RantSchema *rant_std_schema(RantStdType t, RantAllocFn alloc, void *user){
-    const char *n = rant_std_name(t);
-    if (!n || !alloc) return 0;
-    return rant_schema_compile(alloc, user, n, 0);     /* the name alone resolves to the type */
-}
-
-/* Does type match the canonical root type bytes of the standard type. */
-static int i_rant_std_shape_eq(RantStdType t, RantBytes type, RantAllocFn alloc, void *user){
-    RantSchema *c = rant_std_schema(t, alloc, user);
-    RantBytes w; RantString nm; size_t off; int ok = 0;
-    if (!c) return 0;
-    w = rant_schema_wire(c); nm = rant_schema_name(c);
-    off = 2u + nm.len;
-    if (type.data && off < w.len && type.len == w.len - off)
-        ok = memcmp(type.data, w.data + off, type.len) == 0;
-    rant_schema_free(c, alloc, user);
-    return ok;
+/* Does type match the registry's type bytes for a standard name. */
+static int i_rant_std_shape_eq(i_RantRegistry *r, RantString name, RantBytes type){
+    char nm[256]; const uint8_t *tb; size_t tl;
+    if (!r || !type.data || name.len >= sizeof nm) return 0;
+    memcpy(nm, name.data, name.len); nm[name.len] = '\0';
+    if (!i_rant_registry_ref(r, nm, &tb, &tl)) return 0;
+    return type.len == tl && memcmp(type.data, tb, tl) == 0;
 }
 
 /* peel a NAMED wrapper: fills *name and returns the inner type bytes */
@@ -114,31 +103,28 @@ static int i_rant_std_peel(RantBytes type, RantString *name, RantBytes *inner){
     return 1;
 }
 
-static RantStdType i_rant_std_check(RantString name, RantBytes inner,
-                                    RantAllocFn alloc, void *user){
+static RantStdType i_rant_std_check(i_RantRegistry *r, RantString name, RantBytes inner){
     RantStdType t = rant_std_by_name(name);
-    if (t == RANT_STD_NONE || !alloc) return RANT_STD_NONE;
-    return i_rant_std_shape_eq(t, inner, alloc, user) ? t : RANT_STD_NONE;
+    if (t == RANT_STD_NONE) return RANT_STD_NONE;
+    return i_rant_std_shape_eq(r, name, inner) ? t : RANT_STD_NONE;
 }
 
-RantStdType rant_std_recognize(const RantSchema *s, RantAllocFn alloc, void *user){
+RantStdType i_rant_std_recognize(i_RantRegistry *r, const RantSchema *s){
     RantBytes w = rant_schema_wire(s);
     RantString nm = rant_schema_name(s);
     size_t off = 2u + nm.len;
     if (!w.data || off >= w.len) return RANT_STD_NONE;
-    return i_rant_std_check(nm, rant_bytes(w.data + off, w.len - off), alloc, user);
+    return i_rant_std_check(r, nm, rant_bytes(w.data + off, w.len - off));
 }
 
-RantStdType rant_std_recognize_field(const RantSchema *s, uint16_t field,
-                                     RantAllocFn alloc, void *user){
+RantStdType i_rant_std_recognize_field(i_RantRegistry *r, const RantSchema *s, uint16_t field){
     RantBytes type = rant_schema_field_type_wire(s, field), inner;
     RantString name;
     if (!i_rant_std_peel(type, &name, &inner)) return RANT_STD_NONE;
-    return i_rant_std_check(name, inner, alloc, user);
+    return i_rant_std_check(r, name, inner);
 }
 
-RantStdType rant_std_recognize_elem(const RantSchema *s, uint16_t field,
-                                    RantAllocFn alloc, void *user){
+RantStdType i_rant_std_recognize_elem(i_RantRegistry *r, const RantSchema *s, uint16_t field){
     RantBytes type = rant_schema_field_type_wire(s, field), inner;
     RantSchemaFieldInfo fi;
     RantString name;
@@ -150,7 +136,7 @@ RantStdType rant_std_recognize_elem(const RantSchema *s, uint16_t field,
     if (head >= type.len) return RANT_STD_NONE;
     if (!i_rant_std_peel(rant_bytes(type.data + head, type.len - head), &name, &inner))
         return RANT_STD_NONE;
-    return i_rant_std_check(name, inner, alloc, user);
+    return i_rant_std_check(r, name, inner);
 }
 
 /* No math.h, so a consumer's build line never grows an -lm. Newton from the halved

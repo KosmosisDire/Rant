@@ -396,44 +396,46 @@ static bool stdtypes_leg() {
     chk("std: Color is 4 bytes", sizeof(rant::Color) == 4);
 
     {   /* a standard type as a whole schema: its name, its canonical hash */
-        auto f3 = rant::Schema::compile("Float3");
-        chk("std: Float3 compiles by name alone", f3.has_value());
+        rant::Schema f3 = a.schema("Float3");
+        chk("std: Float3 compiles by name alone", !f3.empty());
         if (f3) {
-            chk("std: Float3 golden hash", f3->hash() == HASH_FLOAT3);
-            chk("std: Float3 is 12 message bytes", f3->size() == 12);
+            chk("std: Float3 golden hash", f3.hash() == HASH_FLOAT3);
+            chk("std: Float3 is 12 message bytes", f3.size() == 12);
         }
-        auto tf    = rant::Schema::compile("Transform");
-        auto twist = rant::Schema::compile("Twist");
+        rant::Schema tf    = a.schema("Transform");
+        rant::Schema twist = a.schema("Twist");
         chk("std: Transform and Twist are distinct names, never mistaken for each other",
-            tf && twist && !twist->can_read(*tf) && !tf->can_read(*twist));
+            tf && twist && !twist.can_read(tf) && !tf.can_read(twist));
         /* the name NARROWS: an anonymous field of the same shape reads a Transform field,
-           never the reverse (a struct ROOT's name stays strict-equal, as before) */
-        auto named_f = rant::Schema::compile("W { at: Transform }");
-        auto bare_f  = rant::Schema::compile(
+           never the reverse (a struct ROOT's name stays strict-equal, as before). Two
+           shapes of W, so each goes on its own node */
+        rant::Schema named_f = a.schema("W { at: Transform }");
+        rant::Schema bare_f  = b.schema(
             "W { at: { translation: { x: f64, y: f64, z: f64 },"
             "          rotation: { x: f64, y: f64, z: f64, w: f64 }, parent: string<30> } }");
         chk("std: an anonymous field of the same shape reads a Transform field",
-            named_f && bare_f && bare_f->can_read(*named_f) && !named_f->can_read(*bare_f));
+            named_f && bare_f && bare_f.can_read(named_f) && !named_f.can_read(bare_f));
         if (tf) {
             rant::Schema::Field f;
-            int i = tf->field_index("translation");
+            int i = tf.field_index("translation");
             chk("std: a named member reports its type name",
-                i >= 0 && tf->field_at((uint16_t)i, f) && f.type_name == "Double3");
+                i >= 0 && tf.field_at((uint16_t)i, f) && f.type_name == "Double3");
         }
-        auto cloud = rant::Schema::compile("Cloud { pts: Float3[], at: Transform }");
-        chk("std: named types nest and array", cloud.has_value());
+        rant::Schema cloud = a.schema("Cloud { pts: Float3[], at: Transform }");
+        chk("std: named types nest and array", !cloud.empty());
         if (cloud) {
             rant::Schema::Field f;
-            int i = cloud->field_index("pts");
+            int i = cloud.field_index("pts");
             chk("std: an array element reports its type name",
-                i >= 0 && cloud->field_at((uint16_t)i, f)
+                i >= 0 && cloud.field_at((uint16_t)i, f)
                        && f.elem_name == "Float3" && f.elem_size == 12);
         }
+        chk("std: the same text is the same handle", a.schema("Transform").raw() == tf.raw());
     }
 
     {   /* the RANT_SCHEMA codec emits the NAMES, never the inlined shapes */
         rant::Publisher<Track> pub(a, "std/track");
-        const rant::Schema* sc = rant::priv::schema_of<Track>();
+        auto sc = rant::priv::schema_of<Track>(a);
         std::string txt = sc ? sc->to_dsl() : std::string();
         chk("std: the codec spells named members by name",
             txt.find("at: Transform") != std::string::npos &&
@@ -468,19 +470,19 @@ static bool stdtypes_leg() {
     }
 
     {   /* the video family: mirrors with a variable member ride the codec's tail path */
-        const rant::Schema* im = rant::priv::schema_of<rant::Image>();
-        const rant::Schema* vf = rant::priv::schema_of<rant::VideoFrame>();
-        const rant::Schema* xs = rant::priv::schema_of<rant::ExternalVideoStream>();
-        auto imc = rant::Schema::compile("Image");
-        auto vfc = rant::Schema::compile("VideoFrame");
-        auto xsc = rant::Schema::compile("ExternalVideoStream");
+        auto im = rant::priv::schema_of<rant::Image>(a);
+        auto vf = rant::priv::schema_of<rant::VideoFrame>(a);
+        auto xs = rant::priv::schema_of<rant::ExternalVideoStream>(a);
+        rant::Schema imc = a.schema("Image");
+        rant::Schema vfc = a.schema("VideoFrame");
+        rant::Schema xsc = a.schema("ExternalVideoStream");
         chk("std: video codecs compile", im && vf && xs && imc && vfc && xsc);
-        chk("std: Image codec == canonical", im && imc && im->hash() == imc->hash());
-        chk("std: VideoFrame codec == canonical", vf && vfc && vf->hash() == vfc->hash());
-        chk("std: ExternalVideoStream codec == canonical", xs && xsc && xs->hash() == xsc->hash());
+        chk("std: Image codec == canonical", im && imc && im->hash() == imc.hash());
+        chk("std: VideoFrame codec == canonical", vf && vfc && vf->hash() == vfc.hash());
+        chk("std: ExternalVideoStream codec == canonical", xs && xsc && xs->hash() == xsc.hash());
         chk("std: video golden hashes (shared with every binding)",
-            imc && imc->hash() == HASH_IMAGE && vfc && vfc->hash() == HASH_VIDEO
-                && xsc && xsc->hash() == HASH_EXTSTREAM);
+            imc && imc.hash() == HASH_IMAGE && vfc && vfc.hash() == HASH_VIDEO
+                && xsc && xsc.hash() == HASH_EXTSTREAM);
 
         /* an Image end to end: the variable payload crosses beside the fixed fields */
         std::atomic<int> img_recv{ 0 };
@@ -566,11 +568,11 @@ static bool value_root_leg() {
     chk("root: A started", a.start());   /* A on its service thread, B pumped by wait_for */
 
     /* the canonical-hash pin: the typed codec and the DSL agree, and both agree with C */
-    const rant::Schema* sb = rant::priv::schema_of<bool>();
-    auto arr = rant::Schema::compile("f32[]");
-    chk("root: bool codec compiles", sb != nullptr);
+    auto sb = rant::priv::schema_of<bool>(a);
+    rant::Schema arr = a.schema("f32[]");
+    chk("root: bool codec compiles", sb.has_value());
     chk("root: `bool` canonical hash", sb && sb->hash() == HASH_BOOL);
-    chk("root: `f32[]` canonical hash", arr && arr->hash() == HASH_F32ARR);
+    chk("root: `f32[]` canonical hash", arr && arr.hash() == HASH_F32ARR);
     chk("root: bare root is one anonymous field",
         sb && sb->field_count() == 1 && sb->name().empty());
 
@@ -619,17 +621,17 @@ static bool value_root_leg() {
         [&] { auto v = vd.get(); return v && *v == 2.5; }, &b));
 
     /* the dynamic API over a bare root: MessageBuilder/FieldView through the "" path */
-    auto f64 = rant::Schema::compile("f64");
-    chk("root: dynamic f64 schema", f64 && f64->field_count() == 1);
+    rant::Schema f64 = a.schema("f64");
+    chk("root: dynamic f64 schema", f64 && f64.field_count() == 1);
     if (f64) {
         std::atomic<int> hits{ 0 };
         double seen = 0;
-        rant::Publisher<rant::Bytes>  dp(a, "dyn", &*f64, rel);
-        rant::Subscriber<rant::Bytes> ds(b, "dyn", &*f64,
+        rant::Publisher<rant::Bytes>  dp(a, "dyn", &f64, rel);
+        rant::Subscriber<rant::Bytes> ds(b, "dyn", &f64,
             [&](const rant::MessageView& m) { seen = m.get_f64(""); hits++; }, rel);
         chk("root: dynamic pair created", dp.valid() && ds.valid());
         chk("root: dynamic matched", wait_for(4000, [&] { return dp.match_count() > 0 && dp.ready(); }, &b));
-        rant::MessageBuilder mb(*f64);
+        rant::MessageBuilder mb(f64);
         mb.set_f64("", -7.5);
         chk("root: builder set through the empty path", mb.ok());
         chk("root: dynamic send", dp.send(mb) == rant::SendStatus::Ok);
@@ -666,38 +668,6 @@ RANT_SCHEMA(wide::Chunk, stamp, debug, samples, seq, note, gain);
 static bool tails_leg() {
     int fails_at_entry = g_failures;
 
-    {   /* codec-level: spelling, roundtrip, and the bare-vector root pin */
-        const rant::Schema* sc = rant::priv::schema_of<narrow::Chunk>();
-        chk("tails: Chunk codec compiles", sc != nullptr);
-        std::string txt = sc ? sc->to_dsl() : std::string();
-        chk("tails: variable members spell as f32[] / string",
-            txt.find("samples: f32[]") != std::string::npos &&
-            txt.find("note: string") != std::string::npos);
-
-        narrow::Chunk in;
-        in.seq = 7;
-        in.samples = { 1.5f, -2.5f, 8.75f };
-        in.note = "a note well past any small-string buffer, to make the heap real";
-        std::vector<uint8_t> scratch;
-        rant::Bytes wire = rant::priv::encode(in, scratch);
-        chk("tails: encode produces a message", wire.size() > 0);
-        narrow::Chunk out;
-        chk("tails: decode roundtrips", rant::priv::decode(out, wire, nullptr)
-            && out.seq == 7 && out.samples == in.samples && out.note == in.note);
-
-        narrow::Chunk empty_in, empty_out;
-        empty_out.samples = { 9.f };            /* stale state must be overwritten */
-        empty_out.note = "stale";
-        rant::Bytes ewire = rant::priv::encode(empty_in, scratch);
-        chk("tails: empty vector and string roundtrip", ewire.size() > 0
-            && rant::priv::decode(empty_out, ewire, nullptr)
-            && empty_out.samples.empty() && empty_out.note.empty());
-
-        const rant::Schema* vr = rant::priv::schema_of<std::vector<float>>();
-        chk("tails: bare std::vector<float> root is canonical `f32[]`",
-            vr && vr->hash() == HASH_F32ARR);
-    }
-
     rant::NodeOptions opts;
     opts.domain = 47;
     opts.multicast_interface = "127.0.0.1";
@@ -713,6 +683,39 @@ static bool tails_leg() {
     if (!a.valid() || !b.valid()) return false;
     chk("tails: A started", a.start());   /* A on its service thread, B pumped by wait_for */
     rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
+
+    {   /* codec-level: spelling, roundtrip, and the bare-vector root pin */
+        auto sc = rant::priv::schema_of<narrow::Chunk>(b);
+        rant::priv::TypeCodec* cc = rant::priv::type_codec<narrow::Chunk>(b);
+        chk("tails: Chunk codec compiles", sc.has_value());
+        std::string txt = sc ? sc->to_dsl() : std::string();
+        chk("tails: variable members spell as f32[] / string",
+            txt.find("samples: f32[]") != std::string::npos &&
+            txt.find("note: string") != std::string::npos);
+
+        narrow::Chunk in;
+        in.seq = 7;
+        in.samples = { 1.5f, -2.5f, 8.75f };
+        in.note = "a note well past any small-string buffer, to make the heap real";
+        std::vector<uint8_t> scratch;
+        rant::Bytes wire = rant::priv::encode(*cc, in, scratch);
+        chk("tails: encode produces a message", wire.size() > 0);
+        narrow::Chunk out;
+        chk("tails: decode roundtrips", rant::priv::decode(*cc, out, wire, nullptr)
+            && out.seq == 7 && out.samples == in.samples && out.note == in.note);
+
+        narrow::Chunk empty_in, empty_out;
+        empty_out.samples = { 9.f };            /* stale state must be overwritten */
+        empty_out.note = "stale";
+        rant::Bytes ewire = rant::priv::encode(*cc, empty_in, scratch);
+        chk("tails: empty vector and string roundtrip", ewire.size() > 0
+            && rant::priv::decode(*cc, empty_out, ewire, nullptr)
+            && empty_out.samples.empty() && empty_out.note.empty());
+
+        auto vr = rant::priv::schema_of<std::vector<float>>(a);
+        chk("tails: bare std::vector<float> root is canonical `f32[]`",
+            vr && vr->hash() == HASH_F32ARR);
+    }
 
     {   /* subset/rebase: wide publisher, narrow subscriber, frames found by path */
         std::atomic<int> got{ 0 };
@@ -979,32 +982,39 @@ static bool bench_leg() {
     padded.a = 9; padded.b = 0x11223344u; padded.c = 777; padded.d = -3.5; padded.tag.assign("robot");
     narrow::Chunk chunk, chunk_out;
     chunk.seq = 7; chunk.samples = { 1.5f, -2.5f, 8.75f }; chunk.note = "tail";
-    const rant::Schema* ps = rant::priv::schema_of<Padded>();
-    if (!ps) { std::printf("bench: no Padded schema\n"); return false; }
+    rant::NodeOptions copt;
+    copt.domain = 49;
+    copt.multicast_interface = "127.0.0.1";
+    rant::Node cn("bench-codec", {}, [](const rant::Event&) {}, copt);   /* holds the codecs */
+    auto ps = rant::priv::schema_of<Padded>(cn);
+    rant::priv::TypeCodec* cflat = rant::priv::type_codec<Flat>(cn);
+    rant::priv::TypeCodec* cpad = rant::priv::type_codec<Padded>(cn);
+    rant::priv::TypeCodec* cchunk = rant::priv::type_codec<narrow::Chunk>(cn);
+    if (!ps || !cflat || !cchunk) { std::printf("bench: no Padded schema\n"); return false; }
 
     const int N = 200000;
     std::printf("bench: codec only, ns per operation, %d each\n", N);
     std::printf("  %-36s %10s %10s\n", "path", "encode", "decode");
     auto row = [](const char* name, double a, double b) { std::printf("  %-36s %10.1f %10.1f\n", name, a, b); };
     {
-        rant::Bytes w = rant::priv::encode(flat, scratch);
+        rant::Bytes w = rant::priv::encode(*cflat, flat, scratch);
         row("typed memcpy (Flat)",
-            ns_per(N, [&] { sink += rant::priv::encode(flat, scratch).size(); }),
-            ns_per(N, [&] { sink += rant::priv::decode(flat_out, w, nullptr); }));
+            ns_per(N, [&] { sink += rant::priv::encode(*cflat, flat, scratch).size(); }),
+            ns_per(N, [&] { sink += rant::priv::decode(*cflat, flat_out, w, nullptr); }));
     }
     {
         std::vector<uint8_t> keep;
-        rant::Bytes w = rant::priv::encode(padded, keep);
+        rant::Bytes w = rant::priv::encode(*cpad, padded, keep);
         row("typed loop (Padded, string<7>)",
-            ns_per(N, [&] { sink += rant::priv::encode(padded, scratch).size(); }),
-            ns_per(N, [&] { sink += rant::priv::decode(padded_out, w, nullptr); }));
+            ns_per(N, [&] { sink += rant::priv::encode(*cpad, padded, scratch).size(); }),
+            ns_per(N, [&] { sink += rant::priv::decode(*cpad, padded_out, w, nullptr); }));
     }
     {
         std::vector<uint8_t> keep;
-        rant::Bytes w = rant::priv::encode(chunk, keep);
+        rant::Bytes w = rant::priv::encode(*cchunk, chunk, keep);
         row("typed tails (Chunk, f32[] string)",
-            ns_per(N, [&] { sink += rant::priv::encode(chunk, scratch).size(); }),
-            ns_per(N, [&] { sink += rant::priv::decode(chunk_out, w, nullptr); }));
+            ns_per(N, [&] { sink += rant::priv::encode(*cchunk, chunk, scratch).size(); }),
+            ns_per(N, [&] { sink += rant::priv::decode(*cchunk, chunk_out, w, nullptr); }));
     }
     {
         rant::MessageBuilder one(*ps);
@@ -1040,10 +1050,10 @@ static bool bench_leg() {
         rant::detail::RantAllocator cb = rant::detail::rant_allocator_heap(0);
         rant::detail::RantNode* na = rant::detail::rant_node_open(&ca, "CA", nullptr, nullptr, &co);
         rant::detail::RantNode* nb = rant::detail::rant_node_open(&cb, "CB", bench_c_message, nullptr, &co);
-        auto fs = rant::Schema::compile("Flat { a: u32, b: f32 }");
+        const rant::detail::RantSchema* fs = na ? rant::detail::rant_node_schema(na, "Flat { a: u32, b: f32 }") : nullptr;
         rant::detail::RantTopicOpts to{};
-        rant::detail::RantTopic* ta = na && fs ? rant::detail::rant_node_create_topic(na, "flat", rant::detail::RANT_PUB_ONLY, fs->raw(), &to) : nullptr;
-        rant::detail::RantTopic* tb = nb && fs ? rant::detail::rant_node_create_topic(nb, "flat", rant::detail::RANT_SUB_ONLY, fs->raw(), &to) : nullptr;
+        rant::detail::RantTopic* ta = na && fs ? rant::detail::rant_node_create_topic(na, "flat", rant::detail::RANT_PUB_ONLY, fs, &to) : nullptr;
+        rant::detail::RantTopic* tb = nb && fs ? rant::detail::rant_node_create_topic(nb, "flat", rant::detail::RANT_SUB_ONLY, fs, &to) : nullptr;
         auto pump = [&] { rant::detail::rant_node_poll(na, 0); rant::detail::rant_node_poll(nb, 0); };
         bool matched = ta && tb && wait_for(4000, [&] { pump(); return rant::detail::rant_topic_match_count(ta) > 0 && rant::detail::rant_topic_ready(ta) == 1; });
         line("C (reference)", matched ? us_per_round_trip(M,
@@ -1082,8 +1092,8 @@ static bool bench_leg() {
             [&] { return pub.send(chunk) == rant::SendStatus::Ok; }, pump) : -1.0);
     }
     {
-        rant::Publisher<rant::Bytes>  pub(a, "b/dyn", ps);
-        rant::Subscriber<rant::Bytes> sub(b, "b/dyn", ps, [&](const rant::MessageView& v) {
+        rant::Publisher<rant::Bytes>  pub(a, "b/dyn", &*ps);
+        rant::Subscriber<rant::Bytes> sub(b, "b/dyn", &*ps, [&](const rant::MessageView& v) {
             sink += (size_t)(v.get_uint("a") + v.get_uint("b") + v.get_uint("c") + (uint64_t)v.get_f64("d") + v.get_string("tag").size());
             g_bench_recv++;
         });
@@ -1102,12 +1112,6 @@ int main(int argc, char** argv) {
 #if defined(__cpp_exceptions)
   try {
 #endif
-    std::string err;
-    auto schema = rant::Schema::compile(SCHEMA, &err);
-    if (!schema) { std::printf("FAIL: schema: %s\n", err.c_str()); return 1; }
-    std::printf("schema '%.*s' size=%u fields=%u\n",
-                (int)schema->name().size(), schema->name().data(), schema->size(), schema->field_count());
-
     rant::NodeOptions opts;
     opts.domain = 42;
     opts.multicast_interface = "127.0.0.1";   /* single-host discovery */
@@ -1121,14 +1125,19 @@ int main(int argc, char** argv) {
     rant::Node b("B", {}, on_evt("B"), opts);
     if (!a.valid() || !b.valid()) { std::printf("FAIL: node construction\n"); return 1; }
 
-    rant::Publisher<rant::Bytes>  pub(a, "t", &*schema, { rant::Reliability::Reliable });
-    rant::Subscriber<rant::Bytes> sub(b, "t", &*schema, on_msg, { rant::Reliability::Reliable });
+    rant::Schema schema = a.schema(SCHEMA);
+    if (!schema) { std::printf("FAIL: schema: %s\n", a.last_error().c_str()); return 1; }
+    std::printf("schema '%.*s' size=%u fields=%u\n",
+                (int)schema.name().size(), schema.name().data(), schema.size(), schema.field_count());
+
+    rant::Publisher<rant::Bytes>  pub(a, "t", &schema, { rant::Reliability::Reliable });
+    rant::Subscriber<rant::Bytes> sub(b, "t", &schema, on_msg, { rant::Reliability::Reliable });
     if (!pub.valid() || !sub.valid()) { std::printf("FAIL: topic construction\n"); return 1; }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     uint32_t seq = 0;
     while (!g.received && std::chrono::steady_clock::now() < deadline) {
-        if (pub.match_count() > 0 && !send_one(pub, *schema, ++seq)) return 1;
+        if (pub.match_count() > 0 && !send_one(pub, schema, ++seq)) return 1;
         a.poll(1);
         b.poll(1);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -1143,7 +1152,7 @@ int main(int argc, char** argv) {
     if (!a.start() || !b.start()) { std::printf("FAIL: start\n"); return 3; }
     if (a.poll(0) != (int)rant::SendStatus::State) { std::printf("FAIL: poll not refused while started\n"); return 3; }
     g.received = false;
-    if (!send_one(pub, *schema, ++seq)) { std::printf("FAIL: threaded send\n"); return 3; }
+    if (!send_one(pub, schema, ++seq)) { std::printf("FAIL: threaded send\n"); return 3; }
     deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (!g.received && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));

@@ -87,7 +87,7 @@ A reader declares the subset of fields it needs. A match means the same topic, t
 name rule, and the reader's fields a subset of the writer's fields by name with the kind
 rules (`rant_schema_subset`). Subset applies at the top level only. Nested structs compare
 exactly and recursively. Delivery uses the writer's layout through a rebased schema
-(`rant_schema_rebase`: the reader's fields, order and indices with the writer's offsets
+(`i_rant_schema_rebase`: the reader's fields, order and indices with the writer's offsets
 and size), surfaced as `RantMsg.schema`, so reader code keeps its own indices. Rebase walks
 both subtrees in lockstep, which handles nested frames and struct arrays.
 
@@ -100,7 +100,7 @@ validator API.
 
 ## DSL
 
-`rant_schema_compile` takes name first IDL text: `Pose { stamp: u64, velocity: { dx: f32 } }`.
+`rant_node_schema` takes name first IDL text: `Pose { stamp: u64, velocity: { dx: f32 } }`.
 Commas are optional and `--` comments run to the end of the line. The text is the cross
 language interchange: reflecting languages generate it, others paste it, and identical
 text gives identical wire and hash. `rant_schema_print` is the exact inverse. It always
@@ -110,8 +110,17 @@ contained and recompiles to identical bytes under `RANT_NO_STDTYPES` too. Only
 
 Statements compile into their own scratch arena first, so resolving a reference mid
 definition (which may pull in a standard type) never interleaves bytes. The final wire is
-assembled and fed to `rant_schema_parse`. `rant_std_recognize*` take the allocator hook
-because verifying a shape means compiling the canonical type.
+assembled and handed to the node's registry, which parses it once per shape.
+`rant_std_recognize*` take the node, whose registry holds the canonical shape to compare
+against, so recognizing never compiles.
+
+The registry (`i_RantRegistry`, serialize/internal.h) belongs to the node: one arena of
+names and type bytes, an index over it, and every schema handed out, one per shape by a
+wire compare. Both arrays grow through the node's allocator. A failed text rolls the
+arena and index back to where the compile started, so nothing is half kept.
+`rant_node_schema_parse` registers wire without defining a name, which is how a create
+and the bindings keep a peer's schema. The selftest compiles without a node through a
+throwaway registry on its own allocator.
 
 Gotcha: a `--` comment inside concatenated C string literals eats the rest of the schema
 unless the literal ends with a newline, and a definition's last token needs a trailing
@@ -165,15 +174,15 @@ type   := base | base '[' count ']' | base '[' ']' | '{' fields '}' ('[' count? 
 base   := scalar | 'string' ('<' cap '>')? | 'map' | 'enum' '<' scalar '>' '{' options '}' | NAME
 ```
 
-A type word that is not a built in resolves against the text's own definitions, then the
-environment schemas, then the standard library, and emits as a NAMED type. Text is the
+A type word that is not a built in resolves against the node's registry, then the
+standard library, which is expanded into the registry on first use, and emits as a NAMED
+type. Text is the
 one way to make a schema. The parser writes wire type bytes through an internal type
 writer, which holds the limits it can see while writing (name lengths, 255 fields per
 struct, nesting depth). An array suffix follows its element in the text, so the parser
 writes the element first and then splices the array head in front of it. Every other rule
 is checked once, when the finished bytes go through `rant_schema_parse`, the same check a
-peer's bytes get. A text holds at most 64 definitions and a
-standard type expands at most 8 levels deep. Enum values may be omitted and then count up
+peer's bytes get. A standard type expands at most 8 levels deep. Enum values may be omitted and then count up
 from the previous one, starting at 0. Each definition sees the ones before it. A
 definition as the last statement gives a root that carries its name with no NAMED wrapper,
 and a bare reference as the last statement (`Uuid`, `Pose`) gives the same root, so a

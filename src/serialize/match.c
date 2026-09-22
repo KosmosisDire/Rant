@@ -214,21 +214,21 @@ static uint16_t i_rant_subtree_end(const RantSchema *s, uint16_t i){
     return k;
 }
 
-RantSchema *rant_schema_rebase(const RantSchema *sub, const RantSchema *pub,
-                               RantAllocFn alloc, void *user){
+RantSchema *i_rant_schema_rebase(const RantSchema *sub, const RantSchema *pub,
+                                 RantAllocFn alloc, void *user){
     RantSchema *r; uint16_t i = 0;
     if (!alloc || !rant_schema_subset(sub, pub)) return NULL;
-    r = rant_schema_parse(sub->wire.data, sub->wire.len, alloc, user);
+    r = i_rant_schema_parse(sub->wire.data, sub->wire.len, alloc, user);
     if (!r) return NULL;
     while (i < r->nfields){                                   /* the writer's layout */
         const i_Field *p = i_rant_schema_find(pub, r->fields[i].name);
         uint16_t re = i_rant_subtree_end(r, i), j, k;
-        if (!p || r->fields[i].depth != 0){ rant_schema_free(r, alloc, user); return NULL; }
+        if (!p || r->fields[i].depth != 0){ i_rant_schema_free(r, alloc, user); return NULL; }
         j = (uint16_t)(p - pub->fields);
         for (k = 0; (uint16_t)(i + k) < re; k++){             /* the subtrees match exactly */
             i_Field *rf = &r->fields[i + k];
             const i_Field *pf;
-            if ((uint16_t)(j + k) >= pub->nfields){ rant_schema_free(r, alloc, user); return NULL; }
+            if ((uint16_t)(j + k) >= pub->nfields){ i_rant_schema_free(r, alloc, user); return NULL; }
             pf = &pub->fields[j + k];
             rf->offset = pf->offset;
             rf->var_ord = pf->var_ord;

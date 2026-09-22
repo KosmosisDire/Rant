@@ -23,7 +23,7 @@ typedef struct i_RantPatterns {
     /* the authorities sorted by (kind, hash), rebuilt lazily after a create or retire */
     i_RantPatAuth         *auth; uint16_t auth_n, auth_cap; uint8_t auth_dirty;
     struct RantFunction *meta;      /* the built in @rant/meta endpoint, both sides in one handle */
-    RantSchema            *meta_rsp_schema;   /* RantMeta { info: map } */
+    const RantSchema      *meta_rsp_schema;   /* RantMeta { info: map } */
     uint8_t               *meta_msg; uint32_t meta_msg_cap;   /* reply scratch, grown on demand */
 } i_RantPatterns;
 
@@ -1133,11 +1133,6 @@ int rant_function_cancel(RantFunction *fn, uint32_t call_id){
 /* The built in @rant/meta endpoint, hosted at node open as a both sides multi function.
  * The node builds the snapshot, this layer wires it into the function machinery. */
 
-/* the node pool RantAllocFn adapter */
-static void *i_rant_pat_alloc(void *user, void *ptr, size_t size){
-    return i_rant_node_sys_alloc((RantNode*)user, ptr, size);
-}
-
 static void i_rant_meta_on_request(RantRequest *request, void *user){
     RantNode *n = (RantNode*)user;
     i_RantPatterns *pm = (i_RantPatterns*)*i_rant_node_sys_slot(n);
@@ -1165,14 +1160,14 @@ static void i_rant_meta_on_request(RantRequest *request, void *user){
 /* the node open seam declared in node/runtime.c: hosts @rant/meta on this node */
 void i_rant_patterns_meta_open(RantNode *n){
     i_RantPatterns *pm;
-    RantSchema *rsp;
+    const RantSchema *rsp;
     RantFunctionOpts fo;
     int acquired;
     if (!n) return;
     acquired = i_rant_node_sys_lock(n);
     pm = i_rant_patterns_get(n);
     if (pm && !pm->meta_rsp_schema)
-        pm->meta_rsp_schema = rant_schema_compile(i_rant_pat_alloc, n, "RantMeta { info: map }", NULL);
+        pm->meta_rsp_schema = rant_node_schema(n, "RantMeta { info: map }");
     rsp = pm ? pm->meta_rsp_schema : NULL;
     i_rant_node_sys_unlock(n, acquired);
     if (!pm || pm->meta || !rsp) return;   /* OOM degrades: no endpoint, the node stays healthy */

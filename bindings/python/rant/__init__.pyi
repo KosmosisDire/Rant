@@ -133,7 +133,8 @@ class CallError(Error):
 class CancelledError(Exception): ...
 
 class Schema:
-    """A compiled schema: DSL text, an annotated class or a bare type."""
+    """A compiled schema the node owns, from node.schema: DSL text, an annotated class or a
+    bare type."""
     class FieldType(IntEnum):
         U8 = 0
         U16 = 1
@@ -169,7 +170,7 @@ class Schema:
         elem_size: int
         arr_parent: int
 
-    def __init__(self, source: type[Any] | str | Any) -> None: ...
+    def __init__(self, node: Node, source: type[Any] | str | Any) -> None: ...
     @property
     def name(self) -> str: ...
     @property
@@ -382,6 +383,7 @@ class Node:
     def last_error(self) -> Event: ...
     @property
     def reflection(self) -> Reflection: ...
+    def schema(self, source: type[Any] | str | Any) -> Schema: ...
 
     # The topic keywords are docs/topics.md's, durations in seconds, 0 = the default.
     @overload

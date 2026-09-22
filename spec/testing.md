@@ -131,7 +131,9 @@ process base picked from the clock so concurrent runs never join each other.
   element arrays with indexed paths, variable members at any struct depth, and the
   refusals that keep an array element's stride static. A text of several statements
   compiles to its last, a repeated definition must match, and a definition taken by name
-  hashes like the plain struct. Print hoists each named type as a leading definition,
+  hashes like the plain struct. A registry keeps a definition for its later compiles,
+  rolls a failed text back and holds one handle per shape, and a node reserves its
+  builtin names and reports a refusal with the place in `schema_detail`. Print hoists each named type as a leading definition,
   dependencies first, and recompiles to the same wire.
 - Standard types: golden bytes and a golden hash every wrapper pins, and recognition that
   verifies the shape as well as the name. Change the golden pair only with a deliberate

@@ -410,8 +410,6 @@ namespace Rant
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void RantEventFn(IntPtr ev);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate IntPtr RantAllocFn(IntPtr user, IntPtr ptr, UIntPtr size);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void RantRequestFn(IntPtr request, IntPtr user);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void RantResponseFn(IntPtr response);
@@ -501,27 +499,19 @@ namespace Rant
 
         // serialize / schema
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr rant_schema_compile(RantAllocFn alloc, IntPtr user,
-            byte[] text, out IntPtr err);
+        internal static extern IntPtr rant_node_schema(IntPtr node, byte[] text);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern void rant_schema_free(IntPtr s, RantAllocFn alloc, IntPtr user);
+        internal static extern IntPtr rant_node_schema_parse(IntPtr node, IntPtr wire, UIntPtr len);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern RantBytes rant_schema_wire(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern ulong rant_schema_hash(IntPtr s);
-        [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr rant_schema_copy(IntPtr s, RantAllocFn alloc, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern RantStringView rant_schema_name(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern uint rant_schema_print(IntPtr s, IntPtr buf, UIntPtr cap);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_schema_subset(IntPtr sub, IntPtr pub);
-        [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int rant_std_recognize(IntPtr s, RantAllocFn alloc, IntPtr user);
-        [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int rant_std_recognize_field(IntPtr s, ushort field,
-                                                            RantAllocFn alloc, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern long rant_timestamp_now();
         [DllImport(LIB, CallingConvention = CC)]
@@ -1108,66 +1098,40 @@ namespace Rant
     // ---- schema: DSL compile, reflection, encode/decode -------------------------
 
     /// <summary>A compiled message schema: the wire shape of a topic, request, response or
-    /// variable. Compile DSL text, or reflect a type's public fields.</summary>
-    public sealed class Schema : IDisposable
+    /// variable. A node makes one from DSL text or a reflected type (RantNode.Schema), owns
+    /// it and frees it at Close, so it is valid for the node's life.</summary>
+    public sealed class Schema
     {
-        internal IntPtr Handle;
-        internal Type ClrType;   // set for reflection-built schemas (decode target)
+        internal IntPtr Handle;   // zeroed when the owning node closes
+        internal Type ClrType;    // set for reflection-built schemas (decode target)
 
-        /// <summary>Compile schema DSL text such as "Pose { x: f32 }".</summary>
-        public Schema(string text)
-        {
-            IntPtr err;
-            IntPtr h = Native.rant_schema_compile(Codec.SchemaAlloc, IntPtr.Zero, Codec.CStr(text), out err);
-            if (h == IntPtr.Zero)
-            {
-                string near = Codec.PtrToStr(err);
-                throw new SchemaException(string.IsNullOrEmpty(near)
-                    ? "schema compile failed at the end of the text" : "schema compile failed near: " + near);
-            }
-            Handle = h;
-        }
+        internal Schema(IntPtr handle, Type clrType) { Handle = handle; ClrType = clrType; }
 
-        /// <summary>Reflect a type into a compiled schema: public fields become the wire fields.
-        /// A bare type is the whole schema, an anonymous root whose message is one value. A
-        /// tuple has no name of its own and throws here: a handle names it after itself.</summary>
-        public Schema(Type t) : this(Codec.TypeDsl(t, null)) { ClrType = t; }
-
-        // Reflect with a wire name for a nameless type, derived from the handle's name.
-        internal Schema(Type t, string namelessAs) : this(Codec.TypeDsl(t, namelessAs)) { ClrType = t; }
-
-        /// <summary>Adopt a compiled schema this wrapper already owns, such as a copy of a
-        /// publisher's. Freeing it is this object's job from here on.</summary>
-        internal Schema(IntPtr owned) { Handle = owned; }
+        // The node freed it at Close: refuse loudly instead of reading freed memory.
+        private IntPtr Live => Handle != IntPtr.Zero ? Handle
+            : throw new SchemaException("the node that owned this schema is closed");
 
         // The schema a typed handle uses: the given one bound to T, else T reflected under the
         // handle's name when T has none of its own. A byte[] T carries the encoded message as
         // is, so it binds no type and reflects nothing.
-        internal static Schema For(Type t, Schema given, string handleName)
+        internal static Schema For(RantNode node, Type t, Schema given, string handleName)
         {
-            if (Codec.IsRaw(t)) return given == null ? null : Copy(given, null);
-            return given == null ? new Schema(t, Codec.WireName(handleName)) : Copy(given, t);
-        }
-
-        private static Schema Copy(Schema given, Type t)
-        {
-            IntPtr h = Native.rant_schema_copy(given.Handle, Codec.SchemaAlloc, IntPtr.Zero);
-            if (h == IntPtr.Zero) throw new SchemaException("schema copy failed");
-            return new Schema(h) { ClrType = t };
+            if (Codec.IsRaw(t)) return given == null ? null : node.Keep(given, null);
+            return given == null ? node.Schema(t, Codec.WireName(handleName)) : node.Keep(given, t);
         }
 
         /// <summary>The wire type name, "" for an anonymous root.</summary>
-        public string Name => Codec.Str(Native.rant_schema_name(Handle));
+        public string Name => Codec.Str(Native.rant_schema_name(Live));
         /// <summary>The identity of the wire shape, the same value in every language.</summary>
-        public ulong Hash => Native.rant_schema_hash(Handle);
+        public ulong Hash => Native.rant_schema_hash(Live);
 
         /// <summary>The DSL text reconstructed from the compiled schema (works for any
         /// schema, including one parsed from a peer). Paste into a C node for interop.</summary>
-        public string Dsl => Codec.SchemaDsl(Handle);
+        public string Dsl => Codec.SchemaDsl(Live);
 
         /// <summary>Can a reader declaring this schema read messages written with pub? Type
         /// names narrow: an anonymous type reads a named one, never the reverse.</summary>
-        public bool CanRead(Schema pub) => Native.rant_schema_subset(Handle, pub.Handle) != 0;
+        public bool CanRead(Schema pub) => Native.rant_schema_subset(Live, pub.Live) != 0;
 
         /// <summary>The flat depth first field table (spec/schema.md). A struct's members
         /// follow it one level deeper, a struct array's element template likewise with
@@ -1176,12 +1140,13 @@ namespace Rant
         {
             get
             {
-                ushort n = Native.rant_schema_field_count(Handle);
+                IntPtr h = Live;
+                ushort n = Native.rant_schema_field_count(h);
                 var fields = new SchemaField[n];
                 for (ushort i = 0; i < n; i++)
                 {
                     RantSchemaFieldInfo info;
-                    if (Native.rant_schema_field_at(Handle, i, out info) == 0)
+                    if (Native.rant_schema_field_at(h, i, out info) == 0)
                         throw new SchemaException("field " + i + " unreadable");
                     fields[i] = new SchemaField
                     {
@@ -1200,12 +1165,13 @@ namespace Rant
         /// <summary>An enum field's options by flat index, empty for any other field.</summary>
         public SchemaEnumVariant[] EnumVariants(int field)
         {
-            ushort n = Native.rant_schema_enum_count(Handle, (ushort)field);
+            IntPtr h = Live;
+            ushort n = Native.rant_schema_enum_count(h, (ushort)field);
             var list = new SchemaEnumVariant[n];
             for (ushort i = 0; i < n; i++)
             {
                 long value; RantStringView name;
-                if (Native.rant_schema_enum_variant(Handle, (ushort)field, i, out value, out name) == 0)
+                if (Native.rant_schema_enum_variant(h, (ushort)field, i, out value, out name) == 0)
                     throw new SchemaException("enum variant " + i + " unreadable");
                 list[i] = new SchemaEnumVariant { Name = Codec.Str(name), Value = value };
             }
@@ -1214,25 +1180,15 @@ namespace Rant
 
         /// <summary>Encode a value: an instance of the reflected type, or a Dictionary by field
         /// name against any schema. A field left null keeps the zero default.</summary>
-        public byte[] Encode(object value) => Codec.Encode(Handle, value);
+        public byte[] Encode(object value) => Codec.Encode(Live, value);
         /// <summary>Decode message bytes: an instance of the reflected type, the one value of a
         /// bare type, else the fields by name as a Dictionary.</summary>
         public object Decode(byte[] data)
         {
-            var d = Codec.DecodeDict(Handle, data);
-            return ClrType != null ? Codec.ToObject(ClrType, d) : Codec.RootOrFields(Handle, d);
+            IntPtr h = Live;
+            var d = Codec.DecodeDict(h, data);
+            return ClrType != null ? Codec.ToObject(ClrType, d) : Codec.RootOrFields(h, d);
         }
-
-        public void Dispose()
-        {
-            if (Handle != IntPtr.Zero)
-            {
-                Native.rant_schema_free(Handle, Codec.SchemaAlloc, IntPtr.Zero);
-                Handle = IntPtr.Zero;
-            }
-            GC.SuppressFinalize(this);
-        }
-        ~Schema() { Dispose(); }
     }
 
     // ---- delivered message / event ----------------------------------------------
@@ -1521,7 +1477,7 @@ namespace Rant
         public ulong ProgressSchemaHash;
         public ulong Generation;
 
-        internal static RantEntity Read(ref RantEntityInfoNative e) => new RantEntity
+        internal static RantEntity Read(RantNode node, ref RantEntityInfoNative e) => new RantEntity
         {
             Kind = (EntityKind)e.kind,
             Name = e.name.data != IntPtr.Zero ? Codec.Str(e.name) : "0x" + e.hash.ToString("x8"),
@@ -1531,19 +1487,11 @@ namespace Rant
             Incomplete = e.incomplete != 0, Conflict = e.conflict != 0,
             Providers = e.providers, Consumers = e.consumers, Provider = e.provider,
             From = Codec.Str(e.from),
-            Schema = Own(e.schema), SchemaHash = e.schema_hash,
-            ResponseSchema = Own(e.rsp_schema), ResponseSchemaHash = e.rsp_schema_hash,
-            ProgressSchema = Own(e.progress_schema), ProgressSchemaHash = e.progress_schema_hash,
+            Schema = node.KeepView(e.schema), SchemaHash = e.schema_hash,
+            ResponseSchema = node.KeepView(e.rsp_schema), ResponseSchemaHash = e.rsp_schema_hash,
+            ProgressSchema = node.KeepView(e.progress_schema), ProgressSchemaHash = e.progress_schema_hash,
             Generation = e.generation,
         };
-
-        // the node's view is good only until the next poll, so every schema is copied out
-        private static Schema Own(IntPtr view)
-        {
-            if (view == IntPtr.Zero) return null;
-            IntPtr h = Native.rant_schema_copy(view, Codec.SchemaAlloc, IntPtr.Zero);
-            return h == IntPtr.Zero ? null : new Schema(h);
-        }
     }
 
     // ---- topic ----------------------------------------------------------------
@@ -1621,10 +1569,11 @@ namespace Rant
         private RantQueue _queue;         // the node's own queue under Threading.Dispatch
         private bool _pumpInDispatch;     // no service thread: Dispatch() polls first
         private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
+        // every Schema handed out, invalidated at Close since the C frees them with the node
         private readonly List<Schema> _schemas = new List<Schema>();
         // A publisher's schema is a node owned view good only until the next poll, so a
-        // message that decodes later needs our own copy. Keyed by the schema hash, so one
-        // copy serves every message on every topic that carries it.
+        // message that decodes later needs it registered. Keyed by the schema hash, so one
+        // wrapper serves every message on every topic that carries it.
         private readonly Dictionary<ulong, Schema> _msgSchemas = new Dictionary<ulong, Schema>();
         // its own lock: the delivery path reaches it while the node lock is held, and
         // _createLock is held across a create, which takes the node lock the other way round
@@ -1817,7 +1766,6 @@ namespace Rant
                     Hold(rec, role, 1);
                     Role after = RoleOf(rec);
                     if (after != before) Native.rant_topic_set_role(rec.Handle, (int)after);
-                    if (schema != null) _schemas.Add(schema);
                     return rec.Handle;
                 }
 
@@ -1833,7 +1781,7 @@ namespace Rant
                 if (h == IntPtr.Zero)
                     throw new RantException("topic '" + name + "' create failed", LastError);
                 ushort idx = Native.rant_topic_index(h);
-                if (schema != null) { _schemas.Add(schema); _topicTypes[idx] = schema.ClrType; }
+                if (schema != null) _topicTypes[idx] = schema.ClrType;
                 rec = new TopicRec { Handle = h, Queue = wantQueue, SchemaHash = sh };
                 Hold(rec, role, 1);
                 _topicsByName[name] = rec;
@@ -1954,16 +1902,14 @@ namespace Rant
             {
                 Schema owned;
                 if (_msgSchemas.TryGetValue(hash, out owned)) return owned;
-                IntPtr h = Native.rant_schema_copy(view, Codec.SchemaAlloc, IntPtr.Zero);
-                if (h == IntPtr.Zero) return null;
-                owned = new Schema(h);
+                owned = KeepView(view);
+                if (owned == null) return null;
                 _msgSchemas[hash] = owned;
                 return owned;
             }
         }
 
         // pattern-layer bookkeeping (reaped at Close)
-        internal void RetainSchema(Schema s) { if (s != null) lock (_createLock) _schemas.Add(s); }
         internal void RegisterPatternBox(long id) { lock (PatternLock) _patternBoxes.Add(id); }
         internal void RegisterHandle(INodeHandle h)
         {
@@ -2149,6 +2095,61 @@ namespace Rant
         // Why the most recent node open failed, from the process global slot.
         private static RantEvent LastOpenError() => RantEvent.FromValue(Native.rant_last_error(IntPtr.Zero));
 
+        /// <summary>Compile schema DSL text such as "Pose { x: f32 }" in this node's registry.
+        /// Every definition stays in scope for the node's later compiles, and a name on its
+        /// own is a schema. The node owns the result for its life, one handle per shape.</summary>
+        public Schema Schema(string text)
+        {
+            IntPtr h = Native.rant_node_schema(_handle, Codec.CStr(text));
+            if (h == IntPtr.Zero)
+            {
+                RantEvent e = LastError;
+                throw new SchemaException(e != null && e.SchemaDetail != null ? e.SchemaDetail
+                                          : "schema compile failed");
+            }
+            return Wrap(h, null);
+        }
+
+        /// <summary>Reflect a type into a schema: public fields become the wire fields. A bare
+        /// type is the whole schema, an anonymous root whose message is one value. A tuple has
+        /// no name of its own and throws here: a handle names it after itself.</summary>
+        public Schema Schema(Type t) => Schema(t, null);
+
+        // Reflect with a wire name for a nameless type, derived from the handle's name.
+        internal Schema Schema(Type t, string namelessAs)
+        {
+            Schema s = Schema(Codec.TypeDsl(t, namelessAs));
+            s.ClrType = t;
+            return s;
+        }
+
+        // Registers any schema's wire in this node, so one from another node serves too.
+        internal Schema Keep(Schema given, Type t)
+        {
+            Schema s = KeepView(given.Handle);
+            if (s == null) throw new SchemaException("schema registration failed");
+            s.ClrType = t;
+            return s;
+        }
+
+        // A node owned schema view, such as a walk's, registered here so it outlives the poll.
+        internal Schema KeepView(IntPtr view)
+        {
+            if (view == IntPtr.Zero) return null;
+            RantBytes w = Native.rant_schema_wire(view);
+            IntPtr h = Native.rant_node_schema_parse(_handle, w.data, w.len);
+            return h == IntPtr.Zero ? null : Wrap(h, null);
+        }
+
+        // Every wrapper goes on the list Close invalidates. Under the leaf lock, since the
+        // delivery path reaches here with the node lock held.
+        private Schema Wrap(IntPtr h, Type t)
+        {
+            var s = new Schema(h, t);
+            lock (_msgSchemaLock) _schemas.Add(s);
+            return s;
+        }
+
         /// <summary>The node's counters, read at the call.</summary>
         public NodeStats Stats
         {
@@ -2192,11 +2193,13 @@ namespace Rant
                 foreach (long id in _asyncLive) Patterns.AbandonAsync(id);
                 _asyncLive.Clear();
             }
-            foreach (var s in _schemas) s.Dispose();
-            _schemas.Clear();
-            // Not disposed: a RantMessage taken before Close may still decode against one.
-            // Dropping the node's reference leaves each to its finalizer.
-            lock (_msgSchemaLock) _msgSchemas.Clear();
+            // the C freed every schema with the node: a wrapper read after this throws
+            lock (_msgSchemaLock)
+            {
+                foreach (var s in _schemas) s.Handle = IntPtr.Zero;
+                _schemas.Clear();
+                _msgSchemas.Clear();
+            }
             Codec.FreeCStr(_discGroup); _discGroup = IntPtr.Zero;
             Codec.FreeCStr(_mcastIf); _mcastIf = IntPtr.Zero;
             return true;
@@ -2274,7 +2277,7 @@ namespace Rant
                 var it = new RantIter();
                 RantEntityInfoNative e;
                 while (Native.rant_node_entities_next(_node.Handle, peer, ref it, out e) != 0)
-                    list.Add(RantEntity.Read(ref e));
+                    list.Add(RantEntity.Read(_node, ref e));
             }
             finally { Native.rant_node_unlock(_node.Handle); }
             return list;
@@ -2290,7 +2293,7 @@ namespace Rant
             {
                 var it = new RantIter();
                 RantEntityInfoNative e;
-                while (Native.rant_node_mesh_next(_node.Handle, ref it, out e) != 0) list.Add(RantEntity.Read(ref e));
+                while (Native.rant_node_mesh_next(_node.Handle, ref it, out e) != 0) list.Add(RantEntity.Read(_node, ref e));
             }
             finally { Native.rant_node_unlock(_node.Handle); }
             return list;
@@ -2304,7 +2307,7 @@ namespace Rant
             {
                 RantEntityInfoNative e;
                 if (Native.rant_node_mesh_find(_node.Handle, (int)kind, Codec.CStr(name), out e) == 0) return null;
-                return RantEntity.Read(ref e);
+                return RantEntity.Read(_node, ref e);
             }
             finally { Native.rant_node_unlock(_node.Handle); }
         }
@@ -2560,7 +2563,12 @@ namespace Rant
         // The bytes a typed handle sends for a value: T encoded with its schema, or a byte[]
         // T as is (the encoded message).
         internal static byte[] Encode<T>(Schema s, T value)
-            => Codec.IsRaw(typeof(T)) ? (byte[])(object)value ?? Array.Empty<byte>() : s.Encode(value);
+        {
+            if (Codec.IsRaw(typeof(T))) return (byte[])(object)value ?? Array.Empty<byte>();
+            // the node closed: the handle refuses the call right after, so nothing to encode
+            if (s.Handle == IntPtr.Zero) return Array.Empty<byte>();
+            return s.Encode(value);
+        }
 
         // A delivered message as T: the decoded value, or the bytes as is for a byte[] T.
         internal static bool TryValue<T>(RantMessage m, out T value)
@@ -2736,8 +2744,6 @@ namespace Rant
                 throw new RantException("function definition create failed", node.LastError);
             }
             if (box != null) { box.Fn = Fn; node.RegisterPatternBox(id); }
-            node.RetainSchema(requestSchema);
-            node.RetainSchema(responseSchema);
             node.RegisterHandle(this);
         }
 
@@ -2834,8 +2840,6 @@ namespace Rant
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
             if (Fn == IntPtr.Zero)
                 throw new RantException("remote function create failed", node.LastError);
-            node.RetainSchema(requestSchema);
-            node.RetainSchema(responseSchema);
             node.RegisterHandle(this);
         }
 
@@ -3016,9 +3020,6 @@ namespace Rant
                 // the definition's ONE native cancel slot fans out to the per-call CTSes
                 Native.rant_function_on_cancel(Fn, Patterns.OnCancel, (IntPtr)cancelId);
             }
-            node.RetainSchema(requestSchema);
-            node.RetainSchema(progressSchema);
-            node.RetainSchema(responseSchema);
             node.RegisterHandle(this);
         }
 
@@ -3101,9 +3102,6 @@ namespace Rant
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
             if (Fn == IntPtr.Zero)
                 throw new RantException("remote task create failed", node.LastError);
-            node.RetainSchema(requestSchema);
-            node.RetainSchema(progressSchema);
-            node.RetainSchema(responseSchema);
             node.RegisterHandle(this);
         }
 
@@ -3230,7 +3228,6 @@ namespace Rant
             if (Var == IntPtr.Zero)
                 throw new RantException((definition ? "variable definition" : "remote variable")
                     + " create failed", node.LastError);
-            node.RetainSchema(schema);
             node.RegisterHandle(this);
         }
 
@@ -3366,8 +3363,8 @@ namespace Rant
         internal FunctionDefinition(RantNode node, string name, Func<TReq, TRsp> handler,
                                     FunctionOptions options, Schema requestSchema, Schema responseSchema)
         {
-            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
-            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
+            _req = Schema.For(node, typeof(TReq), requestSchema, name + "_req");
+            _rsp = Schema.For(node, typeof(TRsp), responseSchema, name + "_rsp");
             Action<RequestCore> h = null;
             if (handler != null)
             {
@@ -3386,8 +3383,8 @@ namespace Rant
         internal FunctionDefinition(RantNode node, string name, Func<TReq, Task<TRsp>> handler,
                                     FunctionOptions options, Schema requestSchema, Schema responseSchema)
         {
-            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
-            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
+            _req = Schema.For(node, typeof(TReq), requestSchema, name + "_req");
+            _rsp = Schema.For(node, typeof(TRsp), responseSchema, name + "_rsp");
             Func<RequestCore, Task<byte[]>> h = null;
             if (handler != null)
             {
@@ -3407,8 +3404,8 @@ namespace Rant
         internal FunctionDefinition(RantNode node, string name, Action<TReq, RantRequest<TRsp>> handler,
                                     FunctionOptions options, Schema requestSchema, Schema responseSchema)
         {
-            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
-            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
+            _req = Schema.For(node, typeof(TReq), requestSchema, name + "_req");
+            _rsp = Schema.For(node, typeof(TRsp), responseSchema, name + "_rsp");
             Action<RequestCore> h = null;
             if (handler != null)
             {
@@ -3479,8 +3476,8 @@ namespace Rant
                                 Schema requestSchema, Schema responseSchema)
         {
             _name = name;
-            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
-            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
+            _req = Schema.For(node, typeof(TReq), requestSchema, name + "_req");
+            _rsp = Schema.For(node, typeof(TRsp), responseSchema, name + "_rsp");
             _core = new RemoteFunctionCore(node, name, _req, _rsp, options);
         }
 
@@ -3555,9 +3552,9 @@ namespace Rant
                                 TaskOptions options, Schema requestSchema, Schema progressSchema,
                                 Schema responseSchema)
         {
-            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
-            _prg = Schema.For(typeof(TPrg), progressSchema, name + "_prg");
-            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
+            _req = Schema.For(node, typeof(TReq), requestSchema, name + "_req");
+            _prg = Schema.For(node, typeof(TPrg), progressSchema, name + "_prg");
+            _rsp = Schema.For(node, typeof(TRsp), responseSchema, name + "_rsp");
             Func<RequestCore, TaskContextCore, Task<byte[]>> h = null;
             if (handler != null)
             {
@@ -3597,9 +3594,9 @@ namespace Rant
                             Schema requestSchema, Schema progressSchema, Schema responseSchema)
         {
             _name = name;
-            _req = Schema.For(typeof(TReq), requestSchema, name + "_req");
-            _prg = Schema.For(typeof(TPrg), progressSchema, name + "_prg");
-            _rsp = Schema.For(typeof(TRsp), responseSchema, name + "_rsp");
+            _req = Schema.For(node, typeof(TReq), requestSchema, name + "_req");
+            _prg = Schema.For(node, typeof(TPrg), progressSchema, name + "_prg");
+            _rsp = Schema.For(node, typeof(TRsp), responseSchema, name + "_rsp");
             _core = new RemoteTaskCore(node, name, _req, _prg, _rsp, options);
         }
 
@@ -3772,7 +3769,7 @@ namespace Rant
         internal VariableDefinition(RantNode node, string name, bool hasInitial, T initial,
                                     VariableOptions options, Schema schema)
         {
-            _schema = Schema.For(typeof(T), schema, name);
+            _schema = Schema.For(node, typeof(T), schema, name);
             byte[] first = hasInitial ? Patterns.Encode(_schema, initial) : null;
             _core = new VariableCore(node, name, _schema, first, options, true);
         }
@@ -3784,7 +3781,7 @@ namespace Rant
     {
         internal RemoteVariable(RantNode node, string name, VariableOptions options, Schema schema)
         {
-            _schema = Schema.For(typeof(T), schema, name);
+            _schema = Schema.For(node, typeof(T), schema, name);
             _core = new VariableCore(node, name, _schema, null, options, false);
         }
     }
@@ -3799,7 +3796,7 @@ namespace Rant
 
         internal Publisher(RantNode node, string name, Qos qos, Schema schema)
         {
-            _topic = new TopicCore(node, name, Schema.For(typeof(T), schema, name), Role.PubOnly, qos);
+            _topic = new TopicCore(node, name, Schema.For(node, typeof(T), schema, name), Role.PubOnly, qos);
         }
 
         /// <summary>Publish one message to every matched subscriber. captureUs is when the
@@ -3837,7 +3834,7 @@ namespace Rant
 
         internal Subscriber(RantNode node, string name, Qos qos, Schema schema)
         {
-            _topic = new TopicCore(node, name, Schema.For(typeof(T), schema, name), Role.SubOnly, qos);
+            _topic = new TopicCore(node, name, Schema.For(node, typeof(T), schema, name), Role.SubOnly, qos);
             _deliver = Deliver;
         }
 
@@ -3917,18 +3914,9 @@ namespace Rant
 
         // --- allocators: managed realloc/free, works on plain .NET and Unity/IL2CPP ---
         private static readonly RantPageFn s_page = PageRealloc;
-        internal static readonly RantAllocFn SchemaAlloc = SchemaReAlloc;
 
         [MonoPInvokeCallback(typeof(RantPageFn))]
         private static IntPtr PageRealloc(IntPtr ptr, UIntPtr size)
-        {
-            if ((ulong)size == 0) { if (ptr != IntPtr.Zero) Marshal.FreeHGlobal(ptr); return IntPtr.Zero; }
-            IntPtr cb = (IntPtr)(long)(ulong)size;
-            return ptr == IntPtr.Zero ? Marshal.AllocHGlobal(cb) : Marshal.ReAllocHGlobal(ptr, cb);
-        }
-
-        [MonoPInvokeCallback(typeof(RantAllocFn))]
-        private static IntPtr SchemaReAlloc(IntPtr user, IntPtr ptr, UIntPtr size)
         {
             if ((ulong)size == 0) { if (ptr != IntPtr.Zero) Marshal.FreeHGlobal(ptr); return IntPtr.Zero; }
             IntPtr cb = (IntPtr)(long)(ulong)size;

@@ -58,7 +58,9 @@ def round_trip():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    sch = rant.Schema(Sensor)
+    node = rant.Node("rt", on_event=lambda e: None, domain=51, multicast_interface=IFACE,
+                     threading=rant.Threading.MANUAL)
+    sch = node.schema(Sensor)
     print("Sensor DSL:\n" + sch.dsl)
     src = Sensor(id=42, name="lidar",
                  note="a long unbounded note that exceeds sixteen bytes easily",
@@ -87,6 +89,7 @@ def round_trip():
     except rant.SchemaError:
         check("over-cap raises", True)
     check("SchemaError is a rant.Error", issubclass(rant.SchemaError, rant.Error))
+    node.close()
     print("variable-kinds round-trip: " + ("PASS\n" if ok else "FAIL\n"))
     return ok
 
@@ -128,23 +131,33 @@ def std_types():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    f3 = rant.Schema("Float3")
+    a = rant.Node("SA", on_event=lambda e: None, domain=52, multicast_interface=IFACE,
+                  threading=rant.Threading.MANUAL)
+    b = rant.Node("SB", on_event=lambda e: None, domain=52, multicast_interface=IFACE,
+                  threading=rant.Threading.MANUAL)
+    f3 = a.schema("Float3")
     check("Float3 compiles by name alone, golden hash", f3.hash == HASH_FLOAT3)
     check("Float3 is 12 message bytes", len(f3.encode({})) == 12)
-    check("the mirror dataclass IS that type", rant.Schema(rant.types.Float3).hash == HASH_FLOAT3)
+    check("the mirror dataclass IS that type", a.schema(rant.types.Float3).hash == HASH_FLOAT3)
 
     # a name narrows: an anonymous field of the same shape reads a Transform field, never
-    # the reverse, and Transform/Twist are distinct names never mistaken for each other
-    named = rant.Schema("W { at: Transform }")
-    bare = rant.Schema("W { at: { translation: { x: f64, y: f64, z: f64 },"
-                       "         rotation: { x: f64, y: f64, z: f64, w: f64 },"
-                       "         parent: string<30> } }")
+    # the reverse, and Transform/Twist are distinct names never mistaken for each other.
+    # Two shapes of W, so each goes on its own node
+    named = a.schema("W { at: Transform }")
+    bare = b.schema("W { at: { translation: { x: f64, y: f64, z: f64 },"
+                    "         rotation: { x: f64, y: f64, z: f64, w: f64 },"
+                    "         parent: string<30> } }")
     check("an anonymous field of the same shape reads a Transform field",
           bare.can_read(named) and not named.can_read(bare))
     check("Transform and Twist never cross-wire",
-          not rant.Schema("Twist").can_read(rant.Schema("Transform")))
+          not a.schema("Twist").can_read(a.schema("Transform")))
+    try:
+        a.schema("W { at: Twist }")
+        check("a second shape of W on one node is refused", False)
+    except rant.SchemaError as e:
+        check("a second shape of W on one node is refused: %s" % e, True)
 
-    sch = rant.Schema(Track)
+    sch = a.schema(Track)
     text = " ".join(rant.dsl(Track).split())
     check("the reflected schema spells the names, not the shapes",
           text == "Track { at: Transform, when: Timestamp, tag: Color, id: Uuid, velocity: Float3 }")
@@ -160,6 +173,8 @@ def std_types():
           and back.when == t.when and back.tag.r == 0x11 and back.tag.a == 0xFF
           and bytes(back.id) == bytes(range(16)) and back.velocity.z == 3.0)
     check("types.now is Unix-epoch microseconds", rant.types.now() > 1600000000000000)
+    a.close()
+    b.close()
     return ok
 
 
@@ -189,22 +204,21 @@ def video_types():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    for name, cls, golden in (("Image", rant.types.Image, HASH_IMAGE),
-                              ("VideoFrame", rant.types.VideoFrame, HASH_VIDEO_FRAME),
-                              ("ExternalVideoStream", rant.types.ExternalVideoStream,
-                               HASH_EXT_STREAM)):
-        check("%s compiles by name alone, golden hash" % name,
-              rant.Schema(name).hash == golden)
-        check("the %s mirror IS that type" % name, rant.Schema(cls).hash == golden)
-    check("a video mirror nests as a named field",
-          rant.Schema(Clip).hash
-          == rant.Schema("Clip { cover: Image, live: ExternalVideoStream }").hash)
-
     got = {}
     a = rant.Node("VidA", on_event=on_event("VidA"), domain=45, multicast_interface=IFACE,
                   threading=rant.Threading.MANUAL)
     b = rant.Node("VidB", on_event=on_event("VidB"), domain=45, multicast_interface=IFACE,
                   threading=rant.Threading.MANUAL)
+    for name, cls, golden in (("Image", rant.types.Image, HASH_IMAGE),
+                              ("VideoFrame", rant.types.VideoFrame, HASH_VIDEO_FRAME),
+                              ("ExternalVideoStream", rant.types.ExternalVideoStream,
+                               HASH_EXT_STREAM)):
+        check("%s compiles by name alone, golden hash" % name,
+              a.schema(name).hash == golden)
+        check("the %s mirror IS that type" % name, a.schema(cls).hash == golden)
+    check("a video mirror nests as a named field",
+          a.schema(Clip).hash
+          == a.schema("Clip { cover: Image, live: ExternalVideoStream }").hash)
     try:
         pub = a.publisher("frame", rant.types.Image, reliable=True, keep_last=4)
         b.subscriber("frame", rant.types.Image, lambda i: got.setdefault("img", i),
@@ -274,7 +288,9 @@ def struct_arrays():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    sch = rant.Schema(Detections)
+    node = rant.Node("sarr", on_event=lambda e: None, domain=53, multicast_interface=IFACE,
+                     threading=rant.Threading.MANUAL)
+    sch = node.schema(Detections)
     print("Detections DSL:\n" + sch.dsl)
     src = Detections(stamp=9, note="after the array",
                      codes=[Code("C128", 1.0, Velocity(0.5, -0.5)),
@@ -289,7 +305,7 @@ def struct_arrays():
     check("empty array round-trips empty", sch.decode(sch.encode(Detections())).codes == [])
 
     # the same wire from DSL text, and the whole of one element's kinds
-    text = rant.Schema("D { rows: { a: u8, b: i16, c: f64, d: bool, e: string<4>, "
+    text = node.schema("D { rows: { a: u8, b: i16, c: f64, d: bool, e: string<4>, "
                        "f: f32[2], g: enum<u8> { OFF=0, ON=1 } }[], n: u8 }")
     rows = [{"a": 1, "b": -2, "c": 0.5, "d": True, "e": "hi", "f": [1.0, 2.0], "g": 1},
             {"a": 255, "b": -32768, "c": -1.5, "d": False, "e": "", "f": [0.0, 0.0], "g": 0}]
@@ -298,18 +314,18 @@ def struct_arrays():
     check("an enum element member takes its option name",
           text.decode(text.encode({"rows": [dict(rows[0], g="OFF")]}))["rows"][0]["g"] == 0)
 
-    fixed = rant.Schema("D { pts: { x: f32, y: f32 }[3] }")
+    fixed = node.schema("P { pts: { x: f32, y: f32 }[3] }")
     short = fixed.decode(fixed.encode({"pts": [{"x": 1.0, "y": 2.0}]}))
     check("a fixed struct array zero fills to its count",
           len(fixed.encode({"pts": []})) == 24 and len(short["pts"]) == 3
           and short["pts"][2] == {"x": 0.0, "y": 0.0})
 
-    bare = rant.Schema(list[Code])
+    bare = node.schema(list[Code])
     check("a struct array is a bare root too",
           bare.decode(bare.encode([Code("A", 1.0)]))[0].type == "A")
     check("list[Code] and the DSL text agree",
-          rant.Schema(Detections).hash
-          == rant.Schema(rant.dsl(Detections)).hash)
+          node.schema(Detections).hash
+          == node.schema(rant.dsl(Detections)).hash)
     try:
         sch.encode(Detections(codes=[Code("way-too-long-for-sixteen-bytes")]))
         check("over-cap inside an element raises", False)
@@ -320,6 +336,7 @@ def struct_arrays():
         check("a non-list for a struct array raises", False)
     except rant.SchemaError:
         check("a non-list for a struct array raises", True)
+    node.close()
     print("struct arrays: " + ("PASS\n" if ok else "FAIL\n"))
     return ok
 
@@ -374,23 +391,25 @@ def value_roots():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    check("bool canonical hash", rant.Schema(bool).hash == HASH_BOOL)
-    check("f32[] canonical hash", rant.Schema(list[rant.f32]).hash == HASH_F32ARR)
+    node = rant.Node("vr", on_event=lambda e: None, domain=54, multicast_interface=IFACE,
+                     threading=rant.Threading.MANUAL)
+    check("bool canonical hash", node.schema(bool).hash == HASH_BOOL)
+    check("f32[] canonical hash", node.schema(list[rant.f32]).hash == HASH_F32ARR)
     check("bool dsl", rant.dsl(bool) == "bool\n")
     check("f32[] dsl", rant.dsl(list[rant.f32]) == "f32[]\n")
     check("string(16) dsl", rant.dsl(rant.string(16)) == "string<16>\n")
     check("bare root reflects as one anonymous field",
-          len(rant.Schema(rant.f64).fields) == 1
-          and rant.Schema(rant.f64).name == ""
-          and rant.Schema(rant.f64).fields[0].name == "")
+          len(node.schema(rant.f64).fields) == 1
+          and node.schema(rant.f64).name == ""
+          and node.schema(rant.f64).fields[0].name == "")
     check("enum variants read back",
-          rant.Schema(Mode).enum_variants(0) == [("IDLE", 0), ("RUN", 1), ("FAULT", 2)])
+          node.schema(Mode).enum_variants(0) == [("IDLE", 0), ("RUN", 1), ("FAULT", 2)])
     for src, value in ((bool, True), (rant.u8, 200), (rant.i32, -7),
                        (rant.f32, 1.5), (rant.f64, -2.25), (int, 5), (float, 0.5),
                        (bool, False), (rant.string(16), "capped"), (str, "unbounded"),
                        (list[rant.f32], [1.5, -2.5]), (dict, {"battery": 87}),
                        ("u8[4]", b"\x01\x02\x03\x04"), (Mode, Mode.FAULT)):
-        sch = rant.Schema(src)
+        sch = node.schema(src)
         out = sch.decode(sch.encode(value))
         if isinstance(value, list):
             same = [round(x, 3) for x in out] == [round(x, 3) for x in value]
@@ -402,12 +421,13 @@ def value_roots():
             same = out == value
         check("round-trip %s -> %r" % (rant.dsl(src).strip(), out), same)
     # text DSL and the bare type agree, and a named bare root is an error
-    check("text `bool` == plain bool", rant.Schema("bool").hash == HASH_BOOL)
+    check("text `bool` == plain bool", node.schema("bool").hash == HASH_BOOL)
     try:
-        rant.Schema("Temperature: f32")
+        node.schema("Temperature: f32")
         check("named bare root refused", False)
     except rant.SchemaError:
         check("named bare root refused", True)
+    node.close()
     print("bare-type roots: " + ("PASS\n" if ok else "FAIL\n"))
     return ok
 
@@ -527,7 +547,7 @@ def handles():
         check("find folds the topic", found is not None and found.kind == rant.EntityKind.TOPIC)
         check("the folded schema is an owned copy",
               found is not None and found.schema is not None
-              and found.schema.hash == rant.Schema(Pose).hash)
+              and found.schema.hash == a.schema(Pose).hash)
         check("mesh lists what find found",
               any(e.name == "shared" for e in a.reflection.mesh()))
         check("epoch is a counter", isinstance(a.reflection.epoch, int))

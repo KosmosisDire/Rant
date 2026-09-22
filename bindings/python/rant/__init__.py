@@ -637,27 +637,24 @@ def _schema_dsl(lib, s):
     return buf.value.decode("utf-8", "replace")
 
 
-# Schema: a compiled message schema plus encode and decode. Build with Schema(text) or
-# Schema(cls), and a typed handle builds one for you.
+# Schema: a compiled message schema plus encode and decode. A node builds it with
+# node.schema(text) or node.schema(cls), and a typed handle builds one for you.
 
 def _dstr(s):
     return _c.string_at(s.data, s.len).decode("utf-8", "replace") if s.data and s.len else ""
 
 
-def _compile_dsl(text):
-    lib = _c.load()
-    err = _c.c_char_p()
-    s = lib.rant_schema_compile(_c.schema_alloc(), None, text.encode("utf-8"), _c.byref(err))
+def _compile_dsl(node, text):
+    s = node._lib.rant_node_schema(node._h, text.encode("utf-8"))
     if not s:
-        near = err.value.decode("utf-8", "replace") if err.value else ""
-        raise SchemaError("schema compile failed near: " + near if near
-                          else "schema compile failed at the end of the text")
+        raise SchemaError(node.last_error.schema_detail or "schema compile failed")
     return s
 
 
 class Schema:
-    """A compiled schema from DSL text, a schema class whose annotated fields are the wire
-        fields, or a bare type whose message is that one value (docs/python.md)."""
+    """A compiled schema the node owns, from node.schema: DSL text, a schema class whose
+        annotated fields are the wire fields, or a bare type whose message is that one value
+        (docs/python.md). Valid for the node's life."""
 
     class FieldType(_pyenum.IntEnum):
         U8 = 0
@@ -697,23 +694,23 @@ class Schema:
 
     __slots__ = ("_s", "_spec", "_vroot")
 
-    def __init__(self, source):
+    def __init__(self, node, source):
         self._spec = None
         self._vroot = None
         if isinstance(source, str):
-            self._s = _compile_dsl(source)
+            self._s = _compile_dsl(node, source)
             return
         self._spec = _value_spec(source)
         if self._spec is None:
             if not isinstance(source, type):
-                raise TypeError("Schema(...) expects DSL text, a schema class, or a bare "
+                raise TypeError("node.schema(...) expects DSL text, a schema class, or a bare "
                                 "type (rant.u8, rant.string(16), list[rant.f32], dict, ...)")
             self._spec = _spec_of(source)
-        self._s = _compile_dsl(_spec_text(self._spec))
+        self._s = _compile_dsl(node, _spec_text(self._spec))
 
     @classmethod
     def _own(cls, handle):
-        # wrap a compiled schema this wrapper now owns (a rant_schema_copy of a mesh view)
+        # wrap a schema the node holds, such as a mesh view registered through it
         s = cls.__new__(cls)
         s._spec = None
         s._vroot = None
@@ -733,7 +730,7 @@ class Schema:
     @property
     def dsl(self):
         """The schema's DSL text, reconstructed from the compiled form. Paste this
-        into a C/C++ node's rant_schema_compile for interop, or just print it."""
+        into a C/C++ node's rant_node_schema for interop, or just print it."""
         return _schema_dsl(_c.load(), self._s)
 
     @property
@@ -784,21 +781,13 @@ class Schema:
         schema), or a typed instance if this schema was built from a class."""
         return _from_decoded(self._spec, _decode(_c.load(), self._s, bytes(data)))
 
-    def __del__(self):
-        try:
-            if self._s:
-                _c.load().rant_schema_free(self._s, _c.schema_alloc(), None)
-                self._s = None
-        except Exception:
-            pass
 
-
-def _as_schema(schema_arg):
+def _as_schema(node, schema_arg):
     if schema_arg is None:
         return None
     if isinstance(schema_arg, Schema):
         return schema_arg
-    return Schema(schema_arg)      # DSL text, a schema class, or a bare type
+    return Schema(node, schema_arg)      # DSL text, a schema class, or a bare type
 
 
 def dsl(x):
@@ -1532,7 +1521,7 @@ class Entity:
     generation: int
 
     @classmethod
-    def _from_c(cls, e):
+    def _from_c(cls, node, e):
         return cls(kind=EntityKind(e.kind) if e.kind in EntityKind._value2member_map_ else e.kind,
                    name=_dstr(e.name) if e.name.data else "0x%08x" % e.hash, hash=e.hash,
                    provides=e.provides != 0, consumes=e.consumes != 0, reliable=e.reliable != 0,
@@ -1541,17 +1530,18 @@ class Entity:
                    multi=e.multi != 0, incomplete=e.incomplete != 0, conflict=e.conflict != 0,
                    providers=e.providers, consumers=e.consumers, provider=e.provider,
                    from_=_dstr(e.from_),
-                   schema=_own_schema(e.schema), schema_hash=e.schema_hash,
-                   rsp_schema=_own_schema(e.rsp_schema), rsp_schema_hash=e.rsp_schema_hash,
-                   progress_schema=_own_schema(e.progress_schema),
+                   schema=_own_schema(node, e.schema), schema_hash=e.schema_hash,
+                   rsp_schema=_own_schema(node, e.rsp_schema), rsp_schema_hash=e.rsp_schema_hash,
+                   progress_schema=_own_schema(node, e.progress_schema),
                    progress_schema_hash=e.progress_schema_hash, generation=e.generation)
 
 
-def _own_schema(view):
-    # the node's view is good only until the next poll, so every schema is copied out
+def _own_schema(node, view):
+    # the node's view is good only until the next poll, so it is registered in the node
     if not view:
         return None
-    h = _c.load().rant_schema_copy(view, _c.schema_alloc(), None)
+    w = node._lib.rant_schema_wire(view)
+    h = node._lib.rant_node_schema_parse(node._h, w.data, w.len)
     return Schema._own(h) if h else None
 
 
@@ -1604,7 +1594,7 @@ class _Topic:
     __slots__ = ("_node", "_h", "_schema", "_name", "_bit", "_open")
 
     def __init__(self, node, name, schema, bit, opts):
-        sch = _as_schema(schema)
+        sch = _as_schema(node, schema)
         self._node = node
         self._name = name
         self._schema = sch
@@ -1674,7 +1664,7 @@ class Node:
 
     # No attribute may point back at the node, so dropping the last reference closes it at once
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_evt", "_on_log", "_log_bound",
-                 "_topic_specs", "_schemas", "_topics_by_name", "_create_lock",
+                 "_topic_specs", "_topics_by_name", "_create_lock",
                  "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock", "_name",
                  "_threading", "__weakref__")
 
@@ -1701,7 +1691,6 @@ class Node:
         self._on_log = None
         self._log_bound = False
         self._topic_specs = {}
-        self._schemas = []       # compiled schemas kept alive for the node's life
         self._topics_by_name = {}   # name to _TopicRec
         self._create_lock = _threading.Lock()
         self._sub_handlers = {}     # topic index to [Message handlers]
@@ -1857,7 +1846,6 @@ class Node:
                 if sch is not None:
                     if self._topic_specs.get(rec.index) is None:
                         self._topic_specs[rec.index] = sch._spec
-                    self._schemas.append(sch)
                     if not rec.schema_hash:
                         rec.schema_hash = sh
             else:
@@ -1869,8 +1857,6 @@ class Node:
                     raise Error("topic %r create failed: %s" % (name, err), err)
                 rec = _TopicRec(h, self._lib.rant_topic_index(h), sh)
                 self._topic_specs[rec.index] = sch._spec if sch else None
-                if sch is not None:
-                    self._schemas.append(sch)
                 self._topics_by_name[name] = rec
             rec.hold(bit)
             return rec.handle
@@ -1977,12 +1963,14 @@ class Node:
                 or an ERROR event whose error is NONE, printing "no error", before any."""
         return Event._from_c(self._lib.rant_last_error(self._h))
 
-    # ---- pattern layer bookkeeping (reaped at close) ----
-    def _retain(self, *schemas):
-        for s in schemas:
-            if s is not None:
-                self._schemas.append(s)
+    def schema(self, source):
+        """A compiled schema from DSL text, a schema class or a bare type, compiled in this
+                node's registry. Every definition stays in scope for the node's later compiles,
+                and a name on its own is a schema. The node owns it for its life, one handle
+                per shape."""
+        return Schema(self, source)
 
+    # ---- pattern layer bookkeeping (reaped at close) ----
     def _register_box(self, box_id):
         with self._pat_lock:
             self._pattern_boxes.append(box_id)
@@ -2085,7 +2073,7 @@ class Reflection:
                 known view is served as a ghost. Schemas need fetch_details on the node."""
         def step(node, it):
             e = _c.RantEntityInfo()
-            return Entity._from_c(e) if node._lib.rant_node_entities_next(
+            return Entity._from_c(node, e) if node._lib.rant_node_entities_next(
                 node._h, int(peer), _c.byref(it), _c.byref(e)) else None
         return self._walk(step)
 
@@ -2094,7 +2082,7 @@ class Reflection:
                 this node. Schemas need fetch_details on the node."""
         def step(node, it):
             e = _c.RantEntityInfo()
-            return Entity._from_c(e) if node._lib.rant_node_mesh_next(node._h, _c.byref(it),
+            return Entity._from_c(node, e) if node._lib.rant_node_mesh_next(node._h, _c.byref(it),
                                                                       _c.byref(e)) else None
         return self._walk(step)
 
@@ -2109,7 +2097,7 @@ class Reflection:
             if not node._lib.rant_node_mesh_find(node._h, int(kind), name.encode("utf-8"),
                                                  _c.byref(e)):
                 return None
-            return Entity._from_c(e)
+            return Entity._from_c(node, e)
         finally:
             node._lib.rant_node_unlock(node._h)
 
@@ -2608,8 +2596,8 @@ class FunctionDefinition(_Function):
     def __init__(self, node, name, handler, req_schema=None, rsp_schema=None, **opts):
         self._node = node
         self._name = name
-        self._req_schema = _as_schema(req_schema)
-        self._rsp_schema = _as_schema(rsp_schema)
+        self._req_schema = _as_schema(node, req_schema)
+        self._rsp_schema = _as_schema(node, rsp_schema)
         co = _function_opts(**opts)
         box_id = 0
         box = None
@@ -2630,7 +2618,6 @@ class FunctionDefinition(_Function):
         if box:
             box.fn = h
             node._register_box(box_id)
-        node._retain(self._req_schema, self._rsp_schema)
 
     __class_getitem__ = classmethod(_generic)
 
@@ -2642,8 +2629,8 @@ class RemoteFunction(_Function):
     def __init__(self, node, name, req_schema=None, rsp_schema=None, **opts):
         self._node = node
         self._name = name
-        self._req_schema = _as_schema(req_schema)
-        self._rsp_schema = _as_schema(rsp_schema)
+        self._req_schema = _as_schema(node, req_schema)
+        self._rsp_schema = _as_schema(node, rsp_schema)
         co = _function_opts(**opts)
         h = node._lib.rant_node_create_remote_function(
             node._h, name.encode("utf-8"),
@@ -2653,7 +2640,6 @@ class RemoteFunction(_Function):
             err = node.last_error
             raise Error("remote_function(%r) failed: %s" % (name, err), err)
         self._fn = h
-        node._retain(self._req_schema, self._rsp_schema)
 
     __class_getitem__ = classmethod(_generic)
 
@@ -2727,9 +2713,9 @@ class TaskDefinition(_Function):
                  rsp_schema=None, **opts):
         self._node = node
         self._name = name
-        self._req_schema = _as_schema(req_schema)
-        self._prg_schema = _as_schema(prg_schema)
-        self._rsp_schema = _as_schema(rsp_schema)
+        self._req_schema = _as_schema(node, req_schema)
+        self._prg_schema = _as_schema(node, prg_schema)
+        self._rsp_schema = _as_schema(node, rsp_schema)
         co = _task_opts(**opts)
         box_id = 0
         box = None
@@ -2754,7 +2740,6 @@ class TaskDefinition(_Function):
             node._register_box(box_id)
             # the one C cancel slot: fans out to the per call cancel Events
             node._lib.rant_function_on_cancel(h, _on_task_cancel, _c.c_void_p(box_id))
-        node._retain(self._req_schema, self._prg_schema, self._rsp_schema)
 
     __class_getitem__ = classmethod(_generic)
 
@@ -2770,9 +2755,9 @@ class RemoteTask(_Function):
                  backpressure_wait=0.0, keep_last=0, reflect_from_mesh=False):
         self._node = node
         self._name = name
-        self._req_schema = _as_schema(req_schema)
-        self._prg_schema = _as_schema(prg_schema)
-        self._rsp_schema = _as_schema(rsp_schema)
+        self._req_schema = _as_schema(node, req_schema)
+        self._prg_schema = _as_schema(node, prg_schema)
+        self._rsp_schema = _as_schema(node, rsp_schema)
         co = _task_opts(progress_best_effort=progress_best_effort,
                         progress_keep_last=progress_keep_last, timeout=timeout,
                         backpressure_wait=backpressure_wait, keep_last=keep_last,
@@ -2786,7 +2771,6 @@ class RemoteTask(_Function):
             err = node.last_error
             raise Error("remote_task(%r) failed: %s" % (name, err), err)
         self._fn = h
-        node._retain(self._req_schema, self._prg_schema, self._rsp_schema)
 
     __class_getitem__ = classmethod(_generic)
 
@@ -2864,7 +2848,7 @@ class Variable:
     def _create(self, node, name, schema, co, remote):
         self._node = node
         self._name = name
-        sch = self._schema = _as_schema(schema)
+        sch = self._schema = _as_schema(node, schema)
         create = (node._lib.rant_node_create_remote_variable if remote
                   else node._lib.rant_node_create_variable_definition)
         h = create(node._h, name.encode("utf-8"), sch._s if sch else None, _c.byref(co))
@@ -2873,7 +2857,6 @@ class Variable:
             raise Error("%s(%r) failed: %s" % ("remote_variable" if remote
                                                else "variable_definition", name, err), err)
         self._var = h
-        node._retain(sch)
 
     @property
     def name(self):
@@ -3006,7 +2989,7 @@ class VariableDefinition(Variable):
         co.keep_last = keep_last
         co.backpressure_wait_us = _us(backpressure_wait)
         co.reflect_from_mesh = 1 if reflect_from_mesh else 0
-        sch = _as_schema(schema)
+        sch = _as_schema(node, schema)
         b, buf = _c_view(_payload_bytes(sch, initial) if initial is not None else b"")
         co.initial = b
         self._create(node, name, sch, co, False)

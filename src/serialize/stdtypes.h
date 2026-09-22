@@ -34,19 +34,8 @@ typedef enum {
  * knows. NULL for RANT_STD_NONE or an out of range value. */
 RANT_API const char *rant_std_name(RantStdType t);
 RANT_API const char *rant_std_text(RantStdType t);
-/* A name lookup only. Use rant_std_recognize when a peer's shape must be verified too. */
+/* A name lookup only. rant_std_recognize (node/runtime.h) verifies a peer's shape too. */
 RANT_API RantStdType rant_std_by_name(RantString name);
-
-/* One standard type compiled as a schema of its own, for a topic whose payload is one. */
-RANT_API RantSchema *rant_std_schema(RantStdType t, RantAllocFn alloc, void *user);
-
-/* Recognizes a standard type in a schema we did not write: the name and the shape must
- * both match. The result is stable per schema, so cache it. */
-RANT_API RantStdType rant_std_recognize(const RantSchema *s, RantAllocFn alloc, void *user);
-RANT_API RantStdType rant_std_recognize_field(const RantSchema *s, uint16_t field,
-                                              RantAllocFn alloc, void *user);
-RANT_API RantStdType rant_std_recognize_elem(const RantSchema *s, uint16_t field,
-                                             RantAllocFn alloc, void *user);
 
 /* The C mirrors, layout identical to the wire on a little endian target. */
 typedef struct { float  x, y;       } RantFloat2;

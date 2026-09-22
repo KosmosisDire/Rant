@@ -372,7 +372,7 @@ static size_t i_rant_schema_compiled_size(const void *wire, size_t wire_len){
     return wire_len + 7u + sizeof(RantSchema) + (size_t)(total ? total - 1u : 0u) * sizeof(i_Field);
 }
 
-RantSchema *rant_schema_parse(const void *wire, size_t wire_len, RantAllocFn alloc, void *user){
+RantSchema *i_rant_schema_parse(const void *wire, size_t wire_len, RantAllocFn alloc, void *user){
     size_t need, i; uint8_t *buf; RantSchema *s;
     if (!wire || !alloc || wire_len == 0) return NULL;
     need = i_rant_schema_compiled_size(wire, wire_len);
@@ -385,14 +385,7 @@ RantSchema *rant_schema_parse(const void *wire, size_t wire_len, RantAllocFn all
     return s;
 }
 
-RantSchema *rant_schema_copy(const RantSchema *s, RantAllocFn alloc, void *user){
-    RantBytes w;
-    if (!s || !alloc) return NULL;
-    w = rant_schema_wire(s);
-    return rant_schema_parse(w.data, w.len, alloc, user);
-}
-
-void rant_schema_free(RantSchema *s, RantAllocFn alloc, void *user){
+void i_rant_schema_free(RantSchema *s, RantAllocFn alloc, void *user){
     if (s && alloc) alloc(user, (void *)s->wire.data, 0);    /* wire.data is the block base */
 }
 

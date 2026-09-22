@@ -17,7 +17,7 @@ extern "C" {
 #define RANT_SCHEMA_WIRE_VERSION 8u      /* bumped on any schema wire change */
 #endif
 #ifndef RANT_SCHEMA_MAX_DEPTH
-#define RANT_SCHEMA_MAX_DEPTH 8u          /* struct nesting the builder accepts */
+#define RANT_SCHEMA_MAX_DEPTH 8u          /* struct nesting the parser accepts */
 #endif
 
 /* The kind byte on the wire. Fixed kinds pack first at static offsets, the variable kinds
@@ -39,8 +39,8 @@ typedef enum {
 /* Bytes of a fixed scalar kind, 0 otherwise. */
 RANT_API uint32_t rant_schema_scalar_size(RantSchemaTypeKind kind);
 
-/* The compiled schema: wire bytes, hash, size and a flat field table in one block from
- * the hook. Free it with rant_schema_free. */
+/* The compiled schema: wire bytes, hash, size and a flat field table in one block. A node
+ * makes them from text or wire, owns them and frees them at close: rant_node_schema. */
 typedef struct RantSchema RantSchema;
 
 /* One field of the flat depth first table. A struct array flattens its element once as
@@ -59,23 +59,6 @@ typedef struct {
     uint32_t     size;      /* byte size, 0 for variable kinds */
     uint32_t     elem_size; /* ARR and VARR: bytes of one element, else 0 */
 } RantSchemaFieldInfo;
-
-/* Compiles DSL text, pasted verbatim on the writer and every reader. The DSL is in
- * docs/stdtypes.md and spec/schema.md. NULL on error, with *err at the offending character. */
-RANT_API RantSchema *rant_schema_compile(RantAllocFn alloc, void *user, const char *text, const char **err);
-/* compile with an environment: each env schema is referenceable by its root name. An
- * anonymous env root is ignored. */
-RANT_API RantSchema *rant_schema_compile_env(RantAllocFn alloc, void *user, const char *text,
-                                             const RantSchema *const *env, size_t n_env,
-                                             const char **err);
-
-/* Compiles received wire, bounds checked. NULL on an overrun or a version mismatch. The
- * bytes are copied in. */
-RANT_API RantSchema *rant_schema_parse(const void *wire, size_t wire_len, RantAllocFn alloc, void *user);
-/* The same hook the schema was made with. */
-RANT_API void          rant_schema_free(RantSchema *s, RantAllocFn alloc, void *user);
-/* An owned copy of any schema, safe to keep and to hand to create. */
-RANT_API RantSchema *rant_schema_copy(const RantSchema *s, RantAllocFn alloc, void *user);
 
 RANT_API RantBytes       rant_schema_wire(const RantSchema *s);            /* the canonical bytes to advertise */
 RANT_API uint64_t        rant_schema_hash(const RantSchema *s);            /* FNV-1a over the wire */
@@ -117,10 +100,6 @@ RANT_API int rant_schema_subset(const RantSchema *sub, const RantSchema *pub);
 /* The same, with the first incompatibility written to buf as one line on refusal. */
 RANT_API int rant_schema_subset_why(const RantSchema *sub, const RantSchema *pub,
                                     char *buf, size_t cap);
-/* The reader's fields with the writer's offsets and size. Requires subset, NULL
- * otherwise or on OOM. Free with rant_schema_free. */
-RANT_API RantSchema *rant_schema_rebase(const RantSchema *sub, const RantSchema *pub,
-                                        RantAllocFn alloc, void *user);
 
 /* Getters by name, nested members by dotted path and array members by indexed path,
  * widened. A mismatch or unknown field yields 0. */
