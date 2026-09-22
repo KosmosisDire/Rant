@@ -538,6 +538,12 @@ def bind(lib):
     F("rant_get_array", [RantBytes, c_void_p, c_char_p], RantBytes)
     F("rant_get_value", [RantBytes, c_void_p, c_uint16, POINTER(RantValue)], c_int)
     F("rant_set_value", [c_void_p, c_size_t, c_void_p, c_uint16, POINTER(RantValue)], c_int)
+    F("rant_get_value_at", [RantBytes, c_void_p, c_uint16, c_uint32, POINTER(RantValue)], c_int)
+    F("rant_set_value_at", [c_void_p, c_size_t, c_void_p, c_uint16, c_uint32,
+                            POINTER(RantValue)], c_int)
+    F("rant_array_count_at", [RantBytes, c_void_p, c_uint16], c_uint32)
+    F("rant_set_array_count", [c_void_p, c_size_t, c_void_p, c_char_p, c_uint32], c_int)
+    F("rant_enum_value_of", [c_void_p, c_uint16, c_char_p, POINTER(c_int64)], c_int)
     F("rant_schema_msg_min", [c_void_p], c_uint32)
     F("rant_schema_msg_len", [c_void_p, c_void_p, c_size_t], c_uint32)
     F("rant_set_map", [c_void_p, c_size_t, c_void_p, c_char_p, RantBytes], c_int)

@@ -138,6 +138,7 @@ _F32, _F64, _BOOL, _ARR, _STRUCT, _STR = 8, 9, 10, 11, 12, 13
 _VSTR, _VARR, _MAP = 14, 15, 16    # the variable kinds (ride the message tail)
 _ENUM = 17                          # named integer (wire = its backing scalar)
 _NAMED = 18                         # a name on another type (unwrapped by the reflection API)
+_NO_PARENT = 0xFFFF                 # Field.arr_parent when the field is not in a struct array
 _SIGNED = frozenset((_I8, _I16, _I32, _I64))
 _FLOATK = frozenset((_F32, _F64))
 _FMT = {_U8: "B", _U16: "H", _U32: "I", _U64: "Q", _I8: "b", _I16: "h",
@@ -389,11 +390,12 @@ def _std(name):
 
 class _FieldSpec:
     __slots__ = ("name", "kind", "elem", "count", "str_cap", "token", "nested", "enum_cls",
-                 "type_name")
+                 "type_name", "elem_name")
 
     def __init__(self, name, kind, elem=0, count=0, str_cap=0, token=None, nested=None,
-                 enum_cls=None, type_name=None):
+                 enum_cls=None, type_name=None, elem_name=None):
         self.type_name = type_name   # a standard type's NAME: the whole spelling
+        self.elem_name = elem_name   # a struct element's standard NAME, else anonymous
         self.name = name
         self.kind = kind
         self.elem = elem
@@ -463,7 +465,8 @@ def _resolve(ann, g):
 
 def _var_array_spec(name, elem):
     """A VARR field spec from a list[...] element annotation (rant.<t>, rant.string(N),
-    or int/float/bool). elem is the message tail's live element count, so no count here."""
+    int/float/bool, or a schema class for an array of structs). elem is the message tail's
+    live element count, so no count here."""
     if isinstance(elem, _String):
         return _FieldSpec(name, _VARR, elem=_STR, str_cap=elem.cap)
     if isinstance(elem, _Type):
@@ -474,8 +477,13 @@ def _var_array_spec(name, elem):
         return _FieldSpec(name, _VARR, elem=_F64, token="f64")
     if elem is bool:
         return _FieldSpec(name, _VARR, elem=_BOOL, token="bool")
+    if (isinstance(elem, type) and not issubclass(elem, _pyenum.Enum)
+            and getattr(elem, "__annotations__", None)):
+        return _FieldSpec(name, _VARR, elem=_STRUCT, nested=_spec_of(elem),
+                          elem_name=getattr(elem, "__rant_std__", None))
     raise SchemaError("rant schema: variable array %r element must be rant.<t>, "
-                      "rant.string(N), or int/float/bool (got %r)" % (name, elem))
+                      "rant.string(N), int/float/bool, or a schema class (got %r)"
+                      % (name, elem))
 
 
 def _field_spec(name, ann, g):
@@ -554,9 +562,9 @@ def _spec_text(spec):
         if f.kind == _STRUCT:
             return "{ %s }" % ", ".join(line(g) for g in f.nested.fields)
         if f.kind == _ARR:
-            return "%s[%d]" % (_elem_token(f.elem, f.str_cap), f.count)
+            return "%s[%d]" % (elem_text(f), f.count)
         if f.kind == _VARR:
-            return "%s[]" % _elem_token(f.elem, f.str_cap)
+            return "%s[]" % elem_text(f)
         if f.kind == _STR:
             return "string<%d>" % f.str_cap
         if f.kind == _VSTR:
@@ -567,6 +575,10 @@ def _spec_text(spec):
             opts = ", ".join("%s=%d" % (m.name, int(m.value)) for m in f.enum_cls)
             return "enum<%s> { %s }" % (_TOKEN[f.elem], opts)
         return f.token
+    def elem_text(f):
+        if f.elem != _STRUCT:
+            return _elem_token(f.elem, f.str_cap)
+        return f.elem_name or "{ %s }" % ", ".join(line(g) for g in f.nested.fields)
     def line(f):
         return "%s: %s" % (f.name, type_text(f))
     if spec.name is None:                     # a bare type: the whole schema is its spelling
@@ -574,14 +586,44 @@ def _spec_text(spec):
     return spec.name + "\n{\n" + ",\n".join("    " + line(f) for f in spec.fields) + "\n}\n"
 
 
-def _is_value_root(lib, s):
+def _fields_of(lib, s):
+    """The flat depth first table read once, so a walker can look ahead at a struct array's
+    element template."""
+    out = []
+    for i in range(lib.rant_schema_field_count(s)):
+        info = _c.RantSchemaFieldInfo()
+        lib.rant_schema_field_at(s, i, _c.byref(info))
+        out.append(info)
+    return out
+
+
+def _is_struct_array(info):
+    """A fixed or variable array of structs. Its members are the element 0 template."""
+    return info.elem == _STRUCT and info.kind in (_ARR, _VARR)
+
+
+def _member_run(infos, i):
+    """One past the last member of the struct array at flat index i: the table flattens its
+    element once, as the contiguous run of fields naming it as arr_parent."""
+    j = i + 1
+    while j < len(infos) and infos[j].arr_parent == i:
+        j += 1
+    return j
+
+
+def _is_value_root(lib, s, infos=None):
     """True when the schema is a BARE TYPE: an unnamed root of one anonymous field, so its
-    message is a single value (encode/decode take and give that value, not a dict)."""
-    if lib.rant_schema_field_count(s) != 1 or lib.rant_schema_name(s).len != 0:
+    message is a single value (encode/decode take and give that value, not a dict). A struct
+    array root carries its element template, so the run under it does not count."""
+    if lib.rant_schema_name(s).len != 0:
         return False
-    info = _c.RantSchemaFieldInfo()
-    return (bool(lib.rant_schema_field_at(s, 0, _c.byref(info)))
-            and info.depth == 0 and info.name.len == 0 and info.kind != _STRUCT)
+    if infos is None:
+        infos = _fields_of(lib, s)
+    if not infos:
+        return False
+    root = infos[0]
+    return (root.depth == 0 and root.name.len == 0 and root.kind != _STRUCT
+            and _member_run(infos, 0) == len(infos))
 
 
 def _schema_dsl(lib, s):
@@ -815,6 +857,73 @@ def _pack_string_slots(strings, cap):
     return bytes(out)
 
 
+def _enum_number(lib, s, field, val, where):
+    """An enum field's wire number from an option name, an enum member or a plain int."""
+    if not isinstance(val, str):
+        return int(val.value if isinstance(val, _pyenum.Enum) else val)
+    n = _c.c_int64()
+    if not lib.rant_enum_value_of(s, field, val.encode("utf-8"), _c.byref(n)):
+        raise SchemaError("unknown enum option %r for %s" % (val, where))
+    return n.value
+
+
+def _py_value(lib, s, field, info, val, keep, where):
+    """A RantValue carrying val for the field at flat index field, the inverse of
+    _value_to_py. An array element is fixed all the way down, so no variable kind here."""
+    out = _c.RantValue(info.kind, info.elem, info.count, info.str_cap)
+    kind = info.kind
+    if kind == _STR:
+        out.bytes = _bytes_view(val.encode("utf-8") if isinstance(val, str) else bytes(val), keep)
+    elif kind == _ARR:
+        out.bytes = _bytes_view(_pack_string_slots(val, info.str_cap) if info.elem == _STR
+                                else _pack_array(info.elem, val), keep)
+    elif kind in _FLOATK:
+        out.v.f = float(val)
+    elif kind == _ENUM:
+        out.v.i = _enum_number(lib, s, field, val, where)
+    elif kind in _SIGNED:
+        out.v.i = int(val)
+    elif kind == _BOOL:
+        out.v.u = 1 if val else 0
+    elif kind in _FMT:
+        out.v.u = int(val)
+    else:
+        raise SchemaError("%s: an array element cannot hold a %s"
+                          % (where, Schema.FieldType(kind).name))
+    return out
+
+
+def _write_elems(lib, s, buf, size, infos, i, path, items, keep):
+    """Every member of every element of the struct array at flat index i, through the
+    element indexed setter. A variable array's frame is sized first."""
+    info = infos[i]
+    end, base = _member_run(infos, i), info.depth
+    where = path.decode("utf-8")
+    count = len(items) if info.kind == _VARR else min(len(items), info.count)
+    if info.kind == _VARR and not lib.rant_set_array_count(buf, size, s, path, count):
+        raise SchemaError("cannot size %s to %d elements" % (where, count))
+    for e in range(count):
+        srcs, names = {base + 1: items[e]}, []
+        for j in range(i + 1, end):
+            m = infos[j]
+            name = _dstr(m.name)
+            d = m.depth - base - 1
+            while len(names) <= d:
+                names.append(None)
+            names[d] = name
+            parent = srcs.get(m.depth)
+            val = None if parent is None else _get(parent, name)
+            if m.kind == _STRUCT:
+                srcs[m.depth + 1] = val   # None keeps the whole subtree at its zeroed default
+                continue
+            if val is None:
+                continue                  # null member: keep the zeroed default
+            spot = "%s[%d].%s" % (where, e, ".".join(names[:d + 1]))
+            mv = _py_value(lib, s, j, m, val, keep, spot)
+            if not lib.rant_set_value_at(buf, size, s, j, e, _c.byref(mv)):
+                raise SchemaError("value does not fit %s" % spot)
+
+
 # The map body, the self describing tagged value tree of a map field, built and parsed
 # here rather than mirroring the C writer. spec/schema.md has the wire, the C validates.
 
@@ -867,13 +976,14 @@ def _encode_map_body(d):
 def _encode(lib, s, src):
     # One walk of the flattened field table: resolve each value, and pre-serialize the
     # variable-field payloads so the tail can be sized before the buffer is allocated.
-    if _is_value_root(lib, s):
+    infos = _fields_of(lib, s)
+    if _is_value_root(lib, s, infos):
         src = {"": src}              # a bare type: the value IS the one anonymous field
     names, srcs, ops = [], [src], []
     var_bytes = 0
-    for i in range(lib.rant_schema_field_count(s)):
-        info = _c.RantSchemaFieldInfo()
-        lib.rant_schema_field_at(s, i, _c.byref(info))
+    for i, info in enumerate(infos):
+        if info.arr_parent != _NO_PARENT:
+            continue                     # an element template member: its array writes it
         name = _dstr(info.name)
         d = info.depth
         while len(names) <= d:
@@ -889,21 +999,28 @@ def _encode(lib, s, src):
         if val is None:
             continue                     # null field: keep the zeroed default
         path = ".".join(names[:d + 1]).encode("utf-8")
-        kind, elem, count, cap = info.kind, info.elem, info.count, info.str_cap
-        if kind == _VSTR:
+        kind, elem, cap = info.kind, info.elem, info.str_cap
+        if _is_struct_array(info):
+            if not isinstance(val, (list, tuple)):
+                raise SchemaError("%s is an array of structs and expects a list, got %s"
+                                  % (path.decode("utf-8"), type(val).__name__))
+            if kind == _VARR:
+                var_bytes += len(val) * info.elem_size
+            ops.append((i, path, val))
+        elif kind == _VSTR:
             payload = val.encode("utf-8") if isinstance(val, str) else bytes(val)
             var_bytes += len(payload)
-            ops.append((kind, elem, count, cap, path, payload))
+            ops.append((i, path, payload))
         elif kind == _VARR:
             payload = _pack_string_slots(val, cap) if elem == _STR else _pack_array(elem, val)
             var_bytes += len(payload)
-            ops.append((kind, elem, count, cap, path, payload))
+            ops.append((i, path, payload))
         elif kind == _MAP:
             payload = _encode_map_body(val)
             var_bytes += len(payload)
-            ops.append((kind, elem, count, cap, path, payload))
+            ops.append((i, path, payload))
         else:
-            ops.append((kind, elem, count, cap, path, val))
+            ops.append((i, path, val))
 
     # msg_min is the fixed section plus one empty frame per variable field, and each
     # variable frame then grows by exactly its payload length
@@ -911,8 +1028,12 @@ def _encode(lib, s, src):
     buf = (_c.c_ubyte * (size or 1))()
     lib.rant_schema_message_default(s, buf, size)
     keep = []
-    for kind, elem, count, cap, path, val in ops:
-        if kind == _STR:
+    for i, path, val in ops:
+        info = infos[i]
+        kind, elem, count, cap = info.kind, info.elem, info.count, info.str_cap
+        if _is_struct_array(info):
+            _write_elems(lib, s, buf, size, infos, i, path, val, keep)
+        elif kind == _STR:
             if not lib.rant_set_string(buf, size, s, path, _str_view(val, keep)):
                 raise SchemaError("string too long for %s (cap %d)" % (path.decode("utf-8"), cap))
         elif kind == _VSTR:
@@ -1058,21 +1179,53 @@ def _value_to_py(val):
     return val.v.u
 
 
+def _decode_elem(lib, s, mb, infos, i, end, elem):
+    """One element of the struct array at flat index i, read through the element indexed
+    getter."""
+    top = {}
+    dests = {infos[i].depth + 1: top}
+    for j in range(i + 1, end):
+        m = infos[j]
+        name = _dstr(m.name)
+        parent = dests[m.depth]
+        if m.kind == _STRUCT:
+            child = {}
+            parent[name] = child
+            dests[m.depth + 1] = child
+        else:
+            val = _c.RantValue()
+            lib.rant_get_value_at(mb, s, j, elem, _c.byref(val))
+            parent[name] = _value_to_py(val)
+    return top
+
+
+def _decode_array(lib, s, mb, infos, i):
+    """A struct array as a list of dicts, one per live element."""
+    end = _member_run(infos, i)
+    return [_decode_elem(lib, s, mb, infos, i, end, e)
+            for e in range(lib.rant_array_count_at(mb, s, i))]
+
+
 def _decode(lib, s, msg):
     mb = _c.RantBytes(_c.cast(_c.c_char_p(msg), _c.c_void_p) if msg else None, len(msg))
-    if _is_value_root(lib, s):       # a bare type: hand back the value, not a one-key dict
+    infos = _fields_of(lib, s)
+    if _is_value_root(lib, s, infos):  # a bare type: hand back the value, not a one-key dict
+        if _is_struct_array(infos[0]):
+            return _decode_array(lib, s, mb, infos, 0)
         val = _c.RantValue()
         lib.rant_get_value(mb, s, 0, _c.byref(val))
         return _value_to_py(val)
     root = {}
     dests = [root]
-    for i in range(lib.rant_schema_field_count(s)):
-        info = _c.RantSchemaFieldInfo()
-        lib.rant_schema_field_at(s, i, _c.byref(info))
+    for i, info in enumerate(infos):
+        if info.arr_parent != _NO_PARENT:
+            continue                 # an element template member: its array reads it
         name = _dstr(info.name)
         d = info.depth
         parent = dests[d]
-        if info.kind == _STRUCT:
+        if _is_struct_array(info):
+            parent[name] = _decode_array(lib, s, mb, infos, i)
+        elif info.kind == _STRUCT:
             child = {}
             parent[name] = child
             while len(dests) <= d + 1:
@@ -1095,35 +1248,34 @@ def _instantiate(cls, kwargs):
         return obj
 
 
+def _typed(f, v):
+    """v with the spec field f's typing applied: a nested instance, a list of them for an
+        array of structs, or an enum member."""
+    if v is None:
+        return v
+    if f.nested is not None:
+        return (_to_obj(f.nested, v) if f.kind == _STRUCT
+                else [_to_obj(f.nested, x) for x in v])
+    if f.kind == _ENUM and f.enum_cls is not None:
+        try:
+            return f.enum_cls(v)                # map the number to the enum member
+        except ValueError:
+            return v                            # an unknown/newer number stays raw
+    return v
+
+
 def _to_obj(spec, d):
-    kwargs = {}
-    for f in spec.fields:
-        v = d.get(f.name)
-        if f.kind == _STRUCT and v is not None:
-            kwargs[f.name] = _to_obj(f.nested, v)
-        elif f.kind == _ENUM and v is not None and f.enum_cls is not None:
-            try:
-                kwargs[f.name] = f.enum_cls(v)      # map the number to the enum member
-            except ValueError:
-                kwargs[f.name] = v                  # unknown/newer value: keep the raw int
-        else:
-            kwargs[f.name] = v
-    return _instantiate(spec.cls, kwargs)
+    return _instantiate(spec.cls, {f.name: _typed(f, d.get(f.name)) for f in spec.fields})
 
 
 def _from_decoded(spec, d):
     """Apply a spec's typing to what _decode produced: a class instance, the bare value (an
-        enum member where the spec names one), or the plain form with no spec."""
+        enum member or a list of instances where the spec names one), or the plain form with
+        no spec."""
     if spec is None:
         return d
     if spec.name is None:                       # a bare type: d IS the value
-        f = spec.fields[0]
-        if f.kind == _ENUM and f.enum_cls is not None and d is not None:
-            try:
-                return f.enum_cls(d)            # the number as its enum member
-            except ValueError:
-                return d                        # an unknown/newer number stays raw
-        return d
+        return _typed(spec.fields[0], d)
     return _to_obj(spec, d)
 
 

@@ -248,6 +248,123 @@ def video_types():
     return ok
 
 
+# A struct array: list[Code] declares it, the DSL spells it inline, and the flat table
+# carries the element once as a template the codec strides over.
+@dataclass
+class Code:
+    type:  Annotated[str, "string<16>"] = ""
+    angle: rant.f32 = 0.0
+    pt:    Velocity = field(default_factory=Velocity)     # a nested struct in the element
+
+
+@dataclass
+class Detections:
+    stamp: rant.u64 = 0
+    codes: list[Code] = field(default_factory=list)
+    note:  str = ""                                       # a tail frame after the array
+
+
+def struct_arrays():
+    """Arrays of structs: declared, encoded and decoded through the element indexed
+    accessors, with the element template read from the flat table."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    sch = rant.Schema(Detections)
+    print("Detections DSL:\n" + sch.dsl)
+    src = Detections(stamp=9, note="after the array",
+                     codes=[Code("C128", 1.0, Velocity(0.5, -0.5)),
+                            Code("QR", -2.5, Velocity(1.0, 2.0))])
+    out = sch.decode(sch.encode(src))
+    check("elements are instances", all(isinstance(c, Code) for c in out.codes))
+    check("element scalars", [c.type for c in out.codes] == ["C128", "QR"]
+          and abs(out.codes[1].angle + 2.5) < 1e-6)
+    check("nested struct in an element", abs(out.codes[0].pt.dx - 0.5) < 1e-6
+          and abs(out.codes[1].pt.dy - 2.0) < 1e-6)
+    check("the fields around it", out.stamp == 9 and out.note == "after the array")
+    check("empty array round-trips empty", sch.decode(sch.encode(Detections())).codes == [])
+
+    # the same wire from DSL text, and the whole of one element's kinds
+    text = rant.Schema("D { rows: { a: u8, b: i16, c: f64, d: bool, e: string<4>, "
+                       "f: f32[2], g: enum<u8> { OFF=0, ON=1 } }[], n: u8 }")
+    rows = [{"a": 1, "b": -2, "c": 0.5, "d": True, "e": "hi", "f": [1.0, 2.0], "g": 1},
+            {"a": 255, "b": -32768, "c": -1.5, "d": False, "e": "", "f": [0.0, 0.0], "g": 0}]
+    check("every fixed kind inside an element",
+          text.decode(text.encode({"rows": rows, "n": 3})) == {"rows": rows, "n": 3})
+    check("an enum element member takes its option name",
+          text.decode(text.encode({"rows": [dict(rows[0], g="OFF")]}))["rows"][0]["g"] == 0)
+
+    fixed = rant.Schema("D { pts: { x: f32, y: f32 }[3] }")
+    short = fixed.decode(fixed.encode({"pts": [{"x": 1.0, "y": 2.0}]}))
+    check("a fixed struct array zero fills to its count",
+          len(fixed.encode({"pts": []})) == 24 and len(short["pts"]) == 3
+          and short["pts"][2] == {"x": 0.0, "y": 0.0})
+
+    bare = rant.Schema(list[Code])
+    check("a struct array is a bare root too",
+          bare.decode(bare.encode([Code("A", 1.0)]))[0].type == "A")
+    check("list[Code] and the DSL text agree",
+          rant.Schema(Detections).hash
+          == rant.Schema(rant.dsl(Detections)).hash)
+    try:
+        sch.encode(Detections(codes=[Code("way-too-long-for-sixteen-bytes")]))
+        check("over-cap inside an element raises", False)
+    except rant.SchemaError:
+        check("over-cap inside an element raises", True)
+    try:
+        sch.encode({"codes": {"type": "C128"}})
+        check("a non-list for a struct array raises", False)
+    except rant.SchemaError:
+        check("a non-list for a struct array raises", True)
+    print("struct arrays: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
+def struct_arrays_live():
+    """A struct array over a real topic: the reader decodes the writer's layout."""
+    print("struct-array live leg: two nodes, domain 45, loopback")
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    seen = []
+    a = rant.Node("SA", on_event=lambda e: None, domain=45, multicast_interface=IFACE,
+                  threading=rant.Threading.MANUAL)
+    b = rant.Node("SB", on_event=lambda e: None, domain=45, multicast_interface=IFACE,
+                  threading=rant.Threading.MANUAL)
+    try:
+        pub = a.publisher("codes", Detections, reliable=True, keep_last=4)
+        b.subscriber("codes", Detections, lambda v: seen.append(v),
+                     reliable=True, keep_last=4)
+        sent = Detections(stamp=3, note="live",
+                          codes=[Code("C128", 1.0, Velocity(0.5, -0.5)),
+                                 Code("QR", -2.5, Velocity(1.0, 2.0)),
+                                 Code("", 0.0)])
+        deadline = time.time() + 8.0
+        while time.time() < deadline and not seen:
+            pub.send(sent)
+            a.poll(0.001)
+            b.poll(0.001)
+        check("delivered", bool(seen))
+        if seen:
+            r = seen[0]
+            check("three elements arrived whole",
+                  len(r.codes) == 3 and [c.type for c in r.codes] == ["C128", "QR", ""]
+                  and abs(r.codes[1].pt.dy - 2.0) < 1e-6 and r.note == "live")
+    finally:
+        a.close()
+        b.close()
+    print("struct-array live leg: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
 def value_roots():
     """Bare types as whole schemas: encode/decode plain values, and the canonical hash."""
     ok = True
@@ -821,6 +938,8 @@ def main():
         return 1
     if not std_types():
         return 1
+    if not struct_arrays():
+        return 1
     print("opening nodes...")
     sub = rant.Node("sub", on_event=on_event("sub"),
                     domain=DOMAIN, multicast_interface=IFACE, threading=rant.Threading.MANUAL)
@@ -876,6 +995,8 @@ def main():
         ok = handles()
     if ok:
         ok = value_roots_live()
+    if ok:
+        ok = struct_arrays_live()
     if ok:
         ok = video_types()
     if ok:

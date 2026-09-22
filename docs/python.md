@@ -70,6 +70,13 @@ unbounded string, `list[...]` for a variable array, `dict` for a map, and an `In
 wire type name. `rant.dsl(source)` gives the DSL text of a class, a bare type, a compiled
 `Schema` or DSL text, with no library load, for display or for pasting into a C node.
 
+`list[Cls]` is an array of structs. The element spells inline, so `codes: list[Code]` is
+`codes: { ... }[]`, and a standard type element spells by its name (`list[rant.types.Float3]`
+is `Float3[]`). An element is fixed all the way down, so a `str`, a `list` or a `dict` inside
+one is refused at compile, and so is an array of them. `encode` takes a list of instances
+or of dicts and `decode` gives one back, typed when the schema came from a class. DSL text
+also declares the fixed form, `{ x: f32, y: f32 }[3]`, which zero fills to its count.
+
 A bare type is a schema of its own: `node.publisher("estop", bool)` sends plain booleans,
 and so do the scalars, `rant.string(N)`, arrays, `list[rant.f32]`, `str`, `dict`, an enum
 class and the plain Python scalars. Such a root is anonymous, so the same one in any
