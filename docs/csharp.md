@@ -54,8 +54,14 @@ reads the node's counters: memory, backpressure and the evicted unsent sends.
 
 ## Schemas
 
-Any struct or class with public fields is a message type, the fields in declaration
-order. `[RantArray(n)]` fixes an array's element count and a plain array is a variable
+Any struct, class or record whose public fields and auto properties hold the message is a
+message type, the members in the order written. `{ get; set; }`, `{ get; init; }` and a
+positional record's parameters all count, a property with a body of its own is computed
+from the others and is not sent. A decoded message is built with no arguments and its
+setters, or through the constructor whose parameters name the members (a positional
+record), and a getter only member that neither fills is refused at `node.Schema`. An
+anonymous object encodes by name against any schema. On a record parameter an attribute
+is written `[property: RantField("w")] double Omega`. `[RantArray(n)]` fixes an array's element count and a plain array is a variable
 array. `[RantString(cap)]` caps a string and a plain string is unbounded. On a `string[]`,
 `[RantString]` alone gives a variable array of capped strings and with `[RantArray]` a
 fixed one. `[RantField("name")]` overrides a wire name, needed for lowercase interop

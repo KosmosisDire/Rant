@@ -934,7 +934,7 @@ namespace Rant
 
     /// <summary>A fixed length array field with this element count. Without it an array
     /// field is a variable array whose length rides the message tail.</summary>
-    [AttributeUsage(AttributeTargets.Field)]
+    [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantArrayAttribute : Attribute
     {
         public int Count;
@@ -943,7 +943,7 @@ namespace Rant
 
     /// <summary>A capped string field, the max UTF-8 byte length. Without it a string is
     /// unbounded. On a string[] it makes a variable array, with [RantArray] a fixed one.</summary>
-    [AttributeUsage(AttributeTargets.Field)]
+    [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantStringAttribute : Attribute
     {
         public int Cap;
@@ -953,7 +953,7 @@ namespace Rant
     /// <summary>Name a plain field's type with a standard type (docs/stdtypes.md), such as a
     /// long as Timestamp, so the name narrows matching. The shape must be the canonical one or
     /// compiling fails. A struct names itself with [RantSchema].</summary>
-    [AttributeUsage(AttributeTargets.Field)]
+    [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantTypeNameAttribute : Attribute
     {
         public string Name;
@@ -1068,7 +1068,7 @@ namespace Rant
     }
 
     /// <summary>Override a field's wire name (must match peers, like a topic name).</summary>
-    [AttributeUsage(AttributeTargets.Field)]
+    [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantFieldAttribute : Attribute
     {
         public string Name;
@@ -4000,10 +4000,53 @@ namespace Rant
             return Encoding.UTF8.GetString(buf, 0, n);
         }
 
+        // A wire member: a public field, or a public auto property through its backing field
+        // (<Name>k__BackingField, or <Name>i__Field on an anonymous type, the compiler's names).
+        // The storage's token orders fields and properties as written, since the field and the
+        // property metadata tables never interleave. A property without storage is computed
+        // from the others and carries nothing.
+        private sealed class Member
+        {
+            public MemberInfo Info;    // the FieldInfo or PropertyInfo the attributes are on
+            public FieldInfo Store;    // where the value lives
+            public bool Settable;      // a field, or a property with a set or init accessor
+            public string Name => Info.Name;
+            public Type Type => Store.FieldType;
+            public object Get(object o) => Info is FieldInfo f ? f.GetValue(o) : ((PropertyInfo)Info).GetValue(o);
+            public void Set(object o, object v)
+            {
+                if (Info is FieldInfo f) f.SetValue(o, v); else ((PropertyInfo)Info).SetValue(o, v);
+            }
+        }
+
+        private static List<Member> Members(Type t)
+        {
+            var list = new List<Member>();
+            foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.Instance))
+                list.Add(new Member { Info = f, Store = f, Settable = true });
+            foreach (var p in t.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (p.GetIndexParameters().Length != 0 || p.GetMethod == null) continue;
+                var store = p.DeclaringType.GetField("<" + p.Name + ">k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance)
+                         ?? p.DeclaringType.GetField("<" + p.Name + ">i__Field", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (store == null) continue;
+                list.Add(new Member { Info = p, Store = store, Settable = p.SetMethod != null });
+            }
+            // a base type's members first, then the written order within each type
+            list.Sort((a, b) =>
+            {
+                int da = Depth(a.Info.DeclaringType), db = Depth(b.Info.DeclaringType);
+                return da != db ? db.CompareTo(da) : a.Store.MetadataToken.CompareTo(b.Store.MetadataToken);
+            });
+            return list;
+        }
+
+        private static int Depth(Type t) { int d = 0; for (; t != null; t = t.BaseType) d++; return d; }
+
         // reflection: message type to field plan to DSL
         private sealed class FieldPlan
         {
-            public FieldInfo Field;
+            public Member Field;
             public string WireName;
             public byte Kind;
             public byte Elem;      // array element kind, or (enum) the backing scalar kind
@@ -4014,7 +4057,13 @@ namespace Rant
             public string TypeName; // a STANDARD type's name: the whole spelling
         }
         private static bool IsStructArray(byte kind, byte elem) => (kind == ARR || kind == VARR) && elem == STRUCT;
-        private sealed class TypeSpec { public string Name; public List<FieldPlan> Fields; }
+        // Ctor null: create with no arguments and set every member. Else the constructor whose
+        // parameters name the members, CtorArgs[i] the member parameter i takes, or -1.
+        private sealed class TypeSpec
+        {
+            public string Name; public List<FieldPlan> Fields;
+            public ConstructorInfo Ctor; public int[] CtorArgs;
+        }
         private static readonly Dictionary<Type, TypeSpec> s_specs = new Dictionary<Type, TypeSpec>();
 
         private static bool StructLike(Type t)
@@ -4097,19 +4146,17 @@ namespace Rant
                 var attr = (RantSchemaAttribute)Attribute.GetCustomAttribute(t, typeof(RantSchemaAttribute));
                 string name = attr != null && !string.IsNullOrEmpty(attr.Name) ? attr.Name
                             : IsNameless(t) ? "" : t.Name;   // "" = named by the handle
-                FieldInfo[] fields = t.GetFields(BindingFlags.Public | BindingFlags.Instance);
-                Array.Sort(fields, (a, b) => a.MetadataToken.CompareTo(b.MetadataToken));
                 var plans = new List<FieldPlan>();
-                foreach (var f in fields)
+                foreach (var f in Members(t))
                 {
-                    var fa = (RantFieldAttribute)Attribute.GetCustomAttribute(f, typeof(RantFieldAttribute));
-                    var arr = (RantArrayAttribute)Attribute.GetCustomAttribute(f, typeof(RantArrayAttribute));
-                    var str = (RantStringAttribute)Attribute.GetCustomAttribute(f, typeof(RantStringAttribute));
+                    var fa = (RantFieldAttribute)Attribute.GetCustomAttribute(f.Info, typeof(RantFieldAttribute));
+                    var arr = (RantArrayAttribute)Attribute.GetCustomAttribute(f.Info, typeof(RantArrayAttribute));
+                    var str = (RantStringAttribute)Attribute.GetCustomAttribute(f.Info, typeof(RantStringAttribute));
                     var plan = new FieldPlan { Field = f, WireName = fa != null ? fa.Name : f.Name };
                     byte k;
                     if (arr != null)   // [RantArray(N)]: a fixed array
                     {
-                        Type et = f.FieldType.GetElementType();
+                        Type et = f.Type.GetElementType();
                         if (et == typeof(string))
                         {
                             if (str == null)
@@ -4124,9 +4171,9 @@ namespace Rant
                         else throw new SchemaException("array field " + f.Name
                             + " element must be a scalar, a [RantString] string or a struct");
                     }
-                    else if (f.FieldType.IsArray)   // T[] without [RantArray]: a variable array
+                    else if (f.Type.IsArray)   // T[] without [RantArray]: a variable array
                     {
-                        Type et = f.FieldType.GetElementType();
+                        Type et = f.Type.GetElementType();
                         if (et == typeof(string))
                         {
                             if (str == null)
@@ -4141,34 +4188,70 @@ namespace Rant
                         else throw new SchemaException("variable array field " + f.Name
                             + " element must be a scalar, a [RantString] string or a struct");
                     }
-                    else if (f.FieldType == typeof(string))
+                    else if (f.Type == typeof(string))
                     {
                         if (str != null) { plan.Kind = STR; plan.StrCap = str.Cap; }   // capped
                         else plan.Kind = VSTR;   // variable, unbounded
                     }
-                    else if (IsMapType(f.FieldType)) { plan.Kind = MAP; }
-                    else if (f.FieldType.IsEnum)   // a named integer, backing from the enum
+                    else if (IsMapType(f.Type)) { plan.Kind = MAP; }
+                    else if (f.Type.IsEnum)   // a named integer, backing from the enum
                     {
-                        if (!ScalarKind.TryGetValue(Enum.GetUnderlyingType(f.FieldType), out k) || k > I64)
+                        if (!ScalarKind.TryGetValue(Enum.GetUnderlyingType(f.Type), out k) || k > I64)
                             throw new SchemaException("enum field " + f.Name + " must have an integer backing type");
-                        plan.Kind = ENUM; plan.Elem = k; plan.EnumType = f.FieldType;
+                        plan.Kind = ENUM; plan.Elem = k; plan.EnumType = f.Type;
                     }
-                    else if (ScalarKind.TryGetValue(f.FieldType, out k)) { plan.Kind = k; }
-                    else if (StructLike(f.FieldType)) { plan.Kind = STRUCT; plan.Nested = f.FieldType; }
-                    else throw new SchemaException("unsupported field type " + f.FieldType + " on " + f.Name
+                    else if (ScalarKind.TryGetValue(f.Type, out k)) { plan.Kind = k; }
+                    else if (StructLike(f.Type)) { plan.Kind = STRUCT; plan.Nested = f.Type; }
+                    else throw new SchemaException("unsupported field type " + f.Type + " on " + f.Name
                         + " (use scalars, strings ([RantString] = capped, plain = variable), arrays "
                         + "([RantArray] = fixed, plain = variable), a Dictionary<string,object> map, "
                         + "or nested structs)");
-                    var tn = (RantTypeNameAttribute)Attribute.GetCustomAttribute(f, typeof(RantTypeNameAttribute));
+                    var tn = (RantTypeNameAttribute)Attribute.GetCustomAttribute(f.Info, typeof(RantTypeNameAttribute));
                     if (tn != null) plan.TypeName = tn.Name;
                     plans.Add(plan);
                 }
                 if (plans.Count == 0)
-                    throw new SchemaException(t.Name + " has no public instance fields to map");
+                    throw new SchemaException(t.Name + " has no public fields or auto properties to map");
                 cached = new TypeSpec { Name = name, Fields = plans };
+                PlanConstruction(t, cached);
                 s_specs[t] = cached;
                 return cached;
             }
+        }
+
+        // How a decoded message becomes a T: no arguments and set everything when every member
+        // has a setter, else the constructor whose parameters name the members (a positional
+        // record, an anonymous type). A getter only member nobody fills is refused here.
+        private static void PlanConstruction(Type t, TypeSpec spec)
+        {
+            bool hasDefault = t.IsValueType || t.GetConstructor(Type.EmptyTypes) != null;
+            bool allSettable = true;
+            foreach (var fp in spec.Fields) allSettable &= fp.Field.Settable;
+            if (hasDefault && allSettable) return;
+            ConstructorInfo best = null; int[] bestArgs = null;
+            foreach (var c in t.GetConstructors())
+            {
+                var ps = c.GetParameters();
+                if (ps.Length == 0 || (ps.Length == 1 && ps[0].ParameterType == t)) continue;   // the record copy
+                var args = new int[ps.Length]; bool ok = true;
+                for (int i = 0; i < ps.Length && ok; i++)
+                {
+                    args[i] = -1;
+                    for (int j = 0; j < spec.Fields.Count; j++)
+                        if (string.Equals(spec.Fields[j].Field.Name, ps[i].Name, StringComparison.OrdinalIgnoreCase)) { args[i] = j; break; }
+                    ok = args[i] >= 0;
+                }
+                if (ok && (best == null || ps.Length > bestArgs.Length)) { best = c; bestArgs = args; }
+            }
+            foreach (var fp in spec.Fields)
+            {
+                if (fp.Field.Settable || (bestArgs != null && Array.IndexOf(bestArgs, spec.Fields.IndexOf(fp)) >= 0)) continue;
+                throw new SchemaException(t.Name + "." + fp.Field.Name + " has a getter only and no constructor parameter"
+                    + " of that name: give it a setter, init or a constructor");
+            }
+            if (best == null)
+                throw new SchemaException(t.Name + " has no parameterless constructor and none whose parameters name its members");
+            spec.Ctor = best; spec.CtorArgs = bestArgs;
         }
 
         // The text of a reflected type: every nested type as a definition of its own first,
@@ -4196,7 +4279,7 @@ namespace Rant
                 if (f.Nested == null || f.TypeName != null || !done.Add(f.Nested)) continue;
                 var inner = Spec(f.Nested);
                 if (inner.Name.Length == 0)
-                    throw new SchemaException(f.Nested + " under field " + f.Field.Name
+                    throw new SchemaException(f.Nested + " under " + f.Field.Name
                         + " has no wire name: a nested type is a struct or class, not a tuple");
                 Hoist(inner, sb, done);
                 Define(sb, inner.Name, inner);
@@ -4335,7 +4418,7 @@ namespace Rant
         {
             foreach (var fp in spec.Fields)
             {
-                object val = fp.Field.GetValue(obj);
+                object val = fp.Field.Get(obj);
                 if (val == null) continue;   // keep the zeroed default from message_default
                 string path = prefix + fp.WireName;
                 if (fp.Kind == STRUCT) { Collect(s, Spec(fp.Nested), val, path + ".", ops, ref varBytes); continue; }
@@ -4933,20 +5016,36 @@ namespace Rant
                 dict.TryGetValue("", out rv);
                 return RootValue(t, rv);
             }
-            object obj = Activator.CreateInstance(t);
-            foreach (var fp in spec.Fields)
+            var vals = new object[spec.Fields.Count];
+            for (int i = 0; i < vals.Length; i++)
             {
+                var fp = spec.Fields[i];
                 object val;
                 if (!dict.TryGetValue(fp.WireName, out val) || val == null) continue;
-                object set;
-                if (fp.Kind == STRUCT) set = ToObject(fp.Nested, (Dictionary<string, object>)val);
-                else if (IsStructArray(fp.Kind, fp.Elem)) set = ToArray(fp.Nested, val);
+                if (fp.Kind == STRUCT) vals[i] = ToObject(fp.Nested, (Dictionary<string, object>)val);
+                else if (IsStructArray(fp.Kind, fp.Elem)) vals[i] = ToArray(fp.Nested, val);
                 else if (fp.Kind == ARR || fp.Kind == VARR || fp.Kind == STR || fp.Kind == VSTR
-                         || fp.Kind == MAP) set = val;   // already string / typed array / dict
-                else if (fp.Kind == ENUM) set = Enum.ToObject(fp.Field.FieldType, val);
-                else set = Convert.ChangeType(val, fp.Field.FieldType);
-                fp.Field.SetValue(obj, set);
+                         || fp.Kind == MAP) vals[i] = val;   // already string / typed array / dict
+                else if (fp.Kind == ENUM) vals[i] = Enum.ToObject(fp.Field.Type, val);
+                else vals[i] = Convert.ChangeType(val, fp.Field.Type);
             }
+            object obj;
+            if (spec.Ctor == null) obj = Activator.CreateInstance(t);
+            else
+            {
+                var ps = spec.Ctor.GetParameters();
+                var args = new object[ps.Length];
+                for (int p = 0; p < ps.Length; p++)
+                {
+                    object v = vals[spec.CtorArgs[p]];
+                    args[p] = v ?? (ps[p].ParameterType.IsValueType ? Activator.CreateInstance(ps[p].ParameterType) : null);
+                }
+                obj = spec.Ctor.Invoke(args);
+            }
+            for (int i = 0; i < vals.Length; i++)
+                if (vals[i] != null && spec.Fields[i].Field.Settable
+                    && (spec.CtorArgs == null || Array.IndexOf(spec.CtorArgs, i) < 0))
+                    spec.Fields[i].Field.Set(obj, vals[i]);
             return obj;
         }
 

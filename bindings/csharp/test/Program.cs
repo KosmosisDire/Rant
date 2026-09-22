@@ -44,6 +44,19 @@ struct Shape
     public Corner Origin;
 }
 
+// properties and records reflect like fields, in the order written
+class PoseClass
+{
+    public double X { get; set; }
+    public double Y { get; init; }
+    [RantString(16)] public string Frame { get; set; }
+    public double Length => Math.Sqrt(X * X + Y * Y);   // computed, not sent
+}
+record Rate(double Vx, double Vy, [property: RantField("w")] double Omega);
+record struct Point2(float X, float Y);
+struct Sample { public uint Id; public float Value { get; set; } public ulong Stamp; }
+class GetOnly { public int Id { get; } }
+
 // patterns leg types
 struct AddReq { public int A; public int B; }
 struct AddRsp { public int Sum; }
@@ -202,6 +215,31 @@ static class Program
             var empty = (Shape)sh.Decode(sh.Encode(new Shape()));
             Check("an unset struct array is empty", empty.Corners != null && empty.Corners.Length == 0
                   && empty.Bounds != null && empty.Bounds.Length == 2);
+        }
+
+        // properties and records reflect like fields
+        {
+            var ps = node.Schema(typeof(PoseClass));
+            Check("properties reflect, a computed one does not",
+                  ps.Dsl.Contains("X: f64") && ps.Dsl.Contains("Frame: string<16>") && !ps.Dsl.Contains("Length"));
+            var pb = (PoseClass)ps.Decode(ps.Encode(new PoseClass { X = 3, Y = 4, Frame = "map" }));
+            Check("a class with set and init round trips", pb.X == 3 && pb.Y == 4 && pb.Frame == "map" && pb.Length == 5);
+            var rs = node.Schema(typeof(Rate));
+            Check("a record spells its parameters", rs.Dsl.Contains("Vx: f64") && rs.Dsl.Contains("w: f64"));
+            var rb = (Rate)rs.Decode(rs.Encode(new Rate(1, 2, 3)));
+            Check("a positional record decodes through its constructor", rb == new Rate(1, 2, 3));
+            var ss = node.Schema(typeof(Sample));
+            Check("fields and properties keep the written order",
+                  ss.Dsl.IndexOf("Id:") < ss.Dsl.IndexOf("Value:") && ss.Dsl.IndexOf("Value:") < ss.Dsl.IndexOf("Stamp:"));
+            var sb = (Sample)ss.Decode(ss.Encode(new Sample { Id = 1, Value = 2.5f, Stamp = 3 }));
+            Check("a mixed struct round trips", sb.Id == 1 && sb.Value == 2.5f && sb.Stamp == 3);
+            var cs = node.Schema(typeof(Point2));
+            var cb = (Point2)cs.Decode(cs.Encode(new Point2(1, 2)));
+            Check("a record struct round trips", cb.X == 1 && cb.Y == 2);
+            try { node.Schema(typeof(GetOnly)); Check("a getter only member nobody fills is refused", false); }
+            catch (SchemaException ex) { Check("a getter only member nobody fills is refused: " + ex.Message, true); }
+            var anon = ps.Encode(new { X = 7.0, Y = 8.0, Frame = "odom" });
+            Check("an anonymous object encodes by name", ((PoseClass)ps.Decode(anon)).Frame == "odom");
         }
 
         // a tuple has no name of its own: only a handle can name it
