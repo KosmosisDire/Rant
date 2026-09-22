@@ -188,7 +188,8 @@ definition as the last statement gives a root that carries its name with no NAME
 and a bare reference as the last statement (`Uuid`, `Pose`) gives the same root, so a
 definition taken by name hashes like its struct written out. A type on its own ends the
 text. `Name = { ... }` and `A = W` for a name `W` are refused at the type, since a struct
-has one spelling and a name never wraps a name.
+has one spelling and a name never wraps a name. The parser keeps the first refusal as a
+reason and a position, and the node prints both in `schema_detail`.
 
 ## The flat table
 

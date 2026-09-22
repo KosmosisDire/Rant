@@ -154,7 +154,7 @@ static int diag_recvfrom(SOCKET s, char *buf, int len, int flags,
 #include "rant.h"   /* discovery + transport + node runtime */
 
 /* compiles text in a throwaway registry on a, so the schema lives until a is reset */
-static RantSchema *tcompile(RantAllocator *a, const char *text, const char **err){
+static RantSchema *tcompile(RantAllocator *a, const char *text, i_RantSchemaErr *err){
     i_RantRegistry r;
     i_rant_registry_init(&r, rant_allocator_alloc, a);
     return i_rant_registry_compile(&r, text, err);
@@ -2559,11 +2559,11 @@ static void schema_dsl_checks(void){
         };
         unsigned i, ok = 1;
         for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
-            const char *ep = NULL;
+            i_RantSchemaErr ep = { NULL, NULL };
             RantSchema *s = tcompile(&ma, bad[i], &ep);
-            if (s || !ep || ep < bad[i] || ep > bad[i] + strlen(bad[i])) ok = 0;
+            if (s || !ep.at || !ep.why || ep.at < bad[i] || ep.at > bad[i] + strlen(bad[i])) ok = 0;
         }
-        ST_CHECK(ok, "schema-dsl: malformed text rejected with a position");
+        ST_CHECK(ok, "schema-dsl: malformed text rejected with a reason and a position");
     }
     {   RantSchema *anon = tcompile(&ma, "{ x: f64 }", NULL);
         ST_CHECK(anon && rant_schema_name(anon).len == 0 && rant_schema_field_index(anon, "x") == 0,
@@ -2671,11 +2671,16 @@ static void schema_advert_checks(void){
         ST_CHECK(rant_node_schema(P, "RantLog { x: u8 }") == NULL, "announce: a builtin name is reserved");
         le = rant_last_error(P);
         ST_CHECK(le.error == RANT_E_BAD_SCHEMA && le.schema_detail
-                 && strstr(le.schema_detail, "near: RantLog") != NULL,
-                 "announce: the refusal says where (%s)", le.schema_detail ? le.schema_detail : "null");
+                 && strstr(le.schema_detail, "another shape near: RantLog") != NULL,
+                 "announce: the refusal says why and where (%s)", le.schema_detail ? le.schema_detail : "null");
         ST_CHECK(rant_node_schema(P, "Open {") == NULL && rant_last_error(P).schema_detail
-                 && strstr(rant_last_error(P).schema_detail, "at the end") != NULL,
-                 "announce: a truncated text is refused at the end");
+                 && strstr(rant_last_error(P).schema_detail, "expected } at the end") != NULL,
+                 "announce: a truncated text is refused at the end (%s)",
+                 rant_last_error(P).schema_detail ? rant_last_error(P).schema_detail : "null");
+        ST_CHECK(rant_node_schema(P, "Pose { p: Nope }") == NULL && rant_last_error(P).schema_detail
+                 && strstr(rant_last_error(P).schema_detail, "unknown type near: Nope") != NULL,
+                 "announce: an unknown type is named (%s)",
+                 rant_last_error(P).schema_detail ? rant_last_error(P).schema_detail : "null");
         ST_CHECK(rant_node_schema(P, "Pose { x: f64 }") != NULL && rant_node_schema(P, "Pose") != NULL,
                  "announce: a definition made on the node names the next compile");
     }
@@ -3392,12 +3397,12 @@ static void schema_v8_checks(void){
         };
         unsigned i, ok = 1;
         for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
-            const char *ep = NULL;
+            i_RantSchemaErr ep = { NULL, NULL };
             RantSchema *s = tcompile(&sv_ma, bad[i], &ep);
             if (s){ ok = 0; sv_free(s); }
-            else if (!ep) ok = 0;
+            else if (!ep.at || !ep.why) ok = 0;
         }
-        ST_CHECK(ok, "schema-v8: every malformed/misplaced form is refused with a position");
+        ST_CHECK(ok, "schema-v8: every malformed/misplaced form is refused with a reason and a position");
     }
     {   RantSchema *a = sv("Float3 { x: f32, y: f32, z: f32 }\nA { p: Float3 }");
         RantSchema *b = sv("A { x: f32 }\nA { x: f32 }");
@@ -3462,7 +3467,7 @@ static void schema_v8_checks(void){
     }
 
     /* ---- the registry: definitions persist across compiles, a failed text keeps nothing ---- */
-    {   i_RantRegistry reg; RantSchema *w, *p; const char *ep = NULL;
+    {   i_RantRegistry reg; RantSchema *w, *p; i_RantSchemaErr ep = { NULL, NULL };
         i_rant_registry_init(&reg, rant_allocator_alloc, &sv_ma);
         w = i_rant_registry_compile(&reg, "Widget { id: u32, tag: Color }", NULL);
         p = i_rant_registry_compile(&reg, "Panel { w: Widget, more: Widget[2] }", NULL);
@@ -3475,9 +3480,10 @@ static void schema_v8_checks(void){
                  && i_rant_registry_compile(&reg, "Widget { id: u32, tag: Color }", NULL) == w,
                  "registry: one handle per shape, by name or spelled out");
         ST_CHECK(i_rant_registry_compile(&reg, "Gadget { a: u8 }\nWidget { id: u64 }", &ep) == NULL
-                 && ep && strncmp(ep, "Widget", 6) == 0
+                 && ep.at && strncmp(ep.at, "Widget", 6) == 0
+                 && ep.why && strstr(ep.why, "another shape") != NULL
                  && i_rant_registry_compile(&reg, "Gadget", NULL) == NULL,
-                 "registry: a failed text keeps none of its definitions");
+                 "registry: a failed text keeps none of its definitions (%s)", ep.why ? ep.why : "null");
         ST_CHECK(i_rant_registry_compile(&reg, "Gadget { a: u8 }", NULL) != NULL,
                  "registry: it compiles again after a failure");
     }

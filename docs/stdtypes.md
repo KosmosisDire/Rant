@@ -244,7 +244,8 @@ in one text is in scope for every later text on that node, so a shared type is w
 once and later handles take just its name. A failed text leaves no definition behind. The
 node owns each schema it hands out, one handle per shape, and frees them at close, so
 nothing is ever freed by hand. A refused text fires `RANT_E_BAD_SCHEMA` and
-`rant_last_error(node).schema_detail` says where.
+`rant_last_error(node).schema_detail` says why and where: `unknown type near: Twist {`,
+`the name is already defined with another shape near: Color {`, `expected } at the end`.
 
 ### The names are reserved
 

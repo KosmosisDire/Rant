@@ -363,7 +363,7 @@ const char *i_rant_std_lookup(const char *name);     /* serialize/stdtypes.c */
 #define i_rant_std_lookup(name) ((const char *)0)
 #endif
 
-typedef struct { const char *p; const char *err; } i_RantDsl;
+typedef struct { const char *p; const char *err; const char *why; } i_RantDsl;
 
 void i_rant_registry_init(i_RantRegistry *r, RantAllocFn alloc, void *user){
     memset(r, 0, sizeof *r);
@@ -377,21 +377,35 @@ static void i_rant_dsl_ws(i_RantDsl *d){
         return;
     }
 }
-static void i_rant_dsl_fail(i_RantDsl *d, const char *at){ if (!d->err) d->err = at; }
+static void i_rant_dsl_fail(i_RantDsl *d, const char *at, const char *why){
+    if (d->err) return;                                  /* the first refusal is the one reported */
+    d->err = at; d->why = why;
+}
+/* the type writer's latched failure as a reason */
+static const char *i_rant_builder_why(int err){
+    switch (err){
+    case -2: return "structs nest too deep";
+    case -4: return "a name is at most 255 characters";
+    case -5: return "a struct has at most 255 fields";
+    default: return "out of memory";
+    }
+}
 /* an identifier into out[256], NUL terminated. 0 and err when missing or overlong */
 static int i_rant_dsl_ident(i_RantDsl *d, char out[256]){
     const char *q = d->p; size_t n;
-    if (!((*q>='A'&&*q<='Z') || (*q>='a'&&*q<='z') || *q=='_')){ i_rant_dsl_fail(d, q); return 0; }
+    if (!((*q>='A'&&*q<='Z') || (*q>='a'&&*q<='z') || *q=='_')){ i_rant_dsl_fail(d, q, "expected a name"); return 0; }
     while ((*q>='A'&&*q<='Z') || (*q>='a'&&*q<='z') || (*q>='0'&&*q<='9') || *q=='_') q++;
     n = (size_t)(q - d->p);
-    if (n > 255){ i_rant_dsl_fail(d, d->p); return 0; }
+    if (n > 255){ i_rant_dsl_fail(d, d->p, i_rant_builder_why(-4)); return 0; }
     memcpy(out, d->p, n); out[n] = '\0';
     d->p = q;
     return 1;
 }
 static int i_rant_dsl_expect(i_RantDsl *d, char c){
     if (*d->p == c){ d->p++; return 1; }
-    i_rant_dsl_fail(d, d->p);
+    i_rant_dsl_fail(d, d->p, c == '{' ? "expected {" : c == '}' ? "expected }" :
+                              c == '<' ? "expected <" : c == '>' ? "expected >" :
+                              c == ']' ? "expected ]" : "expected : after the field name");
     return 0;
 }
 /* a decimal array count, 1 to 65535 */
@@ -399,10 +413,10 @@ static int i_rant_dsl_count(i_RantDsl *d, uint16_t *out){
     const char *at = d->p; uint32_t v = 0;
     while (*d->p>='0' && *d->p<='9'){
         v = v*10u + (uint32_t)(*d->p - '0');
-        if (v > 0xFFFFu){ i_rant_dsl_fail(d, at); return 0; }
+        if (v > 0xFFFFu){ i_rant_dsl_fail(d, at, "a count is 1 to 65535"); return 0; }
         d->p++;
     }
-    if (d->p == at || v == 0){ i_rant_dsl_fail(d, at); return 0; }
+    if (d->p == at || v == 0){ i_rant_dsl_fail(d, at, "a count is 1 to 65535"); return 0; }
     *out = (uint16_t)v;
     return 1;
 }
@@ -423,10 +437,10 @@ static int i_rant_dsl_enum_value(i_RantDsl *d, int64_t *out){
     lim = neg ? (uint64_t)INT64_MAX + 1u : (uint64_t)INT64_MAX;
     while (*d->p >= '0' && *d->p <= '9'){
         v = v * 10u + (uint64_t)(*d->p - '0');
-        if (v > lim){ i_rant_dsl_fail(d, at); return 0; }
+        if (v > lim){ i_rant_dsl_fail(d, at, "an enum value is a whole number that fits i64"); return 0; }
         d->p++; any = 1;
     }
-    if (!any){ i_rant_dsl_fail(d, at); return 0; }
+    if (!any){ i_rant_dsl_fail(d, at, "an enum value is a whole number that fits i64"); return 0; }
     *out = neg ? -(int64_t)v : (int64_t)v;
     return 1;
 }
@@ -438,7 +452,7 @@ static void i_rant_dsl_enum(i_RantDsl *d, i_RantSchemaBuilder *b){
     i_rant_dsl_ws(d);
     if (!i_rant_dsl_ident(d, wname)) return;
     if (!i_rant_dsl_kind(wname, &backing) || !i_rant_enum_backing_ok((uint8_t)backing)){
-        i_rant_dsl_fail(d, d->p); return;                  /* the backing must be an integer kind */
+        i_rant_dsl_fail(d, d->p, "an enum backing is an integer kind"); return;
     }
     i_rant_dsl_ws(d);
     if (!i_rant_dsl_expect(d, '>')) return;
@@ -455,7 +469,9 @@ static void i_rant_dsl_enum(i_RantDsl *d, i_RantSchemaBuilder *b){
             d->p++; i_rant_dsl_ws(d);
             if (!i_rant_dsl_enum_value(d, &v)) return;
         } else v = next;
-        if (!i_rant_enum_val_fits((uint8_t)backing, v)){ i_rant_dsl_fail(d, d->p); return; }
+        if (!i_rant_enum_val_fits((uint8_t)backing, v)){
+            i_rant_dsl_fail(d, d->p, "an enum value does not fit the backing kind"); return;
+        }
         i_rant_schema_builder_enum_add(b, backing, v, vname, strlen(vname));
         count++; next = v + 1;
         i_rant_dsl_ws(d);
@@ -515,10 +531,10 @@ static int i_rant_defs_add_text(i_RantRegistry *defs, const char *name, const ch
     if (defs->rec >= 8u) return 0;                       /* the roster is acyclic, but be sure */
     defs->rec++;
     sb = i_rant_schema_builder_begin(defs->arena.alloc, defs->arena.user);
-    sd.p = text; sd.err = NULL;
+    sd.p = text; sd.err = NULL; sd.why = NULL;
     i_rant_dsl_field_type(&sd, &sb, defs, "");
     i_rant_dsl_ws(&sd);
-    if (*sd.p) i_rant_dsl_fail(&sd, sd.p);
+    if (*sd.p) i_rant_dsl_fail(&sd, sd.p, "a type on its own ends the text");
     if (!sd.err && !sb.err && sb.len)
         ok = i_rant_defs_add_bytes(defs, name, strlen(name), sb.buf, sb.len);
     if (sb.buf) sb.alloc(sb.user, sb.buf, 0);
@@ -604,7 +620,7 @@ static void i_rant_dsl_word_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantReg
         i_rant_schema_builder_put(b, (uint8_t)k);
         return;
     }
-    if (!i_rant_dsl_ref(defs, tname, &toff, &tlen)){ i_rant_dsl_fail(d, at); return; }   /* a named type */
+    if (!i_rant_dsl_ref(defs, tname, &toff, &tlen)){ i_rant_dsl_fail(d, at, "unknown type"); return; }
     nlen = strlen(tname);
     i_rant_schema_builder_put(b, (uint8_t)RANT_NAMED);
     i_rant_schema_builder_put(b, (uint8_t)nlen);
@@ -636,7 +652,7 @@ static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRe
     kind = b->buf[head];
     if (kind == RANT_MAP || kind == RANT_ENUM) return;   /* never an array element */
     if (!i_rant_dsl_suffix(d, &cnt, &variable) || d->err) return;
-    if (kind == RANT_VSTR){ i_rant_dsl_fail(d, at); return; }    /* string[] is ragged */
+    if (kind == RANT_VSTR){ i_rant_dsl_fail(d, at, "string[] is ragged, give the string a cap"); return; }
     i_rant_dsl_splice_array(b, head, cnt, variable);
 }
 
@@ -674,18 +690,23 @@ static void i_rant_dsl_def(i_RantDsl *d, i_RantRegistry *defs, const char *name,
         if (i_rant_dsl_expect(d, '}')) i_rant_schema_builder_close_struct(&sb);
     } else {
         i_rant_dsl_field_type(d, &sb, defs, "");
-        if (!d->err && !sb.err && sb.len && (sb.buf[0] == RANT_STRUCT || sb.buf[0] == RANT_NAMED))
-            i_rant_dsl_fail(d, at);        /* a struct is Name { }, and a name never wraps a name */
+        if (!d->err && !sb.err && sb.len && sb.buf[0] == RANT_STRUCT)
+            i_rant_dsl_fail(d, at, "a struct is defined as Name { }");
+        if (!d->err && !sb.err && sb.len && sb.buf[0] == RANT_NAMED)
+            i_rant_dsl_fail(d, at, "a name cannot stand for another name");
     }
-    if (!d->err && !sb.err && sb.len){
-        if (exists)                                      /* redefining is fine if identical */
+    if (!d->err && sb.err) i_rant_dsl_fail(d, at, i_rant_builder_why(sb.err));
+    if (!d->err && sb.len){
+        if (exists){                                     /* redefining is fine if identical */
             ok = (*tlen == sb.len && memcmp(defs->arena.buf + *toff, sb.buf, sb.len) == 0);
-        else
+            if (!ok) i_rant_dsl_fail(d, name_at, "the name is already defined with another shape");
+        } else {
             ok = i_rant_defs_add_bytes(defs, name, strlen(name), sb.buf, sb.len)
               && i_rant_defs_find(defs, name, toff, tlen);
+            if (!ok) i_rant_dsl_fail(d, name_at, i_rant_builder_why(-1));
+        }
     }
     if (sb.buf) sb.alloc(sb.user, sb.buf, 0);
-    if (!ok) i_rant_dsl_fail(d, name_at);              /* the name is taken by another shape */
 }
 
 RantSchema *i_rant_registry_parse(i_RantRegistry *r, const void *wire, size_t wire_len){
@@ -707,7 +728,7 @@ RantSchema *i_rant_registry_parse(i_RantRegistry *r, const void *wire, size_t wi
 /* A text is a run of statements and compiles to its last one. A definition may be followed
  * by more statements. A type on its own (bool, f32[3], Pose, { x: f32 }) ends the text. A
  * failed text leaves no definition behind, so nothing is half kept. */
-RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, const char **err){
+RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, i_RantSchemaErr *err){
     i_RantDsl d; i_RantSchemaBuilder root;
     RantSchema *s = NULL;
     char word[256];
@@ -717,12 +738,13 @@ RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, cons
     size_t kept_len; uint32_t kept_defs;           /* the rollback point */
     int have_type = 0, have_def = 0;
 
-    if (err) *err = NULL;
+    if (err){ err->why = NULL; err->at = NULL; }
     if (!defs || !text) return NULL;
     kept_len = defs->arena.len; kept_defs = defs->n_defs;
     root = i_rant_schema_builder_begin(defs->arena.alloc, defs->arena.user);
-    d.p = text; d.err = NULL;
-    if (defs->arena.err || root.err) i_rant_dsl_fail(&d, text);
+    d.p = text; d.err = NULL; d.why = NULL;
+    if (defs->arena.err) i_rant_dsl_fail(&d, text, i_rant_builder_why(defs->arena.err));
+    if (root.err) i_rant_dsl_fail(&d, text, i_rant_builder_why(root.err));
 
     while (!d.err){
         const char *at;
@@ -742,11 +764,11 @@ RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, cons
         i_rant_dsl_field_type(&d, &root, defs, "");
         have_type = 1;
         i_rant_dsl_ws(&d);
-        if (*d.p) i_rant_dsl_fail(&d, d.p);                /* a type on its own ends the text */
+        if (*d.p) i_rant_dsl_fail(&d, d.p, "a type on its own ends the text");
         break;
     }
-    if (!d.err && root.err) i_rant_dsl_fail(&d, d.p);
-    if (!d.err && defs->arena.err) i_rant_dsl_fail(&d, d.p);
+    if (!d.err && root.err) i_rant_dsl_fail(&d, d.p, i_rant_builder_why(root.err));
+    if (!d.err && defs->arena.err) i_rant_dsl_fail(&d, d.p, i_rant_builder_why(defs->arena.err));
 
     if (!d.err){
         if (have_type){
@@ -762,7 +784,7 @@ RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, cons
             rname = word; rnlen = strlen(word);
             rtype = defs->arena.buf + toff; rtlen = tlen;
         }
-        if (!rtype || !rtlen) i_rant_dsl_fail(&d, d.p);
+        if (!rtype || !rtlen) i_rant_dsl_fail(&d, d.p, "the text is empty");
     }
     if (!d.err){
         size_t wlen = 2u + rnlen + rtlen;
@@ -775,12 +797,12 @@ RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, cons
             s = i_rant_registry_parse(defs, w, wlen);
             defs->arena.alloc(defs->arena.user, w, 0);
         }
-        if (!s) i_rant_dsl_fail(&d, d.p);
+        if (!s) i_rant_dsl_fail(&d, d.p, i_rant_builder_why(-1));
     }
     if (root.buf) defs->arena.alloc(defs->arena.user, root.buf, 0);
     if (!s){
         defs->arena.len = kept_len; defs->n_defs = kept_defs; defs->arena.err = 0;
-        if (err) *err = d.err ? d.err : d.p;
+        if (err){ err->why = d.why; err->at = d.err; }
     }
     return s;
 }

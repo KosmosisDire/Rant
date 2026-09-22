@@ -2460,25 +2460,25 @@ uint32_t rant_node_evicted_unsent(RantNode *n){
     return v;
 }
 
-/* A refused schema text or wire: RANT_E_BAD_SCHEMA with the place in schema_detail. at
- * NULL means the wire form. Lock held. */
-static void i_rant_node_schema_fail(RantNode *n, const char *text, const char *at){
-    RantEvent e; char detail[96];
+/* A refused schema text or wire: RANT_E_BAD_SCHEMA with the reason and the place in
+ * schema_detail. err NULL means the wire form. Lock held. */
+static void i_rant_node_schema_fail(RantNode *n, const i_RantSchemaErr *err){
+    RantEvent e; char detail[128];
     memset(&e, 0, sizeof e);
     e.kind = RANT_ERROR; e.error = RANT_E_BAD_SCHEMA;
-    if (!text) snprintf(detail, sizeof detail, "schema wire refused");
-    else if (!at || !*at) snprintf(detail, sizeof detail, "schema text refused at the end");
-    else snprintf(detail, sizeof detail, "schema text refused near: %.40s", at);
+    if (!err) snprintf(detail, sizeof detail, "schema wire refused");
+    else if (!err->at || !*err->at) snprintf(detail, sizeof detail, "%s at the end", err->why);
+    else snprintf(detail, sizeof detail, "%s near: %.40s", err->why, err->at);
     e.schema_detail = detail;
     i_rant_node_emit(n, &e);
 }
 
 const RantSchema *rant_node_schema(RantNode *n, const char *text){
-    const RantSchema *s; const char *at = NULL; int acquired;
+    const RantSchema *s; i_RantSchemaErr err; int acquired;
     if (!n || !text) return NULL;
     acquired = i_rant_node_lock(n);
-    s = i_rant_registry_compile(&n->registry, text, &at);
-    if (!s) i_rant_node_schema_fail(n, text, at);
+    s = i_rant_registry_compile(&n->registry, text, &err);
+    if (!s) i_rant_node_schema_fail(n, &err);
     i_rant_node_unlock(n, acquired);
     return s;
 }
@@ -2488,7 +2488,7 @@ const RantSchema *rant_node_schema_parse(RantNode *n, const void *wire, size_t w
     if (!n || !wire) return NULL;
     acquired = i_rant_node_lock(n);
     s = i_rant_registry_parse(&n->registry, wire, wire_len);
-    if (!s) i_rant_node_schema_fail(n, NULL, NULL);
+    if (!s) i_rant_node_schema_fail(n, NULL);
     i_rant_node_unlock(n, acquired);
     return s;
 }

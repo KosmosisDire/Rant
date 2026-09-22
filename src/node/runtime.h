@@ -113,8 +113,8 @@ RANT_API uint32_t       rant_node_evicted_unsent(RantNode *n);
 
 /* Compiles schema text in the node's registry. Every definition stays in scope for each
  * later compile on this node, and a name on its own is a schema. The node owns the result,
- * one handle per shape, freed at close. NULL fires RANT_E_BAD_SCHEMA, the place is in
- * rant_last_error(n).schema_detail. docs/stdtypes.md has the text. */
+ * one handle per shape, freed at close. NULL fires RANT_E_BAD_SCHEMA, the reason and the
+ * place are in rant_last_error(n).schema_detail. docs/stdtypes.md has the text. */
 RANT_API const RantSchema *rant_node_schema(RantNode *n, const char *text);
 /* The same from a schema's wire bytes, such as a peer's, bounds checked. Defines no name. */
 RANT_API const RantSchema *rant_node_schema_parse(RantNode *n, const void *wire, size_t wire_len);

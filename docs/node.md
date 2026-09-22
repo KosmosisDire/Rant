@@ -143,7 +143,7 @@ lifecycle) and `RANT_MSG_LOST` (best effort loss, expected, not an error).
 | matching and config | `NAME_COLLISION`, `QOS_INCOMPATIBLE`, `SCHEMA_MISMATCH`, `KIND_MISMATCH`, `INTEREST_OVERFLOW`, `META_TRUNCATED_INTEREST`, `PEER_META_TOO_BIG`, `MSG_TOO_BIG`, `PEER_REFUSED`, `EVICTED_UNSENT`, `UNMATCHED_SEND`, `DUPLICATE_AUTHORITY` |
 | IO and setup | `OOM`, `PLATFORM`, `SOCKET`, `BIND`, `MCAST_JOIN`, `SEND`, `RECV`, `POLL`, `WAKER`, `BAD_ADDRESS` |
 | a refused create | `NAME_COLLISION` with `.peer` 0 (a live same name topic on this node), `BAD_NAME`, `STATE` (from a callback, or the reserve is full), `BAD_SCHEMA`, `OOM` |
-| a refused schema text or wire | `BAD_SCHEMA` with `.schema_detail` saying where, from `rant_node_schema` |
+| a refused schema text or wire | `BAD_SCHEMA` with `.schema_detail` saying why and where, from `rant_node_schema` |
 
 Socket faults carry the OS errno in `.os_error`. Topic scoped ones carry the name in
 `.topic_name`. `rant_last_error(node)` returns the last error by value, with its strings

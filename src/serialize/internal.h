@@ -89,12 +89,15 @@ int i_rant_enum_val_fits(uint8_t backing, int64_t v);
 const i_Field *i_rant_schema_field_by_path(const RantSchema *s, const char *path,
                                            uint32_t *index);
 
+/* why a text was refused and the character it was refused at, or the text's end */
+typedef struct { const char *why; const char *at; } i_RantSchemaErr;
+
 /* text.c */
 const char *i_rant_why_kind(uint8_t k);
 void i_rant_registry_init(i_RantRegistry *r, RantAllocFn alloc, void *user);
-/* Compiles text against the registry's definitions and keeps the new ones. NULL with *err at
- * the offending character, or at the end, and the registry as it was. */
-RantSchema *i_rant_registry_compile(i_RantRegistry *r, const char *text, const char **err);
+/* Compiles text against the registry's definitions and keeps the new ones. NULL with err
+ * filled in and the registry as it was. */
+RantSchema *i_rant_registry_compile(i_RantRegistry *r, const char *text, i_RantSchemaErr *err);
 /* The schema the registry holds for these wire bytes, parsed on first sight. */
 RantSchema *i_rant_registry_parse(i_RantRegistry *r, const void *wire, size_t wire_len);
 /* A name's compiled type in the arena, a standard name expanded on first use. The view
