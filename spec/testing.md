@@ -129,8 +129,10 @@ process base picked from the clock so concurrent runs never join each other.
   position stays refused because the name may only ride the header.
 - Schema wire: named types and the narrow only matching they buy, alias roots, struct
   element arrays with indexed paths, variable members at any struct depth, and the
-  refusals that keep an array element's stride static. Print hoists each named type as a
-  leading definition, dependencies first, and recompiles to the same wire.
+  refusals that keep an array element's stride static. A text of several statements
+  compiles to its last, a repeated definition must match, and a definition taken by name
+  hashes like the plain struct. Print hoists each named type as a leading definition,
+  dependencies first, and recompiles to the same wire.
 - Standard types: golden bytes and a golden hash every wrapper pins, and recognition that
   verifies the shape as well as the name. Change the golden pair only with a deliberate
   wire bump.

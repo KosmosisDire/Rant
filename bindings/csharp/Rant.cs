@@ -1120,7 +1120,11 @@ namespace Rant
             IntPtr err;
             IntPtr h = Native.rant_schema_compile(Codec.SchemaAlloc, IntPtr.Zero, Codec.CStr(text), out err);
             if (h == IntPtr.Zero)
-                throw new SchemaException("schema compile failed near: " + Codec.PtrToStr(err));
+            {
+                string near = Codec.PtrToStr(err);
+                throw new SchemaException(string.IsNullOrEmpty(near)
+                    ? "schema compile failed at the end of the text" : "schema compile failed near: " + near);
+            }
             Handle = h;
         }
 

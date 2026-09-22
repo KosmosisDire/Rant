@@ -71,10 +71,11 @@ deferred.
 A name rides the schema wire, never a message byte, and narrows matching. An unnamed
 reader reads a named writer of the same shape. A named reader demands the identical
 writer name. Two different names never cross wire. The shape is always verified as well.
-Struct root names stay strict equal both ways. Standard names are reserved for
-definitions and references but not for a plain `Name { ... }` root, so a schema reflected
-from a class called `Color` still compiles, and a shape clash then refuses to match.
-Aliases wrap any type, so `Uuid = u8[16]` is a named alias, not a wrapper struct.
+Struct root names stay strict equal both ways. A name has one shape: defining it again
+with another is a compile error, in any statement, and the standard names count as
+defined. So a type reflected from a class called `Color` must match the standard `Color`
+or take another name. Aliases wrap any type but a struct, so `Uuid = u8[16]` is a named
+alias, not a wrapper struct.
 
 Array elements must be fixed all the way down, with one level of struct array nesting so
 `arr_parent` stays unique. A variable member inside a nested struct declares nested but
@@ -151,15 +152,14 @@ f677bd147b513fbc, `ExternalVideoStream` aae502077016ac13.
 
 A standalone `dist/rant_serialize.h`. Eigen, GLM, numpy and Unity converters. In C# and
 Python a standard type cannot be an array element and user named types are unsupported,
-since neither emitter can hoist a `Name = type` definition. C, C++ and DSL text handle
-both.
+since neither emitter hoists a definition yet. C, C++ and DSL text handle both.
 
 ## DSL grammar
 
 ```
-schema := def* root?              with no root, the last def is the root
-def    := IDENT '=' type
-root   := IDENT '{' fields '}' | type
+schema := def* type?              the text compiles to its last statement
+def    := IDENT '{' fields '}'    a struct
+        | IDENT '=' type          any other type, never a struct and never another name
 field  := name ':' type (',')?    fields self delimit, commas are optional
 type   := base | base '[' count ']' | base '[' ']' | '{' fields '}' ('[' count? ']')?
 base   := scalar | 'string' ('<' cap '>')? | 'map' | 'enum' '<' scalar '>' '{' options '}' | NAME
@@ -174,8 +174,12 @@ writes the element first and then splices the array head in front of it. Every o
 is checked once, when the finished bytes go through `rant_schema_parse`, the same check a
 peer's bytes get. A text holds at most 64 definitions and a
 standard type expands at most 8 levels deep. Enum values may be omitted and then count up
-from the previous one, starting at 0. A bare reference as the root (`Uuid`) is an alias
-root.
+from the previous one, starting at 0. Each definition sees the ones before it. A
+definition as the last statement gives a root that carries its name with no NAMED wrapper,
+and a bare reference as the last statement (`Uuid`, `Pose`) gives the same root, so a
+definition taken by name hashes like its struct written out. A type on its own ends the
+text. `Name = { ... }` and `A = W` for a name `W` are refused at the type, since a struct
+has one spelling and a name never wraps a name.
 
 ## The flat table
 

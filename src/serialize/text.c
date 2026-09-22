@@ -355,8 +355,9 @@ uint32_t rant_schema_print(const RantSchema *s, char *buf, size_t cap){
     scan.w = s->wire.data; scan.n = s->wire.len; scan.count = 0;
     i_rant_defscan_type(&scan, root_type);
     for (i = 0; i < scan.count; i++){                    /* each named type, once, in order */
+        int is_struct = scan.d[i].toff < scan.n && scan.w[scan.d[i].toff] == RANT_STRUCT;
         i_rant_out_raw(&o, (const char *)(scan.w + scan.d[i].noff), scan.d[i].nlen);
-        i_rant_out_str(&o, " = ");
+        i_rant_out_str(&o, is_struct ? " " : " = ");     /* Name { } or Name = type */
         i_rant_spell_type(&o, scan.w, scan.n, scan.d[i].toff, 0);
         i_rant_out_str(&o, "\n");
     }
@@ -674,32 +675,50 @@ static void i_rant_dsl_fields(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantDefs *
     }
 }
 
-/* Name = type: compiles the body on its own, then keeps it, or verifies it matches an
- * existing or reserved definition of the same name exactly. */
-static void i_rant_dsl_def(i_RantDsl *d, i_RantDefs *defs, const char *name){
-    i_RantSchemaBuilder sb; uint32_t toff = 0, tlen = 0; int ok = 0, exists;
-    exists = i_rant_dsl_ref(defs, name, &toff, &tlen);
+/* One definition, with d->p on its { or =. Name { fields } defines a struct and Name = type
+ * names any other type. The body compiles on its own, then is kept, or must match an
+ * existing or standard definition of the name exactly. Leaves the type's place in the arena. */
+static void i_rant_dsl_def(i_RantDsl *d, i_RantDefs *defs, const char *name, const char *name_at,
+                           uint32_t *toff, uint32_t *tlen){
+    i_RantSchemaBuilder sb; int ok = 0, exists, is_struct = *d->p == '{';
+    const char *at;
+    exists = i_rant_dsl_ref(defs, name, toff, tlen);
     sb = i_rant_schema_builder_begin(defs->arena.alloc, defs->arena.user);
-    i_rant_dsl_field_type(d, &sb, defs, "");
+    d->p++;
+    i_rant_dsl_ws(d);
+    at = d->p;
+    if (is_struct){
+        i_rant_schema_builder_open_struct(&sb);
+        i_rant_dsl_fields(d, &sb, defs);
+        if (i_rant_dsl_expect(d, '}')) i_rant_schema_builder_close_struct(&sb);
+    } else {
+        i_rant_dsl_field_type(d, &sb, defs, "");
+        if (!d->err && !sb.err && sb.len && (sb.buf[0] == RANT_STRUCT || sb.buf[0] == RANT_NAMED))
+            i_rant_dsl_fail(d, at);        /* a struct is Name { }, and a name never wraps a name */
+    }
     if (!d->err && !sb.err && sb.len){
         if (exists)                                      /* redefining is fine if identical */
-            ok = (tlen == sb.len && memcmp(defs->arena.buf + toff, sb.buf, sb.len) == 0);
+            ok = (*tlen == sb.len && memcmp(defs->arena.buf + *toff, sb.buf, sb.len) == 0);
         else
-            ok = i_rant_defs_add_bytes(defs, name, strlen(name), sb.buf, sb.len);
+            ok = i_rant_defs_add_bytes(defs, name, strlen(name), sb.buf, sb.len)
+              && i_rant_defs_find(defs, name, toff, tlen);
     }
     if (sb.buf) sb.alloc(sb.user, sb.buf, 0);
-    if (!ok) i_rant_dsl_fail(d, d->p);
+    if (!ok) i_rant_dsl_fail(d, name_at);              /* the name is taken by another shape */
 }
 
+/* A text is a run of statements and compiles to its last one. A definition may be followed
+ * by more statements. A type on its own (bool, f32[3], Pose, { x: f32 }) ends the text. */
 RantSchema *rant_schema_compile_env(RantAllocFn alloc, void *user, const char *text,
                                     const RantSchema *const *env, size_t n_env,
                                     const char **err){
     i_RantDsl d; i_RantDefs defs; i_RantSchemaBuilder root;
     RantSchema *s = NULL;
-    char rootbuf[256];
+    char word[256];
     const char *rname = NULL; size_t rnlen = 0;
     const uint8_t *rtype = NULL; size_t rtlen = 0;
-    int have_root = 0, is_struct = 0;
+    uint32_t toff = 0, tlen = 0;
+    int have_type = 0, have_def = 0;
 
     if (err) *err = NULL;
     if (!alloc || !text) return NULL;
@@ -715,54 +734,41 @@ RantSchema *rant_schema_compile_env(RantAllocFn alloc, void *user, const char *t
         i_rant_dsl_ws(&d);
         if (!*d.p) break;
         at = d.p;
-        if (!i_rant_dsl_ident(&d, rootbuf)) break;
-        i_rant_dsl_ws(&d);
-        if (*d.p == '='){                                /* a definition */
-            d.p++;
-            i_rant_dsl_def(&d, &defs, rootbuf);
-            continue;
+        if (*d.p != '{'){
+            if (!i_rant_dsl_ident(&d, word)) break;
+            i_rant_dsl_ws(&d);
+            if (*d.p == '{' || *d.p == '='){
+                i_rant_dsl_def(&d, &defs, word, at, &toff, &tlen);
+                have_def = 1;
+                continue;
+            }
         }
-        if (*d.p == '{'){                                /* Name { fields }: a struct root */
-            d.p++;
-            i_rant_schema_builder_open_struct(&root);
-            i_rant_dsl_fields(&d, &root, &defs);
-            if (!i_rant_dsl_expect(&d, '}')) break;
-            i_rant_schema_builder_close_struct(&root);
-            rnlen = strlen(rootbuf); rname = rootbuf;
-            is_struct = 1;
-        } else {                                         /* a bare type, maybe a reference */
-            d.p = at;
-            i_rant_dsl_field_type(&d, &root, &defs, "");
-        }
-        have_root = 1;
+        d.p = at;
+        i_rant_dsl_field_type(&d, &root, &defs, "");
+        have_type = 1;
         i_rant_dsl_ws(&d);
-        if (*d.p) i_rant_dsl_fail(&d, d.p);                /* the root ends the text */
+        if (*d.p) i_rant_dsl_fail(&d, d.p);                /* a type on its own ends the text */
         break;
     }
     if (!d.err && root.err) i_rant_dsl_fail(&d, d.p);
     if (!d.err && defs.arena.err) i_rant_dsl_fail(&d, d.p);
 
     if (!d.err){
-        if (have_root){
+        if (have_type){
             rtype = root.buf; rtlen = root.len;
-            if (!is_struct && rtlen >= 2 && rtype[0] == RANT_NAMED){
-                size_t nl = rtype[1];                    /* a bare reference is an alias root */
+            if (rtlen >= 2 && rtype[0] == RANT_NAMED){     /* a bare reference takes the name */
+                size_t nl = rtype[1];
                 if (2u + nl <= rtlen){
                     rname = (const char *)(rtype + 2); rnlen = nl;
                     rtype += 2u + nl; rtlen -= 2u + nl;
                 }
             }
-        } else if (defs.n){                              /* no root: the last definition is it */
-            uint16_t last = (uint16_t)(defs.n - 1u);
-            rname = (const char *)(defs.arena.buf + defs.e[last].noff);
-            rnlen = defs.e[last].nlen;
-            rtype = defs.arena.buf + defs.e[last].toff;
-            rtlen = defs.e[last].tlen;
+        } else if (have_def){                            /* word still holds the last name */
+            rname = word; rnlen = strlen(word);
+            rtype = defs.arena.buf + toff; rtlen = tlen;
         }
         if (!rtype || !rtlen) i_rant_dsl_fail(&d, d.p);
     }
-    /* the reservation covers definitions and references, never a plain Name { ... } root,
-     * since nothing can reference a root. See spec/schema.md. */
     if (!d.err){
         size_t wlen = 2u + rnlen + rtlen;
         uint8_t *w = (uint8_t *)alloc(user, NULL, wlen);

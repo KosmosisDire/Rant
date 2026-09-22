@@ -495,7 +495,8 @@ private:
         const char* e = nullptr;
         s.schema_ = detail::rant_schema_compile(detail::rant_allocator_alloc, &s.alloc_, t.c_str(), &e);
         if (!s.schema_) {
-            if (err) *err = e ? (std::string("schema error near: ") + e) : "schema compile failed";
+            if (err) *err = (e && *e) ? (std::string("schema error near: ") + e)
+                                      : "schema error at the end of the text";
             detail::rant_allocator_reset(&s.alloc_);
             return std::nullopt;
         }

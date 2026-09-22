@@ -441,7 +441,7 @@ static bool stdtypes_leg() {
             txt.find("when: Timestamp") != std::string::npos &&
             txt.find("velocity: Float3") != std::string::npos);
         chk("std: they print back as hoisted definitions, not inlined shapes",
-            txt.find("Transform = {") != std::string::npos &&
+            txt.find("Transform {") != std::string::npos &&
             txt.find("Uuid = u8[16]") != std::string::npos);
     }
 

@@ -2537,7 +2537,8 @@ static void schema_dsl_checks(void){
             "Pose { x: u8[0] }",            /* zero count */
             "Pose { x: u8[70000] }",        /* count > u16 */
             "Pose { x: f64 } y",            /* trailing garbage */
-            "{ x: f64 }",                   /* missing root name */
+            "Pose = { x: f64 }",            /* a struct is defined as Name { }, never Name = { } */
+            "Pose { x: f64 }[2]",           /* a definition takes no array suffix */
             "Pose { x: string[] }",   /* ragged: an array of unbounded strings is a map's job */
             "Pose { x: string[4] }",        /* a fixed string array needs its <cap> */
             "Pose { x: string<0> }",        /* zero cap */
@@ -2556,6 +2557,10 @@ static void schema_dsl_checks(void){
             if (s || !ep || ep < bad[i] || ep > bad[i] + strlen(bad[i])) ok = 0;
         }
         ST_CHECK(ok, "schema-dsl: malformed text rejected with a position");
+    }
+    {   RantSchema *anon = rant_schema_compile(rant_allocator_alloc, &ma, "{ x: f64 }", NULL);
+        ST_CHECK(anon && rant_schema_name(anon).len == 0 && rant_schema_field_index(anon, "x") == 0,
+                 "schema-dsl: a struct body on its own is an anonymous struct");
     }
     {   /* schema enum: a named integer is a fixed field carrying its backing scalar. The name
            table is schema only, so an unknown value stays readable and subset compares the width. */
@@ -3354,10 +3359,14 @@ static void schema_v8_checks(void){
             "A { p: Uuid[2] }",                 /* a named alias that IS an array        */
             "A { p: { q: { r: f32 }[2] }[2] }", /* a struct array inside an element      */
             "A { m: enum<u8> { X }[2] }",       /* enum elements would hide the backing  */
-            "Float3 = { x: f32 }\nA { p: Float3 }",  /* a reserved name, a wrong shape   */
-            "Transform = { x: f32 }",           /* likewise as the last definition       */
+            "Float3 { x: f32 }\nA { p: Float3 }",    /* a reserved name, a wrong shape   */
+            "Transform { x: f32 }",             /* likewise as the last statement        */
+            "A { x: f32 }\nA { x: f64 }",       /* a name defined twice with two shapes  */
+            "W = { x: f32 }",                   /* the removed spelling of a struct      */
+            "W { x: f32 }\nA = W",              /* an alias of another name              */
+            "W { x: f32 }\nA = W\nB { y: u8 }", /* refused where it is written, used or not */
             "A { p: Nope }",                    /* an unknown type word                  */
-            "A { x: f32 }\nB { y: f32 }",       /* two roots                             */
+            "f32\nB { y: f32 }",                /* a type on its own ends the text       */
             "Temperature: f32"                  /* the old typedef spelling stays an error */
         };
         unsigned i, ok = 1;
@@ -3369,13 +3378,28 @@ static void schema_v8_checks(void){
         }
         ST_CHECK(ok, "schema-v8: every malformed/misplaced form is refused with a position");
     }
-    {   RantSchema *a = sv("Float3 = { x: f32, y: f32, z: f32 }\nA { p: Float3 }");
-        RantSchema *b = sv("Pose { x: f32 }");
-        RantSchema *c = sv("Color { r: f32, g: f32, b: f32, a: f32 }");
-        ST_CHECK(a != NULL, "schema-v8: redefining a standard type IDENTICALLY is allowed");
-        ST_CHECK(b != NULL && c != NULL,
-                 "schema-v8: a plain root name is not reserved (reflection names its class)");
+    {   RantSchema *a = sv("Float3 { x: f32, y: f32, z: f32 }\nA { p: Float3 }");
+        RantSchema *b = sv("A { x: f32 }\nA { x: f32 }");
+        RantSchema *c = sv("Float3 { r: f32 }");
+        ST_CHECK(a != NULL && b != NULL, "schema-v8: defining a name again IDENTICALLY is allowed");
+        ST_CHECK(c == NULL, "schema-v8: a standard name is reserved as the last statement too");
         sv_free(a); sv_free(b); sv_free(c);
+    }
+    /* ---- statements: a text defines any number of names and compiles to its last line ---- */
+    {   RantSchema *two = sv("A { x: f32 }\nB { y: f32 }");
+        RantSchema *again = sv("A { x: u8 }\nB { y: u8 }\nA { x: u8 }");
+        RantSchema *byname = sv("W { x: u8 }\nV { w: W[3] }\nW");
+        RantSchema *plain = sv("W { x: u8 }");
+        RantSchema *alias = sv("Celsius = f32\nRoom { t: Celsius }");
+        ST_CHECK(two && rant_schema_name(two).len == 1 && rant_schema_name(two).data[0] == 'B',
+                 "schema-v8: two definitions compile to the second");
+        ST_CHECK(again && rant_schema_name(again).len == 1 && rant_schema_name(again).data[0] == 'A',
+                 "schema-v8: a repeated definition as the last statement is the result");
+        ST_CHECK(byname && plain && rant_schema_hash(byname) == rant_schema_hash(plain),
+                 "schema-v8: a definition taken by its name equals the plain struct");
+        ST_CHECK(alias != NULL && sv_roundtrip("Celsius = f32\nRoom { t: Celsius }"),
+                 "schema-v8: an alias definition serves a later struct and round-trips");
+        sv_free(two); sv_free(again); sv_free(byname); sv_free(plain); sv_free(alias);
     }
 
     /* ---- hostile wire ---- */
@@ -3409,7 +3433,7 @@ static void schema_v8_checks(void){
         char buf[1024]; const char *d3, *q, *ps;
         if (s){
             rant_schema_print(s, buf, sizeof buf);
-            d3 = strstr(buf, "Double3 ="); q = strstr(buf, "Quaternion ="); ps = strstr(buf, "Transform =");
+            d3 = strstr(buf, "Double3 {"); q = strstr(buf, "Quaternion {"); ps = strstr(buf, "Transform {");
             ST_CHECK(d3 && q && ps && d3 < ps && q < ps,
                      "schema-v8: print emits each named type once, dependencies first");
         }

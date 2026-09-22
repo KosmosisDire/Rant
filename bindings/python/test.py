@@ -21,7 +21,7 @@ IFACE = "127.0.0.1"   # pin discovery to loopback for a single-host run
 
 # any annotated class is a schema, @dataclass just gives a handy constructor
 @dataclass
-class Twist:
+class Velocity:
     dx: rant.f32 = 0.0
     dy: rant.f32 = 0.0
 
@@ -34,7 +34,7 @@ class Pose:
     uuid:  Annotated[bytes, "u8[4]"] = b""
     frame: Annotated[str, "string<16>"] = ""             # a capped UTF-8 string
     tags:  Annotated[list[str], "string<8>[2]"] = field(default_factory=list)  # a fixed array of capped strings
-    vel:   Twist = field(default_factory=Twist)
+    vel:   Velocity = field(default_factory=Velocity)
 
 
 # The v4 variable-length kinds: a variable string, a variable scalar array, a
@@ -326,16 +326,16 @@ def lifecycle():
               watcher.poll(0) == rant.SendStatus.STATE)
 
         got = threading.Event()
-        watcher.subscriber("twist", Twist, lambda t: got.set(), reliable=True)
+        watcher.subscriber("twist", Velocity, lambda t: got.set(), reliable=True)
 
         def open_and_drop():
             n = rant.Node("dropped", on_event=lambda e: None, domain=47,
                           multicast_interface=IFACE)
-            p = n.publisher("twist", Twist, reliable=True)
+            p = n.publisher("twist", Velocity, reliable=True)
             deadline = time.time() + 8.0
             while time.time() < deadline and p.match_count == 0:
                 time.sleep(0.005)
-            p.send(Twist(dx=1.0))
+            p.send(Velocity(dx=1.0))
             check("threaded delivery with no poll", got.wait(3.0))
             return weakref.ref(n)
         ref = open_and_drop()
@@ -372,29 +372,29 @@ def handles():
                   fetch_details=True)
     b = rant.Node("HB", on_event=lambda e: None, domain=48, multicast_interface=IFACE)
     try:
-        p = a.publisher("shared", Twist, reliable=True)
-        s = a.subscriber("shared", Twist, lambda t: None, reliable=True)
+        p = a.publisher("shared", Velocity, reliable=True)
+        s = a.subscriber("shared", Velocity, lambda t: None, reliable=True)
         try:
             a.publisher("shared", Pose)
             check("a different schema on a live name is refused", False)
         except rant.Error:
             check("a different schema on a live name is refused", True)
-        b.subscriber("shared", Twist, lambda t: got.append(t), reliable=True)
-        fn = a.function_definition("double", lambda q: Twist(dx=q.dx * 2), Twist, Twist)
+        b.subscriber("shared", Velocity, lambda t: got.append(t), reliable=True)
+        fn = a.function_definition("double", lambda q: Velocity(dx=q.dx * 2), Velocity, Velocity)
         deadline = time.time() + 8.0
         while time.time() < deadline and p.match_count == 0:
             time.sleep(0.005)
         check("publisher matched the peer's subscriber", p.match_count == 1)
         check("the sibling subscriber closes", s.close())
         check("close is idempotent", s.close())
-        check("the publisher still sends", p.send(Twist(dx=3.0)) == rant.SendStatus.OK)
+        check("the publisher still sends", p.send(Velocity(dx=3.0)) == rant.SendStatus.OK)
         deadline = time.time() + 5.0
         while time.time() < deadline and not got:
             time.sleep(0.005)
         check("and the peer still receives", bool(got) and abs(got[0].dx - 3.0) < 1e-6)
         check("counts show the send", p.counts.tx_msgs >= 1)
         check("the last handle closes", p.close())
-        check("a closed handle answers NO_TOPIC", p.send(Twist()) == rant.SendStatus.NO_TOPIC)
+        check("a closed handle answers NO_TOPIC", p.send(Velocity()) == rant.SendStatus.NO_TOPIC)
         p2 = a.publisher("shared", Pose)
         check("the name carries another schema after the last close", p2.name == "shared")
 
@@ -421,7 +421,7 @@ def handles():
         check("on_log binds and returns the handler", a.on_log(handler) is handler)
         st = a.stats
         check("stats is one snapshot", st.mem_in_use > 0 and st.alloc_calls > 0)
-        # the Pose publisher against HB's Twist subscriber is the mismatch it records, once
+        # the Pose publisher against HB's Velocity subscriber is the mismatch it records, once
         # HB's interest has come back
         deadline = time.time() + 5.0
         while time.time() < deadline and a.last_error.error == rant.ErrorKind.NONE:
@@ -831,7 +831,7 @@ def main():
     pubch = pub.publisher("pose", Pose, reliable=True, keep_last=8)
 
     sent = Pose(stamp=7, x=1.5, y=-2.5, uuid=b"\x01\x02\x03\x04",
-                frame="map", tags=["fast", "ok"], vel=Twist(dx=0.5, dy=0.25))
+                frame="map", tags=["fast", "ok"], vel=Velocity(dx=0.5, dy=0.25))
 
     # MANUAL: drive both nodes by polling them in the loop.
     deadline = time.time() + 8.0

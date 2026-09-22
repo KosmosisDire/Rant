@@ -607,8 +607,9 @@ def _compile_dsl(text):
     err = _c.c_char_p()
     s = lib.rant_schema_compile(_c.schema_alloc(), None, text.encode("utf-8"), _c.byref(err))
     if not s:
-        near = err.value.decode("utf-8", "replace") if err.value else "?"
-        raise SchemaError("schema compile failed near: " + near)
+        near = err.value.decode("utf-8", "replace") if err.value else ""
+        raise SchemaError("schema compile failed near: " + near if near
+                          else "schema compile failed at the end of the text")
     return s
 
 
