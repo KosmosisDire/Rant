@@ -244,24 +244,24 @@ class MetaSnapshot:
         if isinstance(node, dict):
             g = node.get
             s.name = g("name", "") or ""
-            s.uptime_us = int(g("uptime_us", 0)); s.wall_us = int(g("wall_us", 0))
-            s.mem_in_use = int(g("mem_in_use", 0)); s.mem_peak = int(g("mem_peak", 0))
-            s.alloc_calls = int(g("alloc_calls", 0)); s.evicted_unsent = int(g("evicted_unsent", 0))
-            s.bp_waited_us = int(g("bp_waited_us", 0)); s.bp_waits = int(g("bp_waits", 0))
-            s.peers = int(g("peers", 0)); s.max_peers = int(g("max_peers", 0))
-            s.topics = int(g("topics", 0)); s.max_topics = int(g("max_topics", 0))
-            s.shm_tx = int(g("shm_tx", 0)); s.shm_rx = int(g("shm_rx", 0))
-            s.last_error = int(g("last_error", 0)); s.last_error_text = g("last_error_text", "") or ""
+            s.uptime_us = int(g("uptimeUs", 0)); s.wall_us = int(g("wallUs", 0))
+            s.mem_in_use = int(g("memInUse", 0)); s.mem_peak = int(g("memPeak", 0))
+            s.alloc_calls = int(g("allocCalls", 0)); s.evicted_unsent = int(g("evictedUnsent", 0))
+            s.bp_waited_us = int(g("bpWaitedUs", 0)); s.bp_waits = int(g("bpWaits", 0))
+            s.peers = int(g("peers", 0)); s.max_peers = int(g("maxPeers", 0))
+            s.topics = int(g("topics", 0)); s.max_topics = int(g("maxTopics", 0))
+            s.shm_tx = int(g("shmTx", 0)); s.shm_rx = int(g("shmRx", 0))
+            s.last_error = int(g("lastError", 0)); s.last_error_text = g("lastErrorText", "") or ""
         proc = info.get("proc")
         if isinstance(proc, dict):
             g = proc.get
             s.have_proc = True
-            s.have_cpu = "cpu_us" in proc
-            s.pid = int(g("pid", 0)); s.cpu_us = int(g("cpu_us", 0))
-            s.rss = int(g("rss", 0)); s.peak_rss = int(g("peak_rss", 0))
-            s.heap_total = int(g("heap_total", 0)); s.heap_free = int(g("heap_free", 0))
-            s.heap_min_free = int(g("heap_min_free", 0))
-            s.heap_largest_free_block = int(g("heap_largest_free_block", 0))
+            s.have_cpu = "cpuUs" in proc
+            s.pid = int(g("pid", 0)); s.cpu_us = int(g("cpuUs", 0))
+            s.rss = int(g("rss", 0)); s.peak_rss = int(g("peakRss", 0))
+            s.heap_total = int(g("heapTotal", 0)); s.heap_free = int(g("heapFree", 0))
+            s.heap_min_free = int(g("heapMinFree", 0))
+            s.heap_largest_free_block = int(g("heapLargestFreeBlock", 0))
         return s
 
 
@@ -389,14 +389,15 @@ def _std(name):
 
 
 class _FieldSpec:
-    __slots__ = ("name", "kind", "elem", "count", "str_cap", "token", "nested", "enum_cls",
+    __slots__ = ("name", "wire", "kind", "elem", "count", "str_cap", "token", "nested", "enum_cls",
                  "type_name", "elem_name")
 
     def __init__(self, name, kind, elem=0, count=0, str_cap=0, token=None, nested=None,
                  enum_cls=None, type_name=None, elem_name=None):
         self.type_name = type_name   # a standard type's NAME: the whole spelling
         self.elem_name = elem_name   # a struct element's standard NAME, else anonymous
-        self.name = name
+        self.name = name             # the Python attribute
+        self.wire = name             # its wire spelling, set by _build_spec
         self.kind = kind
         self.elem = elem
         self.count = count
@@ -408,12 +409,22 @@ class _FieldSpec:
 
 class _Spec:
     """Reflected schema description of an annotated class (built lazily, cached)."""
-    __slots__ = ("name", "fields", "cls")
+    __slots__ = ("name", "fields", "cls", "attrs")
 
     def __init__(self, name, fields, cls):
         self.name = name
         self.fields = fields
         self.cls = cls
+        self.attrs = {f.wire: f.name for f in fields}   # the attribute a wire name reads
+
+
+def _wire_name(name):
+    """The wire spelling of a member name, the library's rule (docs/stdtypes.md)."""
+    buf = _c.ctypes.create_string_buffer(256)
+    n = _c.load().rant_field_name(name.encode("utf-8"), buf, 256)
+    if not n:
+        raise SchemaError("rant schema: no wire name can be made from %r" % name)
+    return buf.raw[:n].decode("utf-8")
 
 
 _SPECS = {}
@@ -533,7 +544,10 @@ def _build_spec(cls):
     if not anns:
         raise SchemaError("rant schema: %s has no annotated fields to map" % cls.__name__)
     name = getattr(cls, "__rant_name__", None) or cls.__name__
-    return _Spec(name, [_field_spec(n, a, g) for n, a in anns.items()], cls)
+    fields = [_field_spec(n, a, g) for n, a in anns.items()]
+    for f in fields:
+        f.wire = _wire_name(f.name)
+    return _Spec(name, fields, cls)
 
 
 def _value_spec(ann):
@@ -555,7 +569,7 @@ def _elem_token(elem, str_cap):
 
 
 def _spec_text(spec):
-    """The schema DSL text a spec compiles to. Pure reflection, no native lib."""
+    """The schema DSL text a spec compiles to, the members in their wire spelling."""
     def type_text(f):
         if f.type_name:               # a standard type: the name IS the spelling
             return f.type_name
@@ -580,7 +594,7 @@ def _spec_text(spec):
             return _elem_token(f.elem, f.str_cap)
         return f.elem_name or "{ %s }" % ", ".join(line(g) for g in f.nested.fields)
     def line(f):
-        return "%s: %s" % (f.name, type_text(f))
+        return "%s: %s" % (f.wire, type_text(f))
     if spec.name is None:                     # a bare type: the whole schema is its spelling
         return type_text(spec.fields[0]) + "\n"
     return spec.name + "\n{\n" + ",\n".join("    " + line(f) for f in spec.fields) + "\n}\n"
@@ -791,8 +805,8 @@ def _as_schema(node, schema_arg):
 
 
 def dsl(x):
-    """The DSL text for a schema source: a class or bare type with no lib load, a compiled
-        Schema, or DSL text returned as is. For display or for a C node."""
+    """The DSL text for a schema source: a class or bare type, a compiled Schema, or DSL
+        text returned as is. For display or for a C node."""
     if isinstance(x, str):
         return x
     if isinstance(x, Schema):
@@ -809,9 +823,17 @@ def dsl(x):
 # work for any schema, reflected, text compiled or a peer's.
 
 def _get(container, name):
+    """The value a wire name reads: a dict key in any spelling, or the attribute of a
+    reflected class. Missing is None, which keeps the zeroed default."""
     if isinstance(container, dict):
-        return container.get(name)          # missing is None, which keeps the zeroed default
-    return getattr(container, name, None)
+        if name in container:
+            return container[name]
+        for k, v in container.items():
+            if isinstance(k, str) and _wire_name(k) == name:
+                return v
+        return None
+    spec = _SPECS.get(type(container))
+    return getattr(container, spec.attrs.get(name, name) if spec is not None else name, None)
 
 
 def _pack_array(elem_kind, val):
@@ -1254,7 +1276,7 @@ def _typed(f, v):
 
 
 def _to_obj(spec, d):
-    return _instantiate(spec.cls, {f.name: _typed(f, d.get(f.name)) for f in spec.fields})
+    return _instantiate(spec.cls, {f.name: _typed(f, d.get(f.wire)) for f in spec.fields})
 
 
 def _from_decoded(spec, d):
@@ -1935,7 +1957,7 @@ class Node:
                 return
             f = m.value if isinstance(m.value, dict) else {}
             handler(LogLine(level=level, node=m.publisher_name, node_id=m.publisher_id,
-                            wall_us=int(f.get("wall_us", 0)), mono_us=int(f.get("mono_us", 0)),
+                            wall_us=int(f.get("wallUs", 0)), mono_us=int(f.get("monoUs", 0)),
                             recv_us=m.recv_us, written_us=m.written_us,
                             text=f.get("text", "") or ""))
         return deliver

@@ -64,8 +64,11 @@ anonymous object encodes by name against any schema. On a record parameter an at
 is written `[property: RantField("w")] double Omega`. `[RantArray(n)]` fixes an array's element count and a plain array is a variable
 array. `[RantString(cap)]` caps a string and a plain string is unbounded. On a `string[]`,
 `[RantString]` alone gives a variable array of capped strings and with `[RantArray]` a
-fixed one. `[RantField("name")]` overrides a wire name, needed for lowercase interop
-names since C# fields are PascalCase. `[RantSchema("Name")]` overrides the type name.
+fixed one. A member's wire name is its own name in the wire spelling, camelCase
+(docs/stdtypes.md): `FrameId` is `frameId`, the same field a Python `frame_id` or a C
+`frameId` names, with no attribute. `[RantField("name")]` gives a member another name.
+A decoded dictionary carries the wire names and a dictionary source may spell its keys
+any way. `[RantSchema("Name")]` overrides the type name.
 `[RantTypeName("Timestamp")]` names a plain field's type with a standard type, and the
 shape must be the canonical one or compiling fails. `node.Schema(typeof(T)).Dsl` prints
 the DSL.
@@ -106,7 +109,7 @@ the node's later compiles, and a name on its own is a schema. The node owns ever
 for its life, one handle per shape, so there is nothing to dispose, and a read after
 `Close` throws.
 
-The standard types of docs/stdtypes.md ship as mirror structs with lowercase wire names,
+The standard types of docs/stdtypes.md ship as mirror structs,
 `Timestamp.Now()` is the Timestamp clock, and the video enums carry the wire values.
 
 ## QoS

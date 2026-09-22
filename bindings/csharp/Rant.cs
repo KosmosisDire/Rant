@@ -553,6 +553,8 @@ namespace Rant
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_schema_field_index(IntPtr s, byte[] path);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern UIntPtr rant_field_name(byte[] name, byte[] outb, UIntPtr cap);
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern uint rant_schema_msg_min(IntPtr s);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern uint rant_schema_msg_len(IntPtr s, IntPtr buf, UIntPtr cap);
@@ -960,54 +962,53 @@ namespace Rant
         public RantTypeNameAttribute(string name) { Name = name; }
     }
 
-    // The standard composites as plain mirrors of their wire shape (docs/stdtypes.md). The
-    // [RantField] overrides give the canonical lowercase wire names every language agrees on,
-    // and each compiles against the standard definition of its name, so a drift is refused.
+    // The standard composites as plain mirrors of their wire shape (docs/stdtypes.md). Each
+    // compiles against the standard definition of its name, so a drift is refused.
     [RantSchema("Float2")] public struct Float2
-    { [RantField("x")] public float X; [RantField("y")] public float Y; }
+    { public float X; public float Y; }
     [RantSchema("Float3")] public struct Float3
-    { [RantField("x")] public float X; [RantField("y")] public float Y;
-      [RantField("z")] public float Z; }
+    { public float X; public float Y;
+      public float Z; }
     [RantSchema("Float4")] public struct Float4
-    { [RantField("x")] public float X; [RantField("y")] public float Y;
-      [RantField("z")] public float Z; [RantField("w")] public float W; }
+    { public float X; public float Y;
+      public float Z; public float W; }
     [RantSchema("Double2")] public struct Double2
-    { [RantField("x")] public double X; [RantField("y")] public double Y; }
+    { public double X; public double Y; }
     [RantSchema("Double3")] public struct Double3
-    { [RantField("x")] public double X; [RantField("y")] public double Y;
-      [RantField("z")] public double Z; }
+    { public double X; public double Y;
+      public double Z; }
     [RantSchema("Double4")] public struct Double4
-    { [RantField("x")] public double X; [RantField("y")] public double Y;
-      [RantField("z")] public double Z; [RantField("w")] public double W; }
+    { public double X; public double Y;
+      public double Z; public double W; }
     [RantSchema("Int2")] public struct Int2
-    { [RantField("x")] public int X; [RantField("y")] public int Y; }
+    { public int X; public int Y; }
     [RantSchema("Int3")] public struct Int3
-    { [RantField("x")] public int X; [RantField("y")] public int Y; [RantField("z")] public int Z; }
+    { public int X; public int Y; public int Z; }
     [RantSchema("Int4")] public struct Int4
-    { [RantField("x")] public int X; [RantField("y")] public int Y;
-      [RantField("z")] public int Z; [RantField("w")] public int W; }
+    { public int X; public int Y;
+      public int Z; public int W; }
     [RantSchema("Quaternion")] public struct Quaternion    // stored x, y, z, w
-    { [RantField("x")] public double X; [RantField("y")] public double Y;
-      [RantField("z")] public double Z; [RantField("w")] public double W; }
+    { public double X; public double Y;
+      public double Z; public double W; }
     [RantSchema("Color")] public struct Color              // sRGB, straight alpha
-    { [RantField("r")] public byte R; [RantField("g")] public byte G;
-      [RantField("b")] public byte B; [RantField("a")] public byte A; }
+    { public byte R; public byte G;
+      public byte B; public byte A; }
     [RantSchema("Rect")] public struct Rect
-    { [RantField("x")] public float X; [RantField("y")] public float Y;
-      [RantField("w")] public float W; [RantField("h")] public float H; }
+    { public float X; public float Y;
+      public float W; public float H; }
     [RantSchema("RectI")] public struct RectI
-    { [RantField("x")] public int X; [RantField("y")] public int Y;
-      [RantField("w")] public int W; [RantField("h")] public int H; }
+    { public int X; public int Y;
+      public int W; public int H; }
     // Meters and radians. Parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
     [RantSchema("Transform")] public struct Transform
-    { [RantField("translation")] public Double3 Translation;
-      [RantField("rotation")] public Quaternion Rotation;
-      [RantField("parent")] [RantString(30)] public string Parent; }
+    { public Double3 Translation;
+      public Quaternion Rotation;
+      [RantString(30)] public string Parent; }
     [RantSchema("Twist")] public struct Twist               // m/s and rad/s
-    { [RantField("linear")] public Double3 Linear; [RantField("angular")] public Double3 Angular; }
+    { public Double3 Linear; public Double3 Angular; }
     [RantSchema("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
-    { [RantField("lat")] public double Lat; [RantField("lon")] public double Lon;
-      [RantField("alt")] public double Alt; }
+    { public double Lat; public double Lon;
+      public double Alt; }
 
     /// <summary>How an Image's data is laid out. A value of 16 or more is a compressed
     /// container, so data holds the file bytes rather than pixels.</summary>
@@ -1021,44 +1022,44 @@ namespace Rant
     public enum VideoStreamKind : byte
     { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3, Rtp = 4, HttpMjpeg = 5, Other = 15 }
     [RantSchema("Image")] public struct Image               // stride 0 = packed rows
-    { [RantField("width")] public uint Width; [RantField("height")] public uint Height;
-      [RantField("stride")] public uint Stride;
-      [RantField("format")] public ImageFormat Format;
-      [RantField("data")] public byte[] Data; }               // pixels, or the file bytes
+    { public uint Width; public uint Height;
+      public uint Stride;
+      public ImageFormat Format;
+      public byte[] Data; }               // pixels, or the file bytes
     [RantSchema("VideoFrame")] public struct VideoFrame     // width/height 0 = unstated
-    { [RantField("codec")] public VideoCodec Codec;
-      [RantField("width")] public uint Width; [RantField("height")] public uint Height;
-      [RantField("keyframe")] public bool Keyframe;
-      [RantField("pts")] [RantTypeName("Timestamp")] public long Pts;   // the Timestamp clock
-      [RantField("data")] public byte[] Data; }
+    { public VideoCodec Codec;
+      public uint Width; public uint Height;
+      public bool Keyframe;
+      [RantTypeName("Timestamp")] public long Pts;   // the Timestamp clock
+      public byte[] Data; }
     // Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. Codec,
     // Width and Height are hints for pickers, the stream stays authoritative once connected.
     [RantSchema("ExternalVideoStream")] public struct ExternalVideoStream
-    { [RantField("kind")] public VideoStreamKind Kind;
-      [RantField("codec")] public VideoCodec Codec;
-      [RantField("width")] public uint Width; [RantField("height")] public uint Height;
-      [RantField("url")] [RantTypeName("Uri")] [RantString(256)] public string Url;
-      [RantField("name")] [RantString(32)] public string Name; }
+    { public VideoStreamKind Kind;
+      public VideoCodec Codec;
+      public uint Width; public uint Height;
+      [RantTypeName("Uri")] [RantString(256)] public string Url;
+      [RantString(32)] public string Name; }
 
     /// <summary>A lens distortion model. NoDistortion is an ideal pinhole.</summary>
     public enum DistortionModel : byte
     { NoDistortion = 0, BrownConrady = 1, Fisheye = 2, Rational = 3 }
     // The pinhole model and its lens distortion. Coeffs is zero filled past the model's count.
     [RantSchema("CameraIntrinsics")] public struct CameraIntrinsics
-    { [RantField("width")] public uint Width; [RantField("height")] public uint Height;
-      [RantField("fx")] public double Fx; [RantField("fy")] public double Fy;
-      [RantField("cx")] public double Cx; [RantField("cy")] public double Cy;
-      [RantField("model")] public DistortionModel Model;
-      [RantField("coeffs")] [RantArray(8)] public double[] Coeffs; }
+    { public uint Width; public uint Height;
+      public double Fx; public double Fy;
+      public double Cx; public double Cy;
+      public DistortionModel Model;
+      [RantArray(8)] public double[] Coeffs; }
     // SI: radians or meters, per second, and newtons or newton meters. Velocity and Effort
     // may be empty. The names ride a JointNames variable, not every sample.
     [RantSchema("JointState")] public struct JointState
-    { [RantField("position")] public double[] Position;
-      [RantField("velocity")] public double[] Velocity;
-      [RantField("effort")] public double[] Effort; }
+    { public double[] Position;
+      public double[] Velocity;
+      public double[] Effort; }
     // Published once as a variable. The order every JointState array follows.
     [RantSchema("JointNames")] public struct JointNames
-    { [RantField("name")] [RantString(32)] public string[] Name; }
+    { [RantString(32)] public string[] Name; }
 
     /// <summary>The Timestamp clock: microseconds since the Unix epoch UTC, the units of a
     /// message's WrittenUs and of a Send's captureUs.</summary>
@@ -1067,7 +1068,8 @@ namespace Rant
         public static long Now() => Native.rant_timestamp_now();
     }
 
-    /// <summary>Override a field's wire name (must match peers, like a topic name).</summary>
+    /// <summary>Name a member on the wire when its own name will not do. Any spelling works,
+    /// the wire keeps camelCase (docs/stdtypes.md).</summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantFieldAttribute : Attribute
     {
@@ -1411,24 +1413,24 @@ namespace Rant
             if (info.TryGetValue("node", out var no) && no is Dictionary<string, object> node)
             {
                 s.Name = S(node, "name");
-                s.UptimeUs = U(node, "uptime_us"); s.WallUs = U(node, "wall_us");
-                s.MemInUse = U(node, "mem_in_use"); s.MemPeak = U(node, "mem_peak");
-                s.AllocCalls = U(node, "alloc_calls"); s.EvictedUnsent = U(node, "evicted_unsent");
-                s.BpWaitedUs = U(node, "bp_waited_us"); s.BpWaits = U(node, "bp_waits");
-                s.Peers = U(node, "peers"); s.MaxPeers = U(node, "max_peers");
-                s.Topics = U(node, "topics"); s.MaxTopics = U(node, "max_topics");
-                s.ShmTx = U(node, "shm_tx"); s.ShmRx = U(node, "shm_rx");
-                s.LastError = U(node, "last_error"); s.LastErrorText = S(node, "last_error_text");
+                s.UptimeUs = U(node, "uptimeUs"); s.WallUs = U(node, "wallUs");
+                s.MemInUse = U(node, "memInUse"); s.MemPeak = U(node, "memPeak");
+                s.AllocCalls = U(node, "allocCalls"); s.EvictedUnsent = U(node, "evictedUnsent");
+                s.BpWaitedUs = U(node, "bpWaitedUs"); s.BpWaits = U(node, "bpWaits");
+                s.Peers = U(node, "peers"); s.MaxPeers = U(node, "maxPeers");
+                s.Topics = U(node, "topics"); s.MaxTopics = U(node, "maxTopics");
+                s.ShmTx = U(node, "shmTx"); s.ShmRx = U(node, "shmRx");
+                s.LastError = U(node, "lastError"); s.LastErrorText = S(node, "lastErrorText");
             }
             if (info.TryGetValue("proc", out var po) && po is Dictionary<string, object> proc)
             {
                 s.HaveProc = true;
-                s.HaveCpu = proc.ContainsKey("cpu_us");
-                s.Pid = U(proc, "pid"); s.CpuUs = U(proc, "cpu_us");
-                s.Rss = U(proc, "rss"); s.PeakRss = U(proc, "peak_rss");
-                s.HeapTotal = U(proc, "heap_total"); s.HeapFree = U(proc, "heap_free");
-                s.HeapMinFree = U(proc, "heap_min_free");
-                s.HeapLargestFreeBlock = U(proc, "heap_largest_free_block");
+                s.HaveCpu = proc.ContainsKey("cpuUs");
+                s.Pid = U(proc, "pid"); s.CpuUs = U(proc, "cpuUs");
+                s.Rss = U(proc, "rss"); s.PeakRss = U(proc, "peakRss");
+                s.HeapTotal = U(proc, "heapTotal"); s.HeapFree = U(proc, "heapFree");
+                s.HeapMinFree = U(proc, "heapMinFree");
+                s.HeapLargestFreeBlock = U(proc, "heapLargestFreeBlock");
             }
             return s;
         }
@@ -2070,7 +2072,7 @@ namespace Rant
                     {
                         Level = lv, Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
                         WrittenUs = m.WrittenUs,
-                        WallUs = LogFieldU(f, "wall_us"), MonoUs = LogFieldU(f, "mono_us"),
+                        WallUs = LogFieldU(f, "wallUs"), MonoUs = LogFieldU(f, "monoUs"),
                         Text = f != null && f.TryGetValue("text", out var t) ? t as string ?? "" : "",
                     });
                 });
@@ -4081,6 +4083,24 @@ namespace Rant
         internal static bool IsNameless(Type t)
             => t.IsGenericType && t.FullName != null && t.FullName.StartsWith("System.ValueTuple`", StringComparison.Ordinal);
 
+        // The wire spelling of a member name, the library's rule (docs/stdtypes.md), null when
+        // nothing is left of it.
+        internal static string FieldName(string name)
+        {
+            byte[] buf = new byte[256];
+            ulong n = (ulong)Native.rant_field_name(CStr(name), buf, (UIntPtr)buf.Length);
+            return n == 0 ? null : Encoding.UTF8.GetString(buf, 0, (int)n);
+        }
+
+        // a dictionary entry by wire name, the key given in any spelling
+        private static object DictGet(System.Collections.IDictionary d, string wire)
+        {
+            if (d.Contains(wire)) return d[wire];
+            foreach (System.Collections.DictionaryEntry e in d)
+                if (e.Key is string k && FieldName(k) == wire) return e.Value;
+            return null;
+        }
+
         // A handle name as a PascalCase type name: every run of letters and digits is a word
         // with its first letter raised, and everything else is dropped.
         internal static string WireName(string handleName)
@@ -4152,7 +4172,8 @@ namespace Rant
                     var fa = (RantFieldAttribute)Attribute.GetCustomAttribute(f.Info, typeof(RantFieldAttribute));
                     var arr = (RantArrayAttribute)Attribute.GetCustomAttribute(f.Info, typeof(RantArrayAttribute));
                     var str = (RantStringAttribute)Attribute.GetCustomAttribute(f.Info, typeof(RantStringAttribute));
-                    var plan = new FieldPlan { Field = f, WireName = fa != null ? fa.Name : f.Name };
+                    var plan = new FieldPlan { Field = f, WireName = FieldName(fa != null ? fa.Name : f.Name)
+                        ?? throw new SchemaException("no wire name can be made from " + f.Name + " on " + t.Name) };
                     byte k;
                     if (arr != null)   // [RantArray(N)]: a fixed array
                     {
@@ -4498,7 +4519,7 @@ namespace Rant
                 while (names.Count <= d) names.Add(null);
                 names[d] = name;
                 var parent = d < srcs.Count ? srcs[d] : null;
-                object val = (parent != null && parent.Contains(name)) ? parent[name] : null;
+                object val = parent != null ? DictGet(parent, name) : null;
                 if (IsStructArray(info.kind, info.elem))
                 {
                     int end = MemberRun(infos, i);

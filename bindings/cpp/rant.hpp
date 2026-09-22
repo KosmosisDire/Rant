@@ -1973,36 +1973,36 @@ struct MetaSnapshot {
             auto u = [&](const char* k){ auto j = m.find(k); return j == m.end() ? uint64_t(0) : j->second.as_uint(); };
             auto str = [&](const char* k){ auto j = m.find(k); return j == m.end() ? std::string() : j->second.as_string(); };
             s.node.name           = str("name");
-            s.node.uptime_us      = u("uptime_us");
-            s.node.wall_us        = u("wall_us");
-            s.node.mem_in_use     = u("mem_in_use");
-            s.node.mem_peak       = u("mem_peak");
-            s.node.alloc_calls    = u("alloc_calls");
-            s.node.evicted_unsent = u("evicted_unsent");
-            s.node.bp_waited_us   = u("bp_waited_us");
-            s.node.bp_waits       = u("bp_waits");
+            s.node.uptime_us      = u("uptimeUs");
+            s.node.wall_us        = u("wallUs");
+            s.node.mem_in_use     = u("memInUse");
+            s.node.mem_peak       = u("memPeak");
+            s.node.alloc_calls    = u("allocCalls");
+            s.node.evicted_unsent = u("evictedUnsent");
+            s.node.bp_waited_us   = u("bpWaitedUs");
+            s.node.bp_waits       = u("bpWaits");
             s.node.peers          = u("peers");
-            s.node.max_peers      = u("max_peers");
+            s.node.max_peers      = u("maxPeers");
             s.node.topics         = u("topics");
-            s.node.max_topics     = u("max_topics");
-            s.node.shm_tx         = u("shm_tx");
-            s.node.shm_rx         = u("shm_rx");
-            s.node.last_error     = u("last_error");
-            s.node.last_error_text= str("last_error_text");
+            s.node.max_topics     = u("maxTopics");
+            s.node.shm_tx         = u("shmTx");
+            s.node.shm_rx         = u("shmRx");
+            s.node.last_error     = u("lastError");
+            s.node.last_error_text= str("lastErrorText");
         }
         it = s.info.find("proc");
         if (it != s.info.end() && it->second.is_map()) {
             const MapDict& m = it->second.as_map();
             auto u = [&](const char* k){ auto j = m.find(k); return j == m.end() ? uint64_t(0) : j->second.as_uint(); };
             s.proc.have     = true;
-            s.proc.have_cpu = m.find("cpu_us") != m.end();
+            s.proc.have_cpu = m.find("cpuUs") != m.end();
             s.proc.pid      = u("pid");
-            s.proc.cpu_us   = u("cpu_us");
+            s.proc.cpu_us   = u("cpuUs");
             s.proc.rss      = u("rss");
-            s.proc.peak_rss = u("peak_rss");
-            s.proc.heap_total = u("heap_total"); s.proc.heap_free = u("heap_free");
-            s.proc.heap_min_free = u("heap_min_free");
-            s.proc.heap_largest_free_block = u("heap_largest_free_block");
+            s.proc.peak_rss = u("peakRss");
+            s.proc.heap_total = u("heapTotal"); s.proc.heap_free = u("heapFree");
+            s.proc.heap_min_free = u("heapMinFree");
+            s.proc.heap_largest_free_block = u("heapLargestFreeBlock");
         }
         return s;
     }
@@ -2255,8 +2255,8 @@ public:
             ln.level   = level;
             ln.node    = m.publisher_name();
             ln.node_id = m.publisher_id();
-            ln.wall_us = m.get_uint("wall_us");
-            ln.mono_us = m.get_uint("mono_us");
+            ln.wall_us = m.get_uint("wallUs");
+            ln.mono_us = m.get_uint("monoUs");
             ln.recv_us = m.recv_us();
             ln.written_us = m.written_us();
             ln.text    = m.get_string("text");

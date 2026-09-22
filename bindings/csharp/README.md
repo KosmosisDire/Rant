@@ -93,9 +93,10 @@ var acc = other.RemoteVariable<Level>("level");          // acc.Value / acc.Set(
 Any struct/class with public fields is a message type: the fields become the schema in
 declaration order. `[RantArray(n)]` fixes an array's element count, `[RantString(cap)]`
 fixes a string's UTF-8 byte capacity (required on every string, combine both for a
-`string[]`), `[RantField("stamp")]` overrides a wire field name, and `[RantSchema("Name")]`
-optionally overrides the wire type name. Wire names must match on every node for a
-topic. `node.Schema(typeof(Pose)).Dsl` prints the DSL for pasting into a C/C++ node.
+`string[]`), `[RantField("stamp")]` gives a member another wire name, and `[RantSchema("Name")]`
+optionally overrides the wire type name. A wire name is the member's name in camelCase,
+the one spelling every language derives (docs/stdtypes.md), and must match on every node
+for a topic. `node.Schema(typeof(Pose)).Dsl` prints the DSL for pasting into a C/C++ node.
 Handlers fire on the service thread (never two at once for one node). From inside a
 handler, `Send` and read-only queries are allowed, Poll, handle creation, Dispose and
 Close are not. To keep handlers on one thread (e.g. Unity's main thread), open the node

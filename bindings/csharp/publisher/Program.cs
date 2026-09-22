@@ -8,10 +8,10 @@ using Rant;
 
 struct Tick
 {
-    [RantField("seq")]   public ulong Seq;
-    [RantField("when")] [RantTypeName("Timestamp")] public long When;   // Unix-epoch us, UTC
-    [RantField("value")] public double Value;
-    [RantField("at")]    public Transform At;                           // meters and a quaternion
+    public ulong Seq;
+    [RantTypeName("Timestamp")] public long When;   // Unix-epoch us, UTC
+    public double Value;
+    public Transform At;                           // meters and a quaternion
 }
 
 static class Program

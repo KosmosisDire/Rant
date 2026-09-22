@@ -57,6 +57,14 @@ record struct Point2(float X, float Y);
 struct Sample { public uint Id; public float Value { get; set; } public ulong Stamp; }
 class GetOnly { public int Id { get; } }
 
+// member names in C# style, camelCase on the wire
+struct Waypoint
+{
+    [RantString(16)] public string FrameId;
+    public float MaxSpeedMps;
+    public bool GpsFix;
+}
+
 // patterns leg types
 struct AddReq { public int A; public int B; }
 struct AddRsp { public int Sum; }
@@ -152,10 +160,10 @@ static class Program
         // observers use, and it must surface the variable kinds too
         var text = node.Schema(s.Dsl);
         var fd = (Dictionary<string, object>)text.Decode(raw);
-        Check("fields note", (string)fd["Note"] == src.Note);
-        Check("fields samples", fd["Samples"] is float[] fs && fs.Length == 3);
-        Check("fields labels", fd["Labels"] is string[] fl && fl.Length == 3 && fl[2] == "rearmost");
-        Check("fields map", fd["Extras"] is Dictionary<string, object> fe && Convert.ToInt64(fe["battery"]) == 87);
+        Check("fields note", (string)fd["note"] == src.Note);
+        Check("fields samples", fd["samples"] is float[] fs && fs.Length == 3);
+        Check("fields labels", fd["labels"] is string[] fl && fl.Length == 3 && fl[2] == "rearmost");
+        Check("fields map", fd["extras"] is Dictionary<string, object> fe && Convert.ToInt64(fe["battery"]) == 87);
 
         // encode straight from a Dictionary (no typed object), with List<> values
         var od = (Sensor)s.Decode(s.Encode(new Dictionary<string, object>
@@ -180,8 +188,8 @@ static class Program
             Console.WriteLine("Shape DSL:\n" + dsl);
             Check("a nested type is defined once and used by name",
                   dsl.IndexOf("Corner {") >= 0 && dsl.IndexOf("Corner {") == dsl.LastIndexOf("Corner {")
-                  && dsl.Contains("Corners: Corner[]") && dsl.Contains("Bounds: Corner[2]")
-                  && dsl.Contains("Normals: Float3[]") && dsl.Contains("Origin: Corner"));
+                  && dsl.Contains("corners: Corner[]") && dsl.Contains("bounds: Corner[2]")
+                  && dsl.Contains("normals: Float3[]") && dsl.Contains("origin: Corner"));
             var same = node.Schema("Corner { X: f32, Y: f32 }\n"
                                  + "Shape { Corners: Corner[], Bounds: Corner[2], Normals: Float3[], Origin: Corner }");
             Check("the reflected text is the spelled out text", same.Handle == sh.Handle);
@@ -202,8 +210,8 @@ static class Program
             Check("the nested member beside them", back.Origin.X == 9 && back.Origin.Y == 10);
             var asDict = (Dictionary<string, object>)same.Decode(sh.Encode(shape));
             Check("a struct array decodes as a list of dictionaries",
-                  asDict["Corners"] is List<Dictionary<string, object>> cl && cl.Count == 3
-                  && Convert.ToDouble(cl[1]["X"]) == 3 && asDict["Origin"] is Dictionary<string, object>);
+                  asDict["corners"] is List<Dictionary<string, object>> cl && cl.Count == 3
+                  && Convert.ToDouble(cl[1]["x"]) == 3 && asDict["origin"] is Dictionary<string, object>);
             var fromDict = (Shape)sh.Decode(sh.Encode(new Dictionary<string, object>
             {
                 { "Corners", new List<object> { new Dictionary<string, object> { { "X", 11 }, { "Y", 12 } } } },
@@ -221,16 +229,16 @@ static class Program
         {
             var ps = node.Schema(typeof(PoseClass));
             Check("properties reflect, a computed one does not",
-                  ps.Dsl.Contains("X: f64") && ps.Dsl.Contains("Frame: string<16>") && !ps.Dsl.Contains("Length"));
+                  ps.Dsl.Contains("x: f64") && ps.Dsl.Contains("frame: string<16>") && !ps.Dsl.Contains("length"));
             var pb = (PoseClass)ps.Decode(ps.Encode(new PoseClass { X = 3, Y = 4, Frame = "map" }));
             Check("a class with set and init round trips", pb.X == 3 && pb.Y == 4 && pb.Frame == "map" && pb.Length == 5);
             var rs = node.Schema(typeof(Rate));
-            Check("a record spells its parameters", rs.Dsl.Contains("Vx: f64") && rs.Dsl.Contains("w: f64"));
+            Check("a record spells its parameters", rs.Dsl.Contains("vx: f64") && rs.Dsl.Contains("w: f64"));
             var rb = (Rate)rs.Decode(rs.Encode(new Rate(1, 2, 3)));
             Check("a positional record decodes through its constructor", rb == new Rate(1, 2, 3));
             var ss = node.Schema(typeof(Sample));
             Check("fields and properties keep the written order",
-                  ss.Dsl.IndexOf("Id:") < ss.Dsl.IndexOf("Value:") && ss.Dsl.IndexOf("Value:") < ss.Dsl.IndexOf("Stamp:"));
+                  ss.Dsl.IndexOf("id:") < ss.Dsl.IndexOf("value:") && ss.Dsl.IndexOf("value:") < ss.Dsl.IndexOf("stamp:"));
             var sb = (Sample)ss.Decode(ss.Encode(new Sample { Id = 1, Value = 2.5f, Stamp = 3 }));
             Check("a mixed struct round trips", sb.Id == 1 && sb.Value == 2.5f && sb.Stamp == 3);
             var cs = node.Schema(typeof(Point2));
@@ -240,6 +248,21 @@ static class Program
             catch (SchemaException ex) { Check("a getter only member nobody fills is refused: " + ex.Message, true); }
             var anon = ps.Encode(new { X = 7.0, Y = 8.0, Frame = "odom" });
             Check("an anonymous object encodes by name", ((PoseClass)ps.Decode(anon)).Frame == "odom");
+        }
+
+        // members spell camelCase on the wire, whatever the C# style, and meet any text
+        {
+            var ws = node.Schema(typeof(Waypoint));
+            Check("PascalCase members spell camelCase on the wire",
+                  ws.Dsl.Contains("frameId: string<16>") && ws.Dsl.Contains("maxSpeedMps: f32") && ws.Dsl.Contains("gpsFix: bool"));
+            Check("a text in another spelling is the same handle",
+                  node.Schema("Waypoint { frame_id: string<16>, max_speed_mps: f32, GPSFix: bool }").Handle == ws.Handle);
+            var wb = (Waypoint)ws.Decode(ws.Encode(new Waypoint { FrameId = "map", MaxSpeedMps = 1.5f, GpsFix = true }));
+            Check("and decode back into the members", wb.FrameId == "map" && wb.MaxSpeedMps == 1.5f && wb.GpsFix);
+            var wd = (Dictionary<string, object>)node.Schema(ws.Dsl).Decode(ws.Encode(new Waypoint { FrameId = "odom" }));
+            Check("a dictionary carries the wire names", (string)wd["frameId"] == "odom");
+            var fromAny = (Waypoint)ws.Decode(ws.Encode(new Dictionary<string, object> { { "frame_id", "x" }, { "MaxSpeedMps", 2.0f } }));
+            Check("a dictionary source may use any spelling", fromAny.FrameId == "x" && fromAny.MaxSpeedMps == 2.0f);
         }
 
         // a tuple has no name of its own: only a handle can name it
@@ -1114,7 +1137,7 @@ static class Program
             if (ok) Console.WriteLine("PASS");
             var s = pub.Schema(typeof(Pose));
             Console.WriteLine("Pose DSL (for C interop):\n" + s.Dsl);
-            if (!s.Dsl.Contains("Vel: Velocity")) { ok = false; Console.WriteLine("FAIL: the nested type is not named"); }
+            if (!s.Dsl.Contains("vel: Velocity")) { ok = false; Console.WriteLine("FAIL: the nested type is not named"); }
         }
         else
         {
