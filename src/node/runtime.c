@@ -170,7 +170,7 @@ struct RantNode {
     char            last_error_detail[160];
     /* the built in @rant/log topics and the error mirror ring */
     RantTopic      *log_topics[3];       /* by RantLogLevel, all NULL under opts.disable_logs */
-    const RantSchema *log_schema;        /* RantLog { wall_us, mono_us, text } */
+    const RantSchema *log_schema;        /* RantLog { wallUs, monoUs, text } */
     i_RantRegistry  registry;            /* every schema this node compiled or registered */
     uint8_t         log_errors;          /* the default on RANT_ERROR mirror */
     uint8_t         log_flushing;        /* reentrancy guard: a flush must not re enter the ring */
@@ -1443,7 +1443,7 @@ static const char *const i_rant_log_topic_names[3] =
 static void i_rant_node_logs_open(RantNode *n){
     RantTopicOpts topt; int lvl;
     n->log_schema = i_rant_registry_compile(&n->registry,
-        "RantLog { wall_us: u64, mono_us: u64, text: string }", NULL);
+        "RantLog { wallUs: u64, monoUs: u64, text: string }", NULL);
     if (!n->log_schema) return;
     for (lvl = 0; lvl < 3; lvl++){
         memset(&topt, 0, sizeof topt);
@@ -1466,8 +1466,8 @@ static int i_rant_node_log_publish(RantNode *n, RantLogLevel level, const char *
     RantTopic *h = n->log_topics[level];
     if (!h || !n->log_schema) return RANT_ERR_NOSYS;
     if (!rant_schema_message_default(n->log_schema, msg, sizeof msg)) return RANT_ERR_OOM;
-    rant_set_uint(msg, sizeof msg, n->log_schema, "wall_us", wall_us);
-    rant_set_uint(msg, sizeof msg, n->log_schema, "mono_us", mono_us);
+    rant_set_uint(msg, sizeof msg, n->log_schema, "wallUs", wall_us);
+    rant_set_uint(msg, sizeof msg, n->log_schema, "monoUs", mono_us);
     if (!rant_set_string(msg, sizeof msg, n->log_schema, "text", rant_string(text, text_len)))
         return RANT_ERR_TOO_BIG;
     len = rant_schema_msg_len(n->log_schema, msg, sizeof msg);
@@ -2572,33 +2572,33 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
         rant_allocator_stats(&n->pool, &in_use, &peak, &allocs);
         rant_map_open_map(w, "node");
         rant_map_put_string(w, "name", rant_string(n->name, n->name_len));
-        rant_map_put_uint(w, "uptime_us", now - n->open_us);
-        rant_map_put_uint(w, "mono_us", now);
-        rant_map_put_uint(w, "wall_us", i_rant_plat_wall_us());
-        rant_map_put_uint(w, "mem_in_use", (uint64_t)in_use);
-        rant_map_put_uint(w, "mem_peak", (uint64_t)peak);
-        rant_map_put_uint(w, "alloc_calls", allocs);
-        rant_map_put_uint(w, "evicted_unsent", n->evicted_unsent);
-        rant_map_put_uint(w, "bp_waited_us", n->backpressure_total_us);
-        rant_map_put_uint(w, "bp_waits", n->backpressure_wait_count);
+        rant_map_put_uint(w, "uptimeUs", now - n->open_us);
+        rant_map_put_uint(w, "monoUs", now);
+        rant_map_put_uint(w, "wallUs", i_rant_plat_wall_us());
+        rant_map_put_uint(w, "memInUse", (uint64_t)in_use);
+        rant_map_put_uint(w, "memPeak", (uint64_t)peak);
+        rant_map_put_uint(w, "allocCalls", allocs);
+        rant_map_put_uint(w, "evictedUnsent", n->evicted_unsent);
+        rant_map_put_uint(w, "bpWaitedUs", n->backpressure_total_us);
+        rant_map_put_uint(w, "bpWaits", n->backpressure_wait_count);
         rant_map_put_uint(w, "peers", i_rant_discovery_peer_count(i_rant_discovery_state(n->discovery)));
-        rant_map_put_uint(w, "max_peers", n->max_peers);
+        rant_map_put_uint(w, "maxPeers", n->max_peers);
         /* app topics only: the @rant/ builtins are hidden, so neither the counts nor the
            topics array below surface them */
         rant_map_put_uint(w, "topics", (uint64_t)n->n_created);
-        rant_map_put_uint(w, "max_topics", (uint64_t)(n->max_topics - n->n_builtin));
+        rant_map_put_uint(w, "maxTopics", (uint64_t)(n->max_topics - n->n_builtin));
 #ifdef RANT_SHM
-        rant_map_put_uint(w, "shm_tx", n->shm_tx);
-        rant_map_put_uint(w, "shm_rx", n->shm_rx);
+        rant_map_put_uint(w, "shmTx", n->shm_tx);
+        rant_map_put_uint(w, "shmRx", n->shm_rx);
 #endif
-        rant_map_put_uint(w, "last_error", (uint64_t)n->last_error.error);
+        rant_map_put_uint(w, "lastError", (uint64_t)n->last_error.error);
         if (n->last_error.error != RANT_E_NONE){
             /* format from a sanitized copy: the stored event's name views can outlive what
                they pointed at, so the text carries the indices instead */
             RantEvent le = n->last_error; char txt[160];
             le.topic_name = NULL; le.peer_name = NULL; le.schema_detail = NULL;
             rant_event_str(&le, txt, sizeof txt);
-            rant_map_put_string(w, "last_error_text", rant_cstr(txt));
+            rant_map_put_string(w, "lastErrorText", rant_cstr(txt));
         }
         rant_map_close(w);
     }
@@ -2608,16 +2608,16 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
         if (i_rant_plat_proc_stats(&cpu, &rss, &peak_rss, &have_cpu)){     /* absent if unsupported */
             rant_map_open_map(w, "proc");
             rant_map_put_uint(w, "pid", i_rant_plat_pid());
-            if (have_cpu) rant_map_put_uint(w, "cpu_us", cpu);
+            if (have_cpu) rant_map_put_uint(w, "cpuUs", cpu);
             rant_map_put_uint(w, "rss", rss);
-            rant_map_put_uint(w, "peak_rss", peak_rss);
+            rant_map_put_uint(w, "peakRss", peak_rss);
             {   uint64_t heap_total, heap_free, heap_min_free, heap_largest_free_block;
                 if (i_rant_plat_heap_stats(&heap_total, &heap_free, &heap_min_free,
                                            &heap_largest_free_block)){
-                    rant_map_put_uint(w, "heap_total", heap_total);
-                    rant_map_put_uint(w, "heap_free", heap_free);
-                    rant_map_put_uint(w, "heap_min_free", heap_min_free);
-                    rant_map_put_uint(w, "heap_largest_free_block", heap_largest_free_block);
+                    rant_map_put_uint(w, "heapTotal", heap_total);
+                    rant_map_put_uint(w, "heapFree", heap_free);
+                    rant_map_put_uint(w, "heapMinFree", heap_min_free);
+                    rant_map_put_uint(w, "heapLargestFreeBlock", heap_largest_free_block);
                 }
             }
             rant_map_close(w);
@@ -2654,28 +2654,28 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
             rant_map_put_uint(w, "kind", h->kind);
             rant_map_put_uint(w, "role", h->role);
             rant_map_put_bool(w, "reliable", q && q->reliability == RANT_RELIABLE);
-            rant_map_put_uint(w, "keep_last", q ? q->keep_last : 0);
-            rant_map_put_uint(w, "catch_up", q ? q->catch_up : 0);
+            rant_map_put_uint(w, "keepLast", q ? q->keep_last : 0);
+            rant_map_put_uint(w, "catchUp", q ? q->catch_up : 0);
             rant_map_put_uint(w, "subs", (uint64_t)i_rant_transport_publisher_match_count(n->transport, i));
             rant_map_put_uint(w, "pubs", (uint64_t)i_rant_transport_subscriber_match_count(n->transport, i));
             rant_map_put_uint(w, "pending", pend ? (uint64_t)pend[i]
                                                  : (uint64_t)i_rant_node_core_topic_unresolved(n->core, i));
-            rant_map_put_uint(w, "tx_msgs", h->tx_msgs);
-            rant_map_put_uint(w, "tx_bytes", h->tx_bytes);
-            rant_map_put_uint(w, "rx_msgs", h->rx_msgs);
-            rant_map_put_uint(w, "rx_bytes", h->rx_bytes);
-            rant_map_put_uint(w, "nacks_recv", rs.nacks_recv);
-            rant_map_put_uint(w, "frags_resent", rs.frags_resent);
-            rant_map_put_uint(w, "frags_sent", rs.frags_sent);
-            rant_map_put_uint(w, "nacks_sent", rs.nacks_sent);
-            rant_map_put_uint(w, "frags_recv", rs.frags_recv);
-            rant_map_put_uint(w, "frags_dup", rs.frags_dup);
-            rant_map_put_uint(w, "msgs_skipped", rs.msgs_skipped);
+            rant_map_put_uint(w, "txMsgs", h->tx_msgs);
+            rant_map_put_uint(w, "txBytes", h->tx_bytes);
+            rant_map_put_uint(w, "rxMsgs", h->rx_msgs);
+            rant_map_put_uint(w, "rxBytes", h->rx_bytes);
+            rant_map_put_uint(w, "nacksRecv", rs.nacks_recv);
+            rant_map_put_uint(w, "fragsResent", rs.frags_resent);
+            rant_map_put_uint(w, "fragsSent", rs.frags_sent);
+            rant_map_put_uint(w, "nacksSent", rs.nacks_sent);
+            rant_map_put_uint(w, "fragsRecv", rs.frags_recv);
+            rant_map_put_uint(w, "fragsDup", rs.frags_dup);
+            rant_map_put_uint(w, "msgsSkipped", rs.msgs_skipped);
             if (h->q){
-                rant_map_put_uint(w, "q_msgs", h->q->count);
-                rant_map_put_uint(w, "q_bytes", h->q->bytes);
-                rant_map_put_uint(w, "q_cap", h->q->cap);
-                rant_map_put_uint(w, "q_dropped", h->q->dropped);
+                rant_map_put_uint(w, "qMsgs", h->q->count);
+                rant_map_put_uint(w, "qBytes", h->q->bytes);
+                rant_map_put_uint(w, "qCap", h->q->cap);
+                rant_map_put_uint(w, "qDropped", h->q->dropped);
             }
             rant_map_close(w);
         }
@@ -2698,15 +2698,15 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
                               ps[i].addr.ip[2], ps[i].addr.ip[3]);
             rant_map_put_string(w, "ip", rant_string(ip, ln > 0 ? (size_t)ln : 0));
             rant_map_put_uint(w, "port", ps[i].addr.port);
-            rant_map_put_uint(w, "age_us", now > ps[i].last_heard_us ? now - ps[i].last_heard_us : 0);
-            rant_map_put_uint(w, "publish_to", pub_to);
-            rant_map_put_uint(w, "receive_from", recv_from);
+            rant_map_put_uint(w, "ageUs", now > ps[i].last_heard_us ? now - ps[i].last_heard_us : 0);
+            rant_map_put_uint(w, "publishTo", pub_to);
+            rant_map_put_uint(w, "receiveFrom", recv_from);
             {   i_RantPeerRtt e;     /* the measured round trip, absent until the first sample */
                 if (i_rant_transport_peer_rtt(n->transport, ps[i].id, &e) && e.samples){
-                    rant_map_put_uint(w, "rtt_us", e.rtt_us);
-                    rant_map_put_uint(w, "rtt_jitter_us", e.rtt_jitter_us);
-                    rant_map_put_uint(w, "rtt_min_us", e.rtt_min_us);
-                    rant_map_put_uint(w, "rtt_samples", e.samples);
+                    rant_map_put_uint(w, "rttUs", e.rtt_us);
+                    rant_map_put_uint(w, "rttJitterUs", e.rtt_jitter_us);
+                    rant_map_put_uint(w, "rttMinUs", e.rtt_min_us);
+                    rant_map_put_uint(w, "rttSamples", e.samples);
                 } }
             rant_map_close(w);
         }

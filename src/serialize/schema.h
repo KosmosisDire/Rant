@@ -76,8 +76,17 @@ RANT_API uint32_t      rant_schema_msg_len(const RantSchema *s, const void *buf,
 RANT_API uint16_t      rant_schema_field_count(const RantSchema *s);
 /* 1 and fills out, else 0 */
 RANT_API int           rant_schema_field_at(const RantSchema *s, uint16_t i, RantSchemaFieldInfo *out);
-/* Resolves a dotted or indexed path ("velocity.dx", "corners[2].x") to the flat index, or -1. */
+/* Resolves a dotted or indexed path ("velocity.dx", "corners[2].x") to the flat index, or -1.
+ * Each name may be in any spelling, it is matched by its wire spelling. */
 RANT_API int           rant_schema_field_index(const RantSchema *s, const char *path);
+/* The one wire spelling of a name: fields camelCase (frame_id, FrameId and frameId are all
+ * frameId), types and enum options PascalCase (robot_pose is RobotPose, IDLE is Idle). An
+ * underscore, a case change and the last capital of a run split words, so HTTPServer is
+ * httpServer, and a digit stays with its word, so Imu9Dof is imu9Dof. The parser applies
+ * this to every name in a text, and every binding derives a member's wire name with it.
+ * The length written, 0 when nothing is left, it starts with a digit or out is too small. */
+RANT_API size_t        rant_field_name(const char *name, char *out, size_t cap);
+RANT_API size_t        rant_type_name(const char *name, char *out, size_t cap);
 /* One field's type encoding, a view into the wire. Two fields have the same type exactly
  * when these agree. {NULL,0} for an unknown index. */
 RANT_API RantBytes       rant_schema_field_type_wire(const RantSchema *s, uint16_t field);
@@ -87,7 +96,7 @@ RANT_API uint16_t      rant_schema_enum_count    (const RantSchema *s, uint16_t 
 RANT_API int           rant_schema_enum_variant(const RantSchema *s, uint16_t field, uint16_t i,
                                               int64_t *value, RantString *name);
 /* Resolution over the schema alone. name_of gives {NULL,0} for an unknown number, which
- * is safe, not an error. value_of returns 1 and *out for a known name. */
+ * is safe, not an error. value_of returns 1 and *out for a known name, given in any spelling. */
 RANT_API RantString      rant_enum_name_of (const RantSchema *s, uint16_t field, int64_t value);
 RANT_API int             rant_enum_value_of(const RantSchema *s, uint16_t field, const char *name, int64_t *out);
 

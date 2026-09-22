@@ -239,7 +239,7 @@ yields them. `rant_node_log_topic` and `rant_node_meta_function` are the way in.
 The three `@rant/log/{error,warn,info}` topics are reliable with `keep_last` = `catch_up` =
 16 (8 for info) and no backpressure wait, so a slow subscriber only loses old lines.
 Catch up replay is per writer lane, so a late subscriber gets each node's last lines per
-level. The record schema is `RantLog { wall_us: u64, mono_us: u64, text: string }`, and the
+level. The record schema is `RantLog { wallUs: u64, monoUs: u64, text: string }`, and the
 text is capped at `RANT_LOG_MAX` (512) bytes. A node never delivers to itself, so
 consuming a level means reading every other node's lines.
 `set_role` queues a log builtin before its subscribe side goes live, or its catch up

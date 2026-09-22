@@ -94,6 +94,7 @@ typedef struct { const char *why; const char *at; } i_RantSchemaErr;
 
 /* text.c */
 const char *i_rant_why_kind(uint8_t k);
+size_t i_rant_name_normalize(const char *in, char *out, size_t cap, int as_type);
 void i_rant_registry_init(i_RantRegistry *r, RantAllocFn alloc, void *user);
 /* Compiles text against the registry's definitions and keeps the new ones. NULL with err
  * filled in and the registry as it was. */

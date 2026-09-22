@@ -174,7 +174,12 @@ type   := base | base '[' count ']' | base '[' ']' | '{' fields '}' ('[' count? 
 base   := scalar | 'string' ('<' cap '>')? | 'map' | 'enum' '<' scalar '>' '{' options '}' | NAME
 ```
 
-A type word that is not a built in resolves against the node's registry, then the
+Every IDENT and NAME is normalized as it is read, fields to camelCase and types and enum
+options to PascalCase (`i_rant_name_normalize`, public as `rant_field_name` and
+`rant_type_name`), and a field name already used in the open struct is refused by
+walking the struct's bytes written so far. A path given to the accessors is normalized
+the same way before it is matched. A type word that is not a built in resolves against
+the node's registry, then the
 standard library, which is expanded into the registry on first use, and emits as a NAMED
 type. Text is the
 one way to make a schema. The parser writes wire type bytes through an internal type

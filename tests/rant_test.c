@@ -2849,9 +2849,9 @@ static void schema_bigenum_checks(void){
                  "bigenum: option count carries past 255 (%u)",
                  rant_schema_enum_count(es,(uint16_t)ji));
         ST_CHECK(rant_schema_enum_variant(es,(uint16_t)ji,1000,&vv,&nm)
-                 && vv==1000 && nm.len==8 && memcmp(nm.data,"job_1000",8)==0,
+                 && vv==1000 && nm.len==7 && memcmp(nm.data,"Job1000",7)==0,
                  "bigenum: high-index variant reflects");
-        ST_CHECK(rant_enum_name_of(es,(uint16_t)ji,1023).len==8
+        ST_CHECK(rant_enum_name_of(es,(uint16_t)ji,1023).len==7
                  && rant_enum_value_of(es,(uint16_t)ji,"job_0500",&vv) && vv==500,
                  "bigenum: name<->value at the tail");
         wire = rant_schema_wire(es);
@@ -2889,7 +2889,7 @@ static void schema_bigenum_checks(void){
                  "bigenum: set the value by its human name");
         rant_topic_send(pc, rant_bytes(buf, rant_schema_msg_len(es, buf, sizeof buf)), NULL);
         for (t=0;t<400 && be_recv==0;t++){ rant_node_poll(P,1); rant_node_poll(S,2); }
-        ST_CHECK(be_recv==1 && be_val==1000 && strcmp(be_label,"job_1000")==0,
+        ST_CHECK(be_recv==1 && be_val==1000 && strcmp(be_label,"Job1000")==0,
                  "bigenum: value delivered + resolved to its name (val=%lld, label=%s)",
                  (long long)be_val, be_label);
     }
@@ -3464,6 +3464,38 @@ static void schema_v8_checks(void){
                      "schema-v8: print emits each named type once, dependencies first");
         }
         sv_free(s);
+    }
+
+    /* ---- names: one wire spelling, whatever was written ---- */
+    {   RantSchema *s = sv("robot_pose { frame_id: u8, HTTPServer: u8, Imu9Dof: u8, MONO8: u8,\n"
+                           "  mode: enum<u8> { IDLE, running_fast } }\nRobotPose");
+        RantSchema *same = sv("RobotPose { frameId: u8, httpServer: u8, imu9Dof: u8, mono8: u8,\n"
+                              "  mode: enum<u8> { Idle, RunningFast } }");
+        char buf[512], w[64];
+        ST_CHECK(s && same, "names: a text of mixed spellings compiles");
+        if (s && same){
+            rant_schema_print(s, buf, sizeof buf);
+            ST_CHECK(strstr(buf, "RobotPose {") && strstr(buf, "frameId:") && strstr(buf, "httpServer:")
+                     && strstr(buf, "imu9Dof:") && strstr(buf, "mono8:") && strstr(buf, "Idle")
+                     && strstr(buf, "RunningFast"),
+                     "names: fields spell camelCase, types and options PascalCase (%s)", buf);
+            ST_CHECK(rant_schema_field_index(s, "FrameId") == 0 && rant_schema_field_index(s, "frame_id") == 0
+                     && rant_schema_field_index(s, "http_server") == 1,
+                     "names: a path finds a field in any spelling");
+            ST_CHECK(rant_schema_hash(s) == rant_schema_hash(same),
+                     "names: the same fields in another spelling are the same schema");
+        }
+        ST_CHECK(rant_field_name("HTTPServer", w, sizeof w) == 10 && strcmp(w, "httpServer") == 0
+                 && rant_field_name("wall_us", w, sizeof w) == 6 && strcmp(w, "wallUs") == 0
+                 && rant_field_name("Pos2D", w, sizeof w) == 5 && strcmp(w, "pos2D") == 0
+                 && rant_type_name("frame_id", w, sizeof w) == 7 && strcmp(w, "FrameId") == 0
+                 && rant_type_name("RectI", w, sizeof w) == 5 && strcmp(w, "RectI") == 0
+                 && rant_field_name("__", w, sizeof w) == 0 && rant_field_name("_1", w, sizeof w) == 0
+                 && rant_field_name("frameId", w, 7) == 0,
+                 "names: the public rule");
+        ST_CHECK(sv("A { x: u8, X: u8 }") == NULL && sv("A { frame_id: u8, frameId: u8 }") == NULL
+                 && sv("A { a: { x: u8, X: u8 } }") == NULL && sv("A { x: u8, b: { x: u8 } }") != NULL,
+                 "names: two fields of one struct with one wire name are refused");
     }
 
     /* ---- the registry: definitions persist across compiles, a failed text keeps nothing ---- */
@@ -8023,7 +8055,7 @@ static void metalog_checks(void){
           pf_pump(A,B,2);
           while (n_got<16 && rant_topic_take(eh, &m, 0) == 1){
               RantString txt = rant_get_string(m.data, m.schema, "text");
-              uint64_t wall = rant_get_uint(m.data, m.schema, "wall_us");
+              uint64_t wall = rant_get_uint(m.data, m.schema, "wallUs");
               char tb[64]; size_t tl = txt.len < sizeof tb - 1 ? txt.len : sizeof tb - 1;
               memcpy(tb, txt.data, tl); tb[tl]='\0';
               n_got++;
@@ -8066,7 +8098,7 @@ static void metalog_checks(void){
             ST_CHECK(ok_topics && topv.count == 1 && hid == 0,
                      "metalog: snapshot lists app topics only (%u rows, %d hidden)",
                      (unsigned)(ok_topics?topv.count:0), hid); }
-          ST_CHECK(ok_node && rant_map_get(nodev.bytes, "uptime_us", &upt) && upt.v.u > 0,
+          ST_CHECK(ok_node && rant_map_get(nodev.bytes, "uptimeUs", &upt) && upt.v.u > 0,
                    "metalog: snapshot uptime present");
       }
 

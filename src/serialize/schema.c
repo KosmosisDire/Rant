@@ -458,14 +458,46 @@ static int i_rant_schema_path_match(const RantSchema *s, const i_Field *f, const
     }
 }
 
+/* The path with each name in its wire spelling, indices and dots as given. 0 when a name
+ * is refused or the result does not fit. */
+static int i_rant_path_normalize(const char *path, char *out, size_t cap, size_t *len){
+    size_t n = 0, i = 0;
+    while (path[i]){
+        if (path[i] == '.' || path[i] == '['){
+            int idx = path[i] == '[';
+            if (n + 1 >= cap) return 0;
+            out[n++] = path[i++];
+            while (idx && path[i]){                       /* an index verbatim, through its bracket */
+                char c = path[i++];
+                if (n + 1 >= cap) return 0;
+                out[n++] = c;
+                if (c == ']') break;
+            }
+        } else {
+            char seg[256]; size_t sl = 0, wl;
+            while (path[i] && path[i] != '.' && path[i] != '['){
+                if (sl >= sizeof seg - 1) return 0;
+                seg[sl++] = path[i++];
+            }
+            seg[sl] = '\0';
+            wl = i_rant_name_normalize(seg, out + n, cap - n, 0);
+            if (!wl) return 0;
+            n += wl;
+        }
+    }
+    out[n] = '\0';
+    *len = n;
+    return 1;
+}
+
 const i_Field *i_rant_schema_field_by_path(const RantSchema *s, const char *path,
                                            uint32_t *index){
-    uint16_t i; size_t n;
+    uint16_t i; size_t n; char wire[512];
     if (index) *index = 0;
     if (!s || !path) return NULL;
-    n = strlen(path);
+    if (!i_rant_path_normalize(path, wire, sizeof wire, &n)) return NULL;
     for (i = 0; i < s->nfields; i++)
-        if (i_rant_schema_path_match(s, &s->fields[i], path, n, index)) return &s->fields[i];
+        if (i_rant_schema_path_match(s, &s->fields[i], wire, n, index)) return &s->fields[i];
     return NULL;
 }
 
@@ -523,8 +555,11 @@ RantString rant_enum_name_of(const RantSchema *s, uint16_t field, int64_t value)
 
 int rant_enum_value_of(const RantSchema *s, uint16_t field, const char *name, int64_t *out){
     uint16_t i, n = rant_schema_enum_count(s, field);
-    size_t want = 0;
-    if (name) while (name[want]) want++;
+    char wire[256]; size_t want;
+    if (!name) return 0;
+    want = i_rant_name_normalize(name, wire, sizeof wire, 1);   /* given in any spelling */
+    if (!want) return 0;
+    name = wire;
     for (i = 0; i < n; i++){
         int64_t v; RantString nm;
         if (rant_schema_enum_variant(s, field, i, &v, &nm) && nm.len == want &&

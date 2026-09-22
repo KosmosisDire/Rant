@@ -377,6 +377,38 @@ static void i_rant_dsl_ws(i_RantDsl *d){
         return;
     }
 }
+/* The wire spelling of a name, see rant_field_name. Words start at an underscore, at a
+ * capital after a lowercase letter or a digit, and at the last capital of a run of them. */
+size_t i_rant_name_normalize(const char *in, char *out, size_t cap, int as_type){
+    size_t n = 0; int boundary = 1; char prev = 0;
+    const char *p;
+    for (p = in; *p; p++){
+        char c = *p;
+        int upper = c >= 'A' && c <= 'Z', lower = c >= 'a' && c <= 'z', digit = c >= '0' && c <= '9';
+        if (!upper && !lower && !digit){ boundary = 1; continue; }
+        if (!boundary && upper){
+            int plower = prev >= 'a' && prev <= 'z', pdigit = prev >= '0' && prev <= '9';
+            int pupper = prev >= 'A' && prev <= 'Z', nlower = p[1] >= 'a' && p[1] <= 'z';
+            if (plower || pdigit || (pupper && nlower)) boundary = 1;
+        }
+        if (n + 1 >= cap) return 0;
+        if (boundary && (n || as_type)) out[n++] = upper ? c : (lower ? (char)(c - 32) : c);
+        else out[n++] = upper ? (char)(c + 32) : c;
+        boundary = 0; prev = c;
+    }
+    out[n] = '\0';
+    if (!n || (out[0] >= '0' && out[0] <= '9')) return 0;
+    return n;
+}
+size_t rant_field_name(const char *name, char *out, size_t cap){
+    if (!name || !out || !cap) return 0;
+    return i_rant_name_normalize(name, out, cap, 0);
+}
+size_t rant_type_name(const char *name, char *out, size_t cap){
+    if (!name || !out || !cap) return 0;
+    return i_rant_name_normalize(name, out, cap, 1);
+}
+
 static void i_rant_dsl_fail(i_RantDsl *d, const char *at, const char *why){
     if (d->err) return;                                  /* the first refusal is the one reported */
     d->err = at; d->why = why;
@@ -460,10 +492,14 @@ static void i_rant_dsl_enum(i_RantDsl *d, i_RantSchemaBuilder *b){
     if (!i_rant_dsl_expect(d, '{')) return;
     count_pos = i_rant_schema_builder_enum_open(b, backing);
     for (;;){
-        char vname[256]; int64_t v;
+        char vname[256], vwire[256]; int64_t v; const char *vat;
         i_rant_dsl_ws(d);
         if (*d->p == '}' || *d->p == '\0' || d->err || b->err) break;
+        vat = d->p;
         if (!i_rant_dsl_ident(d, vname)) return;
+        if (!i_rant_name_normalize(vname, vwire, sizeof vwire, 1)){
+            i_rant_dsl_fail(d, vat, "an option name needs a letter"); return;
+        }
         i_rant_dsl_ws(d);
         if (*d->p == '='){   /* an explicit value, else auto increment */
             d->p++; i_rant_dsl_ws(d);
@@ -472,7 +508,7 @@ static void i_rant_dsl_enum(i_RantDsl *d, i_RantSchemaBuilder *b){
         if (!i_rant_enum_val_fits((uint8_t)backing, v)){
             i_rant_dsl_fail(d, d->p, "an enum value does not fit the backing kind"); return;
         }
-        i_rant_schema_builder_enum_add(b, backing, v, vname, strlen(vname));
+        i_rant_schema_builder_enum_add(b, backing, v, vwire, strlen(vwire));
         count++; next = v + 1;
         i_rant_dsl_ws(d);
         if (*d->p == ',') d->p++;                        /* an optional separator */
@@ -595,7 +631,7 @@ static int i_rant_dsl_suffix(i_RantDsl *d, uint16_t *count, int *variable){
 /* The type whose leading word is in tname, with at pointing at it for errors */
 static void i_rant_dsl_word_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegistry *defs,
                                  const char *tname, const char *at){
-    RantSchemaTypeKind k; uint16_t cap; uint32_t toff, tlen; size_t nlen;
+    RantSchemaTypeKind k; uint16_t cap; uint32_t toff, tlen; size_t nlen; char twire[256];
     if (strcmp(tname, "map") == 0){
         i_rant_schema_builder_put(b, (uint8_t)RANT_MAP);
         return;
@@ -620,11 +656,14 @@ static void i_rant_dsl_word_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantReg
         i_rant_schema_builder_put(b, (uint8_t)k);
         return;
     }
-    if (!i_rant_dsl_ref(defs, tname, &toff, &tlen)){ i_rant_dsl_fail(d, at, "unknown type"); return; }
-    nlen = strlen(tname);
+    if (!i_rant_name_normalize(tname, twire, sizeof twire, 1)){
+        i_rant_dsl_fail(d, at, "a type name needs a letter"); return;
+    }
+    if (!i_rant_dsl_ref(defs, twire, &toff, &tlen)){ i_rant_dsl_fail(d, at, "unknown type"); return; }
+    nlen = strlen(twire);
     i_rant_schema_builder_put(b, (uint8_t)RANT_NAMED);
     i_rant_schema_builder_put(b, (uint8_t)nlen);
-    i_rant_schema_builder_put_raw(b, tname, nlen);
+    i_rant_schema_builder_put_raw(b, twire, nlen);
     i_rant_schema_builder_put_raw(b, defs->arena.buf + toff, tlen);
 }
 
@@ -656,17 +695,39 @@ static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRe
     i_rant_dsl_splice_array(b, head, cnt, variable);
 }
 
+/* whether the field name written at b->buf[mine] already names an earlier field of the
+ * open struct, whose fields start at first */
+static int i_rant_dsl_name_taken(const i_RantSchemaBuilder *b, size_t first, size_t mine){
+    size_t pos = first; uint8_t nl = b->buf[mine];
+    while (pos < mine){
+        uint8_t l = b->buf[pos];
+        if (l == nl && memcmp(b->buf + pos + 1, b->buf + mine + 1, nl) == 0) return 1;
+        pos = i_rant_skip_type(b->buf, b->len, pos + 1u + l);
+    }
+    return 0;
+}
+
 /* the fields of one struct body, up to and not consuming the closing brace */
 static void i_rant_dsl_fields(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegistry *defs){
-    char name[256];
+    char name[256], wire[256];
     for (;;){
+        const char *at; size_t first, mine;
         i_rant_dsl_ws(d);
         if (*d->p == '}' || *d->p == '\0' || d->err || b->err) return;
+        at = d->p;
         if (!i_rant_dsl_ident(d, name)) return;
+        if (!i_rant_name_normalize(name, wire, sizeof wire, 0)){
+            i_rant_dsl_fail(d, at, "a field name needs a letter"); return;
+        }
         i_rant_dsl_ws(d);
         if (!i_rant_dsl_expect(d, ':')) return;
-        i_rant_dsl_field_type(d, b, defs, name);
+        first = b->count_pos[b->depth - 1] + 1u;
+        mine = b->len;
+        i_rant_dsl_field_type(d, b, defs, wire);
         if (d->err) return;
+        if (!b->err && i_rant_dsl_name_taken(b, first, mine)){
+            i_rant_dsl_fail(d, at, "two fields of one struct spell the same wire name"); return;
+        }
         i_rant_dsl_ws(d);
         if (*d->p == ',') d->p++;                        /* an optional separator */
     }
@@ -755,6 +816,11 @@ RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, i_Ra
             if (!i_rant_dsl_ident(&d, word)) break;
             i_rant_dsl_ws(&d);
             if (*d.p == '{' || *d.p == '='){
+                char twire[256];
+                if (!i_rant_name_normalize(word, twire, sizeof twire, 1)){
+                    i_rant_dsl_fail(&d, at, "a type name needs a letter"); break;
+                }
+                strcpy(word, twire);
                 i_rant_dsl_def(&d, defs, word, at, &toff, &tlen);
                 have_def = 1;
                 continue;

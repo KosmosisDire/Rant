@@ -150,6 +150,15 @@ this:
 - A new fixed type lists its widest member first, so the packed wire size matches the
   natural C size and the type can keep a mirror. The transport internals follow the same
   rule.
+- A name has one spelling on the wire: fields are camelCase, types and enum options
+  PascalCase, and the parser makes them so from whatever was written. `frame_id`,
+  `FrameId` and `frameId` are one field, `robot_pose` is `RobotPose`, `IDLE` is `Idle`.
+  An underscore, a case change and the last capital of a run split words (`HTTPServer`
+  is `httpServer`), a digit stays with its word (`Imu9Dof` is `imu9Dof`). Two fields of
+  one struct with the same wire name are refused. Every binding derives a member's wire
+  name by the same rule, `rant_field_name` in C, so a C# `FrameId`, a Python `frame_id`
+  and a C `frameId` meet with no attribute, and a path such as `"frame_id"` given to
+  `rant_get_f32` finds `frameId`.
 
 Deliberately absent for now: civil date and time, unit annotated value types (SI by
 convention today, schema level unit annotations are the future mechanism), IP addresses,
