@@ -556,6 +556,11 @@ struct Corner { float x, y; };
 RANT_SCHEMA(Corner, x, y);
 struct Shape { Corner origin; rant::types::Float2 at; uint8_t id; };
 RANT_SCHEMA(Shape, origin, at, id);
+/* fixed struct arrays, one nested in another's element */
+struct Outline { rant::types::Float2 corners[4]; uint8_t n; };
+RANT_SCHEMA(Outline, corners, n);
+struct Grid { std::array<Outline, 2> rows; Corner mark[3]; };
+RANT_SCHEMA(Grid, rows, mark);
 
 /* encode then decode through the node's typed codec, no network */
 template <class T> static bool round_trip(rant::Node& n, const T& in, T& out) {
@@ -591,6 +596,43 @@ static bool nested_leg() {
         chk("nest: a nested struct round trips",
             round_trip(a, in, out) && out.origin.x == 1.5f && out.origin.y == -2.0f
             && out.at.y == 4.0f && out.id == 7);
+    }
+    {   auto sc = rant::priv::schema_of<Grid>(a);
+        std::string txt = sc ? sc->to_dsl() : std::string();
+        chk("nest: fixed struct arrays spell by element name",
+            txt.find("corners: Float2[4]") != std::string::npos
+            && txt.find("rows: Outline[2]") != std::string::npos
+            && txt.find("mark: Corner[3]") != std::string::npos);
+        rant::Schema same = a.schema("Outline { corners: Float2[4], n: u8 }\n"
+                                     "Grid { rows: Outline[2], mark: Corner[3] }");
+        chk("nest: the same text is the same schema", sc && same && sc->hash() == same.hash());
+        Grid in{}, out{};
+        in.rows[1].corners[3] = { 5.0f, 6.0f };
+        in.rows[0].corners[0] = { 1.0f, 2.0f };
+        in.rows[1].n = 9;
+        in.mark[2] = { -1.0f, -2.0f };
+        chk("nest: a struct array inside a struct array's element round trips",
+            round_trip(a, in, out) && out.rows[1].corners[3].y == 6.0f
+            && out.rows[0].corners[0].x == 1.0f && out.rows[1].corners[0].x == 0.0f
+            && out.rows[1].n == 9 && out.mark[2].y == -2.0f);
+        std::vector<uint8_t> scratch;
+        rant::priv::TypeCodec* gc = rant::priv::type_codec<Grid>(a);
+        rant::Bytes by = gc ? rant::priv::encode(*gc, in, scratch) : rant::Bytes();
+        {
+            rant::detail::RantBytes mb; mb.data = by.data(); mb.len = by.size();
+            chk("nest: the C path reads what the C++ codec wrote",
+                gc && rant::detail::rant_get_f32(mb, gc->raw, "rows[1].corners[3].y") == 6.0f
+                && rant::detail::rant_get_f32(mb, gc->raw, "mark[2].x") == -1.0f);
+        }
+    }
+    {   auto sc = rant::priv::schema_of<std::array<Corner, 3>>(a);
+        std::string txt = sc ? sc->to_dsl() : std::string();
+        chk("nest: a fixed struct array is a whole schema too",
+            txt.find("Corner[3]") != std::string::npos);
+        std::array<Corner, 3> in{}, out{};
+        in[2] = { 7.0f, 8.0f };
+        chk("nest: a fixed struct array root round trips",
+            round_trip(a, in, out) && out[2].x == 7.0f && out[0].y == 0.0f);
     }
     return g_failures == fails_at_entry;
 }

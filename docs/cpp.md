@@ -117,11 +117,12 @@ one memcpy, anything else runs a per field loop. A delivery whose schema hash di
 ours rebuilds the offsets from the incoming schema and caches them per schema pointer.
 
 Wire types are the sized integers, float, double, bool, `T[N]` and `std::array<U, N>` of
-those, `rant::String<N>` for a capped string, nested reflected structs, and the variable
-members `std::vector<scalar>` and `std::string`. A variable member rides the message tail
-as a length framed section, so a type with one encodes into scratch and its decode
-allocates into the member. Refused at compile time: pointers, maps, `std::vector<bool>`,
-vectors of structs or strings, and struct array members. Those shapes use the dynamic
+those or of structs, `rant::String<N>` for a capped string, nested reflected structs, and
+the variable members `std::vector<scalar>` and `std::string`. A fixed struct array spells
+`corners: Float2[4]` and may sit inside another's element to any depth. A variable member
+rides the message tail as a length framed section, so a type with one encodes into scratch
+and its decode allocates into the member. Refused at compile time: pointers, maps,
+`std::vector<bool>`, and vectors of structs or strings. Those shapes use the dynamic
 `Schema` and `MessageBuilder` API.
 
 Any wire type used directly as a handle's type is a bare schema with no `RANT_SCHEMA`:

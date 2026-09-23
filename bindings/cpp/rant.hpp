@@ -1125,6 +1125,7 @@ struct Leaf {
     uint16_t    count = 1, cap = 0;   /* elements, or the string capacity */
     uint32_t    s_stride = 0, w_stride = 0;     /* per-element byte strides */
     std::string path;                           /* dotted path for by-name offset lookup */
+    std::vector<uint16_t> elems;                /* its index in each enclosing struct array */
 };
 
 /* One variable member, a length framed section on the message tail reached by dotted path
@@ -1215,6 +1216,7 @@ struct SchemaBuilder {
     bool              value_root = false;   /* the schema IS one bare type: no name, no braces */
     int               quiet = 0;            /* > 0: emit leaves only (inside a NAMED type,
                                                whose spelling is just its name) */
+    std::vector<uint16_t> elems;            /* the element being walked in each struct array */
     std::string       defs;                 /* nested struct definitions, before the root */
     std::unordered_set<const void*> defined;   /* the types already in defs */
     SchemaBuilder*    root = nullptr;       /* a definition's builder writes defs here */
@@ -1242,6 +1244,7 @@ struct SchemaBuilder {
         l.s_stride = (uint32_t)sizeof(E);
         l.w_stride = scalar_wire_size(k);
         l.path = prefix + name;
+        l.elems = elems;
         leaves.push_back(std::move(l));
     }
     template <class E> void add_string(const char* name, size_t off, size_t count, bool arr) {
@@ -1256,6 +1259,7 @@ struct SchemaBuilder {
         l.s_stride = (uint32_t)sizeof(E);
         l.w_stride = 2u + cap;
         l.path = prefix + name;
+        l.elems = elems;
         leaves.push_back(std::move(l));
     }
     /* a RANT_ENUM-registered enum: emit `enum<uN> { A=v, ... }`, copy as the backing int */
@@ -1279,6 +1283,7 @@ struct SchemaBuilder {
         l.s_stride = (uint32_t)sizeof(E);
         l.w_stride = scalar_wire_size(k);
         l.path = prefix + name;
+        l.elems = elems;
         leaves.push_back(std::move(l));
     }
     /* a VARIABLE member: no fixed leaf, a Tail reached by path via the C accessors */
@@ -1314,7 +1319,14 @@ struct SchemaBuilder {
     template <class U> void add(const char* name, size_t off);
     template <class U> void define();
     template <class U> void members(const char* name, size_t off);
+    template <class E> void add_struct_array(const char* name, size_t off, size_t n);
 };
+
+/* a struct shaped type: reflected, or a standard struct, never an alias */
+template <class U> constexpr bool is_struct_type() {
+    if constexpr (std_type<U>::name != nullptr) return std::is_void_v<typename std_type<U>::repr>;
+    else return is_reflected<U>::value;
+}
 
 struct SchemaVisit {
     SchemaBuilder* b;
@@ -1335,11 +1347,13 @@ template <class U> void SchemaBuilder::add(const char* name, size_t off) {
         using E = std::remove_extent_t<U>;
         constexpr size_t n = std::extent_v<U>;
         if constexpr (is_rant_string<E>::value) add_string<E>(name, off, n, true);
+        else if constexpr (is_struct_type<E>()) add_struct_array<E>(name, off, n);
         else                                    add_scalar<E>(name, off, n, true);
     } else if constexpr (is_std_array<U>::value) {
         using E = typename is_std_array<U>::elem;
         constexpr size_t n = is_std_array<U>::count;
         if constexpr (is_rant_string<E>::value) add_string<E>(name, off, n, true);
+        else if constexpr (is_struct_type<E>()) add_struct_array<E>(name, off, n);
         else                                    add_scalar<E>(name, off, n, true);
     } else if constexpr (std_type<U>::name != nullptr) {
         /* a NAMED type: it spells as its name alone, but still contributes the leaves of
@@ -1407,6 +1421,41 @@ template <class U> void SchemaBuilder::members(const char* name, size_t off) {
     prefix = std::move(saved_prefix);
 }
 
+/* A fixed array of structs: `name: Elem[n]`, the element defined once above. Every
+ * element contributes its own leaves, each carrying its index, so nesting needs nothing more. */
+template <class E> void SchemaBuilder::add_struct_array(const char* name, size_t off, size_t n) {
+    sep(name);
+    if constexpr (std_type<E>::name != nullptr) put(std_type<E>::name);
+    else { put(strip_namespaces(reflect<E>::type_name)); define<E>(); }
+    put("["); put(std::to_string(n)); put("]");
+    for (size_t i = 0; i < n; i++) {
+        std::string at = std::string(name) + "[" + std::to_string(i) + "]";
+        elems.push_back((uint16_t)i);
+        members<E>(at.c_str(), off + i * sizeof(E));
+        elems.pop_back();
+    }
+}
+
+/* the wire offset of field fi reached through the enclosing struct arrays by elems, each
+ * fixed. False when an index is out of range or an array is variable. */
+inline bool static_offset(const detail::RantSchema* s, detail::RantSchemaFieldInfo fi,
+                          const std::vector<uint16_t>& elems, uint32_t& out) {
+    uint64_t off = fi.offset;
+    size_t k = elems.size();
+    if (k != fi.arr_depth) return false;
+    while (fi.arr_parent != 0xFFFF) {
+        detail::RantSchemaFieldInfo pa;
+        if (!detail::rant_schema_field_at(s, fi.arr_parent, &pa)) return false;
+        uint16_t e = elems[--k];
+        if (pa.kind != (uint8_t)detail::RANT_ARR || e >= pa.count) return false;
+        off += (uint64_t)e * pa.elem_size;
+        fi = pa;
+    }
+    if (off > 0xFFFFFFFFu) return false;
+    out = (uint32_t)off;
+    return true;
+}
+
 /* resolve every leaf's wire offset by dotted path in a compiled schema, verifying the kinds.
  * Used on our own schema at registration and on an incoming one for the rebase decode. */
 inline bool fill_offsets(const detail::RantSchema* s, std::vector<Leaf>& lv) {
@@ -1425,7 +1474,7 @@ inline bool fill_offsets(const detail::RantSchema* s, std::vector<Leaf>& lv) {
         } else {
             if (fi.kind != l.kind) return false;
         }
-        l.wire_off = fi.offset;
+        if (!static_offset(s, fi, l.elems, l.wire_off)) return false;
     }
     return true;
 }
