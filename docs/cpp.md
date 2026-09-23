@@ -195,7 +195,10 @@ the same hash from every language.
 integer and matches an `enum<uN>` by width only.
 
 `rant::String<N>` is the capped string slot. `assign()` refuses an over capacity value and
-`view()` clamps a hostile length.
+`view()` clamps a hostile length. Encoding is strict: a value that does not fit its schema,
+such as a `String<N>` whose `len` was written past N, is refused rather than cut or sent
+empty. A write answers `SendStatus::Schema`, a reply or a completion answers the caller
+AppError, and a call answers with `send_status()` `Schema`.
 
 ## Standard types
 
@@ -270,6 +273,11 @@ driving the loop, until a value exists.
 A `rant::Bytes` handle made without a schema and with `reflect_from_mesh` set in its
 options types itself from the mesh: a reader takes its provider's schema, a writer the
 widest every reader accepts. `refresh()` re types the handle in place when the mesh moved.
+
+Every handle reports `name()` and the schema it uses now, which for a `reflect_from_mesh`
+handle is the one it adopted: `schema()` on a topic or a variable, `request_schema()`,
+`response_schema()` and, on a task, `progress_schema()` on a function or task handle. Each
+is an empty `Schema` while the handle is untyped.
 
 ## Handle lifetime
 

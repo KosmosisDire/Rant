@@ -142,6 +142,9 @@ struct Padded {
     rant::String<7> tag;
 };
 RANT_SCHEMA(Padded, a, b, c, d, tag);
+/* a capped string alone, the same bytes as its wire: the memcpy path with a string */
+struct Label { rant::String<8> text; };
+RANT_SCHEMA(Label, text);
 static_assert(sizeof(Flat) == 8, "Flat must be padding-free for the memcpy-path leg");
 static_assert(sizeof(Padded) > 1 + 4 + 2 + 8 + 9, "Padded must carry padding for the loop-path leg");
 
@@ -585,9 +588,9 @@ template <class T> static bool round_trip(rant::Node& n, const T& in, T& out) {
     rant::priv::TypeCodec* c = rant::priv::type_codec<T>(n);
     if (!rant::priv::codec_ok(c)) return false;
     std::vector<uint8_t> scratch;
-    rant::Bytes by = rant::priv::encode(*c, in, scratch);
-    if (by.size() == 0) return false;
-    std::vector<uint8_t> copy(by.data(), by.data() + by.size());
+    std::optional<rant::Bytes> by = rant::priv::encode(*c, in, scratch);
+    if (!by) return false;
+    std::vector<uint8_t> copy(by->data(), by->data() + by->size());
     return rant::priv::decode(*c, out, rant::Bytes(copy.data(), copy.size()), nullptr);
 }
 
@@ -636,7 +639,7 @@ static bool nested_leg() {
             && out.rows[1].n == 9 && out.mark[2].y == -2.0f);
         std::vector<uint8_t> scratch;
         rant::priv::TypeCodec* gc = rant::priv::type_codec<Grid>(a);
-        rant::Bytes by = gc ? rant::priv::encode(*gc, in, scratch) : rant::Bytes();
+        rant::Bytes by = gc ? rant::priv::encode(*gc, in, scratch).value_or(rant::Bytes()) : rant::Bytes();
         {
             rant::detail::RantBytes mb; mb.data = by.data(); mb.len = by.size();
             chk("nest: the C path reads what the C++ codec wrote",
@@ -679,7 +682,7 @@ static bool nested_leg() {
             && out.tags[2] == "eightchr" && out.note == "after the arrays");
         std::vector<uint8_t> scratch;
         rant::priv::TypeCodec* c = rant::priv::type_codec<Scene>(a);
-        rant::Bytes by = c ? rant::priv::encode(*c, in, scratch) : rant::Bytes();
+        rant::Bytes by = c ? rant::priv::encode(*c, in, scratch).value_or(rant::Bytes()) : rant::Bytes();
         rant::detail::RantBytes mb; mb.data = by.data(); mb.len = by.size();
         chk("nest: the C path reads the variable array's elements",
             c && rant::detail::rant_get_f32(mb, c->raw, "outlines[1].corners[2].x") == 1.5f
@@ -885,7 +888,7 @@ static bool tails_leg() {
         in.samples = { 1.5f, -2.5f, 8.75f };
         in.note = "a note well past any small-string buffer, to make the heap real";
         std::vector<uint8_t> scratch;
-        rant::Bytes wire = rant::priv::encode(*cc, in, scratch);
+        rant::Bytes wire = rant::priv::encode(*cc, in, scratch).value_or(rant::Bytes());
         chk("tails: encode produces a message", wire.size() > 0);
         narrow::Chunk out;
         chk("tails: decode roundtrips", rant::priv::decode(*cc, out, wire, nullptr)
@@ -894,7 +897,7 @@ static bool tails_leg() {
         narrow::Chunk empty_in, empty_out;
         empty_out.samples = { 9.f };            /* stale state must be overwritten */
         empty_out.note = "stale";
-        rant::Bytes ewire = rant::priv::encode(*cc, empty_in, scratch);
+        rant::Bytes ewire = rant::priv::encode(*cc, empty_in, scratch).value_or(rant::Bytes());
         chk("tails: empty vector and string roundtrip", ewire.size() > 0
             && rant::priv::decode(*cc, empty_out, ewire, nullptr)
             && empty_out.samples.empty() && empty_out.note.empty());
@@ -1512,6 +1515,37 @@ static bool factory_leg() {
     chk("factory: on_log refuses when logs are disabled",
         refuses([&] { (void)nolog.on_log([](const rant::LogLine&) {}); }));
 #endif
+
+    /* every handle reports its name and the schema it uses */
+    chk("names: a typed publisher", pub.name() == "f/speed" && pub.schema().name() == "Speed");
+    wait_for(4000, [&] { raw.refresh(); return raw.schema().hash() == pub.schema().hash(); });
+    chk("names: a reflecting subscriber adopted the publisher's schema",
+        raw.name() == "f/speed" && raw.schema().hash() == pub.schema().hash());
+    auto add = a.function_definition<AddReq, AddRsp>("f/add",
+        [](const AddReq& q) { return AddRsp{ (int64_t)q.x + q.y }; });
+    rant::FunctionOptions fmesh; fmesh.reflect_from_mesh = true;
+    auto add_r = b.remote_function<rant::Bytes, rant::Bytes>("f/add", fmesh);
+    chk("names: a definition reports its schemas", add.name() == "f/add"
+        && add.request_schema().name() == "AddReq" && add.response_schema().name() == "AddRsp");
+    chk("names: a reflect remote starts untyped", !add_r.request_schema());
+    wait_for(4000, [&] { add_r.refresh(); return bool(add_r.request_schema()); });
+    chk("names: a reflect remote reports the schemas it adopted",
+        add_r.request_schema().hash() == add.request_schema().hash()
+        && add_r.response_schema().hash() == add.response_schema().hash());
+    auto gain = a.variable_definition<double>("f/gain");
+    chk("names: a variable reports its schema", gain.name() == "f/gain" && bool(gain.schema()));
+
+    /* a string past its cap, which only a direct write of len makes, is refused, never cut */
+    auto lpub = a.publisher<Label>("f/label");
+    Label lbl{};
+    lbl.text.assign("ok");
+    chk("strict: a fitting string sends", lpub.send(lbl) == rant::SendStatus::Ok);
+    lbl.text.len = 9;
+    chk("strict: an overlong string is refused on the memcpy path", lpub.send(lbl) == rant::SendStatus::Schema);
+    auto ppub = a.publisher<Padded>("f/padded");
+    Padded pd{};
+    pd.tag.len = 12;
+    chk("strict: and on the loop path", ppub.send(pd) == rant::SendStatus::Schema);
     return g_failures == fails_at_entry;
 }
 
@@ -1541,23 +1575,23 @@ static bool bench_leg() {
     std::printf("  %-36s %10s %10s\n", "path", "encode", "decode");
     auto row = [](const char* name, double a, double b) { std::printf("  %-36s %10.1f %10.1f\n", name, a, b); };
     {
-        rant::Bytes w = rant::priv::encode(*cflat, flat, scratch);
+        rant::Bytes w = rant::priv::encode(*cflat, flat, scratch).value_or(rant::Bytes());
         row("typed memcpy (Flat)",
-            ns_per(N, [&] { sink += rant::priv::encode(*cflat, flat, scratch).size(); }),
+            ns_per(N, [&] { sink += rant::priv::encode(*cflat, flat, scratch)->size(); }),
             ns_per(N, [&] { sink += rant::priv::decode(*cflat, flat_out, w, nullptr); }));
     }
     {
         std::vector<uint8_t> keep;
-        rant::Bytes w = rant::priv::encode(*cpad, padded, keep);
+        rant::Bytes w = rant::priv::encode(*cpad, padded, keep).value_or(rant::Bytes());
         row("typed loop (Padded, string<7>)",
-            ns_per(N, [&] { sink += rant::priv::encode(*cpad, padded, scratch).size(); }),
+            ns_per(N, [&] { sink += rant::priv::encode(*cpad, padded, scratch)->size(); }),
             ns_per(N, [&] { sink += rant::priv::decode(*cpad, padded_out, w, nullptr); }));
     }
     {
         std::vector<uint8_t> keep;
-        rant::Bytes w = rant::priv::encode(*cchunk, chunk, keep);
+        rant::Bytes w = rant::priv::encode(*cchunk, chunk, keep).value_or(rant::Bytes());
         row("typed tails (Chunk, f32[] string)",
-            ns_per(N, [&] { sink += rant::priv::encode(*cchunk, chunk, scratch).size(); }),
+            ns_per(N, [&] { sink += rant::priv::encode(*cchunk, chunk, scratch)->size(); }),
             ns_per(N, [&] { sink += rant::priv::decode(*cchunk, chunk_out, w, nullptr); }));
     }
     {

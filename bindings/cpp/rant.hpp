@@ -1288,7 +1288,8 @@ template <uint16_t N> struct string_vector_tail {
         std::vector<uint8_t> tmp(v.size() * (2u + N), 0);
         for (size_t i = 0; i < v.size(); i++) {
             uint8_t* slot = tmp.data() + i * (2u + N);
-            uint16_t len = v[i].len > N ? N : v[i].len;
+            if (v[i].len > N) return false;   /* past its slot: refused, never cut */
+            uint16_t len = v[i].len;
             slot[0] = (uint8_t)len; slot[1] = (uint8_t)(len >> 8);
             std::memcpy(slot + 2, v[i].data, len);
         }
@@ -1709,14 +1710,15 @@ inline void copy_swapped(uint8_t* dst, const uint8_t* src, size_t n) {
     for (size_t i = 0; i < n; i++) dst[i] = src[n - 1 - i];
 }
 
-inline void leaf_to_wire(const Leaf& l, const uint8_t* sbase, uint8_t* wire, bool le) {
+/* false on a String<N> whose length is past N, which only a direct write of len makes */
+inline bool leaf_to_wire(const Leaf& l, const uint8_t* sbase, uint8_t* wire, bool le) {
     const uint8_t* sp = sbase + l.struct_off;
     uint8_t*       wp = wire + l.wire_off;
     for (uint16_t i = 0; i < l.count; i++, sp += l.s_stride, wp += l.w_stride) {
         if (l.kind == (uint8_t)detail::RANT_STR) {
             uint16_t len;
             std::memcpy(&len, sp, 2);
-            if (len > l.cap) len = l.cap;
+            if (len > l.cap) return false;
             if (le) std::memcpy(wp, &len, 2); else copy_swapped(wp, reinterpret_cast<uint8_t*>(&len), 2);
             std::memcpy(wp + 2, sp + 2, l.cap);
         } else if (le || l.w_stride == 1) {
@@ -1725,6 +1727,20 @@ inline void leaf_to_wire(const Leaf& l, const uint8_t* sbase, uint8_t* wire, boo
             copy_swapped(wp, sp, l.w_stride);
         }
     }
+    return true;
+}
+/* the memcpy path copies as is, so it checks its string lengths first */
+inline bool strings_fit(const std::vector<Leaf>& leaves, const uint8_t* sbase) {
+    for (const Leaf& l : leaves) {
+        if (l.kind != (uint8_t)detail::RANT_STR) continue;
+        const uint8_t* sp = sbase + l.struct_off;
+        for (uint16_t i = 0; i < l.count; i++, sp += l.s_stride) {
+            uint16_t len;
+            std::memcpy(&len, sp, 2);
+            if (len > l.cap) return false;
+        }
+    }
+    return true;
 }
 inline void leaf_from_wire(const Leaf& l, uint8_t* sbase, const uint8_t* wire, bool le) {
     uint8_t*       sp = sbase + l.struct_off;
@@ -1755,7 +1771,7 @@ inline bool struct_vector_write(const Tail& t, const uint8_t* member, uint8_t* b
     const uint8_t* src = t.items(member);
     for (size_t i = 0; i < n; i++)
         for (const Leaf& l : t.elem)
-            leaf_to_wire(l, src + i * t.elem_host, w + i * t.elem_wire, le);
+            if (!leaf_to_wire(l, src + i * t.elem_host, w + i * t.elem_wire, le)) return false;
     return true;
 }
 
@@ -1785,6 +1801,7 @@ struct TypeCodec {
     bool                      ok = false;
     bool                      memcpy_ok = false;      /* our own layout coincides with our wire */
     bool                      memcpy_capable = false; /* trivially copyable + little-endian host */
+    bool                      has_strings = false;    /* a String<N> leaf, checked on the memcpy path */
     const detail::RantSchema* raw = nullptr;          /* the node's schema for T */
     uint64_t                  hash = 0;
     uint32_t                  wire_size = 0;   /* the fixed section, all of it when no tails */
@@ -1855,6 +1872,7 @@ template <class T> TypeCodec* build_codec(detail::RantNode* node) {
     if (!fill_offsets(c->raw, c->leaves)) return c;
     if (!tails_resolve(c->raw, c->tails)) return c;
     c->memcpy_capable = std::is_trivially_copyable<T>::value && host_le();
+    for (const Leaf& l : c->leaves) c->has_strings = c->has_strings || l.kind == (uint8_t)detail::RANT_STR;
     bool coincide = c->memcpy_capable && c->tails.empty() && sizeof(T) == c->wire_size;
     for (const Leaf& l : c->leaves)
         coincide = coincide && l.struct_off == l.wire_off && l.s_stride == l.w_stride;
@@ -1877,14 +1895,20 @@ template <class T> std::optional<Schema> schema_of(Node& n) {
 
 /* struct to wire. The memcpy path returns a view of the struct itself, else the field loop
  * packs into scratch, tails in declaration order. Empty Bytes = codec invalid. */
-template <class T> Bytes encode(TypeCodec& c, const T& v, std::vector<uint8_t>& scratch) {
-    if (!c.ok) return Bytes();
-    if (c.memcpy_ok) return Bytes(&v, sizeof(T));
-    const bool le = host_le();
+/* struct to wire. Empty when the value does not fit the schema, so a write refuses rather
+ * than sending an empty message. */
+template <class T> std::optional<Bytes> encode(TypeCodec& c, const T& v, std::vector<uint8_t>& scratch) {
+    if (!c.ok) return std::nullopt;
     const uint8_t* base = reinterpret_cast<const uint8_t*>(&v);
+    if (c.memcpy_ok) {
+        if (c.has_strings && !strings_fit(c.leaves, base)) return std::nullopt;
+        return Bytes(&v, sizeof(T));
+    }
+    const bool le = host_le();
     if (c.tails.empty()) {
         scratch.assign(c.wire_size, 0);
-        for (const Leaf& l : c.leaves) leaf_to_wire(l, base, scratch.data(), le);
+        for (const Leaf& l : c.leaves)
+            if (!leaf_to_wire(l, base, scratch.data(), le)) return std::nullopt;
         return Bytes(scratch.data(), scratch.size());
     }
     size_t need = c.msg_min;
@@ -1893,13 +1917,14 @@ template <class T> Bytes encode(TypeCodec& c, const T& v, std::vector<uint8_t>& 
                              : t.extra(base + t.struct_off);
     scratch.assign(need, 0);
     if (!detail::rant_schema_message_default(c.raw, scratch.data(), scratch.size()))
-        return Bytes();
-    for (const Leaf& l : c.leaves) leaf_to_wire(l, base, scratch.data(), le);
+        return std::nullopt;
+    for (const Leaf& l : c.leaves)
+        if (!leaf_to_wire(l, base, scratch.data(), le)) return std::nullopt;
     for (const Tail& t : c.tails) {
         bool ok = t.is_structs
             ? struct_vector_write(t, base + t.struct_off, scratch.data(), scratch.size(), c.raw, le)
             : t.write(base + t.struct_off, scratch.data(), scratch.size(), c.raw, t.path.c_str());
-        if (!ok) return Bytes();
+        if (!ok) return std::nullopt;
     }
     return Bytes(scratch.data(),
                  detail::rant_schema_msg_len(c.raw, scratch.data(), scratch.size()));
@@ -2103,6 +2128,14 @@ public:
     SendStatus close();
     /* Run h for every message on this topic until this handle closes. */
     void add_handler(MessageHandler h);
+    /* The schema the topic uses now, empty when untyped. A reflect_from_mesh topic reports
+     * what it adopted. */
+    Schema schema() const {
+        detail::RantTopic* c = live();
+        return Schema(c ? detail::rant_topic_schema(c) : nullptr);
+    }
+    /* The topic's name, empty once closed. */
+    std::string name() const;
     uint16_t index() const {
         detail::RantTopic* c = live();
         return c ? detail::rant_topic_index(c) : 0xffff;
@@ -2139,7 +2172,6 @@ private:
               bool pull);
     /* the C topic while the node lives, else null */
     detail::RantTopic* live() const noexcept { return impl_ && impl_->node ? ch_ : nullptr; }
-    std::string name() const;
     void move_from(TopicCore& o) noexcept {
         ch_ = o.ch_; impl_ = std::move(o.impl_); bits_ = o.bits_; handler_id_ = o.handler_id_;
         o.ch_ = nullptr; o.bits_ = 0; o.handler_id_ = 0;
@@ -3292,6 +3324,17 @@ public:
     /* Retire the definition and release the name for a successor. The handle is empty after. State
      * from its own inline callback, and the handle stays valid then. */
     SendStatus close() { return priv::close_function(fn_, impl_, owned_); }
+    const std::string& name() const { return name_; }
+    /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
+     * it adopted. */
+    Schema request_schema() const {
+        detail::RantFunction* f = live();
+        return Schema(f ? detail::rant_function_request_schema(f) : nullptr);
+    }
+    Schema response_schema() const {
+        detail::RantFunction* f = live();
+        return Schema(f ? detail::rant_function_response_schema(f) : nullptr);
+    }
 
 private:
     struct Box : priv::HandlerBox {
@@ -3413,6 +3456,17 @@ public:
     /* Retire the remote and release the name. Every outstanding call completes Cancelled.
      * The handle is empty after. State from its own inline callback, and it stays valid then. */
     SendStatus close() { return priv::close_function(fn_, impl_, owned_); }
+    const std::string& name() const { return name_; }
+    /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
+     * it adopted. */
+    Schema request_schema() const {
+        detail::RantFunction* f = live();
+        return Schema(f ? detail::rant_function_request_schema(f) : nullptr);
+    }
+    Schema response_schema() const {
+        detail::RantFunction* f = live();
+        return Schema(f ? detail::rant_function_response_schema(f) : nullptr);
+    }
 
 private:
     /* wrap a node-owned function handle (the @rant/meta endpoint): callable, never
@@ -3562,6 +3616,21 @@ public:
     /* Retire the definition. Every live deferred call answers Cancelled first, so a RUNNING
      * caller never hangs. The handle is empty after. State from its own inline callback. */
     SendStatus close() { return priv::close_function(fn_, impl_, owned_); }
+    const std::string& name() const { return name_; }
+    /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
+     * it adopted. */
+    Schema request_schema() const {
+        detail::RantFunction* f = live();
+        return Schema(f ? detail::rant_function_request_schema(f) : nullptr);
+    }
+    Schema response_schema() const {
+        detail::RantFunction* f = live();
+        return Schema(f ? detail::rant_function_response_schema(f) : nullptr);
+    }
+    Schema progress_schema() const {
+        detail::RantFunction* f = live();
+        return Schema(f ? detail::rant_function_progress_schema(f) : nullptr);
+    }
 
 private:
     struct Box : priv::HandlerBox {
@@ -3721,6 +3790,21 @@ public:
     /* Retire the remote. Every outstanding call completes Cancelled. The handle is empty
      * after. State from its own inline callback, and it stays valid then. */
     SendStatus close() { return priv::close_function(fn_, impl_, owned_); }
+    const std::string& name() const { return name_; }
+    /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
+     * it adopted. */
+    Schema request_schema() const {
+        detail::RantFunction* f = live();
+        return Schema(f ? detail::rant_function_request_schema(f) : nullptr);
+    }
+    Schema response_schema() const {
+        detail::RantFunction* f = live();
+        return Schema(f ? detail::rant_function_response_schema(f) : nullptr);
+    }
+    Schema progress_schema() const {
+        detail::RantFunction* f = live();
+        return Schema(f ? detail::rant_function_progress_schema(f) : nullptr);
+    }
 
 private:
     /* a blocking call's progress handler, on the caller's stack for the call */
@@ -3853,6 +3937,13 @@ public:
         impl_.reset();
         return SendStatus::Ok;
     }
+    const std::string& name() const { return name_; }
+    /* The schema in use now, empty when untyped. A reflect_from_mesh handle reports what it
+     * adopted. */
+    Schema schema() const {
+        detail::RantVariable* v = live();
+        return Schema(v ? detail::rant_variable_schema(v) : nullptr);
+    }
 
 protected:
     VariableDefinition(Node& n, std::string_view name, const Schema* schema,
@@ -3961,6 +4052,10 @@ public:
     bool drain(std::chrono::milliseconds timeout) { return t_.drain(timeout); }
     /* drop this handle now instead of at scope end, see TopicCore::close */
     SendStatus close()            { return t_.close(); }
+    /* a reflect_from_mesh publisher: re type in place when the mesh moved, true = re typed */
+    bool        refresh()         { return t_.refresh(); }
+    Schema      schema() const    { return t_.schema(); }
+    std::string name() const      { return t_.name(); }
 
 private:
     Publisher(Node& n, std::string_view name, const Schema* schema, const Qos& qos)
@@ -3994,6 +4089,10 @@ public:
     int  match_count()  const { return t_.match_count(); }
     /* drop this handle now instead of at scope end, see TopicCore::close */
     SendStatus close()        { return t_.close(); }
+    /* a reflect_from_mesh subscriber: re type in place when the mesh moved, true = re typed */
+    bool        refresh()      { return t_.refresh(); }
+    Schema      schema() const { return t_.schema(); }
+    std::string name() const   { return t_.name(); }
 
 private:
     Subscriber(Node& n, std::string_view name, const Schema* schema,
@@ -4035,9 +4134,11 @@ public:
     uint64_t         recv_us()       const { return core_.recv_us(); }
     uint64_t         written_us()       const { return core_.written_us(); }
 
+    /* A reply that does not encode answers AppError, never an empty OK. */
     void reply(const Rsp& v) {
         std::vector<uint8_t> s;
-        core_.reply(priv::encode(*rsp_, v, s));
+        if (auto b = priv::encode(*rsp_, v, s)) core_.reply(*b);
+        else core_.fail("the reply did not encode into the response schema");
     }
     void reply(Bytes raw)     { core_.reply(raw); }
     void fail(std::string_view message = {}, Bytes raw = {}) { core_.fail(message, raw); }
@@ -4057,9 +4158,12 @@ public:
     Deferred& operator=(Deferred&&) noexcept = default;
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
+    /* A value that does not encode answers AppError and returns false. */
     bool complete(const Rsp& v, std::string_view message = {}) {
         std::vector<uint8_t> s;
-        return core_.complete(priv::encode(*rsp_, v, s), message);
+        auto b = priv::encode(*rsp_, v, s);
+        if (!b) { (void)core_.fail("the reply did not encode into the response schema"); return false; }
+        return core_.complete(*b, message);
     }
     bool fail(std::string_view message = {}) { return core_.fail(message); }
 private:
@@ -4126,6 +4230,9 @@ public:
     explicit operator bool() const noexcept { return valid(); }
     int match_count() const { return core_.match_count(); }
     SendStatus close() { return core_.close(); }
+    const std::string& name() const { return core_.name(); }
+    Schema request_schema() const   { return core_.request_schema(); }
+    Schema response_schema() const  { return core_.response_schema(); }
 
 private:
     template <class H>
@@ -4156,7 +4263,8 @@ private:
                 if (!priv::decode(*cq, q, u.data(), u.raw_schema())) { u.fail("request decode failed"); return; }
                 Rsp r = f(q);
                 std::vector<uint8_t> s;
-                u.reply(priv::encode(*cr, r, s));
+                if (auto b = priv::encode(*cr, r, s)) u.reply(*b);
+                else u.fail("the reply did not encode into the response schema");
             };
         } else {
             static_assert(priv::always_false<H>,
@@ -4177,8 +4285,10 @@ public:
     /* Blocking call, see RemoteFunction<Bytes, Bytes>::call. Decodes into the owning Response. */
     Response<Rsp> call(const Req& req, std::optional<std::chrono::milliseconds> timeout = std::nullopt, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        Response<Bytes> ur = core_.call(priv::encode(*cq_, req, s), timeout, opts);
         Response<Rsp> r;
+        auto b = priv::encode(*cq_, req, s);
+        if (!b) { r.ss_ = SendStatus::Schema; r.message_ = "the request did not encode"; return r; }
+        Response<Bytes> ur = core_.call(*b, timeout, opts);
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
         r.message_.assign(ur.message());   /* own it: ur dies with this frame */
@@ -4189,7 +4299,9 @@ public:
     SendStatus call_async(const Req& req, std::function<void(const ResponseView<Rsp>&)> cb,
                           const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        return core_.call_async(priv::encode(*cq_, req, s),
+        auto b = priv::encode(*cq_, req, s);
+        if (!b) return SendStatus::Schema;
+        return core_.call_async(*b,
             [cb = std::move(cb), cr = cr_, impl = core_.impl_.get(), nm = core_.name_](const ResponseView<Bytes>& uv) {
                 ResponseView<Rsp> tv;
                 tv.st_ = uv.status(); tv.provider_ = uv.provider(); tv.written_ = uv.written_us();
@@ -4202,6 +4314,9 @@ public:
 
     int  match_count()    const { return core_.match_count(); }
     SendStatus close() { return core_.close(); }
+    const std::string& name() const { return core_.name(); }
+    Schema request_schema() const   { return core_.request_schema(); }
+    Schema response_schema() const  { return core_.response_schema(); }
 
 private:
     RemoteFunction(Node& n, std::string_view name, const FunctionOptions& o) {
@@ -4230,9 +4345,11 @@ public:
     uint64_t         recv_us()     const { return core_.recv_us(); }
     uint64_t         written_us()  const { return core_.written_us(); }
 
+    /* A reply that does not encode answers AppError, never an empty OK. */
     void reply(const Rsp& v) {
         std::vector<uint8_t> s;
-        core_.reply(priv::encode(*rsp_, v, s));
+        if (auto b = priv::encode(*rsp_, v, s)) core_.reply(*b);
+        else core_.fail("the reply did not encode into the response schema");
     }
     void reply(Bytes raw) { core_.reply(raw); }
     void fail(std::string_view message = {}, Bytes raw = {}) { core_.fail(message, raw); }
@@ -4258,19 +4375,26 @@ public:
 
     SendStatus progress(const Prg& v) {
         std::vector<uint8_t> s;
-        return core_.progress(priv::encode(*prg_, v, s));
+        auto b = priv::encode(*prg_, v, s);
+        return b ? core_.progress(*b) : SendStatus::Schema;
     }
     bool cancelled() const { return core_.cancelled(); }
+    /* A result that does not encode answers AppError, so the caller is not left waiting,
+     * and returns Schema. */
     SendStatus complete(const Rsp& v, std::string_view message = {}) {
         std::vector<uint8_t> s;
-        return core_.complete(priv::encode(*rsp_, v, s), message);
+        auto b = priv::encode(*rsp_, v, s);
+        if (!b) { (void)core_.fail("the result did not encode into the response schema"); return SendStatus::Schema; }
+        return core_.complete(*b, message);
     }
     SendStatus fail(std::string_view message = {}) { return core_.fail(message); }
     SendStatus complete_cancelled(std::string_view message = {}) { return core_.complete_cancelled(message); }
     /* honor a cancel and still carry a typed partial result */
     SendStatus complete_cancelled(std::string_view message, const Rsp& partial) {
         std::vector<uint8_t> s;
-        return core_.complete_cancelled(message, priv::encode(*rsp_, partial, s));
+        auto b = priv::encode(*rsp_, partial, s);
+        if (!b) { (void)core_.complete_cancelled(message); return SendStatus::Schema; }
+        return core_.complete_cancelled(message, *b);
     }
 
 private:
@@ -4311,6 +4435,10 @@ public:
     int match_count() const { return core_.match_count(); }
     void on_cancel(std::function<void(uint64_t token)> h) { core_.on_cancel(std::move(h)); }
     SendStatus close() { return core_.close(); }
+    const std::string& name() const { return core_.name(); }
+    Schema request_schema() const   { return core_.request_schema(); }
+    Schema progress_schema() const  { return core_.progress_schema(); }
+    Schema response_schema() const  { return core_.response_schema(); }
 
 private:
     template <class H>
@@ -4351,9 +4479,10 @@ public:
     Response<Rsp> call(const Req& req, ProgressHandler on_progress = {},
                        std::optional<std::chrono::milliseconds> timeout = std::nullopt, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        Response<Bytes> ur = core_.call(priv::encode(*cq_, req, s), adapt_progress(std::move(on_progress)),
-                                   timeout, opts);
         Response<Rsp> r;
+        auto b = priv::encode(*cq_, req, s);
+        if (!b) { r.ss_ = SendStatus::Schema; r.message_ = "the request did not encode"; return r; }
+        Response<Bytes> ur = core_.call(*b, adapt_progress(std::move(on_progress)), timeout, opts);
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
         r.message_.assign(ur.message());   /* own it: ur dies with this frame */
@@ -4366,7 +4495,9 @@ public:
                         std::function<void(const ResponseView<Rsp>&)> on_response,
                         const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        return core_.call_async(priv::encode(*cq_, req, s), adapt_progress(std::move(on_progress)),
+        auto b = priv::encode(*cq_, req, s);
+        if (!b) return TaskCall{ SendStatus::Schema, 0 };
+        return core_.call_async(*b, adapt_progress(std::move(on_progress)),
             [cb = std::move(on_response), cr = cr_, impl = core_.impl_.get(), nm = core_.name_](const ResponseView<Bytes>& uv) {
                 if (!cb) return;
                 ResponseView<Rsp> tv;
@@ -4382,6 +4513,10 @@ public:
 
     int  match_count()    const { return core_.match_count(); }
     SendStatus close() { return core_.close(); }
+    const std::string& name() const { return core_.name(); }
+    Schema request_schema() const   { return core_.request_schema(); }
+    Schema progress_schema() const  { return core_.progress_schema(); }
+    Schema response_schema() const  { return core_.response_schema(); }
 
 private:
     RemoteTask(Node& n, std::string_view name, const TaskOptions& o) {
@@ -4428,8 +4563,16 @@ public:
         return priv::decode_payload<T>(*c_, Bytes(b->data(), b->size()), nullptr, core_.impl_.get(),
                                        core_.name_, "the variable's value did not decode into T");
     }
-    SendStatus set(const T& v)   { thread_local std::vector<uint8_t> s; return core_.set(priv::encode(*c_, v, s)); }
-    SendStatus force(const T& v) { thread_local std::vector<uint8_t> s; return core_.force(priv::encode(*c_, v, s)); }
+    SendStatus set(const T& v) {
+        thread_local std::vector<uint8_t> s;
+        auto b = priv::encode(*c_, v, s);
+        return b ? core_.set(*b) : SendStatus::Schema;
+    }
+    SendStatus force(const T& v) {
+        thread_local std::vector<uint8_t> s;
+        auto b = priv::encode(*c_, v, s);
+        return b ? core_.force(*b) : SendStatus::Schema;
+    }
     SendStatus unforce()         { return core_.unforce(); }
     bool forced()          const { return core_.forced(); }
     int  match_count()     const { return core_.match_count(); }
@@ -4447,6 +4590,8 @@ public:
     void on_change(std::nullptr_t) { core_.on_change({}); }
     void on_write (std::nullptr_t) { core_.on_write({}); }
     SendStatus close() { return core_.close(); }
+    const std::string& name() const { return core_.name(); }
+    Schema schema() const { return core_.schema(); }
 
 private:
     VariableDefinition(Node& n, std::string_view name, const VariableOptions<T>& o) {
@@ -4455,7 +4600,11 @@ private:
         Schema sc = c_->schema();
         std::vector<uint8_t> scratch;
         VariableOptions<Bytes> uo;
-        if (o.initial) uo.initial = priv::encode(*c_, *o.initial, scratch);
+        if (o.initial) {
+            auto b = priv::encode(*c_, *o.initial, scratch);
+            if (!b) { priv::raise_msg("rant::VariableDefinition: the initial value did not encode"); return; }
+            uo.initial = *b;
+        }
         uo.read_only = o.read_only; uo.allow_force = o.allow_force;
         uo.catch_up = o.catch_up; uo.keep_last = o.keep_last;
         uo.backpressure_wait = o.backpressure_wait; uo.queue = o.queue;
@@ -4496,8 +4645,16 @@ public:
     }
     /* Block (driving the node loop) until a value exists or timeout_ms elapses. */
     bool wait(std::chrono::milliseconds timeout) { return core_.wait(timeout); }
-    SendStatus set(const T& v)   { thread_local std::vector<uint8_t> s; return core_.set(priv::encode(*c_, v, s)); }
-    SendStatus force(const T& v) { thread_local std::vector<uint8_t> s; return core_.force(priv::encode(*c_, v, s)); }
+    SendStatus set(const T& v) {
+        thread_local std::vector<uint8_t> s;
+        auto b = priv::encode(*c_, v, s);
+        return b ? core_.set(*b) : SendStatus::Schema;
+    }
+    SendStatus force(const T& v) {
+        thread_local std::vector<uint8_t> s;
+        auto b = priv::encode(*c_, v, s);
+        return b ? core_.force(*b) : SendStatus::Schema;
+    }
     SendStatus unforce()         { return core_.unforce(); }
     bool forced()          const { return core_.forced(); }
     int  match_count()     const { return core_.match_count(); }
@@ -4515,6 +4672,8 @@ public:
     void on_change(std::nullptr_t) { core_.on_change({}); }
     void on_write (std::nullptr_t) { core_.on_write({}); }
     SendStatus close() { return core_.close(); }
+    const std::string& name() const { return core_.name(); }
+    Schema schema() const { return core_.schema(); }
 
 private:
     RemoteVariable(Node& n, std::string_view name, const VariableOptions<T>& o) {
@@ -4557,12 +4716,15 @@ public:
 
     SendStatus send(const T& v, types::Timestamp capture = {}) {
         thread_local std::vector<uint8_t> s;   /* reused: only the non memcpy path fills it */
-        return core_.send(priv::encode(*c_, v, s), capture);
+        auto b = priv::encode(*c_, v, s);
+        return b ? core_.send(*b, capture) : SendStatus::Schema;
     }
     int  match_count()   const { return core_.match_count(); }
     bool ready()         const { return core_.ready(); }
     bool drain(std::chrono::milliseconds timeout) { return core_.drain(timeout); }
     SendStatus close()        { return core_.close(); }
+    Schema      schema() const { return core_.schema(); }
+    std::string name() const   { return core_.name(); }
 
 private:
     Publisher(Node& n, std::string_view name, const Qos& qos) {
@@ -4596,6 +4758,8 @@ public:
 
     int  match_count() const { return core_.match_count(); }
     SendStatus close()      { return core_.close(); }
+    Schema      schema() const { return core_.schema(); }
+    std::string name() const   { return core_.name(); }
 
 private:
     template <class H>
