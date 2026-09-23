@@ -25,60 +25,231 @@ namespace Rant
     }
 #endif
 
-    public enum Reliability { BestEffort = 0, Reliable = 1 }
+    /// <summary>Whether a topic repairs loss. A reliable subscriber refuses a best effort
+    /// publisher.</summary>
+    public enum Reliability
+    {
+        /// <summary>Send once, a lost message stays lost.</summary>
+        BestEffort = 0,
+        /// <summary>Resend what a subscriber reports missing, from the kept history.</summary>
+        Reliable = 1
+    }
     internal enum Role { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 }
+
+    /// <summary>What a send or set did. Every value but Ok means nothing was sent.</summary>
     public enum SendStatus
     {
-        Ok = 0, NoTopic = -1, TooBig = -2, BadRole = -3, OutOfMemory = -4,
-        State = -5,   // wrong state: Poll while started, or a call a handler may not make
-        NoSys = -6,   // not compiled in (Start under RANT_NO_THREADS)
-        Schema = -7   // the payload is not a message of the topic's schema
+        /// <summary>Sent, or queued to send.</summary>
+        Ok = 0,
+        /// <summary>No such topic, or no owner matched a remote variable yet.</summary>
+        NoTopic = -1,
+        /// <summary>The message is larger than any message may be.</summary>
+        TooBig = -2,
+        /// <summary>This handle's side may not send: a receive only topic or a read only variable.</summary>
+        BadRole = -3,
+        /// <summary>The allocator refused the memory the send needed.</summary>
+        OutOfMemory = -4,
+        /// <summary>The wrong moment: Poll while the service thread runs, or a call a
+        /// handler may not make.</summary>
+        State = -5,
+        /// <summary>Not compiled in, such as a service thread in a build without threads.</summary>
+        NoSys = -6,
+        /// <summary>The payload is not a message of the topic's schema.</summary>
+        Schema = -7
     }
 
+    /// <summary>What an event reports. Read the RantEvent fields named for the kind.</summary>
     public enum EventKind
     {
-        PeerUp = 0, PeerDown, PeerInterest, MessageLost, Error
+        /// <summary>A peer was discovered or came back: Peer, PeerName.</summary>
+        PeerUp = 0,
+        /// <summary>A peer dropped or fell silent: Peer, PeerName.</summary>
+        PeerDown,
+        /// <summary>A peer's interest was applied, so matched topics now flow: Peer.</summary>
+        PeerInterest,
+        /// <summary>Sequence numbers were skipped: Topic, Peer, LostFirst, LostCount. Not an
+        /// error.</summary>
+        MessageLost,
+        /// <summary>A fault, which Error names.</summary>
+        Error
     }
 
-    // The error carried by an EventKind.Error event, RantEvent.Error and RantNode.LastError.
+    /// <summary>The fault an EventKind.Error event carries, also in RantEvent.Error and
+    /// RantNode.LastError.</summary>
     public enum ErrorKind
     {
+        /// <summary>No error.</summary>
         None = 0,
-        NameCollision, QosIncompatible, KindMismatch, SchemaMismatch, InterestOverflow,
-        MetaTruncatedInterest, PeerMetaTooBig, MessageTooBig,
-        PeerRefused, EvictedUnsent, UnmatchedSend, DuplicateAuthority,
-        Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress,
-        BadName, State, BadSchema   // a create refused: the name, the moment, the schema
+        /// <summary>A peer's topic name hashes to ours but differs, or a create found a live
+        /// topic of the same name on this node.</summary>
+        NameCollision,
+        /// <summary>A reliable subscriber met a best effort publisher: Topic, Peer.</summary>
+        QosIncompatible,
+        /// <summary>The name is another entity kind at a peer: Topic, Peer.</summary>
+        KindMismatch,
+        /// <summary>A match was refused or a message did not fit the schema: Topic, Peer,
+        /// SchemaDetail.</summary>
+        SchemaMismatch,
+        /// <summary>A peer's topic index map failed to allocate: Peer, LostCount entries.</summary>
+        InterestOverflow,
+        /// <summary>This node's metadata overflowed, so peers see none of its topics.</summary>
+        MetaTruncatedInterest,
+        /// <summary>A peer's metadata is larger than the receive buffer: Peer, TooBigBytes.</summary>
+        PeerMetaTooBig,
+        /// <summary>A received message could not be buffered: TooBigBytes.</summary>
+        MessageTooBig,
+        /// <summary>The peer table is full of active peers, so a new one was refused.</summary>
+        PeerRefused,
+        /// <summary>A send overwrote history no subscriber had been sent: Topic, LostFirst,
+        /// LostCount.</summary>
+        EvictedUnsent,
+        /// <summary>A send reached nobody while a match was still resolving: Topic.</summary>
+        UnmatchedSend,
+        /// <summary>A peer also claims the handler side of this entity: Topic, Peer.</summary>
+        DuplicateAuthority,
+        /// <summary>The allocator returned nothing: TooBigBytes is the size asked for.</summary>
+        Oom,
+        /// <summary>The platform network setup failed.</summary>
+        Platform,
+        /// <summary>Opening a UDP socket failed: OsError.</summary>
+        Socket,
+        /// <summary>Binding failed, the port is in use: OsError.</summary>
+        Bind,
+        /// <summary>Joining the discovery group failed, usually a bad interface: OsError.</summary>
+        McastJoin,
+        /// <summary>A send failed hard: Peer, Topic, TooBigBytes, OsError.</summary>
+        Send,
+        /// <summary>A receive failed hard: OsError.</summary>
+        Recv,
+        /// <summary>Waiting on the sockets failed: OsError.</summary>
+        Poll,
+        /// <summary>No cross thread wake exists, so wakes wait for the next tick.</summary>
+        Waker,
+        /// <summary>A configured address could not be parsed, so the open was refused.</summary>
+        BadAddress,
+        /// <summary>A create's name is empty, too long or holds '@': TopicName.</summary>
+        BadName,
+        /// <summary>A create was refused at this moment: from a handler, or the table is full.</summary>
+        State,
+        /// <summary>A schema text or wire was refused: SchemaDetail says why and where.</summary>
+        BadSchema
     }
 
-    // Schema field kinds for reflection, the value is the wire kind byte. Named is a nominal
-    // tag reflection unwraps into Field.TypeName, so a field never reports it as its Kind.
+    /// <summary>A schema field's kind, valued as its wire kind byte.</summary>
     public enum FieldType : byte
     {
-        U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String,
-        VString, VArray, Map, Enum, Named
+        /// <summary>An unsigned 8 bit integer.</summary>
+        U8 = 0,
+        /// <summary>An unsigned 16 bit integer.</summary>
+        U16,
+        /// <summary>An unsigned 32 bit integer.</summary>
+        U32,
+        /// <summary>An unsigned 64 bit integer.</summary>
+        U64,
+        /// <summary>A signed 8 bit integer.</summary>
+        I8,
+        /// <summary>A signed 16 bit integer.</summary>
+        I16,
+        /// <summary>A signed 32 bit integer.</summary>
+        I32,
+        /// <summary>A signed 64 bit integer.</summary>
+        I64,
+        /// <summary>A 32 bit float.</summary>
+        F32,
+        /// <summary>A 64 bit float.</summary>
+        F64,
+        /// <summary>One byte, 0 or 1.</summary>
+        Bool,
+        /// <summary>A fixed array of Count elements of kind Elem.</summary>
+        Array,
+        /// <summary>A struct, its members follow it in the table one level deeper.</summary>
+        Struct,
+        /// <summary>A capped string of at most StrCap bytes.</summary>
+        String,
+        /// <summary>A string of any length, carried in the message tail.</summary>
+        VString,
+        /// <summary>An array of any length, carried in the message tail.</summary>
+        VArray,
+        /// <summary>A self describing map of string keys to values.</summary>
+        Map,
+        /// <summary>A named integer, its options read through the schema.</summary>
+        Enum,
+        /// <summary>A name on a type. Reflection moves it to TypeName, so no field reports
+        /// it as its Kind.</summary>
+        Named
     }
 
-    // A call's outcome, mirrors RantCallStatus. Timeout, PeerLost and NoProvider are
-    // synthesized on the caller, and Cancelled also for calls still pending when the node closes.
+    /// <summary>How a function or task call ended. Timeout, PeerLost and NoProvider are made
+    /// on the caller's side.</summary>
     public enum CallStatus
     {
-        Ok = 0, AppError = 1, NoHandler = 2, Timeout = 3, PeerLost = 4, Cancelled = 5,
-        Running = 6,  // task, the one NON-terminal status: accepted and running
-        NoProvider = 7   // the timeout passed with no definition ever matched
+        /// <summary>The handler answered.</summary>
+        Ok = 0,
+        /// <summary>The handler failed the call or threw, the reason is in the reply.</summary>
+        AppError = 1,
+        /// <summary>The definition has no handler.</summary>
+        NoHandler = 2,
+        /// <summary>No answer came within the timeout.</summary>
+        Timeout = 3,
+        /// <summary>The handler's node dropped during the call.</summary>
+        PeerLost = 4,
+        /// <summary>The call was cancelled, or the node closed while it was pending.</summary>
+        Cancelled = 5,
+        /// <summary>A task was accepted and runs. The one status that is not an end.</summary>
+        Running = 6,
+        /// <summary>The timeout passed with no definition ever matched.</summary>
+        NoProvider = 7
     }
 
-    // Severity of a built-in @rant/log line. Mirrors RantLogLevel.
-    public enum LogLevel { Error = 0, Warn = 1, Info = 2 }
+    /// <summary>The severity of a line on the built in log topic.</summary>
+    public enum LogLevel
+    {
+        /// <summary>Something failed.</summary>
+        Error = 0,
+        /// <summary>Something is wrong but work goes on.</summary>
+        Warn = 1,
+        /// <summary>Normal progress.</summary>
+        Info = 2
+    }
 
-    // A @rant/meta request's section mask, OR the bits. 0 = every section. Mirrors RANT_META_*.
+    /// <summary>The sections a meta request asks for. Combine the bits, All asks for every
+    /// one.</summary>
     [Flags]
-    public enum MetaSection : uint { Node = 0x1, Proc = 0x2, Topics = 0x4, Peers = 0x8, All = 0 }
+    public enum MetaSection : uint
+    {
+        /// <summary>The node: uptime, memory, backpressure, the last error.</summary>
+        Node = 0x1,
+        /// <summary>The process: cpu time, memory and the heap.</summary>
+        Proc = 0x2,
+        /// <summary>Each topic's traffic and queue.</summary>
+        Topics = 0x4,
+        /// <summary>Each peer's round trip time and traffic.</summary>
+        Peers = 0x8,
+        /// <summary>Every section.</summary>
+        All = 0
+    }
 
-    // Reflection: a peer's liveness and an entity's kind, mirrors RantPeerLiveness and
-    // RantEntityKind. A dropped peer is still listed, gate on Active.
-    public enum PeerLiveness { Active = 0, Dropped = 1 }
-    public enum EntityKind { Topic = 0, Function = 1, Variable = 2, Task = 3 }
+    /// <summary>Whether a listed peer is live. A dropped peer stays listed, so check Active.</summary>
+    public enum PeerLiveness
+    {
+        /// <summary>Heard within the peer timeout.</summary>
+        Active = 0,
+        /// <summary>Silent past the peer timeout, or gone.</summary>
+        Dropped = 1
+    }
+
+    /// <summary>What a mesh entity is.</summary>
+    public enum EntityKind
+    {
+        /// <summary>A published stream of messages.</summary>
+        Topic = 0,
+        /// <summary>A request and one reply.</summary>
+        Function = 1,
+        /// <summary>A value one node owns and others read or set.</summary>
+        Variable = 2,
+        /// <summary>A long request with progress and cancel.</summary>
+        Task = 3
+    }
 
     // ---- native struct layouts (mirror the C exactly) ---------------------------
 
@@ -668,28 +839,45 @@ namespace Rant
     // ---- config + reflection attributes -----------------------------------------
 
     /// <summary>Per topic QoS, the C RantQos as a class. Every field zero means the default,
-    /// so a null Qos is every default. docs/topics.md explains them.</summary>
+    /// so a null Qos is every default. <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/topics.md">docs/topics.md</see> explains them.</summary>
     public sealed class Qos
     {
+        /// <summary>Whether loss is repaired. Both ends must agree, a reliable subscriber
+        /// refuses a best effort publisher.</summary>
         public Reliability Reliability = Reliability.BestEffort;
-        public ushort KeepLast = 0;           // retained for late join and repair. 0 = 1, or 10 reliable
-        public ushort CatchUp = 0;            // messages a new subscriber gets at once. 0 = future only
-        public uint MaxMessageBytes = 0;      // size hint that pins the SHM class, never a cap
-        public uint HeartbeatUs = 0;          // reliable idle publisher ping. 0 = 250 ms
-        public uint RepairDelayUs = 0;        // the reliable re ask bound. 0 = adaptive from the round trip
-        public uint BackpressureWaitUs = 0;   // reliable send pause for a slow subscriber. 0 = none
-        public uint ShmMaxBytes = 0;          // pin the topic to one SHM class. 0 = per message
-        public uint QueueBytes = 0;           // the ring cap of a queued topic, 0 = 1 MB
-        public ushort MaxRateHz = 0;          // subscriber side, best effort: a delivery cap per publisher
-        public bool NoTimestamp = false;      // publisher side: no source stamp, receivers see WrittenUs 0
+        /// <summary>Messages kept for late joiners and repair. 0 means 1, or 10 when reliable.</summary>
+        public ushort KeepLast = 0;
+        /// <summary>Kept messages a new subscriber gets at once. 0 means only future ones.</summary>
+        public ushort CatchUp = 0;
+        /// <summary>A size hint that picks the shared memory class. Never a cap.</summary>
+        public uint MaxMessageBytes = 0;
+        /// <summary>How often an idle reliable publisher pings, in microseconds. 0 means 250 ms.</summary>
+        public uint HeartbeatUs = 0;
+        /// <summary>The longest a reliable subscriber waits before asking again for a lost
+        /// message, in microseconds. 0 adapts to the round trip.</summary>
+        public uint RepairDelayUs = 0;
+        /// <summary>How long a reliable send may wait for a slow subscriber, in microseconds.
+        /// 0 never waits.</summary>
+        public uint BackpressureWaitUs = 0;
+        /// <summary>Pins the topic to one shared memory class of this many bytes. 0 picks per
+        /// message.</summary>
+        public uint ShmMaxBytes = 0;
+        /// <summary>The byte cap of a queued topic's ring. 0 means 1 MB.</summary>
+        public uint QueueBytes = 0;
+        /// <summary>Subscriber side, best effort only: at most this many deliveries a second
+        /// from each publisher. 0 means no cap.</summary>
+        public ushort MaxRateHz = 0;
+        /// <summary>Publisher side: send no source time, so receivers see WrittenUs 0.</summary>
+        public bool NoTimestamp = false;
         /// <summary>Not a QoS field: it rides beside them in the C topic opts. A null schema and
-        /// a BestEffort reliability then follow the mesh. See docs/reflection.md.</summary>
+        /// a BestEffort reliability then follow the mesh. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool ReflectFromMesh = false;
         /// <summary>The queue the subscriber's OnMessage parks on, null = the node's default
         /// under Threading.Dispatch, else inline on the loop thread. Not a QoS field, it rides
-        /// here because the topic options are this object (docs/node.md).</summary>
+        /// here because the topic options are this object (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/node.md">docs/node.md</see>).</summary>
         public RantQueue Queue = null;
 
+        /// <summary>Every default.</summary>
         public Qos() { }
 
         /// <summary>Copy, so a layer that fills in a default never changes its caller's object.</summary>
@@ -730,17 +918,23 @@ namespace Rant
         }
     }
 
-    /// <summary>Who drives the node's loop and where callbacks run. ServiceThread: the C
-    /// service thread runs the loop from construction and every callback fires on it.
-    /// Manual: your thread calls Poll() and callbacks fire there. Dispatch: the service
-    /// thread runs the loop, every callback parks on the node's queue and runs when your
-    /// thread calls Dispatch().</summary>
-    public enum Threading { ServiceThread = 0, Manual = 1, Dispatch = 2 }
+    /// <summary>Who drives the node's loop and where callbacks run.</summary>
+    public enum Threading
+    {
+        /// <summary>The service thread runs the loop from construction and every callback
+        /// fires on it.</summary>
+        ServiceThread = 0,
+        /// <summary>Your thread calls Poll() and callbacks fire there.</summary>
+        Manual = 1,
+        /// <summary>The service thread runs the loop, and every callback waits on the node's
+        /// queue until your thread calls Dispatch().</summary>
+        Dispatch = 2
+    }
 
     /// <summary>A callback queue: a handle created with it parks its callbacks, and Dispatch
     /// runs them on the calling thread with the whole API available. One thread drains a
     /// queue at a time. From RantNode.CreateQueue, or the node's own under
-    /// Threading.Dispatch (docs/node.md).</summary>
+    /// Threading.Dispatch (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/node.md">docs/node.md</see>).</summary>
     public sealed class RantQueue
     {
         internal readonly IntPtr Handle;
@@ -768,7 +962,7 @@ namespace Rant
     }
 
     /// <summary>The node options, the C RantNodeOpts under C# names. 0, false or null is the
-    /// C default. docs/node.md and docs/discovery.md explain each.</summary>
+    /// C default. <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/node.md">docs/node.md</see> and <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/discovery.md">docs/discovery.md</see> explain each.</summary>
     public sealed class NodeOptions
     {
         /// <summary>Nodes only see peers on the same domain.</summary>
@@ -805,16 +999,23 @@ namespace Rant
         public bool UnicastOnly;
         /// <summary>UDP payload bytes per fragment, 0 = the default.</summary>
         public ushort FragmentSize;
-        /// <summary>Data socket OS buffers, 0 = the OS default. Raise both for big payloads.</summary>
+        /// <summary>The data socket's OS receive buffer, 0 = the OS default. Raise it for
+        /// big payloads.</summary>
         public uint RecvBufferBytes;
+        /// <summary>The data socket's OS send buffer, 0 = the OS default. Raise it for big
+        /// payloads.</summary>
         public uint SendBufferBytes;
-        /// <summary>Advertise this locator to every peer instead of letting each learn it from
-        /// the datagram source, for a cloud IP or a published container port.</summary>
+        /// <summary>Advertise this IP to every peer instead of letting each learn it from the
+        /// datagram source, for a cloud IP or a published container port.</summary>
         public string SelfIp;
+        /// <summary>Advertise this data port instead of the bound one, for a published
+        /// container port.</summary>
         public ushort AdvertisePort;
-        /// <summary>Discovery cadence: 0 = 3 s between announces, 12 s peer timeout, 16 peers.</summary>
+        /// <summary>Microseconds between discovery announces, 0 = 3 s.</summary>
         public uint AnnounceIntervalUs;
+        /// <summary>Drop a peer after this many microseconds of silence, 0 = 12 s.</summary>
         public uint PeerTimeoutUs;
+        /// <summary>The peers this node tracks at once, 0 = 16.</summary>
         public ushort MaxPeers;
         /// <summary>ServiceThread starts the C service thread at construction and callbacks
         /// fire on it. Manual leaves the loop to your Poll() calls, so they fire there.
@@ -835,7 +1036,7 @@ namespace Rant
         /// <summary>Redundant definitions on purpose: no duplicate authority diagnostic.</summary>
         public bool Multi;
         /// <summary>A byte[] handle with no schema takes the entity's from the mesh, and
-        /// Refresh() re types it later (docs/reflection.md).</summary>
+        /// Refresh() re types it later (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>).</summary>
         public bool ReflectFromMesh;
         /// <summary>The queue the handle's callbacks park on, null = the node's default under
         /// Threading.Dispatch, else inline on the loop thread.</summary>
@@ -852,7 +1053,7 @@ namespace Rant
         };
     }
 
-    /// <summary>Task options, the C RantTaskOpts (docs/tasks.md). 0 is the default.</summary>
+    /// <summary>Task options, the C RantTaskOpts (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/tasks.md">docs/tasks.md</see>). 0 is the default.</summary>
     public sealed class TaskOptions
     {
         /// <summary>Best effort progress: the definition offers it, a remote requests it.</summary>
@@ -906,7 +1107,7 @@ namespace Rant
         /// <summary>Reliable send pause for a slow peer, 0 = 1 s.</summary>
         public uint BackpressureWaitUs;
         /// <summary>A byte[] handle with no schema takes the owner's from the mesh, and
-        /// Refresh() re types it later (docs/reflection.md).</summary>
+        /// Refresh() re types it later (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>).</summary>
         public bool ReflectFromMesh;
         /// <summary>The queue OnChange and OnWrite park on, null = the node's default under
         /// Threading.Dispatch, else inline on the thread that applied the write.</summary>
@@ -930,7 +1131,9 @@ namespace Rant
     [AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class)]
     public sealed class RantSchemaAttribute : Attribute
     {
+        /// <summary>The wire type name, in any spelling. The wire keeps PascalCase.</summary>
         public string Name;
+        /// <summary>Name the type on the wire.</summary>
         public RantSchemaAttribute(string name) { Name = name; }
     }
 
@@ -939,7 +1142,9 @@ namespace Rant
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantArrayAttribute : Attribute
     {
+        /// <summary>The element count. A shorter array is zero filled, a longer one is cut.</summary>
         public int Count;
+        /// <summary>Fix the array at count elements.</summary>
         public RantArrayAttribute(int count) { Count = count; }
     }
 
@@ -948,137 +1153,371 @@ namespace Rant
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantStringAttribute : Attribute
     {
+        /// <summary>The most UTF-8 bytes the string holds. A longer one is refused at send.</summary>
         public int Cap;
+        /// <summary>Cap the string at cap UTF-8 bytes.</summary>
         public RantStringAttribute(int cap) { Cap = cap; }
     }
 
-    /// <summary>Name a plain field's type with a standard type (docs/stdtypes.md), such as a
+    /// <summary>Name a plain field's type with a standard type (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/stdtypes.md">docs/stdtypes.md</see>), such as a
     /// long as Timestamp, so the name narrows matching. The shape must be the canonical one or
     /// compiling fails. A struct names itself with [RantSchema].</summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantTypeNameAttribute : Attribute
     {
+        /// <summary>The standard type's name, such as Timestamp or Uuid.</summary>
         public string Name;
+        /// <summary>Spell the member's type as the standard type name.</summary>
         public RantTypeNameAttribute(string name) { Name = name; }
     }
 
-    // The standard types of docs/stdtypes.md, apart from the root so a mirror such
-    // as Color or Quaternion never clashes with an engine type of the same name.
+    // The standard types, apart from the root so a mirror such as Color or Quaternion never
+    // clashes with an engine type of the same name.
     namespace Types
     {
-        // The standard composites as plain mirrors of their wire shape (docs/stdtypes.md). Each
-        // compiles against the standard definition of its name, so a drift is refused.
+        // Plain mirrors of the wire shapes. Each compiles against the standard definition of
+        // its name, so a drift is refused.
+
+        /// <summary>The standard 2D vector of 32 bit floats.</summary>
         [RantSchema("Float2")] public struct Float2
-        { public float X; public float Y; }
+        {
+            /// <summary>The first component.</summary>
+            public float X;
+            /// <summary>The second component.</summary>
+            public float Y;
+        }
+        /// <summary>The standard 3D vector of 32 bit floats.</summary>
         [RantSchema("Float3")] public struct Float3
-        { public float X; public float Y;
-          public float Z; }
+        {
+            /// <summary>The first component.</summary>
+            public float X;
+            /// <summary>The second component.</summary>
+            public float Y;
+            /// <summary>The third component.</summary>
+            public float Z;
+        }
+        /// <summary>The standard 4D vector of 32 bit floats.</summary>
         [RantSchema("Float4")] public struct Float4
-        { public float X; public float Y;
-          public float Z; public float W; }
+        {
+            /// <summary>The first component.</summary>
+            public float X;
+            /// <summary>The second component.</summary>
+            public float Y;
+            /// <summary>The third component.</summary>
+            public float Z;
+            /// <summary>The fourth component.</summary>
+            public float W;
+        }
+        /// <summary>The standard 2D vector of 64 bit floats.</summary>
         [RantSchema("Double2")] public struct Double2
-        { public double X; public double Y; }
+        {
+            /// <summary>The first component.</summary>
+            public double X;
+            /// <summary>The second component.</summary>
+            public double Y;
+        }
+        /// <summary>The standard 3D vector of 64 bit floats.</summary>
         [RantSchema("Double3")] public struct Double3
-        { public double X; public double Y;
-          public double Z; }
+        {
+            /// <summary>The first component.</summary>
+            public double X;
+            /// <summary>The second component.</summary>
+            public double Y;
+            /// <summary>The third component.</summary>
+            public double Z;
+        }
+        /// <summary>The standard 4D vector of 64 bit floats.</summary>
         [RantSchema("Double4")] public struct Double4
-        { public double X; public double Y;
-          public double Z; public double W; }
+        {
+            /// <summary>The first component.</summary>
+            public double X;
+            /// <summary>The second component.</summary>
+            public double Y;
+            /// <summary>The third component.</summary>
+            public double Z;
+            /// <summary>The fourth component.</summary>
+            public double W;
+        }
+        /// <summary>The standard 2D vector of 32 bit integers.</summary>
         [RantSchema("Int2")] public struct Int2
-        { public int X; public int Y; }
+        {
+            /// <summary>The first component.</summary>
+            public int X;
+            /// <summary>The second component.</summary>
+            public int Y;
+        }
+        /// <summary>The standard 3D vector of 32 bit integers.</summary>
         [RantSchema("Int3")] public struct Int3
-        { public int X; public int Y; public int Z; }
+        {
+            /// <summary>The first component.</summary>
+            public int X;
+            /// <summary>The second component.</summary>
+            public int Y;
+            /// <summary>The third component.</summary>
+            public int Z;
+        }
+        /// <summary>The standard 4D vector of 32 bit integers.</summary>
         [RantSchema("Int4")] public struct Int4
-        { public int X; public int Y;
-          public int Z; public int W; }
-        [RantSchema("Quaternion")] public struct Quaternion    // stored x, y, z, w
-        { public double X; public double Y;
-          public double Z; public double W; }
-        [RantSchema("Color")] public struct Color              // sRGB, straight alpha
-        { public byte R; public byte G;
-          public byte B; public byte A; }
+        {
+            /// <summary>The first component.</summary>
+            public int X;
+            /// <summary>The second component.</summary>
+            public int Y;
+            /// <summary>The third component.</summary>
+            public int Z;
+            /// <summary>The fourth component.</summary>
+            public int W;
+        }
+        /// <summary>A rotation as a unit quaternion, stored x, y, z, w. The identity is W = 1.</summary>
+        [RantSchema("Quaternion")] public struct Quaternion
+        {
+            /// <summary>The x part of the vector.</summary>
+            public double X;
+            /// <summary>The y part of the vector.</summary>
+            public double Y;
+            /// <summary>The z part of the vector.</summary>
+            public double Z;
+            /// <summary>The scalar part.</summary>
+            public double W;
+        }
+        /// <summary>A color as sRGB bytes with straight, not premultiplied, alpha.</summary>
+        [RantSchema("Color")] public struct Color
+        {
+            /// <summary>Red, 0 to 255.</summary>
+            public byte R;
+            /// <summary>Green, 0 to 255.</summary>
+            public byte G;
+            /// <summary>Blue, 0 to 255.</summary>
+            public byte B;
+            /// <summary>Alpha, 0 transparent to 255 opaque.</summary>
+            public byte A;
+        }
+        /// <summary>An axis aligned rectangle in 32 bit floats.</summary>
         [RantSchema("Rect")] public struct Rect
-        { public float X; public float Y;
-          public float W; public float H; }
+        {
+            /// <summary>The left edge.</summary>
+            public float X;
+            /// <summary>The top edge.</summary>
+            public float Y;
+            /// <summary>The width.</summary>
+            public float W;
+            /// <summary>The height.</summary>
+            public float H;
+        }
+        /// <summary>An axis aligned rectangle in 32 bit integers.</summary>
         [RantSchema("RectI")] public struct RectI
-        { public int X; public int Y;
-          public int W; public int H; }
-        // Meters and radians. Parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
+        {
+            /// <summary>The left edge.</summary>
+            public int X;
+            /// <summary>The top edge.</summary>
+            public int Y;
+            /// <summary>The width.</summary>
+            public int W;
+            /// <summary>The height.</summary>
+            public int H;
+        }
+        /// <summary>A pose in meters and radians, measured in the Parent frame.</summary>
         [RantSchema("Transform")] public struct Transform
-        { public Double3 Translation;
-          public Quaternion Rotation;
-          [RantString(30)] public string Parent; }
-        [RantSchema("Twist")] public struct Twist               // m/s and rad/s
-        { public Double3 Linear; public Double3 Angular; }
-        [RantSchema("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
-        { public double Lat; public double Lon;
-          public double Alt; }
+        {
+            /// <summary>The position in meters.</summary>
+            public Double3 Translation;
+            /// <summary>The orientation.</summary>
+            public Quaternion Rotation;
+            /// <summary>The frame this one is measured in, "" when unstated. Capped at 30 so
+            /// the packed 88 bytes stay 8 aligned.</summary>
+            [RantString(30)] public string Parent;
+        }
+        /// <summary>A velocity: linear in m/s and angular in rad/s.</summary>
+        [RantSchema("Twist")] public struct Twist
+        {
+            /// <summary>The linear velocity in m/s.</summary>
+            public Double3 Linear;
+            /// <summary>The angular velocity in rad/s.</summary>
+            public Double3 Angular;
+        }
+        /// <summary>A place on the earth.</summary>
+        [RantSchema("GeoPoint")] public struct GeoPoint
+        {
+            /// <summary>The latitude in degrees.</summary>
+            public double Lat;
+            /// <summary>The longitude in degrees.</summary>
+            public double Lon;
+            /// <summary>The altitude in meters.</summary>
+            public double Alt;
+        }
 
         /// <summary>How an Image's data is laid out. A value of 16 or more is a compressed
         /// container, so data holds the file bytes rather than pixels.</summary>
         public enum ImageFormat : byte
-        { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3, Bgr8 = 4, Yuyv = 5, Nv12 = 6, Monof32 = 7,
-          Jpeg = 16, Png = 17 }
-        /// <summary>The codec a VideoFrame's data is encoded with. Unknown is the unstated
-        /// codec hint (an ExternalVideoStream that does not state one).</summary>
-        public enum VideoCodec : byte { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 }
+        {
+            /// <summary>One byte of gray per pixel.</summary>
+            Mono8 = 0,
+            /// <summary>Two bytes of gray per pixel.</summary>
+            Mono16 = 1,
+            /// <summary>Red, green, blue, one byte each.</summary>
+            Rgb8 = 2,
+            /// <summary>Red, green, blue, alpha, one byte each.</summary>
+            Rgba8 = 3,
+            /// <summary>Blue, green, red, one byte each.</summary>
+            Bgr8 = 4,
+            /// <summary>Packed 4:2:2 YUV, two bytes per pixel.</summary>
+            Yuyv = 5,
+            /// <summary>Planar 4:2:0 YUV: the Y plane then interleaved UV.</summary>
+            Nv12 = 6,
+            /// <summary>One 32 bit float per pixel.</summary>
+            Monof32 = 7,
+            /// <summary>A JPEG file.</summary>
+            Jpeg = 16,
+            /// <summary>A PNG file.</summary>
+            Png = 17
+        }
+        /// <summary>The codec a VideoFrame's data is encoded with.</summary>
+        public enum VideoCodec : byte
+        {
+            /// <summary>Unstated.</summary>
+            Unknown = 0,
+            /// <summary>Motion JPEG, each frame a JPEG.</summary>
+            Mjpeg = 1,
+            /// <summary>H.264.</summary>
+            H264 = 2,
+            /// <summary>H.265.</summary>
+            H265 = 3,
+            /// <summary>AV1.</summary>
+            Av1 = 4
+        }
         /// <summary>The protocol an ExternalVideoStream's url speaks.</summary>
         public enum VideoStreamKind : byte
-        { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3, Rtp = 4, HttpMjpeg = 5, Other = 15 }
-        [RantSchema("Image")] public struct Image               // stride 0 = packed rows
-        { public uint Width; public uint Height;
-          public uint Stride;
-          public ImageFormat Format;
-          public byte[] Data; }               // pixels, or the file bytes
-        [RantSchema("VideoFrame")] public struct VideoFrame     // width/height 0 = unstated
-        { public VideoCodec Codec;
-          public uint Width; public uint Height;
-          public bool Keyframe;
-          [RantTypeName("Timestamp")] public long Pts;   // the Timestamp clock
-          public byte[] Data; }
-        // Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. Codec,
-        // Width and Height are hints for pickers, the stream stays authoritative once connected.
+        {
+            /// <summary>RTSP.</summary>
+            Rtsp = 0,
+            /// <summary>WebRTC through a WHEP endpoint.</summary>
+            WebrtcWhep = 1,
+            /// <summary>HLS over HTTP.</summary>
+            Hls = 2,
+            /// <summary>SRT.</summary>
+            Srt = 3,
+            /// <summary>Plain RTP.</summary>
+            Rtp = 4,
+            /// <summary>Motion JPEG over HTTP.</summary>
+            HttpMjpeg = 5,
+            /// <summary>Any other protocol, named by the url.</summary>
+            Other = 15
+        }
+        /// <summary>A picture: raw pixels, or a compressed file when Format is 16 or more.</summary>
+        [RantSchema("Image")] public struct Image
+        {
+            /// <summary>The width in pixels.</summary>
+            public uint Width;
+            /// <summary>The height in pixels.</summary>
+            public uint Height;
+            /// <summary>Bytes per row, 0 for tightly packed rows.</summary>
+            public uint Stride;
+            /// <summary>How Data is laid out.</summary>
+            public ImageFormat Format;
+            /// <summary>The pixels, or the file bytes.</summary>
+            public byte[] Data;
+        }
+        /// <summary>One encoded frame of a video stream.</summary>
+        [RantSchema("VideoFrame")] public struct VideoFrame
+        {
+            /// <summary>The codec Data is encoded with.</summary>
+            public VideoCodec Codec;
+            /// <summary>The coded width in pixels, 0 when unstated.</summary>
+            public uint Width;
+            /// <summary>The coded height in pixels, 0 when unstated.</summary>
+            public uint Height;
+            /// <summary>True when the frame decodes on its own.</summary>
+            public bool Keyframe;
+            /// <summary>The presentation time, microseconds since the Unix epoch UTC.</summary>
+            [RantTypeName("Timestamp")] public long Pts;
+            /// <summary>The encoded bitstream.</summary>
+            public byte[] Data;
+        }
+        /// <summary>Where to watch a video stream: hand a viewer a url, not pixels. Fully
+        /// fixed, so it works as a latched variable.</summary>
         [RantSchema("ExternalVideoStream")] public struct ExternalVideoStream
-        { public VideoStreamKind Kind;
-          public VideoCodec Codec;
-          public uint Width; public uint Height;
-          [RantTypeName("Uri")] [RantString(256)] public string Url;
-          [RantString(32)] public string Name; }
+        {
+            /// <summary>The protocol the url speaks.</summary>
+            public VideoStreamKind Kind;
+            /// <summary>A hint for pickers. The stream is authoritative once connected.</summary>
+            public VideoCodec Codec;
+            /// <summary>A hint in pixels, 0 when unstated.</summary>
+            public uint Width;
+            /// <summary>A hint in pixels, 0 when unstated.</summary>
+            public uint Height;
+            /// <summary>Where the stream is served.</summary>
+            [RantTypeName("Uri")] [RantString(256)] public string Url;
+            /// <summary>A name to show for the stream.</summary>
+            [RantString(32)] public string Name;
+        }
 
-        /// <summary>A lens distortion model. NoDistortion is an ideal pinhole.</summary>
+        /// <summary>A lens distortion model.</summary>
         public enum DistortionModel : byte
-        { NoDistortion = 0, BrownConrady = 1, Fisheye = 2, Rational = 3 }
-        // The pinhole model and its lens distortion. Coeffs is zero filled past the model's count.
+        {
+            /// <summary>An ideal pinhole.</summary>
+            NoDistortion = 0,
+            /// <summary>Brown Conrady radial and tangential distortion.</summary>
+            BrownConrady = 1,
+            /// <summary>The fisheye model.</summary>
+            Fisheye = 2,
+            /// <summary>The rational radial model.</summary>
+            Rational = 3
+        }
+        /// <summary>The pinhole camera model and its lens distortion.</summary>
         [RantSchema("CameraIntrinsics")] public struct CameraIntrinsics
-        { public uint Width; public uint Height;
-          public double Fx; public double Fy;
-          public double Cx; public double Cy;
-          public DistortionModel Model;
-          [RantArray(8)] public double[] Coeffs; }
-        // SI: radians or meters, per second, and newtons or newton meters. Velocity and Effort
-        // may be empty. The names ride a JointNames variable, not every sample.
+        {
+            /// <summary>The image width in pixels these numbers hold for.</summary>
+            public uint Width;
+            /// <summary>The image height in pixels these numbers hold for.</summary>
+            public uint Height;
+            /// <summary>The focal length along x, in pixels.</summary>
+            public double Fx;
+            /// <summary>The focal length along y, in pixels.</summary>
+            public double Fy;
+            /// <summary>The principal point's x, in pixels.</summary>
+            public double Cx;
+            /// <summary>The principal point's y, in pixels.</summary>
+            public double Cy;
+            /// <summary>The distortion model Coeffs follows.</summary>
+            public DistortionModel Model;
+            /// <summary>The model's coefficients, zero filled past its count.</summary>
+            [RantArray(8)] public double[] Coeffs;
+        }
+        /// <summary>One sample of a robot's joints, in the order a JointNames variable gives.
+        /// SI units: radians or meters, per second, newtons or newton meters.</summary>
         [RantSchema("JointState")] public struct JointState
-        { public double[] Position;
-          public double[] Velocity;
-          public double[] Effort; }
-        // Published once as a variable. The order every JointState array follows.
+        {
+            /// <summary>Each joint's position.</summary>
+            public double[] Position;
+            /// <summary>Each joint's velocity, or empty.</summary>
+            public double[] Velocity;
+            /// <summary>Each joint's force or torque, or empty.</summary>
+            public double[] Effort;
+        }
+        /// <summary>The joint order every JointState follows, published once as a variable.</summary>
         [RantSchema("JointNames")] public struct JointNames
-        { [RantString(32)] public string[] Name; }
+        {
+            /// <summary>The joint names in order.</summary>
+            [RantString(32)] public string[] Name;
+        }
 
         /// <summary>The Timestamp clock: microseconds since the Unix epoch UTC, the units of a
         /// message's WrittenUs and of a Send's captureUs.</summary>
         public static class Timestamp
         {
+            /// <summary>The time now on the Timestamp clock.</summary>
             public static long Now() => Native.rant_timestamp_now();
         }
     }
 
     /// <summary>Name a member on the wire when its own name will not do. Any spelling works,
-    /// the wire keeps camelCase (docs/stdtypes.md).</summary>
+    /// the wire keeps camelCase (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/stdtypes.md">docs/stdtypes.md</see>).</summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantFieldAttribute : Attribute
     {
+        /// <summary>The wire name, in any spelling. The wire keeps camelCase.</summary>
         public string Name;
+        /// <summary>Name the member on the wire.</summary>
         public RantFieldAttribute(string name) { Name = name; }
     }
 
@@ -1091,7 +1530,9 @@ namespace Rant
         public SendStatus SendStatus;
         /// <summary>The C reason behind a failed create, else null.</summary>
         public RantEvent Error;
+        /// <summary>A refused action and what was refused.</summary>
         public RantException(SendStatus status, string m) : base(m) { SendStatus = status; }
+        /// <summary>A failed create and the C reason, which the message then carries.</summary>
         public RantException(string m, RantEvent error) : base(error != null ? m + ": " + error : m)
         { Error = error; }
     }
@@ -1099,6 +1540,7 @@ namespace Rant
     /// <summary>A type or DSL text is not a valid schema, or a value does not fit one.</summary>
     public class SchemaException : RantException
     {
+        /// <summary>A schema refusal with its reason.</summary>
         public SchemaException(string m) : base(SendStatus.Schema, m) { }
     }
 
@@ -1106,9 +1548,12 @@ namespace Rant
     /// RantResponse&lt;TRsp&gt;.Value. The message is the provider's text or the status text.</summary>
     public class CallException : RantException
     {
+        /// <summary>How the call ended.</summary>
         public CallStatus Status;
         /// <summary>The peer that answered, 0 when the outcome was synthesized here.</summary>
         public uint Provider;
+        /// <summary>A call outcome, the send status when the request never left, and the
+        /// answering peer.</summary>
         public CallException(CallStatus status, string m, SendStatus send = SendStatus.Ok, uint provider = 0)
             : base(send, m) { Status = status; Provider = provider; }
     }
@@ -1151,7 +1596,7 @@ namespace Rant
         /// names narrow: an anonymous type reads a named one, never the reverse.</summary>
         public bool CanRead(Schema pub) => Native.rant_schema_subset(Live, pub.Live) != 0;
 
-        /// <summary>The flat depth first field table (spec/schema.md). A struct's members
+        /// <summary>The flat depth first field table (<see href="https://github.com/KosmosisDire/Rant/blob/main/spec/schema.md">spec/schema.md</see>). A struct's members
         /// follow it one level deeper, a struct array's element template likewise with
         /// ArrayParent pointing back. A bare root is one field named "".</summary>
         public SchemaField[] Fields
@@ -1214,39 +1659,65 @@ namespace Rant
     /// <summary>One row of a schema's flat field table, mirrors RantSchemaFieldInfo.</summary>
     public sealed class SchemaField
     {
+        /// <summary>The row's position in the table.</summary>
         public int Index;
+        /// <summary>The field's own wire name, "" for a bare root.</summary>
         public string Name;
-        public string TypeName;     // the field type's name, "" when anonymous
-        public string ElemName;     // an array element type's name, "" when anonymous
+        /// <summary>The field type's name, "" when anonymous.</summary>
+        public string TypeName;
+        /// <summary>An array element type's name, "" when anonymous.</summary>
+        public string ElemName;
+        /// <summary>The field's kind.</summary>
         public FieldType Kind;
-        public FieldType Elem;      // an array's element kind, or an enum's backing scalar
-        public int Count;           // a fixed array's element count
+        /// <summary>An array's element kind, or an enum's backing integer kind.</summary>
+        public FieldType Elem;
+        /// <summary>A fixed array's element count, or an enum's option count.</summary>
+        public int Count;
+        /// <summary>0 at the top level, n for a member of the struct n levels up.</summary>
         public int Depth;
-        public int StrCap;          // a capped string's byte capacity
-        public int ArrayParent;     // the enclosing struct array's flat index, -1 for none
-        public uint Offset, Size, ElemSize;
+        /// <summary>A capped string's byte capacity, also for capped string elements.</summary>
+        public int StrCap;
+        /// <summary>The enclosing struct array's row, -1 for none. Such a row describes
+        /// element 0 of that array.</summary>
+        public int ArrayParent;
+        /// <summary>The byte offset in the message, 0 for a variable kind.</summary>
+        public uint Offset;
+        /// <summary>The byte size, 0 for a variable kind.</summary>
+        public uint Size;
+        /// <summary>An array's bytes per element, else 0.</summary>
+        public uint ElemSize;
     }
 
-    public sealed class SchemaEnumVariant { public string Name; public long Value; }
+    /// <summary>One option of an enum field.</summary>
+    public sealed class SchemaEnumVariant
+    {
+        /// <summary>The option's wire name.</summary>
+        public string Name;
+        /// <summary>The number it stands for.</summary>
+        public long Value;
+    }
 
     /// <summary>A delivered message: the envelope beside the payload. The payload is copied
     /// out so it outlives the callback, and the decode happens on the first read of Value and
     /// never if it is not read. Read it from one thread, as handlers do.</summary>
     public sealed class RantMessage
     {
+        /// <summary>The sending peer's id.</summary>
         public uint PublisherId;
+        /// <summary>The sending node's name.</summary>
         public string PublisherName;
+        /// <summary>The topic it arrived on.</summary>
         public string TopicName;
         /// <summary>The payload bytes, copied out of the transport buffer.</summary>
         public byte[] Data { get; private set; }
         /// <summary>The node's monotonic clock in microseconds when the poll received the
-        /// message, at enqueue for a queued topic (docs/node.md).</summary>
+        /// message, at enqueue for a queued topic (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/node.md">docs/node.md</see>).</summary>
         public ulong RecvUs;
         /// <summary>The sender's wall clock in UTC microseconds when its send committed, kept
         /// across repair and replay. 0 = opted out. Never mix it with RecvUs.</summary>
         public ulong WrittenUs;
         /// <summary>When the publisher says the data was true, UTC microseconds, which is not
-        /// when it was sent. 0 = none given and WrittenUs is all there is (docs/node.md).</summary>
+        /// when it was sent. 0 = none given and WrittenUs is all there is (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/node.md">docs/node.md</see>).</summary>
         public ulong CaptureUs;
 
         // The node's own copy of the publisher's schema, so a decode after the callback is
@@ -1295,6 +1766,7 @@ namespace Rant
             };
         }
 
+        /// <summary>The topic, the sender and the size on one line.</summary>
         public override string ToString()
             => $"RantMessage(topic={TopicName}, from={PublisherName}, {Data.Length} bytes)";
     }
@@ -1303,17 +1775,29 @@ namespace Rant
     /// lost, or an error. ToString() is the one line diagnostic.</summary>
     public sealed class RantEvent
     {
+        /// <summary>What happened. The kind says which other fields are set.</summary>
         public EventKind Kind;
-        public ErrorKind Error;   // the error when Kind == EventKind.Error, else None
-        public string TopicName;      // our topic's name for topic-scoped events, else null
+        /// <summary>The fault when Kind is Error, else None.</summary>
+        public ErrorKind Error;
+        /// <summary>This node's topic the event is about, else null.</summary>
+        public string TopicName;
+        /// <summary>The peer's id, 0 for none. Prefer PeerName.</summary>
         public uint Peer;
+        /// <summary>This node's topic slot the event is about.</summary>
         public ushort Topic;
-        public int OsError;             // errno / WSAGetLastError for socket failures, else 0
+        /// <summary>The OS error code of a socket fault, else 0.</summary>
+        public int OsError;
+        /// <summary>The first missing sequence number, for MessageLost and EvictedUnsent.</summary>
         public ulong LostFirst;
+        /// <summary>How many were lost, or the entries InterestOverflow could not hold.</summary>
         public ulong LostCount;
+        /// <summary>The byte count behind MessageTooBig, PeerMetaTooBig, Oom and Send.</summary>
         public ulong TooBigBytes;
-        public string SchemaDetail;     // SchemaMismatch: what exactly was incompatible, else null
-        public string PeerName;   // peer scoped events: the peer's node name, else null
+        /// <summary>For SchemaMismatch and BadSchema, one line saying what was refused and
+        /// where, else null.</summary>
+        public string SchemaDetail;
+        /// <summary>The peer's node name, else null.</summary>
+        public string PeerName;
         private string _line;
 
         /// <summary>True if this event reports something going wrong.</summary>
@@ -1349,6 +1833,7 @@ namespace Rant
             };
         }
 
+        /// <summary>The event as one line of text.</summary>
         public override string ToString() => _line;
     }
 
@@ -1361,8 +1846,9 @@ namespace Rant
         /// <summary>Bytes of the node's arena in use now and at the peak, and how many
         /// allocation calls it made.</summary>
         public ulong MemInUse, MemPeak, AllocCalls;
-        /// <summary>Time reliable sends spent paused for a slow subscriber, and how many did.</summary>
+        /// <summary>Microseconds reliable sends spent paused for a slow subscriber.</summary>
         public ulong BackpressureWaitedUs;
+        /// <summary>How many reliable sends paused for a slow subscriber.</summary>
         public uint BackpressureWaits;
     }
 
@@ -1370,16 +1856,24 @@ namespace Rant
     /// MonoUs the publisher's monotonic clock, RecvUs this node's clock at receipt.</summary>
     public sealed class RantLogLine
     {
+        /// <summary>The line's severity.</summary>
         public LogLevel Level;
-        public string Node;      // the publishing node's name
-        public uint NodeId;      // the publishing peer id
+        /// <summary>The publishing node's name.</summary>
+        public string Node;
+        /// <summary>The publishing peer's id.</summary>
+        public uint NodeId;
+        /// <summary>When it was logged, microseconds since the Unix epoch UTC.</summary>
         public ulong WallUs;
+        /// <summary>When it was logged, on the publisher's monotonic clock in microseconds.</summary>
         public ulong MonoUs;
+        /// <summary>When it arrived, on this node's monotonic clock in microseconds.</summary>
         public ulong RecvUs;
         /// <summary>The carrying message's source stamp (see RantMessage.WrittenUs).</summary>
         public ulong WrittenUs;
+        /// <summary>The logged text.</summary>
         public string Text;
 
+        /// <summary>The level, the node and the text on one line.</summary>
         public override string ToString() => $"[{Level}] {Node}: {Text}";
     }
 
@@ -1387,19 +1881,66 @@ namespace Rant
     /// body stays in Info. Absent sections leave zeros and HaveProc false.</summary>
     public sealed class RantMetaSnapshot
     {
-        public uint Provider;                                   // the peer that answered
-        public IReadOnlyDictionary<string, object> Info;        // the whole decoded body
+        /// <summary>The peer that answered.</summary>
+        public uint Provider;
+        /// <summary>The whole decoded body, every section by its camelCase keys.</summary>
+        public IReadOnlyDictionary<string, object> Info;
 
-        // node section
+        /// <summary>The node's name.</summary>
         public string Name;
-        public ulong UptimeUs, WallUs, MemInUse, MemPeak, AllocCalls;
-        public ulong EvictedUnsent, BpWaitedUs, BpWaits;
-        public ulong Peers, MaxPeers, Topics, MaxTopics, ShmTx, ShmRx, LastError;
+        /// <summary>Microseconds since the node opened.</summary>
+        public ulong UptimeUs;
+        /// <summary>The node's wall clock, microseconds since the Unix epoch UTC.</summary>
+        public ulong WallUs;
+        /// <summary>Bytes of the node's arena in use.</summary>
+        public ulong MemInUse;
+        /// <summary>The most bytes of the node's arena ever in use.</summary>
+        public ulong MemPeak;
+        /// <summary>How many allocations the arena made.</summary>
+        public ulong AllocCalls;
+        /// <summary>Sends that overwrote history no subscriber had been sent.</summary>
+        public ulong EvictedUnsent;
+        /// <summary>Microseconds reliable sends spent paused for a slow subscriber.</summary>
+        public ulong BpWaitedUs;
+        /// <summary>How many reliable sends paused for a slow subscriber.</summary>
+        public ulong BpWaits;
+        /// <summary>The peers the node knows.</summary>
+        public ulong Peers;
+        /// <summary>The peers the node can track.</summary>
+        public ulong MaxPeers;
+        /// <summary>The node's own topics, the built in ones left out.</summary>
+        public ulong Topics;
+        /// <summary>The topics the node may create.</summary>
+        public ulong MaxTopics;
+        /// <summary>Messages sent through shared memory.</summary>
+        public ulong ShmTx;
+        /// <summary>Messages received through shared memory.</summary>
+        public ulong ShmRx;
+        /// <summary>The last fault as an ErrorKind number, 0 for none.</summary>
+        public ulong LastError;
+        /// <summary>The last fault as one line, "" for none.</summary>
         public string LastErrorText;
 
-        // the proc section, HaveProc false where unmeasured
-        public bool HaveProc, HaveCpu;
-        public ulong Pid, CpuUs, Rss, PeakRss, HeapTotal, HeapFree, HeapMinFree, HeapLargestFreeBlock;
+        /// <summary>True when the process section came back. Its fields stay 0 otherwise.</summary>
+        public bool HaveProc;
+        /// <summary>True when the platform measures cpu time.</summary>
+        public bool HaveCpu;
+        /// <summary>The process id.</summary>
+        public ulong Pid;
+        /// <summary>The process's cpu time in microseconds.</summary>
+        public ulong CpuUs;
+        /// <summary>The process's resident memory in bytes.</summary>
+        public ulong Rss;
+        /// <summary>The most resident memory the process ever had, in bytes.</summary>
+        public ulong PeakRss;
+        /// <summary>The heap's size in bytes, 0 where the platform does not say.</summary>
+        public ulong HeapTotal;
+        /// <summary>The heap's free bytes, 0 where the platform does not say.</summary>
+        public ulong HeapFree;
+        /// <summary>The fewest free heap bytes ever, 0 where the platform does not say.</summary>
+        public ulong HeapMinFree;
+        /// <summary>The largest free heap block in bytes, 0 where the platform does not say.</summary>
+        public ulong HeapLargestFreeBlock;
 
         private static ulong U(Dictionary<string, object> d, string k)
             => d.TryGetValue(k, out var o) ? (o is ulong u ? u : o is long l ? (ulong)l : 0UL) : 0UL;
@@ -1452,17 +1993,35 @@ namespace Rant
     /// peer is still listed since the same uuid may return: gate on Active.</summary>
     public sealed class RantPeer
     {
+        /// <summary>The peer's id, stable across a drop and return.</summary>
         public uint Id;
+        /// <summary>The process instance's 16 bytes. A restart is a new uuid.</summary>
         public byte[] Uuid;
+        /// <summary>The peer's node name.</summary>
         public string Name;
+        /// <summary>Where it is reached, as "ip:port".</summary>
         public string Address;
+        /// <summary>Whether it is live.</summary>
         public PeerLiveness Liveness;
+        /// <summary>True while the peer is live.</summary>
         public bool Active => Liveness == PeerLiveness.Active;
+        /// <summary>When it was last heard, on this node's monotonic clock in microseconds.</summary>
         public ulong LastHeardUs;
+        /// <summary>Moves on every change the peer advertises.</summary>
         public uint Epoch;
+        /// <summary>True while it advertises newer state than this node holds.</summary>
         public bool CatchingUp;
+        /// <summary>Its UDP payload bytes per fragment.</summary>
         public ushort FragmentSize;
-        public uint RttUs, RttJitterUs, RttMinUs, RttSamples;
+        /// <summary>The smoothed round trip in microseconds, from reliable traffic.</summary>
+        public uint RttUs;
+        /// <summary>The round trip's jitter in microseconds.</summary>
+        public uint RttJitterUs;
+        /// <summary>The smallest round trip seen, in microseconds.</summary>
+        public uint RttMinUs;
+        /// <summary>How many round trips were measured. 0 means the Rtt fields hold no
+        /// estimate yet.</summary>
+        public uint RttSamples;
 
         internal static RantPeer Read(ref RantPeerInfoNative p) => new RantPeer
         {
@@ -1477,22 +2036,53 @@ namespace Rant
     /// channel. The schemas are owned copies, null when untyped or not fetched yet.</summary>
     public sealed class RantEntity
     {
+        /// <summary>What the entity is.</summary>
         public EntityKind Kind;
+        /// <summary>Its name, or "0x" and the Hash until the details arrive.</summary>
         public string Name;
+        /// <summary>The low 32 bits of its name hash.</summary>
         public uint Hash;
-        public bool Provides, Consumes, Reliable;
-        public bool Writable, Forceable;
-        public bool Cancellable, Exclusive;
-        public bool Multi, Incomplete, Conflict;
-        public ushort Providers, Consumers;
+        /// <summary>A live node is on the source side: a publisher, a definition or an owner.</summary>
+        public bool Provides;
+        /// <summary>A live node is on the sink side: a subscriber or a caller.</summary>
+        public bool Consumes;
+        /// <summary>It repairs loss.</summary>
+        public bool Reliable;
+        /// <summary>A variable that others may set.</summary>
+        public bool Writable;
+        /// <summary>A variable whose owner permits force.</summary>
+        public bool Forceable;
+        /// <summary>A task whose provider honors cancel.</summary>
+        public bool Cancellable;
+        /// <summary>A task that runs one call at a time.</summary>
+        public bool Exclusive;
+        /// <summary>More than one provider on purpose.</summary>
+        public bool Multi;
+        /// <summary>Only one half of a pattern's pair is present, shown rather than dropped.</summary>
+        public bool Incomplete;
+        /// <summary>Live schemas on the mesh that cannot read each other.</summary>
+        public bool Conflict;
+        /// <summary>Live endpoints on the source side. A walk of one node reports 0 or 1.</summary>
+        public ushort Providers;
+        /// <summary>Live endpoints on the sink side. A walk of one node reports 0 or 1.</summary>
+        public ushort Consumers;
+        /// <summary>The chosen provider's peer id, 0 for this node.</summary>
         public uint Provider;
+        /// <summary>The node the schemas were read from.</summary>
         public string From;
+        /// <summary>The value, request or payload schema. Null when untyped or not fetched.</summary>
         public Schema Schema;
+        /// <summary>That schema's hash, known before the schema arrives.</summary>
         public ulong SchemaHash;
+        /// <summary>A function's or task's response schema.</summary>
         public Schema ResponseSchema;
+        /// <summary>That schema's hash.</summary>
         public ulong ResponseSchemaHash;
+        /// <summary>A task's progress schema.</summary>
         public Schema ProgressSchema;
+        /// <summary>That schema's hash.</summary>
         public ulong ProgressSchemaHash;
+        /// <summary>Changes when the provider, a schema or an attribute changes.</summary>
         public ulong Generation;
 
         internal static RantEntity Read(RantNode node, ref RantEntityInfoNative e) => new RantEntity
@@ -2089,7 +2679,7 @@ namespace Rant
                ? (o is ulong u ? u : o is long l ? (ulong)l : 0UL) : 0UL;
 
         /// <summary>The mesh as this node sees it: peers, their entities, the folded mesh
-        /// and the @rant/meta snapshots (docs/reflection.md).</summary>
+        /// and the @rant/meta snapshots (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>).</summary>
         public RantReflection Reflection { get; }
 
         internal Type ClrTypeOf(ushort index)
@@ -2116,6 +2706,14 @@ namespace Rant
         /// <summary>Compile schema DSL text such as "Pose { x: f32 }" in this node's registry.
         /// Every definition stays in scope for the node's later compiles, and a name on its
         /// own is a schema. The node owns the result for its life, one handle per shape.</summary>
+        /// <remarks>The text is definitions, then the schema as its last statement.
+        /// Scalars: u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 bool. Strings: string&lt;N&gt; caps
+        /// at N bytes, string is unbounded. map is a self describing map. T[N] is a fixed
+        /// array and T[] a variable one. { name: type, ... } is a struct, commas optional.
+        /// enum&lt;u8&gt; { Idle, Run = 5 } is a named integer. Name { ... } defines a struct
+        /// and Name = type any other type. A standard type such as Float3 or Timestamp is
+        /// always in scope. Names take any spelling: fields become camelCase, types and
+        /// options PascalCase. A refusal throws SchemaException saying why and where.</remarks>
         public Schema Schema(string text)
         {
             IntPtr h = Native.rant_node_schema(_handle, Codec.CStr(text));
@@ -2223,7 +2821,9 @@ namespace Rant
             return true;
         }
 
+        /// <summary>Close the node, as Close does.</summary>
         public void Dispose() { Close(); GC.SuppressFinalize(this); }
+        /// <summary>Close a node nobody closed, so its sockets and threads never leak.</summary>
         ~RantNode() { try { Close(); } catch { } }
 
         [MonoPInvokeCallback(typeof(RantMsgFn))]
@@ -2262,7 +2862,7 @@ namespace Rant
         }
     }
 
-    /// <summary>The reflection walks of docs/reflection.md, from RantNode.Reflection. Every
+    /// <summary>The reflection walks of <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>, from RantNode.Reflection. Every
     /// result is a copied snapshot, so it outlives the poll and needs no lock.</summary>
     public sealed class RantReflection
     {
@@ -3205,12 +3805,17 @@ namespace Rant
     /// handlers. A private copy: safe to hold past the callback.</summary>
     public sealed class VariableUpdate
     {
+        /// <summary>The variable's name.</summary>
         public string Name { get; internal set; }
+        /// <summary>The applied value's encoded bytes.</summary>
         public byte[] Data { get; internal set; }
+        /// <summary>True while the value is forced.</summary>
         public bool Forced { get; internal set; }
+        /// <summary>The owner's count of applied writes.</summary>
         public uint WriteSeq { get; internal set; }
         /// <summary>Peer id the write arrived from (0 = a local call on this node).</summary>
         public uint Source { get; internal set; }
+        /// <summary>When it was applied, on this node's monotonic clock in microseconds.</summary>
         public ulong RecvUs { get; internal set; }
         /// <summary>The writer's wall clock for this write, our own for a local one.</summary>
         public ulong WrittenUs { get; internal set; }
@@ -3318,7 +3923,7 @@ namespace Rant
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
-        /// moved. True when it was re typed. See docs/reflection.md.</summary>
+        /// moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => Var != IntPtr.Zero && Native.rant_variable_refresh(Var) == 1;
     }
 
@@ -3335,10 +3940,13 @@ namespace Rant
 
         /// <summary>The request bytes as sent.</summary>
         public byte[] Data => _core.Data;
-        /// <summary>The calling peer's id and node name.</summary>
+        /// <summary>The calling peer's id.</summary>
         public uint Caller => _core.Caller;
+        /// <summary>The calling node's name.</summary>
         public string CallerName => _core.CallerName;
+        /// <summary>The function the call is for.</summary>
         public string FunctionName => _core.FunctionName;
+        /// <summary>When the request arrived, on this node's monotonic clock in microseconds.</summary>
         public ulong RecvUs => _core.RecvUs;
         /// <summary>The caller's wall clock when it sent the request, 0 = unstamped.</summary>
         public ulong WrittenUs => _core.WrittenUs;
@@ -3441,7 +4049,7 @@ namespace Rant
         /// <summary>Callers currently matched to this definition.</summary>
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
-        /// it was re typed. See docs/reflection.md.</summary>
+        /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => _core.Refresh();
         /// <summary>Retire the definition and release the name. Refused from a callback.</summary>
         public void Dispose() => _core.Dispose();
@@ -3455,7 +4063,9 @@ namespace Rant
         internal Schema RspSchema;
         internal string Name;
 
+        /// <summary>How the call ended. Never throws.</summary>
         public CallStatus Status => Core.Status;
+        /// <summary>True when Status is Ok, so Value is safe to read.</summary>
         public bool Ok => Core.Ok;
         /// <summary>The peer that answered.</summary>
         public uint Provider => Core.Provider;
@@ -3467,6 +4077,7 @@ namespace Rant
         /// the default status text.</summary>
         public string Message => Core.Message;
 
+        /// <summary>The response. Throws CallException when the call did not end Ok.</summary>
         public TRsp Value
         {
             get
@@ -3529,7 +4140,7 @@ namespace Rant
         /// <summary>Definitions currently matched, 0 = no provider present.</summary>
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
-        /// it was re typed. See docs/reflection.md.</summary>
+        /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => _core.Refresh();
         /// <summary>Retire the remote: every outstanding call completes Cancelled. Refused
         /// from a callback.</summary>
@@ -3551,16 +4162,21 @@ namespace Rant
         /// <summary>Cancelled the moment a cancel arrives. Honor it by throwing
         /// OperationCanceledException, or run to completion anyway.</summary>
         public CancellationToken CancellationToken => _core.CancellationToken;
+        /// <summary>True once a cancel arrived.</summary>
         public bool Cancelled => _core.Cancelled;
+        /// <summary>The calling peer's id.</summary>
         public uint Caller => _core.Caller;
+        /// <summary>The calling node's name.</summary>
         public string CallerName => _core.CallerName;
+        /// <summary>When the request arrived, on this node's monotonic clock in microseconds.</summary>
         public ulong RecvUs => _core.RecvUs;
+        /// <summary>The caller's wall clock when it sent the request, 0 = unstamped.</summary>
         public ulong WrittenUs => _core.WrittenUs;
     }
 
     /// <summary>The implementation of a task, from RantNode.TaskDefinition: a long running
     /// call that streams progress and can be cancelled. The async handler's completion
-    /// answers the call, on the service thread until its first await (docs/csharp.md).</summary>
+    /// answers the call, on the service thread until its first await (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/csharp.md">docs/csharp.md</see>).</summary>
     public sealed class TaskDefinition<TReq, TPrg, TRsp> : IDisposable
     {
         private readonly TaskDefinitionCore _core;
@@ -3592,7 +4208,7 @@ namespace Rant
         /// <summary>Callers currently matched to this definition.</summary>
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
-        /// it was re typed. See docs/reflection.md.</summary>
+        /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => _core.Refresh();
         /// <summary>Retire the definition: every live deferred call answers Cancelled, a later
         /// completion is refused. Refused from a callback.</summary>
@@ -3664,7 +4280,7 @@ namespace Rant
         /// <summary>Definitions currently matched, 0 = no provider present.</summary>
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
-        /// it was re typed. See docs/reflection.md.</summary>
+        /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => _core.Refresh();
         /// <summary>Retire the remote: every outstanding call completes Cancelled. Refused
         /// from a callback.</summary>
@@ -3681,6 +4297,8 @@ namespace Rant
 
         private protected Variable() { }
 
+        /// <summary>The latest value. Reading throws while none exists, setting throws
+        /// RantException when the set is refused.</summary>
         public T Value
         {
             get
@@ -3718,7 +4336,9 @@ namespace Rant
         /// Needs AllowForce on the definition: State on the owner without it, BadRole on a
         /// remote whose owner advertises none.</summary>
         public SendStatus Force(T value) => _core.Force(Patterns.Encode(_schema, value));
+        /// <summary>End a force: the latest written value applies again.</summary>
         public SendStatus Unforce() => _core.Unforce();
+        /// <summary>True while the value is forced.</summary>
         public bool Forced => _core.Forced;
         /// <summary>Handles matched on the other side: remotes for a definition, owners for a
         /// remote, 0 = no owner present.</summary>
@@ -3727,7 +4347,7 @@ namespace Rant
         /// progress or driving a Manual node's loop. Refused from a callback.</summary>
         public bool Wait(int timeoutMs) => _core.Wait(timeoutMs);
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
-        /// it was re typed. See docs/reflection.md.</summary>
+        /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => _core.Refresh();
         /// <summary>Retire the handle: park its channels and release the name. Refused from a
         /// callback.</summary>
@@ -3831,7 +4451,7 @@ namespace Rant
         /// it.</summary>
         public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts() => _topic.Counts();
         /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
-        /// provider moved. True when it was re typed. See docs/reflection.md.</summary>
+        /// provider moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => _topic.Refresh();
         /// <summary>Stop publishing. The node stops advertising the role no handle holds, and
         /// the last handle on the name retires the topic. Refused from a callback.</summary>
@@ -3889,7 +4509,7 @@ namespace Rant
         /// it.</summary>
         public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts() => _topic.Counts();
         /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
-        /// provider moved. True when it was re typed. See docs/reflection.md.</summary>
+        /// provider moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => _topic.Refresh();
         /// <summary>Stop receiving: the handlers are dropped, the node stops advertising the
         /// role no handle holds, and the last handle on the name retires the topic. Refused
