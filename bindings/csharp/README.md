@@ -35,8 +35,8 @@ dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
 ```
 
 The binaries are **not committed** to git. The CMake target (or the release workflow)
-produces them before packing. The resulting `.nupkg` bundles `lib/netstandard2.1/Rant.dll` +
-`runtimes/<rid>/native/*`.
+produces them before packing. The resulting `.nupkg` bundles `lib/netstandard2.1/Rant.dll`,
+its doc comments as `Rant.xml`, and `runtimes/<rid>/native/*`.
 
 ## Install
 
@@ -65,11 +65,14 @@ public struct Pose  {
     public Motion Vel;
 }
 
-var node = new RantNode("robot1", new NodeOptions { Domain = 7 });   // the service thread runs from here
-node.OnEvent += e => Console.Error.WriteLine(e);                   // the diagnostics, optional
-var sub = node.Subscriber<Pose>("pose");
-sub.OnMessage += (p, _) => Console.WriteLine(p.X);
-var pub = node.Publisher<Pose>("pose", new Qos { Reliability = Reliability.Reliable });
+var robot = new RantNode("robot", new NodeOptions { Domain = 7 });  // the service thread runs from here
+var pub = robot.Publisher<Pose>("pose", new Qos { Reliability = Reliability.Reliable });
+
+// usually another process
+var viewer = new RantNode("viewer", new NodeOptions { Domain = 7 });
+viewer.OnEvent += e => Console.Error.WriteLine(e);                   // the diagnostics, optional
+viewer.Subscriber<Pose>("pose").OnMessage += (p, _) => Console.WriteLine(p.X);
+
 pub.Send(new Pose { Stamp = 1, X = 1, Frame = "map" });   // thread-safe from any thread
 // (or Threading = Threading.Manual in the options and drive node.Poll(1) in your own loop)
 ```
@@ -79,26 +82,20 @@ for the untyped case:
 
 ```csharp
 // request/response: ONE definition on the network, callers anywhere
-var def = node.FunctionDefinition<AddReq, AddRsp>("add", q => new AddRsp { Sum = q.A + q.B });
-var fn  = other.RemoteFunction<AddReq, AddRsp>("add");
+var def = robot.FunctionDefinition<AddReq, AddRsp>("add", q => new AddRsp { Sum = q.A + q.B });
+var fn  = viewer.RemoteFunction<AddReq, AddRsp>("add");
 var rsp = fn.Call(new AddReq { A = 2, B = 3 });          // blocking, throws CallException off Ok
 var sum = await fn.CallAsync(new AddReq { A = 2, B = 3 });   // the same, awaited
 var r   = fn.TryCall(new AddReq { A = 2, B = 3 });       // never throws: r.Ok / r.Status / r.Value
 
 // replicated state: ONE owner, remotes read the cached latest and push writes
-var own = node.VariableDefinition<Level>("level", new Level { Value = 5 });
-var acc = other.RemoteVariable<Level>("level");          // acc.Value / acc.Set(...) / acc.Wait(...)
+var own = robot.VariableDefinition<Level>("level", new Level { Value = 5 });
+var acc = viewer.RemoteVariable<Level>("level");          // acc.Value / acc.Set(...) / acc.Wait(...)
 ```
 
-Any struct/class with public fields is a message type: the fields become the schema in
-declaration order. `[RantArray(n)]` fixes an array's element count, `[RantString(cap)]`
-fixes a string's UTF-8 byte capacity (required on every string, combine both for a
-`string[]`), `[RantField("stamp")]` gives a member another wire name, and `[RantSchema("Name")]`
-optionally overrides the wire type name. A wire name is the member's name in camelCase,
-the one spelling every language derives (docs/stdtypes.md), and must match on every node
-for a topic. `node.Schema(typeof(Pose)).Dsl` prints the DSL for pasting into a C/C++ node.
-Handlers fire on the service thread (never two at once for one node). From inside a
-handler, `Send` and read-only queries are allowed, Poll, handle creation, Dispose and
-Close are not. To keep handlers on one thread (e.g. Unity's main thread), open the node
-with `Threading.Dispatch` and call `Dispatch()` from that thread, where the whole API is
-allowed.
+Any struct, class or record is a message type: its public fields and auto properties
+become the schema in the order written, each named on the wire in camelCase, so `FrameId`
+is `frameId` in every language. `[RantArray(n)]` fixes an array's length and
+`[RantString(cap)]` caps a string, and without them both are variable.
+`node.Schema(typeof(Pose)).Dsl` prints the DSL for pasting into a C or C++ node.
+docs/csharp.md has the whole mapping, the threading rules and the rest of the API.

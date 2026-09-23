@@ -2885,7 +2885,8 @@ namespace Rant
         }
 
         /// <summary>What one node offers, peer 0 for this one. A dropped peer's last known view
-        /// is served as a ghost. Schemas need FetchDetails on the node.</summary>
+        /// is served as a ghost. Schemas need FetchDetails on the node. Right after open the
+        /// view is partial, since names and schemas arrive later: walk again when Epoch moves.</summary>
         public List<RantEntity> Entities(uint peer = 0)
         {
             var list = new List<RantEntity>();
@@ -2902,7 +2903,8 @@ namespace Rant
         }
 
         /// <summary>The whole mesh folded: one entity per kind and name across every active
-        /// peer and this node. Schemas need FetchDetails on the node.</summary>
+        /// peer and this node. Schemas need FetchDetails on the node. Right after open the
+        /// view is partial, since names and schemas arrive later: walk again when Epoch moves.</summary>
         public List<RantEntity> Mesh()
         {
             var list = new List<RantEntity>();
@@ -2917,7 +2919,8 @@ namespace Rant
             return list;
         }
 
-        /// <summary>One folded entity by kind and name, null when the mesh has none.</summary>
+        /// <summary>One folded entity by kind and name, null when the mesh has none. It matches
+        /// by name hash, so it answers before the details arrive.</summary>
         public RantEntity Find(EntityKind kind, string name)
         {
             Native.rant_node_lock(_node.Handle);
