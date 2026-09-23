@@ -99,7 +99,8 @@ A struct member of another struct, or an array of structs (`Corner[]`,
 text defines the nested type once, as `Corner { x: f32, y: f32 }`, and each use is the
 name, so a C or Python peer spells `Corner` too. A name has one shape per node, so a
 nested type called `Twist` with fields of its own is refused, as the standard `Twist`
-already is. A struct array's elements are fixed types only.
+already is. A struct array's elements are fixed types only, so a struct array inside one
+takes `[RantArray(n)]`: `Outline[]` whose `Outline` holds `[RantArray(4)] Float2[]` works.
 
 A bare type as a handle's type is the whole schema: `Publisher<bool>`,
 `Subscriber<float[]>`, `VariableDefinition<string>`,

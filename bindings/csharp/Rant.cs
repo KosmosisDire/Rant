@@ -405,7 +405,8 @@ namespace Rant
         public ushort count;
         public ushort depth;
         public ushort str_cap;
-        public ushort arr_parent;          // flat index of the enclosing struct ARRAY, 0xFFFF none
+        public ushort arr_parent;          // flat index of the nearest enclosing struct ARRAY, 0xFFFF none
+        public ushort arr_depth;           // the struct arrays around the field, one index each
         public uint offset;
         public uint size;
         public uint elem_size;             // bytes of one array element, else 0
@@ -716,7 +717,8 @@ namespace Rant
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_get_value(RantBytes msg, IntPtr s, ushort field, out RantValue outv);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int rant_get_value_at(RantBytes msg, IntPtr s, ushort field, uint elem, out RantValue outv);
+        internal static extern int rant_get_value_at(RantBytes msg, IntPtr s, ushort field, uint[] elems,
+            ushort nElems, out RantValue outv);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern uint rant_array_count_at(RantBytes msg, IntPtr s, ushort field);
         [DllImport(LIB, CallingConvention = CC)]
@@ -1618,6 +1620,7 @@ namespace Rant
                         Elem = (FieldType)info.elem, Count = info.count, Depth = info.depth,
                         StrCap = info.str_cap,
                         ArrayParent = info.arr_parent == 0xFFFF ? -1 : info.arr_parent,
+                        ArrayDepth = info.arr_depth,
                         Offset = info.offset, Size = info.size, ElemSize = info.elem_size,
                     };
                 }
@@ -1677,9 +1680,12 @@ namespace Rant
         public int Depth;
         /// <summary>A capped string's byte capacity, also for capped string elements.</summary>
         public int StrCap;
-        /// <summary>The enclosing struct array's row, -1 for none. Such a row describes
-        /// element 0 of that array.</summary>
+        /// <summary>The nearest enclosing struct array's row, -1 for none. Such a row
+        /// describes element 0 of that array.</summary>
         public int ArrayParent;
+        /// <summary>How many struct arrays enclose the field, so how many indices reach one
+        /// copy of it: rows[1].cells[2].v takes two.</summary>
+        public int ArrayDepth;
         /// <summary>The byte offset in the message, 0 for a variable kind.</summary>
         public uint Offset;
         /// <summary>The byte size, 0 for a variable kind.</summary>
@@ -5133,11 +5139,11 @@ namespace Rant
         }
 
         // one past the last member of the struct array at flat index i: the table flattens its
-        // element once, as the run of fields naming it as their array
+        // element once, as the run of deeper fields after it, nested arrays included
         private static int MemberRun(RantSchemaFieldInfo[] infos, int i)
         {
             int j = i + 1;
-            while (j < infos.Length && infos[j].arr_parent == i) j++;
+            while (j < infos.Length && infos[j].depth > infos[i].depth) j++;
             return j;
         }
 
@@ -5480,7 +5486,7 @@ namespace Rant
                 };
                 var root = new Dictionary<string, object>();
                 var infos = Infos(s);
-                DecodeMembers(mb, s, infos, 0, infos.Length, 0, -1, root);
+                DecodeMembers(mb, s, infos, 0, infos.Length, 0, Array.Empty<uint>(), root);
                 return root;
             }
             finally { gh.Free(); }
@@ -5488,9 +5494,9 @@ namespace Rant
 
         // Reads infos[from..to) as the members of one struct at depth baseDepth into dest. A
         // struct array becomes a list of dictionaries, one per live element, read through the
-        // element indexed getter: elem is that element, or -1 outside any array.
+        // element indexed getter: elems holds every enclosing array's index, outermost first.
         private static void DecodeMembers(RantBytes mb, IntPtr s, RantSchemaFieldInfo[] infos, int from, int to,
-                                          int baseDepth, int elem, Dictionary<string, object> dest)
+                                          int baseDepth, uint[] elems, Dictionary<string, object> dest)
         {
             var dests = new List<Dictionary<string, object>> { dest };
             for (int i = from; i < to; i++)
@@ -5507,7 +5513,10 @@ namespace Rant
                     for (uint e = 0; e < count; e++)
                     {
                         var ed = new Dictionary<string, object>();
-                        DecodeMembers(mb, s, infos, i + 1, end, info.depth + 1, (int)e, ed);
+                        var inner = new uint[elems.Length + 1];
+                        Array.Copy(elems, inner, elems.Length);
+                        inner[elems.Length] = e;
+                        DecodeMembers(mb, s, infos, i + 1, end, info.depth + 1, inner, ed);
                         list.Add(ed);
                     }
                     parent[name] = list;
@@ -5523,8 +5532,8 @@ namespace Rant
                 else
                 {
                     RantValue v;
-                    if (elem < 0) Native.rant_get_value(mb, s, (ushort)i, out v);
-                    else Native.rant_get_value_at(mb, s, (ushort)i, (uint)elem, out v);
+                    if (elems.Length == 0) Native.rant_get_value(mb, s, (ushort)i, out v);
+                    else Native.rant_get_value_at(mb, s, (ushort)i, elems, (ushort)elems.Length, out v);
                     parent[name] = ValueToObj(v);
                 }
             }

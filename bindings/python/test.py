@@ -372,6 +372,20 @@ def struct_arrays():
         check("a struct name that is not the list's class is refused", False)
     except rant.SchemaError:
         check("a struct name that is not the list's class is refused", True)
+    outlines = node.schema(list[Outline])
+    back = outlines.decode(outlines.encode([Outline(corners=[rant.types.Float2(1.0, 2.0)]),
+                                            Outline(marks=[Velocity(0.0, 5.0)])]))
+    check("a fixed struct array nests in a struct array's element",
+          len(back) == 2 and back[0].corners[0].y == 2.0 and len(back[1].corners) == 4
+          and back[1].marks[0].dy == 5.0)
+    grid = node.schema("G { rows: { cells: { v: i32 }[3], n: u8 }[2] }")
+    got = grid.decode(grid.encode({"rows": [{"cells": [{"v": 1}], "n": 4},
+                                            {"cells": [{"v": 7}, {"v": 8}, {"v": 9}]}]}))
+    check("nested struct arrays from dicts read back per level",
+          got["rows"][0]["cells"][0]["v"] == 1 and got["rows"][0]["cells"][2]["v"] == 0
+          and got["rows"][1]["cells"][2]["v"] == 9 and got["rows"][0]["n"] == 4)
+    check("the field table counts the enclosing arrays",
+          [f.arr_depth for f in grid.fields] == [0, 1, 2, 1])
     bare = node.schema(list[Code])
     check("a struct array is a bare root too",
           bare.decode(bare.encode([Code("A", 1.0)]))[0].type == "A")

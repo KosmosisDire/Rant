@@ -666,11 +666,16 @@ def _is_struct_array(info):
 
 def _member_run(infos, i):
     """One past the last member of the struct array at flat index i: the table flattens its
-    element once, as the contiguous run of fields naming it as arr_parent."""
+    element once, as the contiguous run of deeper fields after it, nested arrays included."""
     j = i + 1
-    while j < len(infos) and infos[j].arr_parent == i:
+    while j < len(infos) and infos[j].depth > infos[i].depth:
         j += 1
     return j
+
+
+def _elems(idx):
+    """An index list for the element accessors, outermost first."""
+    return (_c.ctypes.c_uint32 * max(len(idx), 1))(*idx)
 
 
 def _is_value_root(lib, s, infos=None):
@@ -752,7 +757,8 @@ class Schema:
         type_name: str = ""  # the field type's NAME ("Transform"), "" when anonymous
         elem_name: str = ""  # an array ELEMENT type's name, "" when anonymous
         elem_size: int = 0   # bytes of one array element, else 0
-        arr_parent: int = 0xFFFF   # flat index of the enclosing struct ARRAY, 0xFFFF for none
+        arr_parent: int = 0xFFFF   # flat index of the nearest enclosing struct ARRAY, 0xFFFF for none
+        arr_depth: int = 0         # the struct arrays around the field, one index each
 
     __slots__ = ("_s", "_spec", "_vroot")
 
@@ -820,7 +826,7 @@ class Schema:
                                         Schema.FieldType(info.elem), info.count, info.depth,
                                  info.offset, info.size, info.str_cap,
                                  _dstr(info.type_name), _dstr(info.elem_name),
-                                 info.elem_size, info.arr_parent))
+                                 info.elem_size, info.arr_parent, info.arr_depth))
         return out
 
     def enum_variants(self, field):
@@ -952,9 +958,10 @@ def _py_value(lib, s, field, info, val, keep, where):
     return out
 
 
-def _write_elems(lib, s, buf, size, infos, i, path, items, keep):
+def _write_elems(lib, s, buf, size, infos, i, path, items, keep, outer=()):
     """Every member of every element of the struct array at flat index i, through the
-    element indexed setter. A variable array's frame is sized first."""
+    element indexed setter, outer holding the enclosing arrays' indices. A variable array's
+    frame is sized first, and a struct array inside an element recurses."""
     info = infos[i]
     end, base = _member_run(infos, i), info.depth
     where = path.decode("utf-8")
@@ -962,8 +969,10 @@ def _write_elems(lib, s, buf, size, infos, i, path, items, keep):
     if info.kind == _VARR and not lib.rant_set_array_count(buf, size, s, path, count):
         raise SchemaError("cannot size %s to %d elements" % (where, count))
     for e in range(count):
+        idx = outer + (e,)
         srcs, names = {base + 1: items[e]}, []
-        for j in range(i + 1, end):
+        j = i + 1
+        while j < end:
             m = infos[j]
             name = _dstr(m.name)
             d = m.depth - base - 1
@@ -972,14 +981,23 @@ def _write_elems(lib, s, buf, size, infos, i, path, items, keep):
             names[d] = name
             parent = srcs.get(m.depth)
             val = None if parent is None else _get(parent, name)
+            spot = "%s[%d].%s" % (where, e, ".".join(names[:d + 1]))
+            if _is_struct_array(m):
+                if val is not None:
+                    if not isinstance(val, (list, tuple)):
+                        raise SchemaError("%s is an array of structs and expects a list, got %s"
+                                          % (spot, type(val).__name__))
+                    _write_elems(lib, s, buf, size, infos, j, spot.encode("utf-8"), val, keep, idx)
+                j = _member_run(infos, j)
+                continue
+            j += 1
             if m.kind == _STRUCT:
                 srcs[m.depth + 1] = val   # None keeps the whole subtree at its zeroed default
                 continue
             if val is None:
                 continue                  # null member: keep the zeroed default
-            spot = "%s[%d].%s" % (where, e, ".".join(names[:d + 1]))
-            mv = _py_value(lib, s, j, m, val, keep, spot)
-            if not lib.rant_set_value_at(buf, size, s, j, e, _c.byref(mv)):
+            mv = _py_value(lib, s, j - 1, m, val, keep, spot)
+            if not lib.rant_set_value_at(buf, size, s, j - 1, _elems(idx), len(idx), _c.byref(mv)):
                 raise SchemaError("value does not fit %s" % spot)
 
 
@@ -1238,30 +1256,36 @@ def _value_to_py(val):
     return val.v.u
 
 
-def _decode_elem(lib, s, mb, infos, i, end, elem):
+def _decode_elem(lib, s, mb, infos, i, end, idx):
     """One element of the struct array at flat index i, read through the element indexed
-    getter."""
+    getter, idx holding every enclosing array's index. A nested struct array recurses."""
     top = {}
     dests = {infos[i].depth + 1: top}
-    for j in range(i + 1, end):
+    j = i + 1
+    while j < end:
         m = infos[j]
         name = _dstr(m.name)
         parent = dests[m.depth]
+        if _is_struct_array(m):
+            parent[name] = _decode_array(lib, s, mb, infos, j, idx)
+            j = _member_run(infos, j)
+            continue
         if m.kind == _STRUCT:
             child = {}
             parent[name] = child
             dests[m.depth + 1] = child
         else:
             val = _c.RantValue()
-            lib.rant_get_value_at(mb, s, j, elem, _c.byref(val))
+            lib.rant_get_value_at(mb, s, j, _elems(idx), len(idx), _c.byref(val))
             parent[name] = _value_to_py(val)
+        j += 1
     return top
 
 
-def _decode_array(lib, s, mb, infos, i):
+def _decode_array(lib, s, mb, infos, i, outer=()):
     """A struct array as a list of dicts, one per live element."""
     end = _member_run(infos, i)
-    return [_decode_elem(lib, s, mb, infos, i, end, e)
+    return [_decode_elem(lib, s, mb, infos, i, end, outer + (e,))
             for e in range(lib.rant_array_count_at(mb, s, i))]
 
 

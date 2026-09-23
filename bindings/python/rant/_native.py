@@ -215,7 +215,8 @@ class RantSchemaFieldInfo(Structure):
         ("count", c_uint16),
         ("depth", c_uint16),
         ("str_cap", c_uint16),
-        ("arr_parent", c_uint16),        # flat index of the enclosing struct ARRAY, 0xFFFF none
+        ("arr_parent", c_uint16),        # flat index of the nearest enclosing struct ARRAY, 0xFFFF none
+        ("arr_depth", c_uint16),         # the struct arrays around the field, one index each
         ("offset", c_uint32),
         ("size", c_uint32),
         ("elem_size", c_uint32),         # bytes of one array element, else 0
@@ -536,8 +537,9 @@ def bind(lib):
     F("rant_get_array", [RantBytes, c_void_p, c_char_p], RantBytes)
     F("rant_get_value", [RantBytes, c_void_p, c_uint16, POINTER(RantValue)], c_int)
     F("rant_set_value", [c_void_p, c_size_t, c_void_p, c_uint16, POINTER(RantValue)], c_int)
-    F("rant_get_value_at", [RantBytes, c_void_p, c_uint16, c_uint32, POINTER(RantValue)], c_int)
-    F("rant_set_value_at", [c_void_p, c_size_t, c_void_p, c_uint16, c_uint32,
+    F("rant_get_value_at", [RantBytes, c_void_p, c_uint16, POINTER(c_uint32), c_uint16,
+                            POINTER(RantValue)], c_int)
+    F("rant_set_value_at", [c_void_p, c_size_t, c_void_p, c_uint16, POINTER(c_uint32), c_uint16,
                             POINTER(RantValue)], c_int)
     F("rant_array_count_at", [RantBytes, c_void_p, c_uint16], c_uint32)
     F("rant_set_array_count", [c_void_p, c_size_t, c_void_p, c_char_p, c_uint32], c_int)

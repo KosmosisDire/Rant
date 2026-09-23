@@ -79,7 +79,8 @@ the wire: the reflected text defines it once above its first use, as
 is `codes: Code[]` and a C# or C peer spells `Code` too. A name has one shape per node, so
 a class called `Twist` with fields of its own is refused. A standard type spells by its
 name alone (`list[rant.types.Float3]` is `Float3[]`). An element is fixed all the way down, so a `str`, a `list` or a `dict` inside
-one is refused at compile, and so is an array of them. `encode` takes a list of instances
+one is refused at compile, and so is an array of them. A struct array inside one must be
+fixed, `Annotated[list[Float2], "Float2[4]"]`, and nests to any depth. `encode` takes a list of instances
 or of dicts and `decode` gives one back, typed when the schema came from a class. DSL text
 also declares the fixed form, `{ x: f32, y: f32 }[3]`, which zero fills to its count.
 

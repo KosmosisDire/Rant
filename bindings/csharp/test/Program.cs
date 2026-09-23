@@ -43,6 +43,8 @@ struct Shape
     public Rant.Types.Float3[] Normals;
     public Corner Origin;
 }
+// a fixed struct array inside a struct array's element
+struct Outline { [RantArray(4)] public Rant.Types.Float2[] Corners; public byte N; }
 
 // properties and records reflect like fields, in the order written
 class PoseClass
@@ -223,6 +225,34 @@ static class Program
             var empty = (Shape)sh.Decode(sh.Encode(new Shape()));
             Check("an unset struct array is empty", empty.Corners != null && empty.Corners.Length == 0
                   && empty.Bounds != null && empty.Bounds.Length == 2);
+        }
+
+        // a fixed struct array nests inside a struct array's element, one index per level
+        {
+            var os = node.Schema(typeof(Outline[]));
+            var outlines = new[]
+            {
+                new Outline { Corners = new[] { new Rant.Types.Float2 { X = 1, Y = 2 } }, N = 1 },
+                new Outline { Corners = new[] { new Rant.Types.Float2 { X = 3, Y = 4 },
+                                                new Rant.Types.Float2 { X = 5, Y = 6 } }, N = 2 },
+            };
+            var ob = (Outline[])os.Decode(os.Encode(outlines));
+            Check("a nested struct array round trips typed", ob.Length == 2 && ob[0].Corners.Length == 4
+                  && ob[0].Corners[0].Y == 2 && ob[1].Corners[1].X == 5 && ob[1].Corners[3].X == 0
+                  && ob[1].N == 2);
+            var inner = Array.Find(os.Fields, f => f.Name == "x");
+            Check("the inner member takes two indices", inner != null && inner.ArrayDepth == 2);
+            var ol = node.Schema("Outline[]").Decode(os.Encode(outlines)) as List<Dictionary<string, object>>;
+            Check("a nested struct array decodes as nested lists of dictionaries",
+                  ol != null && ol[1]["corners"] is List<Dictionary<string, object>> cl2
+                  && Convert.ToDouble(cl2[1]["y"]) == 6);
+            var fd2 = (Outline[])os.Decode(os.Encode(new List<object>
+            {
+                new Dictionary<string, object> { { "Corners", new List<object>
+                    { new Dictionary<string, object> { { "X", 7 }, { "Y", 8 } } } }, { "N", 3 } },
+            }));
+            Check("nested lists of dictionaries encode a nested struct array",
+                  fd2.Length == 1 && fd2[0].Corners[0].Y == 8 && fd2[0].N == 3);
         }
 
         // properties and records reflect like fields

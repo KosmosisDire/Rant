@@ -417,7 +417,8 @@ public:
         FieldType elem;          /* array element type (Array), or enum backing type (Enum) */
         uint16_t  count, depth;  /* array/enum option count */
         uint16_t  str_cap;       /* string capacity (String fields and String-element arrays) */
-        uint16_t  arr_parent;    /* flat index of the enclosing struct ARRAY, 0xFFFF for none */
+        uint16_t  arr_parent;    /* flat index of the nearest enclosing struct ARRAY, 0xFFFF for none */
+        uint16_t  arr_depth;     /* the struct arrays around the field, one index each */
         uint32_t  offset, size;
         uint32_t  elem_size;     /* bytes of one array element, else 0 */
     };
@@ -430,7 +431,7 @@ public:
         out.kind   = static_cast<FieldType>(f.kind);
         out.elem   = static_cast<FieldType>(f.elem);
         out.count  = f.count; out.depth = f.depth;
-        out.str_cap = f.str_cap; out.arr_parent = f.arr_parent;
+        out.str_cap = f.str_cap; out.arr_parent = f.arr_parent; out.arr_depth = f.arr_depth;
         out.offset = f.offset; out.size = f.size; out.elem_size = f.elem_size;
         return true;
     }

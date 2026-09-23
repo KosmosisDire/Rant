@@ -169,6 +169,7 @@ class Schema:
         elem_name: str
         elem_size: int
         arr_parent: int
+        arr_depth: int
 
     def __init__(self, node: Node, source: type[Any] | str | Any) -> None: ...
     @property
