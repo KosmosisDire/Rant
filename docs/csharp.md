@@ -31,8 +31,8 @@ the C node options under C# names, where 0, false or null means the C default: `
 `MaxTopics`, `MulticastInterface`, `MatchWaitMs`, `FetchDetails`, the discovery options of
 docs/discovery.md (`SeedPeers` as "ip" or "ip:port" strings, `UnicastOnly`, `SelfIp` with
 `AdvertisePort`) and the rest. `node.OnEvent` carries peer lifecycle, loss and error
-events. It is optional, since `LastError` records the last error either way, null before
-any. `Stats` reads the node's memory, backpressure and evicted unsent counters.
+events. It is optional: with no handler attached, error events print to stderr, and
+`LastError` records the last error either way, null before any. `Stats` reads the node's memory, backpressure and evicted unsent counters.
 
 Every handle comes from the node method named after it: `Publisher<T>`, `Subscriber<T>`,
 `FunctionDefinition<TReq, TRsp>`, `RemoteFunction<TReq, TRsp>`,
@@ -165,8 +165,9 @@ clock at receipt, `WrittenUs` the sender's wall clock, 0 when it opted out, and
 `Qos.QueueBytes` caps a queued subscriber's ring, 0 meaning 1 MB, and `QueueStats()` reads
 it. Same name handles on one node share the topic slot: `Dispose()` on one leaves its
 siblings receiving, and the last one retires the slot so the name can carry another
-schema. `Ready` on a publisher is true when a send would not wait, and `MatchCount` counts
-its matched subscribers. A subscriber has no count, since the C gives none on that side.
+schema. `Ready` on a publisher is true when a send would not wait, `Drain(timeoutMs)` waits
+until every reliable subscriber acknowledged what was sent, the flush before `Dispose`, and
+`MatchCount` counts its matched subscribers. A subscriber has no count, since the C gives none on that side.
 
 `Qos.ReflectFromMesh`, and the same field on the pattern options, is not a QoS field: a
 null schema and a best effort reliability then follow the mesh. Every handle that can
@@ -198,7 +199,10 @@ service thread or drives a Manual node's loop, and is refused from a service thr
 callback. On a task, `CallAsync(req, progress, cancellationToken)` reports each progress
 update, skipping the valueless RUNNING. Cancelling the token asks for a cooperative
 cancel, and a task that honors it ends the awaited call with
-`OperationCanceledException`, or with status Cancelled from `TryCallAsync`.
+`OperationCanceledException`, or with status Cancelled from `TryCallAsync`. `Call(req,
+progress, timeoutMs, cancellationToken)` and `TryCall` are the blocking task forms, with
+progress reported where the node's callbacks run. Use them where awaiting would deadlock,
+such as the thread that calls `Dispatch` or the Unity main thread.
 
 `MatchCount` on a pattern handle counts the other side: definitions on a remote, callers
 or remotes on a definition.
@@ -226,7 +230,8 @@ folded view changed. A walk right after open is partial: names and schemas arriv
 details, so walk again when `Epoch` moved. The schemas on a `RantEntity` are owned copies,
 null when untyped or not fetched, and `FetchDetails` on the node makes them arrive.
 `MetaAsync(peer, sections)` decodes a peer's snapshot into a `RantMetaSnapshot` and throws
-`CallException` when the peer did not answer.
+`CallException` when the peer did not answer. `Meta(peer, sections, timeoutMs)` is the
+blocking form.
 
 `Schema.Fields` is the flat depth first field table as `SchemaField` rows, and
 `Schema.EnumVariants(field)` the options of an enum field, for a tool that renders a

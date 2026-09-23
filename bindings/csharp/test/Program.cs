@@ -576,6 +576,17 @@ static class Program
             // a blocking call under the service thread sleeps on its progress and answers
             Check("blocking call answers under service thread",
                   amulR.Call(new AddReq { A = 2, B = 3 }, 2000).Sum == 6);
+
+            // the blocking task forms: progress where callbacks run, the result returned
+            var bseen = new List<int>();
+            XferRsp br = xferR.Call(new XferReq { Chunks = 2 },
+                new InlineProgress<XferPrg>(p => { lock (bseen) bseen.Add(p.Done); }), 10000);
+            Check("blocking task returns the result", br.Total == 2);
+            lock (bseen)
+                Check("blocking task progress in order", bseen.Count == 2 && bseen[0] == 1 && bseen[1] == 2);
+            var bcts = new CancellationTokenSource(300);
+            var tr = foreverR.TryCall(new XferReq(), null, 10000, bcts.Token);
+            Check("a blocking task call cancels by token", tr.Status == CallStatus.Cancelled);
         }
         finally
         {
@@ -1136,6 +1147,14 @@ static class Program
         Check("a reflect topic took the provider's schema",
               Native.rant_topic_schema(reflect.Topic._handle) != IntPtr.Zero);
         Check("refresh on a settled handle reports no change", !reflect.Refresh());
+        Check("drain returns once every reader acked", pub.Drain(2000));
+
+        // the blocking meta form answers on this thread
+        uint aId = 0;
+        foreach (var p in b.Reflection.Peers()) if (p.Active && p.Name == "rsrv") aId = p.Id;
+        Check("the peer is known", aId != 0);
+        var snap = b.Reflection.Meta(aId, MetaSection.All, 2000);
+        Check("blocking meta names the peer", snap.Name == "rsrv");
 
         a.Close();
         b.Close();

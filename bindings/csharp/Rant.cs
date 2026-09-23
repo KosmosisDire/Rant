@@ -2160,6 +2160,7 @@ namespace Rant
         internal ushort Index => Native.rant_topic_index(_handle);
         internal int MatchCount => Native.rant_topic_match_count(_handle);
         internal bool Ready => Native.rant_topic_ready(_handle) == 1;
+        internal bool Drain(int timeoutMs) => _handle == IntPtr.Zero || Native.rant_topic_drain(_handle, timeoutMs) == 1;
 
         internal (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
         {
@@ -2223,7 +2224,8 @@ namespace Rant
         private static long s_nextId = 1;
 
         /// <summary>Peer lifecycle, loss and error events, where the node's callbacks run.
-        /// Optional: LastError records the last error either way.</summary>
+        /// Optional: with none attached errors print to stderr, and LastError records the last
+        /// error either way.</summary>
         public event Action<RantEvent> OnEvent;
 
         /// <summary>Who drives the loop, as opened.</summary>
@@ -2906,7 +2908,13 @@ namespace Rant
                 s_nodes.TryGetValue((long)e.user, out node);
                 if (node == null) return;
                 Action<RantEvent> fn = node.OnEvent;
-                if (fn == null) return;
+                if (fn == null)
+                {
+                    // the default: nothing goes unseen when no handler is attached
+                    if (e.kind == (int)EventKind.Error)
+                        Console.Error.WriteLine("rant: " + RantEvent.FromNative(evPtr, ref e));
+                    return;
+                }
                 fn(RantEvent.FromNative(evPtr, ref e));
             }
             catch (Exception ex) { Console.Error.WriteLine("rant on_event: " + ex); }
@@ -2993,16 +3001,26 @@ namespace Rant
         /// a MetaSection mask.</summary>
         public async Task<RantMetaSnapshot> MetaAsync(uint peer, MetaSection sections = MetaSection.All)
         {
-            // the local @rant/meta caller handle, node owned: callable, never created or
-            // destroyed here, and absent when meta is disabled
+            ResponseCore r = await MetaFunction().CallAsync(MetaRequest(sections), peer).ConfigureAwait(false);
+            return RantMetaSnapshot.FromResponse(r);
+        }
+
+        /// <summary>The same, blocking up to timeoutMs on this thread. Use it where awaiting
+        /// would deadlock, such as the thread that calls Dispatch.</summary>
+        public RantMetaSnapshot Meta(uint peer, MetaSection sections = MetaSection.All, int timeoutMs = 1000)
+            => RantMetaSnapshot.FromResponse(MetaFunction().Call(MetaRequest(sections), timeoutMs, peer));
+
+        // the local @rant/meta caller handle, node owned: callable, never created or destroyed
+        // here, and absent when meta is disabled
+        private RemoteFunctionCore MetaFunction()
+        {
             IntPtr fn = Native.rant_node_meta_function(_node.Handle);
             if (fn == IntPtr.Zero)
                 throw new CallException(CallStatus.NoHandler, "call '@rant/meta' failed: meta is disabled on this node");
-            byte[] req = sections == MetaSection.All
-                ? Array.Empty<byte>() : BitConverter.GetBytes((uint)sections);
-            ResponseCore r = await new RemoteFunctionCore(_node, fn).CallAsync(req, peer).ConfigureAwait(false);
-            return RantMetaSnapshot.FromResponse(r);
+            return new RemoteFunctionCore(_node, fn);
         }
+        private static byte[] MetaRequest(MetaSection sections)
+            => sections == MetaSection.All ? Array.Empty<byte>() : BitConverter.GetBytes((uint)sections);
     }
 
     // ---- patterns: shared plumbing ----------------------------------------------
@@ -3834,6 +3852,63 @@ namespace Rant
             return tcs.Task;
         }
 
+        // Run the task and block on this thread until the terminal outcome. sink fires where
+        // the node's callbacks run. The token cancels through Cancel once the call committed.
+        internal ResponseCore Call(byte[] request, Action<ProgressCore> sink, int timeoutMs,
+                                   CancellationToken cancellationToken, uint provider)
+        {
+            var r = new ResponseCore();
+            long id = 0;
+            var opts = new RantCallOpts[1];
+            opts[0].provider = provider;
+            if (sink != null)
+            {
+                // the progress trampoline finds the sink by id, and only this call fires it
+                id = Patterns.AddAsync(new Patterns.AsyncCall { RantNode = RantNode, OnProgress = sink });
+                opts[0].on_progress = Marshal.GetFunctionPointerForDelegate(Patterns.OnProgress);
+                opts[0].progress_user = (IntPtr)id;
+            }
+            var idBox = new uint[1];
+            GCHandle idHandle = GCHandle.Alloc(idBox, GCHandleType.Pinned);
+            GCHandle optsHandle = GCHandle.Alloc(opts, GCHandleType.Pinned);
+            CancellationTokenRegistration reg = default;
+            if (cancellationToken.CanBeCanceled)
+                reg = cancellationToken.Register(() =>
+                {
+                    uint cid = Volatile.Read(ref idBox[0]);   // 0 until the request committed
+                    if (cid != 0) Cancel(cid);
+                });
+            RantResponseNative o;
+            int rc;
+            try
+            {
+                opts[0].id_out = idHandle.AddrOfPinnedObject();
+                using (var p = new PinnedBytes(request))
+                    rc = Native.rant_function_call(Fn, p.B, out o, timeoutMs, optsHandle.AddrOfPinnedObject());
+            }
+            finally
+            {
+                reg.Dispose();
+                optsHandle.Free();
+                idHandle.Free();
+                if (id != 0) Patterns.TakeAsync(id);
+            }
+            if (rc == 1)
+            {
+                r.Status = (CallStatus)o.status;
+                r.Provider = o.provider;
+                r.WrittenUs = o.written_us;
+                r.SchemaPtr = o.schema;
+                r.Data = Codec.Bytes(o.data);   // the view lasts until the next call, copy now
+            }
+            else if (rc < 0)
+            {
+                r.SendStatus = (SendStatus)rc;  // Status stays Timeout: never answered
+            }
+            if (rc >= 0) r.Message = Codec.Str(o.message);
+            return r;
+        }
+
         // Cooperative and never acked, the terminal status answers. BadRole when the provider
         // declared noCancel, State if done.
         public SendStatus Cancel(uint callId) => (SendStatus)Native.rant_function_cancel(Fn, callId);
@@ -4309,23 +4384,50 @@ namespace Rant
                                                      CancellationToken cancellationToken = default,
                                                      uint provider = 0)
         {
-            Action<ProgressCore> sink = null;
-            if (progress != null)
-            {
-                Schema prg = _prg;
-                IProgress<TPrg> pr = progress;
-                sink = info =>
-                {
-                    object v;
-                    if (info.Value == null) return;   // the RUNNING ack: no TPrg to decode
-                    if (Patterns.TryDecode(prg, info.SchemaPtr, info.Value, typeof(TPrg), out v))
-                        pr.Report((TPrg)v);
-                };
-            }
             uint callId;
-            Task<ResponseCore> core = _core.CallCore(Patterns.Encode(_req, request), out callId, sink,
-                                                     cancellationToken, provider);
+            Task<ResponseCore> core = _core.CallCore(Patterns.Encode(_req, request), out callId,
+                                                     Sink(progress), cancellationToken, provider);
             return Wrap(core);
+        }
+
+        /// <summary>Run the task and block this thread until it ends: timeoutMs bounds the wait
+        /// for the first response, negative = the default, and progress fires where the node's
+        /// callbacks run, this thread only under Manual. Throws CallException when it did not complete Ok, and
+        /// OperationCanceledException when the token cancelled it. Refused from a service thread
+        /// callback. Use it where awaiting would deadlock, such as the thread that calls
+        /// Dispatch.</summary>
+        public TRsp Call(TReq request, IProgress<TPrg> progress = null, int timeoutMs = -1,
+                         CancellationToken cancellationToken = default, uint provider = 0)
+        {
+            RantResponse<TRsp> r = TryCall(request, progress, timeoutMs, cancellationToken, provider);
+            if (r.Status == CallStatus.Cancelled && cancellationToken.IsCancellationRequested)
+                throw new OperationCanceledException("task '" + _name + "' was cancelled", cancellationToken);
+            return r.Value;
+        }
+
+        /// <summary>Call with the terminal outcome as a value: never throws on a failed call,
+        /// inspect Status.</summary>
+        public RantResponse<TRsp> TryCall(TReq request, IProgress<TPrg> progress = null, int timeoutMs = -1,
+                                          CancellationToken cancellationToken = default, uint provider = 0)
+            => new RantResponse<TRsp>
+            {
+                Core = _core.Call(Patterns.Encode(_req, request), Sink(progress), timeoutMs,
+                                  cancellationToken, provider),
+                RspSchema = _rsp, Name = _name,
+            };
+
+        // decode each update to TPrg, skipping the valueless RUNNING ack
+        private Action<ProgressCore> Sink(IProgress<TPrg> progress)
+        {
+            if (progress == null) return null;
+            Schema prg = _prg;
+            return info =>
+            {
+                object v;
+                if (info.Value == null) return;   // the RUNNING ack: no TPrg to decode
+                if (Patterns.TryDecode(prg, info.SchemaPtr, info.Value, typeof(TPrg), out v))
+                    progress.Report((TPrg)v);
+            };
         }
 
         private async Task<RantResponse<TRsp>> Wrap(Task<ResponseCore> core)
@@ -4501,6 +4603,9 @@ namespace Rant
         /// <summary>True when a send would not wait on the match wait: a subscriber is matched
         /// or matching has converged. For a GUI: park payloads while false.</summary>
         public bool Ready => _topic.Ready;
+        /// <summary>Wait until every reliable subscriber acknowledged everything sent, the flush
+        /// before Dispose or Close. False when timeoutMs passed first.</summary>
+        public bool Drain(int timeoutMs) => _topic.Drain(timeoutMs);
         /// <summary>The cumulative traffic this node committed to the topic and delivered from
         /// it.</summary>
         public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts() => _topic.Counts();
