@@ -223,12 +223,19 @@ if(RANT_IS_TOP_LEVEL AND TARGET rant_shared)
     add_dependencies(packages nuget_package)
   endif()
 
+  # PATH before the registry, so the wheel goes to the python a shell runs.
+  set(Python3_FIND_REGISTRY LAST)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
     add_custom_target(python_wheel
       COMMAND "${Python3_EXECUTABLE}" -m pip wheel "${CMAKE_CURRENT_SOURCE_DIR}" --no-deps
               -w "${CMAKE_CURRENT_SOURCE_DIR}/dist" VERBATIM)
     add_dependencies(packages python_wheel)
+    # A local build keeps the released version number, so only a forced reinstall takes it.
+    add_custom_target(python_install
+      COMMAND "${Python3_EXECUTABLE}" -m pip install --force-reinstall --no-deps --no-index
+              --find-links "${CMAKE_CURRENT_SOURCE_DIR}/dist" rant-middleware VERBATIM)
+    add_dependencies(python_install python_wheel)
   endif()
 endif()
 

@@ -41,6 +41,10 @@ runs `pip wheel` for this platform's wheel. Each bundles the native libraries in
 `dist/native/`, so a local package covers this machine and the release workflow covers
 every platform. The version is the `VERSION` file at the root.
 
+`python_install` builds the wheel and reinstalls it into the Python found first on PATH,
+forced since a local build keeps the released version number. It is not part of
+`packages`.
+
 Embedded targets (Arduino, ESP32, VxWorks) do not build the host programs. They drop a
 `dist/` header (generated here, or from a release) into their own project and link the header only `rant` target, or just
 point at `dist/`. Set `-DRANT_BUILD_TOOLS=OFF`. Cross builds default it off.

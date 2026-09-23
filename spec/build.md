@@ -98,7 +98,8 @@ Rant as a subproject or finds the installed package.
 - The `packages` target builds whichever of `unity_package`, `nuget_package` (needs
   dotnet) and `python_wheel` (needs Python) this machine can, into `dist/`, each over the
   libraries in `dist/native/`. The release workflow runs the same three after merging the
-  libraries of every platform.
+  libraries of every platform. `python_install` is apart from it: it force reinstalls
+  the fresh wheel, and `Python3_FIND_REGISTRY LAST` makes that the PATH Python.
 - CI is two workflows. `build.yml` runs on every push to main and every pull request, on
   linux, windows and macos: configure and build the library and its programs, build
   `tools/consumer` from the source tree and from an install, pack the NuGet and build the
