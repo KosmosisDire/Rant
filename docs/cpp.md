@@ -45,6 +45,22 @@ out.send("hello");
 Options are plain structs mirroring the C ones, and all zero means every default. `Qos::queue_bytes`, `Qos::max_rate_hz` and
 `Qos::no_timestamp` are the C fields of the same meaning.
 
+Every time is a `std::chrono` duration. Timeout parameters take milliseconds, so `2s`,
+`500ms` and `std::chrono::milliseconds(n)` all pass, and a plain integer does not compile.
+`rant::forever` is the wait with no end where one is allowed. A call's timeout and
+`settle()`'s are optional, and leaving them out takes the default. Option fields drop the
+unit from their names and take any duration: `Qos::heartbeat`, `repair_delay` and
+`backpressure_wait`, `NodeOptions::match_wait`, `announce_interval` and `peer_timeout`, and
+`timeout` and `backpressure_wait` in the pattern options. Timestamps stay integer
+microseconds, as `recv_us()` and `written_us()` return them.
+
+```cpp
+rant::FunctionOptions o;
+o.timeout = 500ms;
+auto fn = node.remote_function<AddReq, AddRsp>("add", o);
+auto r  = fn.call(req, 2s);
+```
+
 Every handle comes from a factory on the node named after it: `publisher`, `subscriber`,
 `function_definition`, `remote_function`, `task_definition`, `remote_task`,
 `variable_definition` and `remote_variable`. A default constructed handle is empty.
@@ -59,16 +75,16 @@ subscriber and pattern handlers, `on_event`, `on_log`, progress and async respon
 
 - `Threading::ServiceThread`, the default: the C service thread runs from construction and
   every callback fires on it.
-- `Threading::Manual`: your thread calls `poll(timeout_ms)` for one loop tick and callbacks
+- `Threading::Manual`: your thread calls `poll(timeout)` for one loop tick and callbacks
   fire there. `poll` on another threading answers `SendStatus::State`.
 - `Threading::Dispatch`: the service thread runs, and every callback of a handle made
   without a queue, every event and every log line waits on the node's queue until
-  `node.dispatch(max, timeout_ms)` runs them on the calling thread.
+  `node.dispatch(max, timeout)` runs them on the calling thread.
 
 ```cpp
 rant::Node app("app", { .threading = rant::Threading::Dispatch });
 auto pose = app.subscriber<Pose>("robot/pose", on_pose);
-while (running) { app.dispatch(0, 16); draw(); }
+while (running) { app.dispatch(0, 16ms); draw(); }
 ```
 
 `settle()` blocks until discovery and matching have converged, call it after creating the
@@ -80,7 +96,7 @@ handlers capture goes out of scope.
 `create_queue()` returns a `Queue` for the case where handles need a thread of their own,
 such as a worker draining a slow provider while the UI thread drains the node queue. A
 handle whose options name it (`Qos::queue`, or `queue` in the function, task and variable
-options) parks its callbacks until `queue.dispatch(max, timeout_ms)` runs them on the
+options) parks its callbacks until `queue.dispatch(max, timeout)` runs them on the
 calling thread. Same name topic handles must agree on the queue. A `Queue` is non owning
 and lives as long as its node.
 
@@ -100,11 +116,11 @@ of the same name share one topic slot, and its role follows the live handles. A 
 same name topic with a different schema refuses, so close every handle on a name to
 retype it: the last one retires the topic and the next factory call creates it fresh.
 `match_count()` on any handle counts the matched
-counterparts, and `drain(timeout_ms)` on a publisher waits until every reader has acked,
+counterparts, and `drain(timeout)` on a publisher waits until every reader has acked,
 the flush before close.
 
-A subscriber made without a handler is pulled: `take(timeout_ms)` returns the oldest
-waiting message and `take_latest(timeout_ms)` the newest, dropping the older ones, as a
+A subscriber made without a handler is pulled: `take(timeout)` returns the oldest
+waiting message and `take_latest(timeout)` the newest, dropping the older ones, as a
 `std::optional<T>`, or a `std::optional<MessageView>` valid until the next take for
 `rant::Bytes`. A pulled subscriber takes no `Qos::queue`, and `take` on one with a handler
 throws.
@@ -284,7 +300,7 @@ returns false, on a node opened with `disable_logs`.
 `peers()`, `entities(peer)` and `mesh()` return owned snapshots and `find(kind, name)` one
 folded entity. An `Entity` name is the hash placeholder until the peer's details arrive.
 `epoch()` moves on every reflected change, so a UI re walks only when it moved.
-`meta(peer, sections, timeout_ms)` sends a directed `@rant/meta` call and decodes the reply
+`meta(peer, sections, timeout)` sends a directed `@rant/meta` call and decodes the reply
 into an owning `MetaSnapshot`: the node and proc scalars are pulled out and the whole body
 stays in `info` as a `MapDict`. `meta_async(peer, handler, sections)` is the same with the
 handler firing where the node's callbacks run. `sections` is a mask of `MetaSection` bits,

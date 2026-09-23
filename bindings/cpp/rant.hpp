@@ -13,6 +13,8 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <climits>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -258,6 +260,24 @@ namespace priv {
 inline detail::RantBytes    to_c(Bytes b) { return detail::rant_bytes(b.data(), b.size()); }
 }
 
+/* A wait with no end, for the timeouts that take one. */
+inline constexpr std::chrono::milliseconds forever{ -1 };
+
+namespace priv {
+/* A timeout for the C API: whole milliseconds, clamped, any negative one -1. An empty
+ * optional is -1 too, which the C reads as the handle's default. */
+inline int to_ms(std::chrono::milliseconds d) {
+    const auto c = d.count();
+    return c < 0 ? -1 : c > INT_MAX ? INT_MAX : static_cast<int>(c);
+}
+inline int to_ms(const std::optional<std::chrono::milliseconds>& d) { return d ? to_ms(*d) : -1; }
+/* An option duration for the C config: microseconds, 0 for none or negative, clamped. */
+inline uint32_t to_us(std::chrono::microseconds d) {
+    const auto c = d.count();
+    return c <= 0 ? 0u : c > (long long)UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(c);
+}
+}
+
 
 /* A callback queue of a node, from Node::create_queue. A handle whose options name it parks
  * its callbacks until dispatch() runs them on the calling thread. Non owning, freed with the node. */
@@ -267,10 +287,10 @@ public:
     bool valid() const noexcept { return q_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
     /* Run the callbacks parked at entry, oldest first, up to max_callbacks (0 = all), waiting
-     * up to timeout_ms for the first (negative = forever). The count run, or State from a
+     * up to timeout for the first (rant::forever = no end). The count run, or State from a
      * callback or while another thread dispatches this queue. */
-    int dispatch(int max_callbacks = 0, int timeout_ms = 0) {
-        return q_ ? detail::rant_queue_dispatch(q_, max_callbacks, timeout_ms)
+    int dispatch(int max_callbacks = 0, std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
+        return q_ ? detail::rant_queue_dispatch(q_, max_callbacks, priv::to_ms(timeout))
                   : static_cast<int>(SendStatus::State);
     }
     struct Stats { uint32_t waiting = 0; uint32_t dropped = 0; };
@@ -297,9 +317,9 @@ struct Qos {
     uint16_t    keep_last            = 0;   /* recent messages retained (late join / repair) */
     uint16_t    catch_up             = 0;   /* recent messages a new subscriber replays */
     uint32_t    max_message_bytes    = 0;   /* 0 = one fragment, or grow-to-fit */
-    uint32_t    heartbeat_us         = 0;   /* reliable idle-writer ping (0 = 100ms) */
-    uint32_t    repair_delay_us      = 0;   /* reader re ask bound, 0 = adaptive from the RTT */
-    uint32_t    backpressure_wait_us = 0;   /* reliable: send pause for a slow reader (0 = none) */
+    std::chrono::microseconds heartbeat{ 0 };           /* reliable idle writer ping, 0 = 100 ms */
+    std::chrono::microseconds repair_delay{ 0 };        /* reader re ask bound, 0 = adaptive from the RTT */
+    std::chrono::microseconds backpressure_wait{ 0 };   /* reliable: send pause for a slow reader, 0 = none */
     uint32_t    shm_max_bytes        = 0;   /* pin topic to one same-host SHM size class */
     uint32_t    queue_bytes          = 0;   /* the handle's ring on its queue, 0 = 1 MB */
     uint16_t    max_rate_hz          = 0;   /* best effort sub: kept samples per second, 0 = all */
@@ -325,7 +345,7 @@ struct NodeOptions {
     uint16_t                 max_topics           = 8;   /* how many topics may be created */
     bool                     disable_shm          = false;
     bool                     fetch_details        = false;   /* fetch every peer topic's schema */
-    int32_t                  match_wait_ms        = 0;   /* 0 = 1 s, negative = drop loudly */
+    std::chrono::milliseconds match_wait{ 0 };   /* 0 = 1 s, negative = drop loudly */
     /* networking (all optional) */
     /* built in observability, all on by default (Node::log, Node::on_log, Reflection::meta) */
     bool                     disable_logs         = false; /* strip the @rant/log/{error,warn,info}
@@ -350,8 +370,8 @@ struct NodeOptions {
     std::string              self_ip;   /* "203.0.113.7", empty = learn per path */
     uint16_t                 advertise_port       = 0;   /* 0 = the port we actually bound */
     /* discovery cadence */
-    uint32_t                 announce_interval_us = 0;   /* 0 = 1s */
-    uint32_t                 peer_timeout_us      = 0;   /* 0 = 3.5s */
+    std::chrono::microseconds announce_interval{ 0 };   /* 0 = 1 s */
+    std::chrono::microseconds peer_timeout{ 0 };        /* 0 = 3.5 s */
     uint16_t                 max_peers            = 0;   /* 0 = 16 */
     /* Leave memory null for the dynamic allocator. A fixed buffer means static mode: no heap,
      * no growth, shared memory off, and construction fails if it is too small (docs/cpp.md). */
@@ -362,8 +382,8 @@ struct NodeOptions {
 #ifndef RANT_NO_PATTERNS
 /* Per-pattern options (all zero = defaults). */
 struct FunctionOptions {
-    uint32_t backpressure_wait_us = 0;   /* 0 = 1s (patterns are low-rate, loss unacceptable) */
-    uint32_t timeout_us           = 0;   /* remote call timeout, 0 = 5 s */
+    std::chrono::microseconds backpressure_wait{ 0 };   /* 0 = 1 s: patterns are low rate, loss unacceptable */
+    std::chrono::microseconds timeout{ 0 };             /* remote call timeout, 0 = 5 s */
     uint16_t keep_last            = 0;   /* req and rsp ring depth, 0 = 10 */
     const Queue* queue            = nullptr;   /* where every callback parks, null = inline */
     bool     reflect_from_mesh    = false;   /* rant::Bytes only: take the schemas from the mesh */
@@ -375,8 +395,8 @@ struct TaskOptions {
     bool     no_cancel            = false;   /* cancel not honored, remotes get BadRole */
     bool     exclusive            = false;   /* declared serialization, handler enforced */
     bool     multi                = false;   /* redundant providers, one executor each */
-    uint32_t timeout_us           = 0;   /* remote: bound until the first response, 0 = 5 s */
-    uint32_t backpressure_wait_us = 0;     /* 0 = 1s */
+    std::chrono::microseconds timeout{ 0 };             /* remote: bound until the first response, 0 = 5 s */
+    std::chrono::microseconds backpressure_wait{ 0 };   /* 0 = 1 s */
     uint16_t keep_last            = 0;     /* req + rsp ring depth (FunctionOptions::keep_last) */
     const Queue* queue            = nullptr;   /* where every callback parks, null = inline */
     bool     reflect_from_mesh    = false;   /* rant::Bytes only: take the schemas from the mesh */
@@ -396,7 +416,7 @@ template <class T> struct VariableOptions {
     bool     allow_force          = false;   /* permit force (local + remote) */
     uint16_t catch_up             = 0;   /* value channel catch_up, 0 = 1 */
     uint16_t keep_last            = 0;   /* both channels' repair window, 0 = 10 */
-    uint32_t backpressure_wait_us = 0;       /* 0 = 1s */
+    std::chrono::microseconds backpressure_wait{ 0 };   /* 0 = 1 s */
     const Queue* queue            = nullptr;   /* where on_change and on_write park, null = inline */
     bool     reflect_from_mesh    = false;   /* rant::Bytes only: take the schema from the mesh */
 };
@@ -406,7 +426,7 @@ template <> struct VariableOptions<Bytes> {
     bool     allow_force          = false;
     uint16_t catch_up             = 0;
     uint16_t keep_last            = 0;
-    uint32_t backpressure_wait_us = 0;
+    std::chrono::microseconds backpressure_wait{ 0 };
     const Queue* queue            = nullptr;
     bool     reflect_from_mesh    = false;
 };
@@ -2097,11 +2117,11 @@ public:
         detail::RantTopic* c = live();
         return c && detail::rant_topic_ready(c) == 1;
     }
-    /* Pump until every reader has acked, or timeout_ms elapses. Call before
+    /* Pump until every reader has acked, or timeout elapses. Call before
      * closing so a final burst is not cut off by the BYE. */
-    bool drain(int timeout_ms) {
+    bool drain(std::chrono::milliseconds timeout) {
         detail::RantTopic* c = live();
-        return !c || detail::rant_topic_drain(c, timeout_ms) == 1;
+        return !c || detail::rant_topic_drain(c, priv::to_ms(timeout)) == 1;
     }
 
     /* Cumulative traffic counters (always on): messages/bytes this node committed to the
@@ -2575,7 +2595,7 @@ public:
         co.max_topics    = o.max_topics;
         co.disable_shm   = o.disable_shm ? 1 : 0;
         co.fetch_details = o.fetch_details ? 1 : 0;
-        co.match_wait_ms = o.match_wait_ms;
+        co.match_wait_ms = priv::to_ms(o.match_wait);
         co.disable_logs  = o.disable_logs ? 1 : 0;
         co.disable_meta  = o.disable_meta ? 1 : 0;
         co.disable_error_logs = o.disable_error_logs ? 1 : 0;
@@ -2593,8 +2613,8 @@ public:
         co.net.fragment_size       = o.fragment_size;
         co.net.recv_buffer_bytes   = o.recv_buffer_bytes;
         co.net.send_buffer_bytes   = o.send_buffer_bytes;
-        co.discovery.announce_interval_us = o.announce_interval_us;
-        co.discovery.peer_timeout_us      = o.peer_timeout_us;
+        co.discovery.announce_interval_us = priv::to_us(o.announce_interval);
+        co.discovery.peer_timeout_us      = priv::to_us(o.peer_timeout);
         co.discovery.max_peers            = o.max_peers;
 
         detail::RantAllocator mem = (o.memory && o.memory_size)
@@ -2642,18 +2662,18 @@ public:
     Threading threading() const { return valid() ? impl_->threading : Threading::Manual; }
 
     /* Manual threading: one loop tick of discovery, receive, timers and queued sends, where
-     * callbacks fire. Blocks up to timeout_ms, 0 = non blocking. State on another threading. */
-    int poll(int timeout_ms = 0) {
+     * callbacks fire. Blocks up to timeout, 0 = non blocking. State on another threading. */
+    int poll(std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
         if (!valid()) return (int)SendStatus::State;
-        return detail::rant_node_poll(impl_->node, timeout_ms);
+        return detail::rant_node_poll(impl_->node, priv::to_ms(timeout));
     }
 
     /* Dispatch threading: run the parked callbacks on this thread, at most max_callbacks
-     * (0 = all), waiting up to timeout_ms for the first (negative = forever). The count run,
-     * or State on another threading. */
-    int dispatch(int max_callbacks = 0, int timeout_ms = 0) {
+     * (0 = all), waiting up to timeout for the first (rant::forever = no end). The count
+     * run, or State on another threading. */
+    int dispatch(int max_callbacks = 0, std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
         if (!valid() || !impl_->queue) return (int)SendStatus::State;
-        return detail::rant_queue_dispatch(impl_->queue, max_callbacks, timeout_ms);
+        return detail::rant_queue_dispatch(impl_->queue, max_callbacks, priv::to_ms(timeout));
     }
 
     /* Peer, loss and error events, where the node's callbacks run. Optional: with none set
@@ -2668,13 +2688,13 @@ public:
     }
 
     /* Block until discovery and matching settle, so everything sent now reaches everyone on
-     * the network. Call after creating the topics. timeout_ms < 0 = 3 announce intervals. */
-    bool settle(int timeout_ms = -1) {
-        return valid() && detail::rant_node_settle(impl_->node, timeout_ms) == 1;
+     * the network. Call after creating the topics. No timeout = 3 announce intervals. */
+    bool settle(std::optional<std::chrono::milliseconds> timeout = std::nullopt) {
+        return valid() && detail::rant_node_settle(impl_->node, priv::to_ms(timeout)) == 1;
     }
 
     /* The mesh as this node sees it: peers, entities, the folded mesh and meta snapshots. */
-    Reflection reflection();
+    Reflection reflection() const;
 
     /* This node's own counters: memory, the reliable send waits, and the sends that evicted
      * never sent history after the bounded wait (the send burst indicator). */
@@ -2925,9 +2945,9 @@ private:
         c.keep_last            = q.keep_last;
         c.catch_up             = q.catch_up;
         c.max_message_bytes    = q.max_message_bytes;
-        c.heartbeat_us         = q.heartbeat_us;
-        c.repair_delay_us      = q.repair_delay_us;
-        c.backpressure_wait_us = q.backpressure_wait_us;
+        c.heartbeat_us         = priv::to_us(q.heartbeat);
+        c.repair_delay_us      = priv::to_us(q.repair_delay);
+        c.backpressure_wait_us = priv::to_us(q.backpressure_wait);
         c.shm_max_bytes        = q.shm_max_bytes;
         c.queue_bytes          = q.queue_bytes;
         c.max_rate_hz          = q.max_rate_hz;
@@ -3045,7 +3065,8 @@ public:
 #ifndef RANT_NO_PATTERNS
     /* A peer's snapshot through a directed @rant/meta call, blocking up to timeout_ms.
      * sections is a MetaSection mask, 0 = all. valid is false when it did not answer. */
-    MetaSnapshot meta(uint32_t peer, uint32_t sections = 0, int timeout_ms = 1000);
+    MetaSnapshot meta(uint32_t peer, uint32_t sections = 0,
+                      std::chrono::milliseconds timeout = std::chrono::milliseconds(1000));
     /* The same, returning at once: cb fires once where the node's callbacks run. */
     SendStatus meta_async(uint32_t peer, std::function<void(const MetaSnapshot&)> cb,
                           uint32_t sections = 0);
@@ -3062,7 +3083,7 @@ private:
     friend class Node;
 };
 
-inline Reflection Node::reflection() { return Reflection(impl_); }
+inline Reflection Node::reflection() const { return Reflection(impl_); }
 
 /* Create, or share the same name slot with a widened role. A live same name topic with a
  * different schema refuses, since two modules disagreeing is a bug. Close its handles first. */
@@ -3241,8 +3262,8 @@ private:
         name_ = nm;
         detail::RantFunctionOpts co;
         std::memset(&co, 0, sizeof co);
-        co.backpressure_wait_us = o.backpressure_wait_us;
-        co.timeout_us           = o.timeout_us;
+        co.backpressure_wait_us = priv::to_us(o.backpressure_wait);
+        co.timeout_us           = priv::to_us(o.timeout);
         co.keep_last            = o.keep_last;
         co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
         co.queue                = n.impl_->queue_for(o.queue);
@@ -3323,8 +3344,8 @@ private:
         name_ = nm;
         detail::RantFunctionOpts co;
         std::memset(&co, 0, sizeof co);
-        co.backpressure_wait_us = o.backpressure_wait_us;
-        co.timeout_us           = o.timeout_us;
+        co.backpressure_wait_us = priv::to_us(o.backpressure_wait);
+        co.timeout_us           = priv::to_us(o.timeout);
         co.keep_last            = o.keep_last;
         co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
         co.queue                = n.impl_->queue_for(o.queue);
@@ -3341,14 +3362,14 @@ public:
     /* Blocking call: waits for the response or timeout_ms, negative = the default, on the
      * service thread's progress under start() and driving the loop otherwise. Refused with
      * State from a callback, use call_async there. */
-    Response<Bytes> call(Bytes req, int timeout_ms = -1, const CallOptions& opts = {}) {
+    Response<Bytes> call(Bytes req, std::optional<std::chrono::milliseconds> timeout = std::nullopt, const CallOptions& opts = {}) {
         Response<Bytes> r;
         if (!live()) { r.ss_ = SendStatus::NoTopic; return r; }
         detail::RantResponse out;
         std::memset(&out, 0, sizeof out);
         detail::RantCallOpts co; std::memset(&co, 0, sizeof co);
         co.provider = opts.provider; co.id_out = opts.id_out;
-        int rc = detail::rant_function_call(fn_, priv::to_c(req), &out, timeout_ms, &co);
+        int rc = detail::rant_function_call(fn_, priv::to_c(req), &out, priv::to_ms(timeout), &co);
         if (rc == 1) {
             r.st_       = static_cast<CallStatus>(out.status);
             r.provider_ = out.provider;
@@ -3435,11 +3456,11 @@ inline Bytes Reflection::sections_req(uint32_t sections, uint8_t* buf) {
     buf[2] = (uint8_t)(sections >> 16); buf[3] = (uint8_t)(sections >> 24);
     return Bytes(buf, 4);
 }
-inline MetaSnapshot Reflection::meta(uint32_t peer, uint32_t sections, int timeout_ms) {
+inline MetaSnapshot Reflection::meta(uint32_t peer, uint32_t sections, std::chrono::milliseconds timeout) {
     RemoteFunction<Bytes, Bytes> m = meta_fn();
     if (!m.valid()) return MetaSnapshot();
     uint8_t buf[4];
-    return MetaSnapshot::decode(m.call(sections_req(sections, buf), timeout_ms, CallOptions{ peer }));
+    return MetaSnapshot::decode(m.call(sections_req(sections, buf), timeout, CallOptions{ peer }));
 }
 inline SendStatus Reflection::meta_async(uint32_t peer,
                                          std::function<void(const MetaSnapshot&)> cb, uint32_t sections) {
@@ -3497,8 +3518,8 @@ private:
         co.no_cancel            = o.no_cancel ? 1 : 0;
         co.exclusive            = o.exclusive ? 1 : 0;
         co.multi                = o.multi ? 1 : 0;
-        co.timeout_us           = o.timeout_us;
-        co.backpressure_wait_us = o.backpressure_wait_us;
+        co.timeout_us           = priv::to_us(o.timeout);
+        co.backpressure_wait_us = priv::to_us(o.backpressure_wait);
         co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
         co.queue                = n.impl_->queue_for(o.queue);
         Box* box = new Box();
@@ -3607,8 +3628,8 @@ private:
         co.progress_best_effort = o.progress_best_effort ? 1 : 0;
         co.progress_keep_last   = o.progress_keep_last;
         co.keep_last            = o.keep_last;
-        co.timeout_us           = o.timeout_us;
-        co.backpressure_wait_us = o.backpressure_wait_us;
+        co.timeout_us           = priv::to_us(o.timeout);
+        co.backpressure_wait_us = priv::to_us(o.backpressure_wait);
         co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
         co.queue                = n.impl_->queue_for(o.queue);
         fn_ = detail::rant_node_create_remote_task(n.impl_->node, nm.c_str(),
@@ -3625,7 +3646,7 @@ public:
     /* Blocking call: waits for the terminal outcome on the service thread's progress, or
      * drives a Manual node's loop. on_progress fires where the node's callbacks run, so on
      * this thread only under Manual. Refused from a callback. id_out allows a cancel(). */
-    Response<Bytes> call(Bytes req, ProgressHandler on_progress = {}, int timeout_ms = -1,
+    Response<Bytes> call(Bytes req, ProgressHandler on_progress = {}, std::optional<std::chrono::milliseconds> timeout = std::nullopt,
                     const CallOptions& opts = {}) {
         Response<Bytes> r;
         if (!live()) { r.ss_ = SendStatus::NoTopic; return r; }
@@ -3638,7 +3659,7 @@ public:
             co.on_progress   = &RemoteTask::blocking_progress_tramp;
             co.progress_user = &bp;
         }
-        int rc = detail::rant_function_call(fn_, priv::to_c(req), &out, timeout_ms, &co);
+        int rc = detail::rant_function_call(fn_, priv::to_c(req), &out, priv::to_ms(timeout), &co);
         if (rc == 1) {
             r.st_       = static_cast<CallStatus>(out.status);
             r.provider_ = out.provider;
@@ -3870,7 +3891,7 @@ protected:
         co.allow_force = o.allow_force ? 1 : 0;
         co.catch_up    = o.catch_up;
         co.keep_last   = o.keep_last;
-        co.backpressure_wait_us = o.backpressure_wait_us;
+        co.backpressure_wait_us = priv::to_us(o.backpressure_wait);
         co.reflect_from_mesh = o.reflect_from_mesh ? 1 : 0;
         co.queue = n.impl_->queue_for(o.queue);
         node_ = n.impl_->node;
@@ -3902,7 +3923,9 @@ template <> class RemoteVariable<Bytes> : public VariableDefinition<Bytes> {
 public:
     RemoteVariable() = default;
     /* Block (driving the node loop) until a value exists or timeout_ms elapses. */
-    bool wait(int timeout_ms) { return live() && detail::rant_variable_wait(var_, timeout_ms) == 1; }
+    bool wait(std::chrono::milliseconds timeout) {
+        return live() && detail::rant_variable_wait(var_, priv::to_ms(timeout)) == 1;
+    }
 
 private:
     RemoteVariable(Node& n, std::string_view name, const Schema* schema,
@@ -3934,8 +3957,8 @@ public:
     int  match_count()      const { return t_.match_count(); }
     /* true when a send would not wait: a subscriber is matched or matching has converged */
     bool ready()            const { return t_.ready(); }
-    /* wait until every reader has acked, the flush before close. false = timeout_ms passed */
-    bool drain(int timeout_ms)    { return t_.drain(timeout_ms); }
+    /* wait until every reader has acked, the flush before close. false = timeout passed */
+    bool drain(std::chrono::milliseconds timeout) { return t_.drain(timeout); }
     /* drop this handle now instead of at scope end, see TopicCore::close */
     SendStatus close()            { return t_.close(); }
 
@@ -3956,9 +3979,13 @@ public:
 
     /* The oldest waiting message of a pulled subscriber, or nullopt when none arrived within
      * timeout_ms (0 = check, negative = forever). The view lives until the next take. */
-    std::optional<MessageView> take(int timeout_ms = 0)        { return pull(timeout_ms, false); }
+    std::optional<MessageView> take(std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
+        return pull(timeout, false);
+    }
     /* The newest waiting message, dropping the older ones. As take(). */
-    std::optional<MessageView> take_latest(int timeout_ms = 0) { return pull(timeout_ms, true); }
+    std::optional<MessageView> take_latest(std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
+        return pull(timeout, true);
+    }
 
     bool valid() const noexcept { return t_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3978,8 +4005,8 @@ private:
     /* A pulled subscriber: messages wait until take() or take_latest() reads them. */
     Subscriber(Node& n, std::string_view name, const Schema* schema, const Qos& qos)
         : t_(priv::TopicCore::pulled(n, name, schema, qos)) {}
-    std::optional<MessageView> pull(int timeout_ms, bool latest) {
-        int r = t_.take(&msg_, timeout_ms, latest);
+    std::optional<MessageView> pull(std::chrono::milliseconds timeout, bool latest) {
+        int r = t_.take(&msg_, priv::to_ms(timeout), latest);
         if (r == static_cast<int>(SendStatus::State))
             priv::raise_msg("rant::Subscriber::take: this subscriber has a handler, take needs one made without");
         if (r != 1) return std::nullopt;
@@ -4148,9 +4175,9 @@ public:
     explicit operator bool() const noexcept { return valid(); }
 
     /* Blocking call, see RemoteFunction<Bytes, Bytes>::call. Decodes into the owning Response. */
-    Response<Rsp> call(const Req& req, int timeout_ms = -1, const CallOptions& opts = {}) {
+    Response<Rsp> call(const Req& req, std::optional<std::chrono::milliseconds> timeout = std::nullopt, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        Response<Bytes> ur = core_.call(priv::encode(*cq_, req, s), timeout_ms, opts);
+        Response<Bytes> ur = core_.call(priv::encode(*cq_, req, s), timeout, opts);
         Response<Rsp> r;
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
@@ -4322,10 +4349,10 @@ public:
 
     /* Blocking call, see RemoteTask<Bytes, Bytes, Bytes>::call. on_progress fires typed while it waits. */
     Response<Rsp> call(const Req& req, ProgressHandler on_progress = {},
-                       int timeout_ms = -1, const CallOptions& opts = {}) {
+                       std::optional<std::chrono::milliseconds> timeout = std::nullopt, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
         Response<Bytes> ur = core_.call(priv::encode(*cq_, req, s), adapt_progress(std::move(on_progress)),
-                                   timeout_ms, opts);
+                                   timeout, opts);
         Response<Rsp> r;
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
@@ -4431,7 +4458,7 @@ private:
         if (o.initial) uo.initial = priv::encode(*c_, *o.initial, scratch);
         uo.read_only = o.read_only; uo.allow_force = o.allow_force;
         uo.catch_up = o.catch_up; uo.keep_last = o.keep_last;
-        uo.backpressure_wait_us = o.backpressure_wait_us; uo.queue = o.queue;
+        uo.backpressure_wait = o.backpressure_wait; uo.queue = o.queue;
         core_ = VariableDefinition<Bytes>(n, name, &sc, uo);
     }
     friend class Node;
@@ -4468,7 +4495,7 @@ public:
                                        core_.name_, "the variable's value did not decode into T");
     }
     /* Block (driving the node loop) until a value exists or timeout_ms elapses. */
-    bool wait(int timeout_ms)    { return core_.wait(timeout_ms); }
+    bool wait(std::chrono::milliseconds timeout) { return core_.wait(timeout); }
     SendStatus set(const T& v)   { thread_local std::vector<uint8_t> s; return core_.set(priv::encode(*c_, v, s)); }
     SendStatus force(const T& v) { thread_local std::vector<uint8_t> s; return core_.force(priv::encode(*c_, v, s)); }
     SendStatus unforce()         { return core_.unforce(); }
@@ -4496,7 +4523,7 @@ private:
         Schema sc = c_->schema();
         VariableOptions<Bytes> uo;
         uo.catch_up = o.catch_up; uo.keep_last = o.keep_last;
-        uo.backpressure_wait_us = o.backpressure_wait_us; uo.queue = o.queue;
+        uo.backpressure_wait = o.backpressure_wait; uo.queue = o.queue;
         core_ = RemoteVariable<Bytes>(n, name, &sc, uo);
     }
     friend class Node;
@@ -4534,7 +4561,7 @@ public:
     }
     int  match_count()   const { return core_.match_count(); }
     bool ready()         const { return core_.ready(); }
-    bool drain(int timeout_ms) { return core_.drain(timeout_ms); }
+    bool drain(std::chrono::milliseconds timeout) { return core_.drain(timeout); }
     SendStatus close()        { return core_.close(); }
 
 private:
@@ -4559,9 +4586,13 @@ public:
 
     /* The oldest waiting message of a pulled subscriber, decoded, or nullopt when none
      * arrived within timeout_ms (0 = check, negative = forever). */
-    std::optional<T> take(int timeout_ms = 0)        { return decoded(core_.take(timeout_ms)); }
+    std::optional<T> take(std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
+        return decoded(core_.take(timeout));
+    }
     /* The newest waiting message, dropping the older ones. As take(). */
-    std::optional<T> take_latest(int timeout_ms = 0) { return decoded(core_.take_latest(timeout_ms)); }
+    std::optional<T> take_latest(std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
+        return decoded(core_.take_latest(timeout));
+    }
 
     int  match_count() const { return core_.match_count(); }
     SendStatus close()      { return core_.close(); }

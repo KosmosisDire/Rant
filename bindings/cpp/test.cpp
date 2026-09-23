@@ -9,6 +9,8 @@
 #include <functional>
 #include <thread>
 
+using namespace std::chrono_literals;
+
 static int g_failures = 0;
 static void chk(const char* what, bool ok) {
     std::printf("  %s  %s\n", ok ? "ok " : "FAIL", what);
@@ -19,7 +21,7 @@ static bool wait_for(int timeout_ms, const std::function<bool()>& pred,
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
         if (pred()) return true;
-        if (pump) pump->poll(2);
+        if (pump) pump->poll(2ms);
         else std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     return pred();
@@ -209,19 +211,19 @@ static bool patterns_leg() {
         [&] { return rf_add.match_count() > 0 && rf_chk.match_count() > 0 && rf_defer.match_count() > 0; }, &b));
     /* settle B so the rsp lanes from A to B are formed before the first blocking
      * call, since match_count proves only the req direction */
-    chk("patterns: settle", b.settle(4000));
+    chk("patterns: settle", b.settle(4s));
 
     /* blocking round trip (memcpy-path structs both ways) */
-    auto r1 = rf_add.call(AddReq{ 20, 22 }, 3000);
+    auto r1 = rf_add.call(AddReq{ 20, 22 }, 3s);
     chk("patterns: blocking call Ok 20+22=42",
         r1.ok() && r1.value()->sum == 42 && r1.provider() != 0);
 
     /* full-form handler replying */
-    auto r2 = rf_chk.call(AddReq{ 6, 7 }, 3000);
+    auto r2 = rf_chk.call(AddReq{ 6, 7 }, 3s);
     chk("patterns: full-form reply 6*7=42", r2.ok() && r2.value()->sum == 42);
 
     /* full form handler failing: AppError */
-    auto r3 = rf_chk.call(AddReq{ -1, 0 }, 3000);
+    auto r3 = rf_chk.call(AddReq{ -1, 0 }, 3s);
     chk("patterns: fail() -> AppError", !r3.ok() && r3.status() == rant::CallStatus::AppError);
 
     /* deferred completion from another thread while the caller blocks */
@@ -231,7 +233,7 @@ static bool patterns_leg() {
         std::lock_guard<std::mutex> g(g_deferred_mu);
         g_deferred.complete(AddRsp{ 11 });
     });
-    auto r4 = rf_defer.call(AddReq{ 5, 6 }, 4000);
+    auto r4 = rf_defer.call(AddReq{ 5, 6 }, 4s);
     completer.join();
     chk("patterns: deferred completion delivers 11", r4.ok() && r4.value()->sum == 11);
 
@@ -256,7 +258,7 @@ static bool patterns_leg() {
     auto vd = a.variable_definition<Speed>("speed", vo);
     auto rv = b.remote_variable<Speed>("speed");
     chk("var: created", vd.valid() && rv.valid());
-    chk("var: remote wait() gets a value", rv.wait(4000));
+    chk("var: remote wait() gets a value", rv.wait(4s));
     { auto v = rv.get(); chk("var: initial 7 replicated", v && v->v == 7); }
     chk("var: remote set accepted", rv.set(Speed{ 25 }) == rant::SendStatus::Ok);
     chk("var: set converges at definition", wait_for(3000,
@@ -1008,7 +1010,7 @@ static bool tasks_leg() {
     chk("task: remotes created", rt_move.valid() && rt_fixed.valid());
     chk("task: definition discovered", wait_for(4000,
         [&] { return rt_move.match_count() > 0 && rt_fixed.match_count() > 0; }, &b));
-    chk("task: settle", b.settle(4000));
+    chk("task: settle", b.settle(4s));
 
     /* blocking call with progress: the handler defers to a test thread that streams typed
        progress and completes. on_progress sees the RUNNING ack first, then the values */
@@ -1029,7 +1031,7 @@ static bool tasks_leg() {
     auto r1 = rt_move.call(MoveReq{ 5.0 },
         [&](const rant::ProgressView<MoveProgress>& p) {
             updates.emplace_back(p.has_value(), p.has_value() ? p.value().remaining : 0.0);
-        }, 8000);
+        }, 8s);
     worker.join();
     chk("task: blocking call ends Ok", r1.ok() && r1.value()->final_position == 5.0 && r1.provider() != 0);
     chk("task: completion message carried", r1.message() == "arrived");
@@ -1176,7 +1178,7 @@ static bool queue_leg() {
     chk("queue: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
     chk("queue: B dispatches", b.threading() == rant::Threading::Dispatch);
-    chk("queue: poll is refused off Manual", b.poll(0) == (int)rant::SendStatus::State);
+    chk("queue: poll is refused off Manual", b.poll() == (int)rant::SendStatus::State);
     chk("queue: dispatch is refused off Dispatch", a.dispatch() == (int)rant::SendStatus::State);
     std::atomic<int> events{ 0 };
     std::thread::id me = std::this_thread::get_id();
@@ -1199,7 +1201,7 @@ static bool queue_leg() {
         [](const AddReq& r) { return AddRsp{ (int64_t)r.x + r.y }; });
     auto rf = b.remote_function<AddReq, AddRsp>("q/add");
     auto drained = [&](const std::function<bool()>& pred) {
-        return wait_for(4000, [&] { b.dispatch(0, 0); return pred(); });
+        return wait_for(4000, [&] { b.dispatch(); return pred(); });
     };
     chk("queue: matched", drained([&] { return pub.match_count() > 0 && pub.ready()
                                              && rf.match_count() > 0; }));
@@ -1231,9 +1233,9 @@ static bool queue_leg() {
     chk("queue: own queue matched", wait_for(4000, [&] { return xpub.match_count() > 0 && xpub.ready(); }));
     xpub.send(Speed{ 9 });
     chk("queue: the node dispatch leaves it",
-        wait_for(4000, [&] { b.dispatch(0, 0); return q.stats().waiting > 0; }) && extra.empty());
+        wait_for(4000, [&] { b.dispatch(); return q.stats().waiting > 0; }) && extra.empty());
     chk("queue: its own dispatch runs it",
-        wait_for(4000, [&] { q.dispatch(0, 0); return extra.size() == 1 && extra[0] == 9; }));
+        wait_for(4000, [&] { q.dispatch(); return extra.size() == 1 && extra[0] == 9; }));
     chk("queue: every callback ran on this thread", !stray.load());
     bool refused = false;
 #if defined(__cpp_exceptions)
@@ -1246,7 +1248,7 @@ static bool queue_leg() {
     auto pulled = b.subscriber<Speed>("q/pull", rel);
     chk("pull: matched", wait_for(4000, [&] { return ppub.match_count() > 0 && ppub.ready(); }));
     for (int32_t v = 1; v <= 3; v++) ppub.send(Speed{ v });
-    auto first = pulled.take(2000);
+    auto first = pulled.take(2s);
     chk("pull: take waits for the oldest", first && first->v == 1);
     std::optional<Speed> newest;
     wait_for(4000, [&] { auto l = pulled.take_latest(); if (l) newest = l; return newest && newest->v == 3; });
@@ -1381,7 +1383,7 @@ static bool failure_leg() {
         [](const AddReq&) -> AddRsp { throw std::runtime_error("the answer is not ready"); });
     auto boom_r = b.remote_function<AddReq, AddRsp>("x/boom");
     chk("fail: matched", wait_for(4000, [&] { return boom_r.match_count() > 0; }));
-    auto r = boom_r.call(AddReq{ 1, 2 }, 3000);
+    auto r = boom_r.call(AddReq{ 1, 2 }, 3s);
     chk("fail: a throwing handler answers AppError", !r && r.status() == rant::CallStatus::AppError);
     chk("fail: with the exception text", r.message() == "the answer is not ready");
     chk("fail: and no value", !r.value());
@@ -1418,6 +1420,16 @@ static bool failure_leg() {
         && final_status == rant::CallStatus::Cancelled);
     chk("fail: with the partial result", partial && partial->final_position == 4.5);
 
+    /* an option duration reaches the C: a 300 ms call timeout with nobody providing */
+    rant::FunctionOptions quick;
+    quick.timeout = 300ms;
+    auto nobody = b.remote_function<AddReq, AddRsp>("x/nobody", quick);
+    auto t0 = std::chrono::steady_clock::now();
+    auto rn = nobody.call(AddReq{ 1, 1 });
+    auto took = std::chrono::steady_clock::now() - t0;
+    chk("fail: a call with no provider answers NoProvider", rn.status() == rant::CallStatus::NoProvider);
+    chk("fail: within the option's timeout", took >= 250ms && took < 2s);
+
     rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
 #if defined(__cpp_exceptions)
     /* a blocking call from the loop thread would stall the loop it waits on */
@@ -1428,7 +1440,7 @@ static bool failure_leg() {
     std::atomic<int> threw{ 0 };
     auto ping = a.publisher<Speed>("x/ping", rel);
     auto trigger = b.subscriber<Speed>("x/ping", [&](const Speed&) {
-        try { (void)add_r.call(AddReq{ 1, 1 }, 500); threw = 1; }
+        try { (void)add_r.call(AddReq{ 1, 1 }, 500ms); threw = 1; }
         catch (const rant::Error&) { threw = 2; }
     }, rel);
     chk("fail: ping matched", wait_for(4000, [&] { return ping.match_count() > 0 && ping.ready(); }));
@@ -1469,7 +1481,7 @@ static bool factory_leg() {
         return a_id != 0;
     });
     chk("reflection: B sees A", a_id != 0);
-    rant::MetaSnapshot snap = b.reflection().meta(a_id, rant::MetaNode, 2000);
+    rant::MetaSnapshot snap = b.reflection().meta(a_id, rant::MetaNode, 2s);
     chk("reflection: blocking meta answers", snap.valid && snap.node.name == "FA");
     std::atomic<bool> async_named{ false };
     chk("reflection: meta_async launches", b.reflection().meta_async(a_id,
@@ -1602,7 +1614,7 @@ static bool bench_leg() {
     rant::Node a("BA", opts);
     rant::Node b("BB", opts);
     if (!a.valid() || !b.valid()) { std::printf("bench: nodes failed\n"); return false; }
-    auto pump = [&] { a.poll(0); b.poll(0); };
+    auto pump = [&] { a.poll(); b.poll(); };
     auto matched = [&](auto& pub) { return wait_for(4000, [&] { pump(); return pub.match_count() > 0 && pub.ready(); }); };
 
     {
@@ -1674,8 +1686,8 @@ int main(int argc, char** argv) {
     uint32_t seq = 0;
     while (!g.received && std::chrono::steady_clock::now() < deadline) {
         if (pub.match_count() > 0 && !send_one(pub, schema, ++seq)) return 1;
-        a.poll(1);
-        b.poll(1);
+        a.poll(1ms);
+        b.poll(1ms);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     if (!g.received) { std::printf("FAIL: no message within timeout (match_count=%d)\n", pub.match_count()); return 1; }
@@ -1692,7 +1704,7 @@ int main(int argc, char** argv) {
     if (!ta.valid() || !tb.valid()) { std::printf("FAIL: threaded node construction\n"); return 3; }
     ta.on_event(on_evt("TA"));
     tb.on_event(on_evt("TB"));
-    if (ta.poll(0) != (int)rant::SendStatus::State) { std::printf("FAIL: poll not refused on the service thread\n"); return 3; }
+    if (ta.poll() != (int)rant::SendStatus::State) { std::printf("FAIL: poll not refused on the service thread\n"); return 3; }
     rant::Schema tschema = ta.schema(SCHEMA);
     auto tpub = ta.publisher<rant::Bytes>("t", { rant::Reliability::Reliable }, tschema);
     auto tsub = tb.subscriber<rant::Bytes>("t", on_msg, { rant::Reliability::Reliable }, tschema);

@@ -24,6 +24,9 @@ about a wrapper API, this file wins.
 - A payload that does not decode into a handle's type raises an Error event of kind
   SchemaMismatch naming the topic in every binding, and the handler does not run. A pull
   or a variable read of one throws.
+- Durations follow the language: `std::chrono` in C++ (a timeout in milliseconds,
+  `rant::forever` for no end, option fields without a unit suffix), int milliseconds in
+  C#, float seconds in Python. Timestamps stay integer microseconds everywhere.
 - Variable reads are local and status free. Writes return a status. C# `Value` has a
   setter that throws on a non OK status. A remote set round trips through the definition.
   The cache is authoritative only, never an optimistic echo.
