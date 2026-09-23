@@ -785,6 +785,12 @@ namespace Rant
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_function_refresh(IntPtr fn);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr rant_function_request_schema(IntPtr fn);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr rant_function_response_schema(IntPtr fn);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr rant_function_progress_schema(IntPtr fn);
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern void rant_request_reply(IntPtr request, RantBytes rsp);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern void rant_request_fail(IntPtr request, byte[] message, RantBytes rsp);
@@ -838,6 +844,8 @@ namespace Rant
 
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_variable_refresh(IntPtr var);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr rant_variable_schema(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_variable_on_change(IntPtr var, RantVariableUpdateFn on_change, IntPtr user);
         [DllImport(LIB, CallingConvention = CC)]
@@ -2140,12 +2148,14 @@ namespace Rant
         internal IntPtr _handle;   // zeroed by Release, and by the node at Close
         internal readonly Schema Schema;
         internal readonly Role Role;
+        internal readonly string Name;
 
         void INodeHandle.Invalidate() { _handle = IntPtr.Zero; }
 
         internal TopicCore(RantNode node, string name, Schema schema, Role role, Qos qos, bool pull = false)
         {
             _node = node;
+            Name = name;
             Schema = schema;
             Role = role;
             _handle = node.AcquireTopic(name, role, schema, qos, pull);
@@ -2826,6 +2836,18 @@ namespace Rant
             return h == IntPtr.Zero ? null : Wrap(h, null);
         }
 
+        // The schema a handle uses now: its own when unchanged, else this node's wrapper of the
+        // one it adopted, made once.
+        internal Schema CurrentSchema(IntPtr h, Schema local)
+        {
+            if (h == IntPtr.Zero) return null;
+            if (local != null && local.Handle == h) return local;
+            lock (_msgSchemaLock)
+                foreach (Schema s in _schemas)
+                    if (s.Handle == h) return s;
+            return Wrap(h, null);
+        }
+
         // Every wrapper goes on the list Close invalidates. Under the leaf lock, since the
         // delivery path reaches here with the node lock held.
         private Schema Wrap(IntPtr h, Type t)
@@ -3454,6 +3476,7 @@ namespace Rant
     {
         internal IntPtr Fn;   // zeroed by Dispose, and by the node at Close
         internal readonly RantNode RantNode;
+        internal readonly string Name;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
@@ -3461,6 +3484,7 @@ namespace Rant
                                   Action<RequestCore> handler, FunctionOptions options)
         {
             RantNode = node;
+            Name = name;
             FunctionOptions opt = options ?? new FunctionOptions();
             RantFunctionOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
             long id = 0;
@@ -3559,6 +3583,7 @@ namespace Rant
     {
         internal IntPtr Fn;   // zeroed by Dispose, and by the node at Close
         internal readonly RantNode RantNode;
+        internal readonly string Name;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
@@ -3568,6 +3593,7 @@ namespace Rant
                               FunctionOptions options)
         {
             RantNode = node;
+            Name = name;
             FunctionOptions opt = options ?? new FunctionOptions();
             RantFunctionOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
             Queued = co.queue != IntPtr.Zero;
@@ -3716,6 +3742,7 @@ namespace Rant
     {
         internal IntPtr Fn;   // zeroed by Dispose, and by the node at Close
         internal readonly RantNode RantNode;
+        internal readonly string Name;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
@@ -3724,6 +3751,7 @@ namespace Rant
                               TaskOptions options)
         {
             RantNode = node;
+            Name = name;
             TaskOptions opt = options ?? new TaskOptions();
             RantTaskOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
             long id = 0, cancelId = 0;
@@ -3822,6 +3850,7 @@ namespace Rant
     {
         internal IntPtr Fn;   // zeroed by Dispose, and by the node at Close
         internal readonly RantNode RantNode;
+        internal readonly string Name;
 
         void INodeHandle.Invalidate() { Fn = IntPtr.Zero; }
 
@@ -3831,6 +3860,7 @@ namespace Rant
                           Schema responseSchema, TaskOptions options)
         {
             RantNode = node;
+            Name = name;
             TaskOptions opt = options ?? new TaskOptions();
             RantTaskOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
             Queued = co.queue != IntPtr.Zero;
@@ -4224,6 +4254,13 @@ namespace Rant
         }
 
         /// <summary>Callers currently matched to this definition.</summary>
+        /// <summary>The handle's name.</summary>
+        public string Name => _core.Name;
+        /// <summary>The request schema in use now, null when untyped. A ReflectFromMesh handle
+        /// reports what it adopted.</summary>
+        public Schema RequestSchema => _core.RantNode.CurrentSchema(Native.rant_function_request_schema(_core.Fn), _req);
+        /// <summary>The response schema in use now, as RequestSchema.</summary>
+        public Schema ResponseSchema => _core.RantNode.CurrentSchema(Native.rant_function_response_schema(_core.Fn), _rsp);
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
@@ -4320,6 +4357,13 @@ namespace Rant
         }
 
         /// <summary>Definitions currently matched, 0 = no provider present.</summary>
+        /// <summary>The handle's name.</summary>
+        public string Name => _core.Name;
+        /// <summary>The request schema in use now, null when untyped. A ReflectFromMesh handle
+        /// reports what it adopted.</summary>
+        public Schema RequestSchema => _core.RantNode.CurrentSchema(Native.rant_function_request_schema(_core.Fn), _req);
+        /// <summary>The response schema in use now, as RequestSchema.</summary>
+        public Schema ResponseSchema => _core.RantNode.CurrentSchema(Native.rant_function_response_schema(_core.Fn), _rsp);
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
@@ -4390,6 +4434,15 @@ namespace Rant
         }
 
         /// <summary>Callers currently matched to this definition.</summary>
+        /// <summary>The handle's name.</summary>
+        public string Name => _core.Name;
+        /// <summary>The request schema in use now, null when untyped. A ReflectFromMesh handle
+        /// reports what it adopted.</summary>
+        public Schema RequestSchema => _core.RantNode.CurrentSchema(Native.rant_function_request_schema(_core.Fn), _req);
+        /// <summary>The response schema in use now, as RequestSchema.</summary>
+        public Schema ResponseSchema => _core.RantNode.CurrentSchema(Native.rant_function_response_schema(_core.Fn), _rsp);
+        /// <summary>The progress schema in use now, as RequestSchema.</summary>
+        public Schema ProgressSchema => _core.RantNode.CurrentSchema(Native.rant_function_progress_schema(_core.Fn), _prg);
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
@@ -4493,6 +4546,15 @@ namespace Rant
             => new RantResponse<TRsp> { Core = await core.ConfigureAwait(false), RspSchema = _rsp, Name = _name };
 
         /// <summary>Definitions currently matched, 0 = no provider present.</summary>
+        /// <summary>The handle's name.</summary>
+        public string Name => _core.Name;
+        /// <summary>The request schema in use now, null when untyped. A ReflectFromMesh handle
+        /// reports what it adopted.</summary>
+        public Schema RequestSchema => _core.RantNode.CurrentSchema(Native.rant_function_request_schema(_core.Fn), _req);
+        /// <summary>The response schema in use now, as RequestSchema.</summary>
+        public Schema ResponseSchema => _core.RantNode.CurrentSchema(Native.rant_function_response_schema(_core.Fn), _rsp);
+        /// <summary>The progress schema in use now, as RequestSchema.</summary>
+        public Schema ProgressSchema => _core.RantNode.CurrentSchema(Native.rant_function_progress_schema(_core.Fn), _prg);
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
@@ -4557,6 +4619,11 @@ namespace Rant
         public bool Forced => _core.Forced;
         /// <summary>Handles matched on the other side: remotes for a definition, owners for a
         /// remote, 0 = no owner present.</summary>
+        /// <summary>The variable's name.</summary>
+        public string Name => _core.Name;
+        /// <summary>The schema in use now, null when untyped. A ReflectFromMesh handle reports
+        /// what it adopted.</summary>
+        public Schema Schema => _core.RantNode.CurrentSchema(Native.rant_variable_schema(_core.Var), _schema);
         public int MatchCount => _core.MatchCount;
         /// <summary>Block until a value exists or timeoutMs elapses, on the service thread's
         /// progress or driving a Manual node's loop. Refused from a callback.</summary>
@@ -4674,6 +4741,11 @@ namespace Rant
         public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts() => _topic.Counts();
         /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
         /// provider moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
+        /// <summary>The topic's name.</summary>
+        public string Name => _topic.Name;
+        /// <summary>The schema in use now, null when untyped. A ReflectFromMesh topic reports
+        /// what it adopted.</summary>
+        public Schema Schema => _topic._node.CurrentSchema(Native.rant_topic_schema(_topic._handle), _topic.Schema);
         public bool Refresh() => _topic.Refresh();
         /// <summary>Stop publishing. The node stops advertising the role no handle holds, and
         /// the last handle on the name retires the topic. Refused from a callback.</summary>
@@ -4749,6 +4821,11 @@ namespace Rant
         public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts() => _topic.Counts();
         /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
         /// provider moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
+        /// <summary>The topic's name.</summary>
+        public string Name => _topic.Name;
+        /// <summary>The schema in use now, null when untyped. A ReflectFromMesh topic reports
+        /// what it adopted.</summary>
+        public Schema Schema => _topic._node.CurrentSchema(Native.rant_topic_schema(_topic._handle), _topic.Schema);
         public bool Refresh() => _topic.Refresh();
         /// <summary>Stop receiving: the handlers are dropped, the node stops advertising the
         /// role no handle holds, and the last handle on the name retires the topic. Refused

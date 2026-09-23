@@ -172,7 +172,10 @@ until every reliable subscriber acknowledged what was sent, the flush before `Di
 `Qos.ReflectFromMesh`, and the same field on the pattern options, is not a QoS field: a
 null schema and a best effort reliability then follow the mesh. Every handle that can
 carry it has `Refresh()`, which re types it in place when the mesh moved and returns true
-when it did. docs/reflection.md says what gets adopted.
+when it did. docs/reflection.md says what gets adopted. Every handle reports `Name` and the
+schema it uses now, the adopted one on a reflect handle: `Schema` on a topic or a variable,
+`RequestSchema`, `ResponseSchema` and, on a task, `ProgressSchema` on a function or task
+handle, null while untyped.
 
 ## Functions and tasks
 

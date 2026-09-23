@@ -1162,6 +1162,22 @@ static class Program
         Check("a reflect topic took the provider's schema",
               Native.rant_topic_schema(reflect.Topic._handle) != IntPtr.Zero);
         Check("refresh on a settled handle reports no change", !reflect.Refresh());
+        Check("a handle reports its name and schema", pub.Name == "reflected" && pub.Schema.Name == "Level");
+        Check("a reflect topic reports the schema it adopted",
+              reflect.Schema != null && reflect.Schema.Hash == pub.Schema.Hash);
+
+        // a reflect remote function reports the schemas it adopted
+        var radd = a.FunctionDefinition<AddReq, AddRsp>("radd", q => new AddRsp { Sum = q.A + q.B });
+        var raddR = b.RemoteFunction<byte[], byte[]>("radd", new FunctionOptions { ReflectFromMesh = true });
+        Check("a definition reports its schemas", radd.Name == "radd"
+              && radd.RequestSchema.Name == "AddReq" && radd.ResponseSchema.Name == "AddRsp");
+        deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline && raddR.RequestSchema == null) { raddR.Refresh(); Thread.Sleep(20); }
+        Check("a reflect remote reports the schemas it adopted",
+              raddR.RequestSchema != null && raddR.RequestSchema.Hash == radd.RequestSchema.Hash
+              && raddR.ResponseSchema.Hash == radd.ResponseSchema.Hash);
+        var level = a.VariableDefinition<Level>("rlevel", new Level { Value = 1 });
+        Check("a variable reports its name and schema", level.Name == "rlevel" && level.Schema.Name == "Level");
         Check("drain returns once every reader acked", pub.Drain(2000));
 
         // the blocking meta form answers on this thread
