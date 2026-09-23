@@ -71,7 +71,7 @@ var pub = robot.Publisher<Pose>("pose", new Qos { Reliability = Reliability.Reli
 // usually another process
 var viewer = new RantNode("viewer", new NodeOptions { Domain = 7 });
 viewer.OnEvent += e => Console.Error.WriteLine(e);                   // the diagnostics, optional
-viewer.Subscriber<Pose>("pose").OnMessage += (p, _) => Console.WriteLine(p.X);
+viewer.Subscriber<Pose>("pose", p => Console.WriteLine(p.X));
 
 pub.Send(new Pose { Stamp = 1, X = 1, Frame = "map" });   // thread-safe from any thread
 // (or Threading = Threading.Manual in the options and drive node.Poll(1) in your own loop)

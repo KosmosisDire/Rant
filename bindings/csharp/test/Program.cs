@@ -785,7 +785,7 @@ static class Program
         return ok;
     }
 
-    // Bare types as whole schemas: no struct wrapper, plain values through Send and OnMessage.
+    // Bare types as whole schemas: no struct wrapper, plain values through Send and the handler.
     static bool ValueRoots()
     {
         bool ok = true;

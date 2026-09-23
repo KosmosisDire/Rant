@@ -880,7 +880,7 @@ namespace Rant
         /// <summary>Not a QoS field: it rides beside them in the C topic opts. A null schema and
         /// a BestEffort reliability then follow the mesh. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool ReflectFromMesh = false;
-        /// <summary>The queue the subscriber's OnMessage parks on, null = the node's default
+        /// <summary>The queue the subscriber's handler parks on, null = the node's default
         /// under Threading.Dispatch, else inline on the loop thread. Not a QoS field, it rides
         /// here because the topic options are this object (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/node.md">docs/node.md</see>).</summary>
         public RantQueue Queue = null;
@@ -4512,9 +4512,9 @@ namespace Rant
         public void Dispose() => _topic.Release();
     }
 
-    /// <summary>The subscribing side of a topic, from RantNode.Subscriber. OnMessage fires per
-    /// message where the node's callbacks run: the loop thread, or Dispatch() with a queue.
-    /// T decodes against the publisher's schema, a byte[] T is the bytes as is.</summary>
+    /// <summary>The subscribing side of a topic, from RantNode.Subscriber. Its handler fires
+    /// per message where the node's callbacks run, or without one TryTake reads it. T decodes
+    /// against the publisher's schema, a byte[] T is the bytes as is.</summary>
     public sealed class Subscriber<T> : IDisposable
     {
         private readonly TopicCore _topic;
