@@ -561,6 +561,14 @@ struct Outline { rant::types::Float2 corners[4]; uint8_t n; };
 RANT_SCHEMA(Outline, corners, n);
 struct Grid { std::array<Outline, 2> rows; Corner mark[3]; };
 RANT_SCHEMA(Grid, rows, mark);
+/* variable arrays of structs and of capped strings, beside other tail members */
+struct Scene {
+    uint32_t seq = 0;
+    std::vector<Outline> outlines;
+    std::vector<rant::String<8>> tags;
+    std::string note;
+};
+RANT_SCHEMA(Scene, seq, outlines, tags, note);
 
 /* encode then decode through the node's typed codec, no network */
 template <class T> static bool round_trip(rant::Node& n, const T& in, T& out) {
@@ -633,6 +641,80 @@ static bool nested_leg() {
         in[2] = { 7.0f, 8.0f };
         chk("nest: a fixed struct array root round trips",
             round_trip(a, in, out) && out[2].x == 7.0f && out[0].y == 0.0f);
+    }
+    {   auto sc = rant::priv::schema_of<Scene>(a);
+        std::string txt = sc ? sc->to_dsl() : std::string();
+        chk("nest: variable struct and capped string arrays spell as C# and Python do",
+            txt.find("outlines: Outline[]") != std::string::npos
+            && txt.find("tags: string<8>[]") != std::string::npos);
+        rant::Schema same = a.schema("Scene { seq: u32, outlines: Outline[], tags: string<8>[], "
+                                     "note: string }");
+        chk("nest: the same text is the same schema", sc && same && sc->hash() == same.hash());
+        Scene in, out;
+        in.seq = 3;
+        in.outlines.resize(2);
+        in.outlines[1].corners[2] = { 1.5f, 2.5f };
+        in.outlines[0].n = 4;
+        in.tags.resize(3);
+        in.tags[0].assign("left");
+        in.tags[2].assign("eightchr");
+        in.note = "after the arrays";
+        chk("nest: a variable struct array round trips",
+            round_trip(a, in, out) && out.seq == 3 && out.outlines.size() == 2
+            && out.outlines[1].corners[2].y == 2.5f && out.outlines[0].n == 4
+            && out.outlines[1].corners[0].x == 0.0f);
+        chk("nest: a variable capped string array round trips",
+            out.tags.size() == 3 && out.tags[0] == "left" && out.tags[1] == ""
+            && out.tags[2] == "eightchr" && out.note == "after the arrays");
+        std::vector<uint8_t> scratch;
+        rant::priv::TypeCodec* c = rant::priv::type_codec<Scene>(a);
+        rant::Bytes by = c ? rant::priv::encode(*c, in, scratch) : rant::Bytes();
+        rant::detail::RantBytes mb; mb.data = by.data(); mb.len = by.size();
+        chk("nest: the C path reads the variable array's elements",
+            c && rant::detail::rant_get_f32(mb, c->raw, "outlines[1].corners[2].x") == 1.5f
+            && rant::detail::rant_get_array_count(mb, c->raw, "outlines") == 2
+            && rant::detail::rant_schema_validate(c->raw, mb));
+        Scene none, back;
+        back.outlines.resize(5);
+        chk("nest: an empty variable struct array decodes empty",
+            round_trip(a, none, back) && back.outlines.empty() && back.tags.empty());
+
+        /* a publisher's other layout: an extra field shifts every offset */
+        rant::NodeOptions o2 = opts;
+        rant::Node w("nest-w", {}, [](const rant::Event&) {}, o2);
+        rant::Schema wide = w.schema("Outline { corners: Float2[4], n: u8 }\n"
+                                     "Scene { extra: u64, seq: u32, outlines: Outline[], "
+                                     "tags: string<8>[], note: string }");
+        rant::MessageBuilder mbld(wide);
+        mbld.set_uint("extra", 99).set_uint("seq", 5);
+        std::vector<uint8_t> msg;
+        {   /* a variable array sized in the raw builder bytes, then filled by path */
+            rant::Bytes raw = mbld.bytes();
+            msg.assign(raw.data(), raw.data() + raw.size());
+            msg.resize(msg.size() + 64);
+            rant::detail::rant_set_array_count(msg.data(), msg.size(), wide.raw(), "outlines", 1);
+            rant::detail::rant_set_f32(msg.data(), msg.size(), wide.raw(), "outlines[0].corners[3].y", 8.0f);
+            msg.resize(rant::detail::rant_schema_msg_len(wide.raw(), msg.data(), msg.size()));
+        }
+        Scene rb;
+        chk("nest: another layout decodes through its own offsets",
+            c && rant::priv::decode(*c, rb, rant::Bytes(msg.data(), msg.size()), wide.raw())
+            && rb.seq == 5 && rb.outlines.size() == 1 && rb.outlines[0].corners[3].y == 8.0f);
+    }
+    {   auto sc = rant::priv::schema_of<std::vector<Corner>>(a);
+        std::string txt = sc ? sc->to_dsl() : std::string();
+        chk("nest: a variable struct array is a whole schema too",
+            txt.find("Corner[]") != std::string::npos);
+        std::vector<Corner> in = { { 1.0f, 2.0f }, { 3.0f, 4.0f } }, out;
+        chk("nest: a variable struct array root round trips",
+            round_trip(a, in, out) && out.size() == 2 && out[1].x == 3.0f);
+    }
+    {   rant::types::JointNames in, out;
+        in.name.resize(2);
+        in.name[0].assign("shoulder");
+        in.name[1].assign("elbow");
+        chk("nest: the standard JointNames compiles and round trips",
+            round_trip(a, in, out) && out.name.size() == 2 && out.name[1] == "elbow");
     }
     return g_failures == fails_at_entry;
 }

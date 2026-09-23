@@ -1134,7 +1134,18 @@ struct Tail {
     uint32_t    struct_off = 0;
     uint8_t     is_string = 0;                  /* std::string member (VSTR frame) */
     uint8_t     elem_kind = 0;                  /* std::vector<E>: E's wire kind */
+    uint16_t    cap = 0;                        /* std::vector<String<N>>: N */
     std::string path;
+    /* std::vector of structs: one element's leaves, offsets within the element, copied
+       per element through the array's frame */
+    uint8_t     is_structs = 0;
+    std::vector<Leaf> elem;
+    uint32_t    elem_host = 0;                  /* sizeof the element */
+    uint32_t    elem_wire = 0;                  /* its wire size, resolved per schema */
+    uint16_t    index = 0;                      /* the array's row, resolved per schema */
+    size_t (*count)(const uint8_t* member) = nullptr;
+    const uint8_t* (*items)(const uint8_t* member) = nullptr;
+    uint8_t* (*resize)(uint8_t* member, size_t n) = nullptr;
     size_t (*extra)(const uint8_t* member) = nullptr;   /* payload bytes to reserve */
     bool (*write)(const uint8_t* member, uint8_t* buf, size_t cap,
                   const detail::RantSchema* s, const char* path) = nullptr;
@@ -1177,6 +1188,58 @@ template <class E> struct vector_tail {
                 copy_swapped(reinterpret_cast<uint8_t*>(&v[i]), src + i * sizeof(E), sizeof(E));
         }
         return true;
+    }
+};
+
+/* a std::vector<String<N>>: [u16 len][N bytes] slots, copied one by one since the
+ * struct may carry a pad byte */
+template <uint16_t N> struct string_vector_tail {
+    static size_t extra(const uint8_t* m) {
+        return reinterpret_cast<const std::vector<String<N>>*>(m)->size() * (2u + N);
+    }
+    static bool write(const uint8_t* m, uint8_t* buf, size_t cap,
+                      const detail::RantSchema* s, const char* path) {
+        const std::vector<String<N>>& v = *reinterpret_cast<const std::vector<String<N>>*>(m);
+        std::vector<uint8_t> tmp(v.size() * (2u + N), 0);
+        for (size_t i = 0; i < v.size(); i++) {
+            uint8_t* slot = tmp.data() + i * (2u + N);
+            uint16_t len = v[i].len > N ? N : v[i].len;
+            slot[0] = (uint8_t)len; slot[1] = (uint8_t)(len >> 8);
+            std::memcpy(slot + 2, v[i].data, len);
+        }
+        return detail::rant_set_array(buf, cap, s, path,
+                                      detail::rant_bytes(tmp.data(), tmp.size())) != 0;
+    }
+    static bool read(uint8_t* m, detail::RantBytes msg,
+                     const detail::RantSchema* s, const char* path) {
+        std::vector<String<N>>& v = *reinterpret_cast<std::vector<String<N>>*>(m);
+        detail::RantBytes view = detail::rant_get_array(msg, s, path);
+        if (!view.data) return false;
+        size_t n = view.len / (2u + N);
+        v.assign(n, String<N>());
+        for (size_t i = 0; i < n; i++) {
+            const uint8_t* slot = view.data + i * (2u + N);
+            uint16_t len = (uint16_t)(slot[0] | (slot[1] << 8));
+            if (len > N) len = N;                  /* clamp a hostile length prefix */
+            v[i].len = len;
+            std::memcpy(v[i].data, slot + 2, len);
+        }
+        return true;
+    }
+};
+
+/* the type erased access to a std::vector of structs */
+template <class E> struct struct_vector_ops {
+    static size_t count(const uint8_t* m) {
+        return reinterpret_cast<const std::vector<E>*>(m)->size();
+    }
+    static const uint8_t* items(const uint8_t* m) {
+        return reinterpret_cast<const uint8_t*>(reinterpret_cast<const std::vector<E>*>(m)->data());
+    }
+    static uint8_t* resize(uint8_t* m, size_t n) {
+        std::vector<E>& v = *reinterpret_cast<std::vector<E>*>(m);
+        v.assign(n, E{});
+        return reinterpret_cast<uint8_t*>(v.data());
     }
 };
 
@@ -1290,7 +1353,7 @@ struct SchemaBuilder {
     template <class E> void add_vector(const char* name, size_t off) {
         constexpr int k = scalar_kind_of<E>();
         static_assert(k >= 0, "RANT_SCHEMA: std::vector element must be a wire scalar "
-                              "(no vectors of structs, strings, or vectors)");
+                              "or a rant::String<N> or a struct (no std::string, no vectors of vectors)");
         static_assert(!std::is_same_v<E, bool>,
                       "RANT_SCHEMA: std::vector<bool> is bit-packed; use std::vector<uint8_t>");
         sep(name);
@@ -1320,6 +1383,8 @@ struct SchemaBuilder {
     template <class U> void define();
     template <class U> void members(const char* name, size_t off);
     template <class E> void add_struct_array(const char* name, size_t off, size_t n);
+    template <class E> void add_struct_vector(const char* name, size_t off);
+    template <class E> void add_string_vector(const char* name, size_t off);
 };
 
 /* a struct shaped type: reflected, or a standard struct, never an alias */
@@ -1382,13 +1447,17 @@ template <class U> void SchemaBuilder::add(const char* name, size_t off) {
         define<U>();
         members<U>(name, off);
     } else if constexpr (is_std_vector<U>::value) {
-        add_vector<typename is_std_vector<U>::elem>(name, off);
+        using E = typename is_std_vector<U>::elem;
+        if constexpr (is_struct_type<E>())            add_struct_vector<E>(name, off);
+        else if constexpr (is_rant_string<E>::value)  add_string_vector<E>(name, off);
+        else                                          add_vector<E>(name, off);
     } else if constexpr (is_var_string<U>::value) {
         add_var_string(name, off);
     } else {
         static_assert(always_false<U>,
             "RANT_SCHEMA: unsupported field type (no pointers/maps; use scalars, "
-            "rant::String<N>, fixed arrays, std::vector<scalar>, std::string, or a "
+            "rant::String<N>, fixed arrays, std::vector of scalars, structs or strings, "
+            "std::string, or a "
             "nested RANT_SCHEMA struct)");
     }
 }
@@ -1436,14 +1505,57 @@ template <class E> void SchemaBuilder::add_struct_array(const char* name, size_t
     }
 }
 
+/* A variable array of structs: `name: Elem[]`, a tail whose element leaves sit relative
+ * to one element, copied per element through the array's frame. */
+template <class E> void SchemaBuilder::add_struct_vector(const char* name, size_t off) {
+    sep(name);
+    if constexpr (std_type<E>::name != nullptr) put(std_type<E>::name);
+    else { put(strip_namespaces(reflect<E>::type_name)); define<E>(); }
+    put("[]");
+    SchemaBuilder sub;                          /* the element's leaves, base 0 */
+    sub.root   = root ? root : this;
+    sub.prefix = prefix + name + ".";
+    sub.quiet  = 1;
+    reflect<E>::visit(SchemaVisit{ &sub });
+    Tail t;
+    t.struct_off = base + (uint32_t)off;
+    t.path       = prefix + name;
+    t.is_structs = 1;
+    t.elem_kind  = (uint8_t)detail::RANT_STRUCT;
+    t.elem       = std::move(sub.leaves);
+    t.elem_host  = (uint32_t)sizeof(E);
+    t.count  = &struct_vector_ops<E>::count;
+    t.items  = &struct_vector_ops<E>::items;
+    t.resize = &struct_vector_ops<E>::resize;
+    tails.push_back(std::move(t));
+}
+
+/* A variable array of capped strings: `name: string<N>[]`. */
+template <class E> void SchemaBuilder::add_string_vector(const char* name, size_t off) {
+    constexpr uint16_t cap = is_rant_string<E>::cap;
+    sep(name);
+    put("string<"); put(std::to_string(cap)); put(">[]");
+    Tail t;
+    t.struct_off = base + (uint32_t)off;
+    t.elem_kind  = (uint8_t)detail::RANT_STR;
+    t.cap        = cap;
+    t.path  = prefix + name;
+    t.extra = &string_vector_tail<cap>::extra;
+    t.write = &string_vector_tail<cap>::write;
+    t.read  = &string_vector_tail<cap>::read;
+    tails.push_back(std::move(t));
+}
+
 /* the wire offset of field fi reached through the enclosing struct arrays by elems, each
- * fixed. False when an index is out of range or an array is variable. */
+ * fixed, stopping at row stop, a variable array whose frame is the base. False when an
+ * index is out of range or another array is variable. */
 inline bool static_offset(const detail::RantSchema* s, detail::RantSchemaFieldInfo fi,
-                          const std::vector<uint16_t>& elems, uint32_t& out) {
+                          const std::vector<uint16_t>& elems, uint32_t& out,
+                          uint16_t stop = 0xFFFF) {
     uint64_t off = fi.offset;
     size_t k = elems.size();
-    if (k != fi.arr_depth) return false;
-    while (fi.arr_parent != 0xFFFF) {
+    if (k + (stop != 0xFFFF ? 1u : 0u) != fi.arr_depth) return false;
+    while (fi.arr_parent != 0xFFFF && fi.arr_parent != stop) {
         detail::RantSchemaFieldInfo pa;
         if (!detail::rant_schema_field_at(s, fi.arr_parent, &pa)) return false;
         uint16_t e = elems[--k];
@@ -1479,18 +1591,30 @@ inline bool fill_offsets(const detail::RantSchema* s, std::vector<Leaf>& lv) {
     return true;
 }
 
-/* verify every tail member resolves in a compiled schema with the matching variable
- * kind (a tail needs no offset: the accessors walk the frames per message) */
-inline bool tails_resolve(const detail::RantSchema* s, const std::vector<Tail>& tv) {
-    for (const Tail& t : tv) {
+/* resolve every tail member in a compiled schema with the matching variable kind. A
+ * frame needs no offset, the accessors walk it per message, but a struct vector's element
+ * leaves get their offsets within one element, and the element's wire size. */
+inline bool tails_resolve(const detail::RantSchema* s, std::vector<Tail>& tv) {
+    for (Tail& t : tv) {
         int idx = detail::rant_schema_field_index(s, t.path.c_str());
         if (idx < 0) return false;
         detail::RantSchemaFieldInfo fi;
         if (!detail::rant_schema_field_at(s, (uint16_t)idx, &fi)) return false;
         if (t.is_string) {
             if (fi.kind != (uint8_t)detail::RANT_VSTR) return false;
-        } else {
-            if (fi.kind != (uint8_t)detail::RANT_VARR || fi.elem != t.elem_kind) return false;
+            continue;
+        }
+        if (fi.kind != (uint8_t)detail::RANT_VARR || fi.elem != t.elem_kind) return false;
+        if (t.elem_kind == (uint8_t)detail::RANT_STR && fi.str_cap != t.cap) return false;
+        if (!t.is_structs) continue;
+        t.index = (uint16_t)idx;
+        t.elem_wire = fi.elem_size;
+        for (Leaf& l : t.elem) {
+            int li = detail::rant_schema_field_index(s, l.path.c_str());
+            detail::RantSchemaFieldInfo lf;
+            if (li < 0 || !detail::rant_schema_field_at(s, (uint16_t)li, &lf)) return false;
+            if (!static_offset(s, lf, l.elems, l.wire_off, t.index)) return false;
+            if ((uint64_t)l.wire_off + (uint64_t)l.w_stride * l.count > t.elem_wire) return false;
         }
     }
     return true;
@@ -1535,6 +1659,34 @@ inline void leaf_from_wire(const Leaf& l, uint8_t* sbase, const uint8_t* wire, b
     }
 }
 
+/* a struct vector into its sized frame, element by element */
+inline bool struct_vector_write(const Tail& t, const uint8_t* member, uint8_t* buf, size_t cap,
+                                const detail::RantSchema* s, bool le) {
+    size_t n = t.count(member);
+    if (!detail::rant_set_array_count(buf, cap, s, t.path.c_str(), (uint32_t)n)) return false;
+    detail::RantBytes fr = detail::rant_get_array(detail::rant_bytes(buf, cap), s, t.path.c_str());
+    if (n && (!fr.data || fr.len < n * t.elem_wire)) return false;
+    uint8_t* w = const_cast<uint8_t*>(fr.data);   /* a view into buf, ours to write */
+    const uint8_t* src = t.items(member);
+    for (size_t i = 0; i < n; i++)
+        for (const Leaf& l : t.elem)
+            leaf_to_wire(l, src + i * t.elem_host, w + i * t.elem_wire, le);
+    return true;
+}
+
+/* a struct vector out of its frame, resized to the live element count */
+inline bool struct_vector_read(const Tail& t, uint8_t* member, detail::RantBytes msg,
+                               const detail::RantSchema* s, bool le) {
+    detail::RantBytes fr = detail::rant_get_array(msg, s, t.path.c_str());
+    if (!fr.data || !t.elem_wire) return false;
+    size_t n = fr.len / t.elem_wire;
+    uint8_t* dst = t.resize(member, n);
+    for (size_t i = 0; i < n; i++)
+        for (const Leaf& l : t.elem)
+            leaf_from_wire(l, dst + i * t.elem_host, fr.data + i * t.elem_wire, le);
+    return true;
+}
+
 /* T is a bare wire type, usable as a handle's whole schema with no RANT_SCHEMA. std::string
  * is the unbounded string root and std::vector<E> the E[] root, both on the tail path. */
 template <class U> constexpr bool is_value_type() {
@@ -1558,7 +1710,8 @@ struct TypeCodec {
 
     /* one incoming schema pointer's resolved offsets. A rebased schema keeps our hash with the
      * publisher's offsets, so offsets are resolved per pointer and never chosen by hash. */
-    struct Rebased { std::vector<Leaf> leaves; uint32_t size = 0; bool ok = false, coincide = false; };
+    struct Rebased { std::vector<Leaf> leaves; std::vector<Tail> tails; uint32_t size = 0;
+                     bool ok = false, coincide = false; };
     std::mutex                                       mu;
     std::map<const detail::RantSchema*, Rebased>       rebased;
 
@@ -1570,7 +1723,8 @@ struct TypeCodec {
         if (it != rebased.end()) return &it->second;
         Rebased r;
         r.leaves = leaves;                    /* keep struct offsets, refill wire offsets */
-        r.ok     = fill_offsets(s, r.leaves) && tails_resolve(s, tails);
+        r.tails  = tails;
+        r.ok     = fill_offsets(s, r.leaves) && tails_resolve(s, r.tails);
         r.size   = detail::rant_schema_size(s);
         if (r.ok && memcpy_capable && r.size >= struct_size) {
             bool co = true;
@@ -1649,15 +1803,19 @@ template <class T> Bytes encode(TypeCodec& c, const T& v, std::vector<uint8_t>& 
         return Bytes(scratch.data(), scratch.size());
     }
     size_t need = c.msg_min;
-    for (const Tail& t : c.tails) need += t.extra(base + t.struct_off);
+    for (const Tail& t : c.tails)
+        need += t.is_structs ? t.count(base + t.struct_off) * t.elem_wire
+                             : t.extra(base + t.struct_off);
     scratch.assign(need, 0);
     if (!detail::rant_schema_message_default(c.raw, scratch.data(), scratch.size()))
         return Bytes();
     for (const Leaf& l : c.leaves) leaf_to_wire(l, base, scratch.data(), le);
-    for (const Tail& t : c.tails)
-        if (!t.write(base + t.struct_off, scratch.data(), scratch.size(),
-                     c.raw, t.path.c_str()))
-            return Bytes();
+    for (const Tail& t : c.tails) {
+        bool ok = t.is_structs
+            ? struct_vector_write(t, base + t.struct_off, scratch.data(), scratch.size(), c.raw, le)
+            : t.write(base + t.struct_off, scratch.data(), scratch.size(), c.raw, t.path.c_str());
+        if (!ok) return Bytes();
+    }
     return Bytes(scratch.data(),
                  detail::rant_schema_msg_len(c.raw, scratch.data(), scratch.size()));
 }
@@ -1668,12 +1826,14 @@ template <class T> bool decode(TypeCodec& c, T& out, Bytes data, const detail::R
     if (!c.ok) return false;
     const detail::RantSchema* sch = c.raw;
     const std::vector<Leaf>* lv = &c.leaves;
+    const std::vector<Tail>* tv = &c.tails;
     uint32_t need = c.wire_size;
     bool fast = c.memcpy_ok;
     if (schema && schema != c.raw) {
         const TypeCodec::Rebased* rb = c.rebased_for(schema);
         if (!rb->ok) return false;
         lv   = &rb->leaves;
+        tv   = &rb->tails;
         need = rb->size;
         fast = rb->coincide;
         sch  = schema;
@@ -1691,11 +1851,13 @@ template <class T> bool decode(TypeCodec& c, T& out, Bytes data, const detail::R
     const bool le = host_le();
     uint8_t* base = reinterpret_cast<uint8_t*>(&out);
     for (const Leaf& l : *lv) leaf_from_wire(l, base, data.data(), le);
-    if (!c.tails.empty()) {                     /* frames walked per message, by path */
+    if (!tv->empty()) {                         /* frames walked per message, by path */
         detail::RantBytes mb; mb.data = data.data(); mb.len = data.size();
-        for (const Tail& t : c.tails)
-            if (!t.read(base + t.struct_off, mb, sch, t.path.c_str()))
-                return false;
+        for (const Tail& t : *tv) {
+            bool ok = t.is_structs ? struct_vector_read(t, base + t.struct_off, mb, sch, le)
+                                   : t.read(base + t.struct_off, mb, sch, t.path.c_str());
+            if (!ok) return false;
+        }
     }
     return true;
 }

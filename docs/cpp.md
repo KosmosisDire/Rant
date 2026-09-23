@@ -118,12 +118,14 @@ ours rebuilds the offsets from the incoming schema and caches them per schema po
 
 Wire types are the sized integers, float, double, bool, `T[N]` and `std::array<U, N>` of
 those or of structs, `rant::String<N>` for a capped string, nested reflected structs, and
-the variable members `std::vector<scalar>` and `std::string`. A fixed struct array spells
-`corners: Float2[4]` and may sit inside another's element to any depth. A variable member
-rides the message tail as a length framed section, so a type with one encodes into scratch
-and its decode allocates into the member. Refused at compile time: pointers, maps,
-`std::vector<bool>`, and vectors of structs or strings. Those shapes use the dynamic
-`Schema` and `MessageBuilder` API.
+the variable members `std::vector` of scalars, of structs or of `rant::String<N>`, and
+`std::string`. A fixed struct array spells `corners: Float2[4]` and may sit inside
+another's element to any depth. A `std::vector<Outline>` spells `Outline[]`, and its
+element must be fixed all the way down. Each of these also works as a handle's whole type.
+A variable member rides the message tail as a length framed section, so a type with one
+encodes into scratch and its decode allocates into the member. Refused at compile time:
+pointers, maps, `std::vector<bool>` and `std::vector<std::string>`. Those shapes use the
+dynamic `Schema` and `MessageBuilder` API.
 
 Any wire type used directly as a handle's type is a bare schema with no `RANT_SCHEMA`:
 `Publisher<bool>`, `RemoteVariable<float>`, `Subscriber<std::string>` or
