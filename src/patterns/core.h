@@ -136,6 +136,11 @@ RANT_API int    rant_function_retire(RantFunction *fn);
 /* A reflect_from_mesh handle: re types every channel in place when the generation moved.
  * 1 re typed, 0 current, negative on error, RANT_ERR_ROLE without the flag. */
 RANT_API int    rant_function_refresh(RantFunction *fn);
+/* The schemas a function or task handle uses now, NULL when untyped. A function has no
+ * progress schema. A reflect_from_mesh handle reports what it adopted. */
+RANT_API const RantSchema *rant_function_request_schema(const RantFunction *fn);
+RANT_API const RantSchema *rant_function_response_schema(const RantFunction *fn);
+RANT_API const RantSchema *rant_function_progress_schema(const RantFunction *fn);
 
 /* The built in @rant/meta function every node hosts and can call, with .multi and directed
  * requests. Ask with RantCallOpts.provider and a RANT_META_* mask. NULL when disabled. */
@@ -265,6 +270,8 @@ RANT_API int    rant_variable_match_count(RantVariable *var);
 RANT_API int    rant_variable_retire(RantVariable *var);
 /* As rant_function_refresh, for a reflect_from_mesh variable. */
 RANT_API int    rant_variable_refresh(RantVariable *var);
+/* The schema a variable handle uses now, NULL when untyped. */
+RANT_API const RantSchema *rant_variable_schema(const RantVariable *var);
 
 #ifdef __cplusplus
 }

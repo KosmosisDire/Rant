@@ -27,6 +27,10 @@ about a wrapper API, this file wins.
 - Durations follow the language: `std::chrono` in C++ (a timeout in milliseconds,
   `rant::forever` for no end, option fields without a unit suffix), int milliseconds in
   C#, float seconds in Python. Timestamps stay integer microseconds everywhere.
+- Every handle reports its name and the schema it uses now, the adopted one on a
+  reflect_from_mesh handle, through `rant_topic_schema`, `rant_function_request_schema`,
+  `rant_function_response_schema`, `rant_function_progress_schema` and
+  `rant_variable_schema`.
 - Variable reads are local and status free. Writes return a status. C# `Value` has a
   setter that throws on a non OK status. A remote set round trips through the definition.
   The cache is authoritative only, never an optimistic echo.

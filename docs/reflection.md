@@ -54,7 +54,10 @@ declaration, which every reader accepts. Untyped when nobody advertises one.
 `rant_topic_refresh`, `rant_function_refresh` and `rant_variable_refresh` re read the mesh
 and, when the entity's generation moved, re type the handle in place: same handle, same
 index, peers re verify, outstanding calls answered CANCELLED first. It is never
-automatic, because a retire is visible to peers, so the app picks the moment.
+automatic, because a retire is visible to peers, so the app picks the moment. What a
+handle uses now, adopted or declared, reads back through `rant_topic_schema`,
+`rant_function_request_schema`, `rant_function_response_schema`,
+`rant_function_progress_schema` and `rant_variable_schema`, each NULL while untyped.
 `rant_node_schema_parse` registers a walk's schema view in a node, which then owns it
 for its life.
 

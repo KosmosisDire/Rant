@@ -4784,6 +4784,55 @@ static void pl_on_message(const RantMsg *msg){ (void)msg; pl_inline++; }
 
 /* The pull phase: a pull topic never calls back, take pops the oldest, take_latest the
  * newest after dropping the rest, and a topic created without pull refuses take. */
+/* Pattern handle schemas: what a definition declared, a function's missing progress, and
+   what a reflect_from_mesh remote adopted once the mesh typed it. */
+static void ps_request(RantRequest *req, void *user){ (void)user; rant_request_reply(req, rant_bytes(NULL, 0)); }
+static void pattern_schema_checks(void){
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0);
+    RantNodeOpts o;
+    RantNode *a, *b;
+    const RantSchema *rq, *rs, *pg;
+    RantFunction *fn = NULL, *task = NULL, *remote = NULL;
+    RantVariable *var = NULL;
+    int t, typed = 0;
+    memset(&o, 0, sizeof o);
+    o.domain = ST_DOMAIN+53; o.discovery.max_peers = 4; o.max_topics = 16; o.fetch_details = 1;
+    o.net.multicast_interface = "127.0.0.1";
+    a = rant_node_open(&aa, "ps-a", NULL, NULL, &o);
+    b = rant_node_open(&ba, "ps-b", NULL, NULL, &o);
+    ST_CHECK(a && b, "pattern schema: nodes open");
+    if (!(a && b)) goto done;
+    rq = rant_node_schema(a, "PsReq { x: i32 }");
+    rs = rant_node_schema(a, "PsRsp { y: f64 }");
+    pg = rant_node_schema(a, "PsPrg { done: u8 }");
+    fn   = rant_node_create_function_definition(a, "ps/fn", rq, rs, ps_request, NULL, NULL);
+    task = rant_node_create_task_definition(a, "ps/task", rq, pg, rs, ps_request, NULL, NULL);
+    var  = rant_node_create_variable_definition(a, "ps/var", rs, NULL);
+    ST_CHECK(fn && task && var, "pattern schema: handles created");
+    if (!(fn && task && var)) goto done;
+    ST_CHECK(rant_function_request_schema(fn) == rq && rant_function_response_schema(fn) == rs,
+             "pattern schema: a definition reports its schemas");
+    ST_CHECK(rant_function_progress_schema(fn) == NULL, "pattern schema: a function has no progress schema");
+    ST_CHECK(rant_function_progress_schema(task) == pg, "pattern schema: a task reports its progress schema");
+    ST_CHECK(rant_variable_schema(var) == rs, "pattern schema: a variable reports its schema");
+    ST_CHECK(!rant_function_request_schema(NULL) && !rant_variable_schema(NULL),
+             "pattern schema: NULL handles report NULL");
+
+    remote = rant_node_create_remote_function(b, "ps/fn", NULL, NULL,
+                                              &(RantFunctionOpts){ .reflect_from_mesh = 1 });
+    ST_CHECK(remote && !rant_function_request_schema(remote), "pattern schema: a reflect remote starts untyped");
+    for (t = 0; t < 2500 && remote && !typed; t++){
+        st_pump(a, b, 2);
+        if (rant_function_refresh(remote) == 1 || rant_function_request_schema(remote)) typed = 1;
+    }
+    ST_CHECK(typed && rant_schema_hash(rant_function_request_schema(remote)) == rant_schema_hash(rq)
+             && rant_schema_hash(rant_function_response_schema(remote)) == rant_schema_hash(rs),
+             "pattern schema: a reflect remote reports the schemas it adopted");
+done:
+    if (a) rant_node_close(a, 0);
+    if (b) rant_node_close(b, 0);
+}
+
 static void pull_checks(void){
     RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0);
     RantNodeOpts o; RantTopicOpts co;
@@ -8598,6 +8647,7 @@ static int selftest_main(void){
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
     queue_checks();               /* 19d. queue rings: park, timed dispatch, overwrite, park */
     pull_checks();                /* 19d2. pull topics: take, take_latest, refusals */
+    pattern_schema_checks();      /* 19d3. pattern handle schemas, a reflect remote's adoption */
     callback_queue_checks();      /* 19e. callback queues: explicit queue, order, refusals */
     callback_pattern_checks();    /* 19f. callback queues on functions, tasks and variables */
     patterns_checks();            /* 19e. functions: request, reply, defer, timeout, sync */

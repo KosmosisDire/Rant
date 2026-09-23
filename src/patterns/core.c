@@ -865,6 +865,16 @@ int rant_function_retire(RantFunction *fn){
     return RANT_OK;
 }
 
+const RantSchema *rant_function_request_schema(const RantFunction *fn){
+    return fn ? rant_topic_schema(fn->req) : NULL;
+}
+const RantSchema *rant_function_response_schema(const RantFunction *fn){
+    return fn ? rant_topic_schema(fn->rsp) : NULL;
+}
+const RantSchema *rant_function_progress_schema(const RantFunction *fn){
+    return fn && fn->prg ? rant_topic_schema(fn->prg) : NULL;
+}
+
 int rant_function_refresh(RantFunction *fn){
     RantNode *n; RantEntityKind ek; uint64_t gen = 0; int acquired, r;
     const RantSchema *rq = NULL, *rs = NULL, *pg = NULL;
@@ -1606,6 +1616,10 @@ int rant_variable_retire(RantVariable *var){
     i_rant_node_sys_unlock(n, acquired);
     i_rant_pat_release_channels(value, set);
     return RANT_OK;
+}
+
+const RantSchema *rant_variable_schema(const RantVariable *var){
+    return var ? rant_topic_schema(var->value) : NULL;
 }
 
 int rant_variable_refresh(RantVariable *var){
