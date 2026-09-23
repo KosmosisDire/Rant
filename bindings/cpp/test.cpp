@@ -179,14 +179,14 @@ static bool patterns_leg() {
     chk("patterns: A started", a.start());
 
     /* functions */
-    rant::FunctionDefinition<AddReq, AddRsp> def_add(a, "add",
+    auto def_add = a.function_definition<AddReq, AddRsp>("add",
         [](const AddReq& q) { return AddRsp{ (int64_t)q.x + q.y }; });
-    rant::FunctionDefinition<AddReq, AddRsp> def_chk(a, "chk",
+    auto def_chk = a.function_definition<AddReq, AddRsp>("chk",
         [](const AddReq& q, rant::Request<AddRsp>& rq) {
             if (q.x < 0) rq.fail();
             else         rq.reply(AddRsp{ (int64_t)q.x * q.y });
         });
-    rant::FunctionDefinition<AddReq, AddRsp> def_defer(a, "defr",
+    auto def_defer = a.function_definition<AddReq, AddRsp>("defr",
         [](const AddReq& q, rant::Request<AddRsp>& rq) {
             (void)q;
             std::lock_guard<std::mutex> g(g_deferred_mu);
@@ -195,9 +195,9 @@ static bool patterns_leg() {
         });
     chk("patterns: definitions created", def_add.valid() && def_chk.valid() && def_defer.valid());
 
-    rant::RemoteFunction<AddReq, AddRsp> rf_add(b, "add");
-    rant::RemoteFunction<AddReq, AddRsp> rf_chk(b, "chk");
-    rant::RemoteFunction<AddReq, AddRsp> rf_defer(b, "defr");
+    auto rf_add = b.remote_function<AddReq, AddRsp>("add");
+    auto rf_chk = b.remote_function<AddReq, AddRsp>("chk");
+    auto rf_defer = b.remote_function<AddReq, AddRsp>("defr");
     chk("patterns: remotes created", rf_add.valid() && rf_chk.valid() && rf_defer.valid());
 
     chk("patterns: definition discovered", wait_for(4000,
@@ -248,8 +248,8 @@ static bool patterns_leg() {
     rant::VariableOptions<Speed> vo;
     vo.initial = Speed{ 7 };
     vo.allow_force = true;
-    rant::VariableDefinition<Speed> vd(a, "speed", vo);
-    rant::RemoteVariable<Speed>       rv(b, "speed");
+    auto vd = a.variable_definition<Speed>("speed", vo);
+    auto rv = b.remote_variable<Speed>("speed");
     chk("var: created", vd.valid() && rv.valid());
     chk("var: remote wait() gets a value", rv.wait(4000));
     { auto v = rv.get(); chk("var: initial 7 replicated", v && v->v == 7); }
@@ -284,8 +284,8 @@ static bool patterns_leg() {
     /* typed pub sub, memcpy path: a padding free struct and identical schemas */
     rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
     std::atomic<bool> flat_ok{ false };
-    rant::Publisher<Flat>    pf(a, "flat", rel);
-    rant::Subscriber<Flat> sf(b, "flat",
+    auto pf = a.publisher<Flat>("flat", rel);
+    auto sf = b.subscriber<Flat>("flat",
         [&](const Flat& f) { if (f.a == 7 && f.b == 2.5f) flat_ok = true; }, rel);
     chk("codec: flat pair created", pf.valid() && sf.valid());
     chk("codec: flat matched", wait_for(4000, [&] { return pf.match_count() > 0 && pf.ready(); }, &b));
@@ -297,8 +297,8 @@ static bool patterns_leg() {
     std::atomic<bool> padded_got{ false };
     Padded      padded_seen{};
     std::string padded_pub, padded_topic;
-    rant::Publisher<Padded>    pp(a, "padded", rel);
-    rant::Subscriber<Padded> sp(b, "padded", [&](const Padded& v, const rant::MessageView& m) {
+    auto pp = a.publisher<Padded>("padded", rel);
+    auto sp = b.subscriber<Padded>("padded", [&](const Padded& v, const rant::MessageView& m) {
         padded_seen  = v;
         padded_pub   = std::string(m.publisher_name());
         padded_topic = std::string(m.topic_name());
@@ -319,8 +319,8 @@ static bool patterns_leg() {
 
     /* typed pub sub, schema hash mismatch: a subset subscriber, rebase decode */
     std::atomic<bool> tele_ok{ false };
-    rant::Publisher<pubside::Telemetry>    tp(a, "tele", rel);
-    rant::Subscriber<subside::Telemetry> ts(b, "tele",
+    auto tp = a.publisher<pubside::Telemetry>("tele", rel);
+    auto ts = b.subscriber<subside::Telemetry>("tele",
         [&](const subside::Telemetry& t) { if (t.seq == 31337 && t.flags == 5) tele_ok = true; }, rel);
     chk("codec: telemetry pair created", tp.valid() && ts.valid());
     chk("codec: telemetry matched", wait_for(4000, [&] { return tp.match_count() > 0 && tp.ready(); }, &b));
@@ -434,7 +434,7 @@ static bool stdtypes_leg() {
     }
 
     {   /* the RANT_SCHEMA codec emits the NAMES, never the inlined shapes */
-        rant::Publisher<Track> pub(a, "std/track");
+        auto pub = a.publisher<Track>("std/track");
         auto sc = rant::priv::schema_of<Track>(a);
         std::string txt = sc ? sc->to_dsl() : std::string();
         chk("std: the codec spells named members by name",
@@ -448,8 +448,8 @@ static bool stdtypes_leg() {
     }
 
     {   /* end to end through the typed codec */
-        rant::Publisher<Track> pub(a, "std/track2");
-        rant::Subscriber<Track> sub(b, "std/track2", [](const Track& t) {
+        auto pub = a.publisher<Track>("std/track2");
+        auto sub = b.subscriber<Track>("std/track2", [](const Track& t) {
             g_track_x = t.at.translation.x;
             g_track_id0 = t.id.bytes[0];
             g_track_recv++;
@@ -487,8 +487,8 @@ static bool stdtypes_leg() {
         /* an Image end to end: the variable payload crosses beside the fixed fields */
         std::atomic<int> img_recv{ 0 };
         rant::types::Image img_got;
-        rant::Publisher<rant::types::Image> ipub(a, "std/frame");
-        rant::Subscriber<rant::types::Image> isub(b, "std/frame", [&](const rant::types::Image& i) {
+        auto ipub = a.publisher<rant::types::Image>("std/frame");
+        auto isub = b.subscriber<rant::types::Image>("std/frame", [&](const rant::types::Image& i) {
             img_got = i;
             img_recv++;
         });
@@ -515,8 +515,8 @@ static bool stdtypes_leg() {
         st.url.value.assign("rtsp://cam.local/main");
         st.name.assign("front door");
         vo.initial = st;
-        rant::VariableDefinition<rant::types::ExternalVideoStream> vdef(a, "std/stream", vo);
-        rant::RemoteVariable<rant::types::ExternalVideoStream>         vrem(b, "std/stream");
+        auto vdef = a.variable_definition<rant::types::ExternalVideoStream>("std/stream", vo);
+        auto vrem = b.remote_variable<rant::types::ExternalVideoStream>("std/stream");
         chk("std: stream variable replicates", wait_for(4000, [&] {
                 auto v = vrem.get();
                 return v && v->kind == rant::types::VideoStreamKind::Rtsp
@@ -750,8 +750,8 @@ static bool value_root_leg() {
 
     /* bool: the whole payload is one byte */
     std::atomic<int> flags{ 0 };
-    rant::Publisher<bool>    pb(a, "flag", rel);
-    rant::Subscriber<bool> sub_b(b, "flag", [&](const bool& v) { if (v) flags++; }, rel);
+    auto pb = a.publisher<bool>("flag", rel);
+    auto sub_b = b.subscriber<bool>("flag", [&](const bool& v) { if (v) flags++; }, rel);
     chk("root: bool pair created", pb.valid() && sub_b.valid());
     chk("root: bool matched", wait_for(4000, [&] { return pb.match_count() > 0 && pb.ready(); }, &b));
     chk("root: bool send", pb.send(true) == rant::SendStatus::Ok);
@@ -759,8 +759,8 @@ static bool value_root_leg() {
 
     /* std::string: the unbounded `string` root, one tail frame */
     std::string got;
-    rant::Publisher<std::string>    ps(a, "note", rel);
-    rant::Subscriber<std::string> sub_s(b, "note", [&](const std::string& v) { got = v; }, rel);
+    auto ps = a.publisher<std::string>("note", rel);
+    auto sub_s = b.subscriber<std::string>("note", [&](const std::string& v) { got = v; }, rel);
     chk("root: string pair created", ps.valid() && sub_s.valid());
     chk("root: string matched", wait_for(4000, [&] { return ps.match_count() > 0 && ps.ready(); }, &b));
     chk("root: string send", ps.send(std::string("a bare unbounded string")) == rant::SendStatus::Ok);
@@ -769,8 +769,8 @@ static bool value_root_leg() {
     /* std::array: a fixed array root */
     std::atomic<bool> a3_got{ false };
     std::array<float, 3> a3_seen{};
-    rant::Publisher<std::array<float, 3>>    pa3(a, "xyz", rel);
-    rant::Subscriber<std::array<float, 3>> sa3(b, "xyz",
+    auto pa3 = a.publisher<std::array<float, 3>>("xyz", rel);
+    auto sa3 = b.subscriber<std::array<float, 3>>("xyz",
         [&](const std::array<float, 3>& v) { a3_seen = v; a3_got = true; }, rel);
     chk("root: array pair created", pa3.valid() && sa3.valid());
     chk("root: array matched", wait_for(4000, [&] { return pa3.match_count() > 0 && pa3.ready(); }, &b));
@@ -781,8 +781,8 @@ static bool value_root_leg() {
     /* a variable whose type is a bare double */
     rant::VariableOptions<double> vo;
     vo.initial = 1.25;
-    rant::VariableDefinition<double> vd(a, "gain", vo);
-    rant::RemoteVariable<double>       rv(b, "gain");
+    auto vd = a.variable_definition<double>("gain", vo);
+    auto rv = b.remote_variable<double>("gain");
     chk("root: variable pair created", vd.valid() && rv.valid());
     chk("root: variable replicates the initial", wait_for(4000,
         [&] { auto v = rv.get(); return v && *v == 1.25; }, &b));
@@ -796,9 +796,9 @@ static bool value_root_leg() {
     if (f64) {
         std::atomic<int> hits{ 0 };
         double seen = 0;
-        rant::Publisher<rant::Bytes>  dp(a, "dyn", &f64, rel);
-        rant::Subscriber<rant::Bytes> ds(b, "dyn", &f64,
-            [&](const rant::MessageView& m) { seen = m.get_f64(""); hits++; }, rel);
+        auto dp = a.publisher<rant::Bytes>("dyn", rel, f64);
+        auto ds = b.subscriber<rant::Bytes>("dyn",
+            [&](const rant::MessageView& m) { seen = m.get_f64(""); hits++; }, rel, f64);
         chk("root: dynamic pair created", dp.valid() && ds.valid());
         chk("root: dynamic matched", wait_for(4000, [&] { return dp.match_count() > 0 && dp.ready(); }, &b));
         rant::MessageBuilder mb(f64);
@@ -890,8 +890,8 @@ static bool tails_leg() {
     {   /* subset/rebase: wide publisher, narrow subscriber, frames found by path */
         std::atomic<int> got{ 0 };
         narrow::Chunk seen;
-        rant::Publisher<wide::Chunk>      pub(a, "tails/chunk", rel);
-        rant::Subscriber<narrow::Chunk> sub(b, "tails/chunk", [&](const narrow::Chunk& c) {
+        auto pub = a.publisher<wide::Chunk>("tails/chunk", rel);
+        auto sub = b.subscriber<narrow::Chunk>("tails/chunk", [&](const narrow::Chunk& c) {
             seen = c;
             got++;
         }, rel);
@@ -913,8 +913,8 @@ static bool tails_leg() {
     {   /* a bare vector root end to end */
         std::atomic<int> got{ 0 };
         std::vector<float> seen;
-        rant::Publisher<std::vector<float>>    pv(a, "tails/wave", rel);
-        rant::Subscriber<std::vector<float>> sv(b, "tails/wave",
+        auto pv = a.publisher<std::vector<float>>("tails/wave", rel);
+        auto sv = b.subscriber<std::vector<float>>("tails/wave",
             [&](const std::vector<float>& v) { seen = v; got++; }, rel);
         chk("tails: vector-root pair matched",
             wait_for(4000, [&] { return pv.match_count() == 1 && pv.ready(); }, &b));
@@ -964,7 +964,7 @@ static bool tasks_leg() {
     chk("task: A started", a.start());   /* A on its service thread, B pumped from here */
 
     /* the "move" handler parks every call for a thread the TEST owns */
-    rant::TaskDefinition<MoveReq, MoveProgress, MoveRsp> def_move(a, "move",
+    auto def_move = a.task_definition<MoveReq, MoveProgress, MoveRsp>("move",
         [](const MoveReq& q, rant::TaskRequest<MoveProgress, MoveRsp>& rq) {
             (void)q;
             std::lock_guard<std::mutex> g(g_move_mu);
@@ -973,7 +973,7 @@ static bool tasks_leg() {
         });
     rant::TaskOptions fixed_opts;
     fixed_opts.no_cancel = true;
-    rant::TaskDefinition<MoveReq, MoveProgress, MoveRsp> def_fixed(a, "fixed",
+    auto def_fixed = a.task_definition<MoveReq, MoveProgress, MoveRsp>("fixed",
         [](const MoveReq& q, rant::TaskRequest<MoveProgress, MoveRsp>& rq) {
             (void)q;
             std::lock_guard<std::mutex> g(g_fixed_mu);
@@ -985,8 +985,8 @@ static bool tasks_leg() {
     std::atomic<uint64_t> cancel_token{ 0 };
     def_move.on_cancel([&](uint64_t token) { cancel_token = token; });
 
-    rant::RemoteTask<MoveReq, MoveProgress, MoveRsp> rt_move(b, "move");
-    rant::RemoteTask<MoveReq, MoveProgress, MoveRsp> rt_fixed(b, "fixed");
+    auto rt_move = b.remote_task<MoveReq, MoveProgress, MoveRsp>("move");
+    auto rt_fixed = b.remote_task<MoveReq, MoveProgress, MoveRsp>("fixed");
     chk("task: remotes created", rt_move.valid() && rt_fixed.valid());
     chk("task: definition discovered", wait_for(4000,
         [&] { return rt_move.match_count() > 0 && rt_fixed.match_count() > 0; }, &b));
@@ -1173,12 +1173,12 @@ static bool queue_leg() {
     rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
     rant::Qos queued = rel; queued.queue = &q;
     std::vector<int32_t> got;
-    rant::Publisher<Speed> pub(a, "q/speed", rel);
-    rant::Subscriber<Speed> sub(b, "q/speed", [&](const Speed& s) { mark(); got.push_back(s.v); }, queued);
-    rant::FunctionDefinition<AddReq, AddRsp> def(a, "q/add",
+    auto pub = a.publisher<Speed>("q/speed", rel);
+    auto sub = b.subscriber<Speed>("q/speed", [&](const Speed& s) { mark(); got.push_back(s.v); }, queued);
+    auto def = a.function_definition<AddReq, AddRsp>("q/add",
         [](const AddReq& r) { return AddRsp{ (int64_t)r.x + r.y }; });
     rant::FunctionOptions fo; fo.queue = &q;
-    rant::RemoteFunction<AddReq, AddRsp> rf(b, "q/add", fo);
+    auto rf = b.remote_function<AddReq, AddRsp>("q/add", fo);
     auto drained = [&](const std::function<bool()>& pred) {
         return wait_for(4000, [&] { q.dispatch(0, 0); return pred(); });
     };
@@ -1204,13 +1204,13 @@ static bool queue_leg() {
     chk("queue: every callback ran on this thread", !stray.load());
     bool refused = false;
 #if defined(__cpp_exceptions)
-    try { rant::Publisher<Speed> other(b, "q/speed", rel); }
+    try { auto other = b.publisher<Speed>("q/speed", rel); }
     catch (const rant::Error&) { refused = true; }
     chk("queue: a same name handle on another queue is refused", refused);
 #endif
     /* pull: no handler, the app takes when it wants and nothing parks on a queue */
-    rant::Publisher<Speed> ppub(a, "q/pull", rel);
-    rant::Subscriber<Speed> pulled(b, "q/pull", rel);
+    auto ppub = a.publisher<Speed>("q/pull", rel);
+    auto pulled = b.subscriber<Speed>("q/pull", rel);
     chk("pull: matched", wait_for(4000, [&] { return ppub.match_count() > 0 && ppub.ready(); }));
     for (int32_t v = 1; v <= 3; v++) ppub.send(Speed{ v });
     auto first = pulled.take(2000);
@@ -1226,6 +1226,49 @@ static bool queue_leg() {
 #endif
     b.set_event_queue(nullptr);
     b.set_log_queue(nullptr);
+    return g_failures == fails_at_entry;
+}
+
+/* the node factories: a raw handle typed by the mesh, and the refusals */
+static bool factory_leg() {
+    int fails_at_entry = g_failures;
+    rant::NodeOptions opts;
+    opts.domain = 51;
+    opts.multicast_interface = "127.0.0.1";
+    rant::Node a("FA", {}, [](const rant::Event&) {}, opts);
+    rant::Node b("FB", {}, [](const rant::Event&) {}, opts);
+    chk("factory: nodes constructed", a.valid() && b.valid());
+    if (!a.valid() || !b.valid()) return false;
+    chk("factory: services start", a.start() && b.start());
+
+    rant::Qos mesh; mesh.reflect_from_mesh = true;
+    std::atomic<int> hits{ 0 };
+    std::atomic<uint64_t> seen{ 0 };
+    auto pub = a.publisher<Speed>("f/speed");
+    auto raw = b.subscriber<rant::Bytes>("f/speed",
+        [&](const rant::MessageView& m) { seen = (uint64_t)m.get_int("v"); hits++; }, mesh);
+    chk("factory: reflect_from_mesh subscriber matched",
+        wait_for(4000, [&] { return pub.match_count() > 0 && pub.ready(); }));
+    pub.send(Speed{ 7 });
+    chk("factory: reflect_from_mesh subscriber reads by name",
+        wait_for(3000, [&] { return hits.load() > 0; }) && seen.load() == 7);
+
+#if defined(__cpp_exceptions)
+    auto refuses = [](auto make) {
+        try { make(); } catch (const rant::Error&) { return true; }
+        return false;
+    };
+    rant::Schema s = a.schema("{ v: i32 }");
+    chk("factory: a typed handle refuses a schema",
+        refuses([&] { (void)a.publisher<Speed>("f/typed", {}, s); }));
+    chk("factory: a typed handle refuses reflect_from_mesh",
+        refuses([&] { (void)a.subscriber<Speed>("f/typed", mesh); }));
+    chk("factory: a definition refuses an empty handler",
+        refuses([&] { (void)a.function_definition<rant::Bytes, rant::Bytes>("f/fn",
+                          rant::FunctionDefinition<rant::Bytes, rant::Bytes>::Handler{}); }));
+    chk("factory: a subscriber refuses an empty handler",
+        refuses([&] { (void)a.subscriber<rant::Bytes>("f/raw", rant::Node::MessageHandler{}); }));
+#endif
     return g_failures == fails_at_entry;
 }
 
@@ -1331,29 +1374,29 @@ static bool bench_leg() {
     auto matched = [&](auto& pub) { return wait_for(4000, [&] { pump(); return pub.match_count() > 0 && pub.ready(); }); };
 
     {
-        rant::Publisher<Flat> pub(a, "b/flat");
-        rant::Subscriber<Flat> sub(b, "b/flat", [](const Flat&) { g_bench_recv++; });
+        auto pub = a.publisher<Flat>("b/flat");
+        auto sub = b.subscriber<Flat>("b/flat", [](const Flat&) { g_bench_recv++; });
         line("typed memcpy (Flat)", matched(pub) ? us_per_round_trip(M,
             [&] { return pub.send(flat) == rant::SendStatus::Ok; }, pump) : -1.0);
     }
     {
-        rant::Publisher<Padded> pub(a, "b/padded");
-        rant::Subscriber<Padded> sub(b, "b/padded", [](const Padded&) { g_bench_recv++; });
+        auto pub = a.publisher<Padded>("b/padded");
+        auto sub = b.subscriber<Padded>("b/padded", [](const Padded&) { g_bench_recv++; });
         line("typed loop (Padded, string<7>)", matched(pub) ? us_per_round_trip(M,
             [&] { return pub.send(padded) == rant::SendStatus::Ok; }, pump) : -1.0);
     }
     {
-        rant::Publisher<narrow::Chunk> pub(a, "b/chunk");
-        rant::Subscriber<narrow::Chunk> sub(b, "b/chunk", [](const narrow::Chunk&) { g_bench_recv++; });
+        auto pub = a.publisher<narrow::Chunk>("b/chunk");
+        auto sub = b.subscriber<narrow::Chunk>("b/chunk", [](const narrow::Chunk&) { g_bench_recv++; });
         line("typed tails (Chunk, f32[] string)", matched(pub) ? us_per_round_trip(M,
             [&] { return pub.send(chunk) == rant::SendStatus::Ok; }, pump) : -1.0);
     }
     {
-        rant::Publisher<rant::Bytes>  pub(a, "b/dyn", &*ps);
-        rant::Subscriber<rant::Bytes> sub(b, "b/dyn", &*ps, [&](const rant::MessageView& v) {
+        auto pub = a.publisher<rant::Bytes>("b/dyn", {}, *ps);
+        auto sub = b.subscriber<rant::Bytes>("b/dyn", [&](const rant::MessageView& v) {
             sink += (size_t)(v.get_uint("a") + v.get_uint("b") + v.get_uint("c") + (uint64_t)v.get_f64("d") + v.get_string("tag").size());
             g_bench_recv++;
-        });
+        }, {}, *ps);
         line("dynamic (MessageBuilder, FieldView)", matched(pub) ? us_per_round_trip(M, [&] {
                 rant::MessageBuilder mb(*ps);
                 mb.set_uint("a", 9).set_uint("b", 0x11223344u).set_uint("c", 777).set_f64("d", -3.5).set_string("tag", "robot");
@@ -1387,8 +1430,8 @@ int main(int argc, char** argv) {
     std::printf("schema '%.*s' size=%u fields=%u\n",
                 (int)schema.name().size(), schema.name().data(), schema.size(), schema.field_count());
 
-    rant::Publisher<rant::Bytes>  pub(a, "t", &schema, { rant::Reliability::Reliable });
-    rant::Subscriber<rant::Bytes> sub(b, "t", &schema, on_msg, { rant::Reliability::Reliable });
+    auto pub = a.publisher<rant::Bytes>("t", { rant::Reliability::Reliable }, schema);
+    auto sub = b.subscriber<rant::Bytes>("t", on_msg, { rant::Reliability::Reliable }, schema);
     if (!pub.valid() || !sub.valid()) { std::printf("FAIL: topic construction\n"); return 1; }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -1451,6 +1494,10 @@ int main(int argc, char** argv) {
     std::printf("queue leg:\n");
     bool queue_ok = queue_leg();
     std::printf("%s\n", queue_ok ? "PASS: callback queues" : "FAIL: queue leg");
+
+    std::printf("factory leg:\n");
+    bool factory_ok = factory_leg();
+    std::printf("%s\n", factory_ok ? "PASS: node factories" : "FAIL: factory leg");
 
 #if defined(__cpp_exceptions)
     /* a failed constructor throws rant::Error (on_event is required) */

@@ -60,8 +60,8 @@ int main(int argc, char** argv) {
 
     /* a publisher and a subscriber on the same name share one topic slot */
     rant::Qos reliable{ rant::Reliability::Reliable };
-    rant::Publisher<rant::Bytes>  chat(node, "chat", &schema, reliable);
-    rant::Subscriber<rant::Bytes> incoming(node, "chat", &schema, handle_message, reliable);
+    auto chat     = node.publisher<rant::Bytes>("chat", reliable, schema);
+    auto incoming = node.subscriber<rant::Bytes>("chat", handle_message, reliable, schema);
     node.start();   /* background poll thread. Sends and creates are thread safe now */
 
     std::printf("typed chat on topic 'chat'. type a line to publish; ctrl-d/z to quit.\n");

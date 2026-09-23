@@ -257,10 +257,6 @@ namespace priv {
 inline detail::RantBytes    to_c(Bytes b) { return detail::rant_bytes(b.data(), b.size()); }
 }
 
-/* Pass it where a constructor takes a schema pointer and the handle types itself from the
- * mesh (docs/reflection.md). refresh() re types it later. */
-struct reflect_from_mesh_t { explicit reflect_from_mesh_t() = default; };
-inline constexpr reflect_from_mesh_t reflect_from_mesh{};
 
 /* A callback queue of a node, from Node::create_queue. A handle whose options name it parks
  * its callbacks until dispatch() runs them on the calling thread. Non owning, freed with the node. */
@@ -310,6 +306,9 @@ struct Qos {
     /* The queue a subscriber's handler parks on, null = inline on the loop thread. Same name
      * handles share one slot and must agree on it. */
     const Queue* queue               = nullptr;
+    /* A rant::Bytes handle with no schema takes its type from the mesh (docs/reflection.md).
+     * refresh() re types it later. */
+    bool         reflect_from_mesh   = false;
 };
 
 struct NodeOptions {
@@ -358,6 +357,7 @@ struct FunctionOptions {
     uint32_t timeout_us           = 0;   /* remote call timeout, 0 = 5 s */
     uint16_t keep_last            = 0;   /* req and rsp ring depth, 0 = 10 */
     const Queue* queue            = nullptr;   /* where every callback parks, null = inline */
+    bool     reflect_from_mesh    = false;   /* rant::Bytes only: take the schemas from the mesh */
 };
 /* Task options, mirrors RantTaskOpts (docs/tasks.md). */
 struct TaskOptions {
@@ -370,6 +370,7 @@ struct TaskOptions {
     uint32_t backpressure_wait_us = 0;     /* 0 = 1s */
     uint16_t keep_last            = 0;     /* req + rsp ring depth (FunctionOptions::keep_last) */
     const Queue* queue            = nullptr;   /* where every callback parks, null = inline */
+    bool     reflect_from_mesh    = false;   /* rant::Bytes only: take the schemas from the mesh */
 };
 /* Per call options, mirrors RantCallOpts. provider directs a call at one definition by peer
  * id, 0 = first answer wins. A task request is always directed, 0 = the oldest provider. */
@@ -388,6 +389,7 @@ template <class T> struct VariableOptions {
     uint16_t keep_last            = 0;   /* both channels' repair window, 0 = 10 */
     uint32_t backpressure_wait_us = 0;       /* 0 = 1s */
     const Queue* queue            = nullptr;   /* where on_change and on_write park, null = inline */
+    bool     reflect_from_mesh    = false;   /* rant::Bytes only: take the schema from the mesh */
 };
 template <> struct VariableOptions<Bytes> {
     Bytes    initial{};
@@ -397,6 +399,7 @@ template <> struct VariableOptions<Bytes> {
     uint16_t keep_last            = 0;
     uint32_t backpressure_wait_us = 0;
     const Queue* queue            = nullptr;
+    bool     reflect_from_mesh    = false;
 };
 #endif /* !RANT_NO_PATTERNS */
 
@@ -1925,13 +1928,11 @@ public:
     TopicCore() = default;
     /* Create (or share) a topic on `node`. Throws rant::Error on failure (with
      * -fno-exceptions: check valid()). schema is copied into the node. */
-    TopicCore(Node& node, std::string_view name, Role role = Role::PubSub,
-              const Schema* schema = nullptr, const Qos& qos = {});
-    /* The same, typed by the mesh (see reflect_from_mesh). */
-    TopicCore(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos = {});
+    TopicCore(Node& node, std::string_view name, Role role, const Schema* schema, const Qos& qos)
+        : TopicCore(node, name, role, schema, qos, false) {}
     /* A pulled subscribe side: no callbacks, messages wait for take(). */
     static TopicCore pulled(Node& node, std::string_view name, const Schema* schema, const Qos& qos) {
-        return TopicCore(node, name, Role::SubOnly, schema, qos, false, true);
+        return TopicCore(node, name, Role::SubOnly, schema, qos, true);
     }
     /* The oldest waiting message of a pulled topic, or with latest the newest. 1 got one,
      * 0 none, negative the C refusal. The view lives until the next take. */
@@ -1991,7 +1992,7 @@ public:
 
 private:
     TopicCore(Node& node, std::string_view name, Role role, const Schema* schema, const Qos& qos,
-              bool reflect, bool pull = false);
+              bool pull);
 
     detail::RantTopic* ch_ = nullptr;
     void* impl_ = nullptr;   /* the owning Node::Impl (Node is incomplete here), so
@@ -2323,6 +2324,22 @@ struct MetaSnapshot {
 
 #endif /* !RANT_NO_PATTERNS */
 
+namespace priv {
+/* A subscriber handler H for T: the typed forms, or the view form for rant::Bytes. */
+template <class T, class H> struct is_message_handler : std::integral_constant<bool,
+    std::is_same_v<T, Bytes>
+        ? std::is_invocable_v<std::decay_t<H>&, const MessageView&>
+        : (std::is_invocable_v<std::decay_t<H>&, const T&> ||
+           std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>)> {};
+/* A typed handle takes its schema from its type: refuse one given, and reflect_from_mesh. */
+inline bool typed_takes_no_schema(bool has_schema, bool reflect, const char* what) {
+    if (!has_schema && !reflect) return true;
+    raise_msg(what);
+    return false;
+}
+inline const Schema* schema_ptr(const Schema& s) { return s ? &s : nullptr; }
+}   /* namespace priv */
+
 /* Owns the RantNode, its memory and the user callbacks. Every call is serialized by the C
  * node lock. The threading and callback rules are in docs/cpp.md and docs/node.md. */
 class Node {
@@ -2599,7 +2616,44 @@ public:
         return true;
     }
 
+    /* The handle factories. T is a RANT_SCHEMA struct, a plain value type, or rant::Bytes
+     * for raw bytes read through a schema. Only a rant::Bytes handle takes a schema, and
+     * one without a schema may set reflect_from_mesh in its options. */
+    template <class T>
+    Publisher<T> publisher(std::string_view name, const Qos& qos = {}, const Schema& schema = {});
+    /* handler is void(const T&) or void(const T&, const MessageView&), and for rant::Bytes
+     * void(const MessageView&). It runs on the loop thread or at dispatch() of qos.queue. */
+    template <class T, class H, class = std::enable_if_t<priv::is_message_handler<T, H>::value>>
+    Subscriber<T> subscriber(std::string_view name, H&& handler, const Qos& qos = {},
+                             const Schema& schema = {});
+    /* No handler: pulled, messages wait until take() or take_latest() reads them. */
+    template <class T>
+    Subscriber<T> subscriber(std::string_view name, const Qos& qos = {}, const Schema& schema = {});
 #ifndef RANT_NO_PATTERNS
+    /* handler is Rsp(const Req&) or void(const Req&, Request<Rsp>&), and for rant::Bytes
+     * void(Request<Bytes>&). A throwing handler answers AppError. */
+    template <class Req, class Rsp, class H>
+    FunctionDefinition<Req, Rsp> function_definition(std::string_view name, H&& handler,
+        const FunctionOptions& o = {}, const Schema& req_schema = {}, const Schema& rsp_schema = {});
+    template <class Req, class Rsp>
+    RemoteFunction<Req, Rsp> remote_function(std::string_view name, const FunctionOptions& o = {},
+        const Schema& req_schema = {}, const Schema& rsp_schema = {});
+    /* handler is void(const Req&, TaskRequest<Prg, Rsp>&), and for rant::Bytes
+     * void(TaskRequest<Bytes, Bytes>&). */
+    template <class Req, class Prg, class Rsp, class H>
+    TaskDefinition<Req, Prg, Rsp> task_definition(std::string_view name, H&& handler,
+        const TaskOptions& o = {}, const Schema& req_schema = {}, const Schema& prg_schema = {},
+        const Schema& rsp_schema = {});
+    template <class Req, class Prg, class Rsp>
+    RemoteTask<Req, Prg, Rsp> remote_task(std::string_view name, const TaskOptions& o = {},
+        const Schema& req_schema = {}, const Schema& prg_schema = {}, const Schema& rsp_schema = {});
+    template <class T>
+    VariableDefinition<T> variable_definition(std::string_view name,
+        const VariableOptions<T>& o = {}, const Schema& schema = {});
+    template <class T>
+    RemoteVariable<T> remote_variable(std::string_view name, const VariableOptions<T>& o = {},
+        const Schema& schema = {});
+
     /* Fetch a peer's snapshot: a directed @rant/meta call decoded into an owning MetaSnapshot.
      * cb fires once on the polling thread. sections is a MetaSection mask, 0 = all. */
     SendStatus meta_request(uint32_t peer, std::function<void(const MetaSnapshot&)> cb,
@@ -2820,14 +2874,8 @@ template <class T> priv::TypeCodec* priv::type_codec(Node& n) {
     return impl->codecs.emplace(&codec_key<T>, std::move(c)).first->second.get();
 }
 
-inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos)
-    : TopicCore(node, name, role, nullptr, qos, /*reflect=*/true) {}
-
 inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
-                                  const Schema* schema, const Qos& qos) : TopicCore(node, name, role, schema, qos, false) {}
-
-inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
-                                  const Schema* schema, const Qos& qos, bool reflect, bool pull) {
+                                  const Schema* schema, const Qos& qos, bool pull) {
     if (!node.valid()) { priv::raise_msg("rant topic create: node is not valid"); return; }
     Node::Impl* impl = node.impl_.get();
     std::lock_guard<std::mutex> g(impl->create_mu);
@@ -2857,7 +2905,7 @@ inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
     detail::RantTopicOpts co;
     std::memset(&co, 0, sizeof co);
     co.qos = Node::to_c(qos);
-    co.reflect_from_mesh = reflect ? 1 : 0;
+    co.reflect_from_mesh = qos.reflect_from_mesh ? 1 : 0;
     co.queue = priv::to_c(qos.queue);
     co.pull = pull ? 1 : 0;
     ch_ = detail::rant_node_create_topic(impl->node, nm.c_str(),
@@ -2902,48 +2950,36 @@ public:
     using Handler = std::function<void(Request<Bytes>&)>;
 
     FunctionDefinition() = default;
-    /* handler == {} answers every call CallStatus::NoHandler (a declared stub). */
-    FunctionDefinition(Node& n, std::string_view name,
-                       const Schema* req_schema, const Schema* rsp_schema,
-                       Handler handler, const FunctionOptions& o = {}) {
-        init(n, name, req_schema, rsp_schema, std::move(handler), o, false);
-    }
-    /* The same, typed by the mesh (see reflect_from_mesh). */
-    FunctionDefinition(Node& n, std::string_view name, reflect_from_mesh_t,
-                       Handler handler, const FunctionOptions& o = {}) {
-        init(n, name, nullptr, nullptr, std::move(handler), o, true);
-    }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
     bool refresh() { return fn_ && detail::rant_function_refresh(fn_) == 1; }
 
 private:
-    void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* rsp_schema,
-              Handler handler, const FunctionOptions& o, bool reflect) {
+    FunctionDefinition(Node& n, std::string_view name, const Schema* req_schema,
+                       const Schema* rsp_schema, Handler handler, const FunctionOptions& o) {
         if (!n.valid()) { priv::raise_msg("rant::FunctionDefinition: node is not valid"); return; }
+        if (!handler) { priv::raise_msg("rant::FunctionDefinition: a definition needs a handler"); return; }
         std::string nm(name);
         detail::RantFunctionOpts co;
         std::memset(&co, 0, sizeof co);
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.timeout_us           = o.timeout_us;
         co.keep_last            = o.keep_last;
-        co.reflect_from_mesh    = reflect ? 1 : 0;
+        co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
         co.queue                = priv::to_c(o.queue);
-        Box* box = nullptr;
-        if (handler) { box = new Box(); box->h = std::move(handler); }
+        Box* box = new Box();
+        box->h = std::move(handler);
         fn_ = detail::rant_node_create_function_definition(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   rsp_schema ? rsp_schema->raw() : nullptr,
-                  box ? &FunctionDefinition::tramp : nullptr, box, &co);
+                  &FunctionDefinition::tramp, box, &co);
         if (!fn_) {
             delete box;
             priv::raise_last(n.impl_->node, "rant::FunctionDefinition create");
             return;
         }
-        if (box) {
-            box->fn.store(fn_);
-            std::lock_guard<std::mutex> g(n.impl_->reg_mu);
-            n.impl_->boxes.emplace_back(box);
-        }
+        box->fn.store(fn_);
+        std::lock_guard<std::mutex> g(n.impl_->reg_mu);
+        n.impl_->boxes.emplace_back(box);
     }
 public:
 
@@ -2977,28 +3013,20 @@ private:
     }
     detail::RantFunction* fn_ = nullptr;
     template <class A, class B> friend class FunctionDefinition;
+    friend class Node;
 };
 
 /* RemoteFunction<Bytes, Bytes> (untyped): a reference to a definition on another node. */
 template <> class RemoteFunction<Bytes, Bytes> {
 public:
     RemoteFunction() = default;
-    RemoteFunction(Node& n, std::string_view name,
-                   const Schema* req_schema = nullptr, const Schema* rsp_schema = nullptr,
-                   const FunctionOptions& o = {}) {
-        init(n, name, req_schema, rsp_schema, o, false);
-    }
-    /* The same, typed by the mesh (see reflect_from_mesh). */
-    RemoteFunction(Node& n, std::string_view name, reflect_from_mesh_t, const FunctionOptions& o = {}) {
-        init(n, name, nullptr, nullptr, o, true);
-    }
     /* A reflect_from_mesh handle: re type in place when the mesh moved. true = re typed, and
      * outstanding calls are answered Cancelled first. */
     bool refresh() { return fn_ && detail::rant_function_refresh(fn_) == 1; }
 
 private:
-    void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* rsp_schema,
-              const FunctionOptions& o, bool reflect) {
+    RemoteFunction(Node& n, std::string_view name, const Schema* req_schema,
+                   const Schema* rsp_schema, const FunctionOptions& o) {
         if (!n.valid()) { priv::raise_msg("rant::RemoteFunction: node is not valid"); return; }
         std::string nm(name);
         detail::RantFunctionOpts co;
@@ -3006,7 +3034,7 @@ private:
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.timeout_us           = o.timeout_us;
         co.keep_last            = o.keep_last;
-        co.reflect_from_mesh    = reflect ? 1 : 0;
+        co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
         co.queue                = priv::to_c(o.queue);
         fn_ = detail::rant_node_create_remote_function(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
@@ -3140,24 +3168,14 @@ public:
     using Handler = std::function<void(TaskRequest<Bytes, Bytes>&)>;
 
     TaskDefinition() = default;
-    /* handler == {} answers every call CallStatus::NoHandler (a declared stub). */
-    TaskDefinition(Node& n, std::string_view name, const Schema* req_schema,
-                   const Schema* prg_schema, const Schema* rsp_schema,
-                   Handler handler, const TaskOptions& o = {}) {
-        init(n, name, req_schema, prg_schema, rsp_schema, std::move(handler), o, false);
-    }
-    /* The same, typed by the mesh (see reflect_from_mesh). */
-    TaskDefinition(Node& n, std::string_view name, reflect_from_mesh_t,
-                   Handler handler, const TaskOptions& o = {}) {
-        init(n, name, nullptr, nullptr, nullptr, std::move(handler), o, true);
-    }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
     bool refresh() { return fn_ && detail::rant_function_refresh(fn_) == 1; }
 
 private:
-    void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* prg_schema,
-              const Schema* rsp_schema, Handler handler, const TaskOptions& o, bool reflect) {
+    TaskDefinition(Node& n, std::string_view name, const Schema* req_schema, const Schema* prg_schema,
+                   const Schema* rsp_schema, Handler handler, const TaskOptions& o) {
         if (!n.valid()) { priv::raise_msg("rant::TaskDefinition: node is not valid"); return; }
+        if (!handler) { priv::raise_msg("rant::TaskDefinition: a definition needs a handler"); return; }
         std::string nm(name);
         detail::RantTaskOpts co;
         std::memset(&co, 0, sizeof co);
@@ -3169,26 +3187,24 @@ private:
         co.multi                = o.multi ? 1 : 0;
         co.timeout_us           = o.timeout_us;
         co.backpressure_wait_us = o.backpressure_wait_us;
-        co.reflect_from_mesh    = reflect ? 1 : 0;
+        co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
         co.queue                = priv::to_c(o.queue);
-        Box* box = nullptr;
-        if (handler) { box = new Box(); box->h = std::move(handler); }
+        Box* box = new Box();
+        box->h = std::move(handler);
         fn_ = detail::rant_node_create_task_definition(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   prg_schema ? prg_schema->raw() : nullptr,
                   rsp_schema ? rsp_schema->raw() : nullptr,
-                  box ? &TaskDefinition::tramp : nullptr, box, &co);
+                  &TaskDefinition::tramp, box, &co);
         if (!fn_) {
             delete box;
             priv::raise_last(n.impl_->node, "rant::TaskDefinition create");
             return;
         }
         impl_ = n.impl_.get();
-        if (box) {
-            box->fn.store(fn_);
-            std::lock_guard<std::mutex> g(impl_->reg_mu);
-            impl_->boxes.emplace_back(box);
-        }
+        box->fn.store(fn_);
+        std::lock_guard<std::mutex> g(impl_->reg_mu);
+        impl_->boxes.emplace_back(box);
     }
 public:
 
@@ -3250,6 +3266,7 @@ private:
     detail::RantFunction* fn_ = nullptr;
     Node::Impl*             impl_ = nullptr;
     template <class A, class B, class C> friend class TaskDefinition;
+    friend class Node;
 };
 
 /* The untyped reference to a task definition elsewhere. A request is always directed at
@@ -3259,22 +3276,13 @@ public:
     using ProgressHandler = std::function<void(const ProgressView<Bytes>&)>;
 
     RemoteTask() = default;
-    RemoteTask(Node& n, std::string_view name, const Schema* req_schema = nullptr,
-               const Schema* prg_schema = nullptr, const Schema* rsp_schema = nullptr,
-               const TaskOptions& o = {}) {
-        init(n, name, req_schema, prg_schema, rsp_schema, o, false);
-    }
-    /* The same, typed by the mesh (see reflect_from_mesh). */
-    RemoteTask(Node& n, std::string_view name, reflect_from_mesh_t, const TaskOptions& o = {}) {
-        init(n, name, nullptr, nullptr, nullptr, o, true);
-    }
     /* A reflect_from_mesh handle: re type in place when the mesh moved. true = re typed, and
      * outstanding calls are answered Cancelled first. */
     bool refresh() { return fn_ && detail::rant_function_refresh(fn_) == 1; }
 
 private:
-    void init(Node& n, std::string_view name, const Schema* req_schema, const Schema* prg_schema,
-              const Schema* rsp_schema, const TaskOptions& o, bool reflect) {
+    RemoteTask(Node& n, std::string_view name, const Schema* req_schema, const Schema* prg_schema,
+               const Schema* rsp_schema, const TaskOptions& o) {
         if (!n.valid()) { priv::raise_msg("rant::RemoteTask: node is not valid"); return; }
         std::string nm(name);
         detail::RantTaskOpts co;
@@ -3284,7 +3292,7 @@ private:
         co.keep_last            = o.keep_last;
         co.timeout_us           = o.timeout_us;
         co.backpressure_wait_us = o.backpressure_wait_us;
-        co.reflect_from_mesh    = reflect ? 1 : 0;
+        co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
         co.queue                = priv::to_c(o.queue);
         fn_ = detail::rant_node_create_remote_task(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
@@ -3417,6 +3425,7 @@ private:
     detail::RantFunction* fn_ = nullptr;
     Node::Impl*             impl_ = nullptr;
     template <class A, class B, class C> friend class RemoteTask;
+    friend class Node;
 };
 
 /* ====================== VARIABLES (untyped cores) =========================== */
@@ -3447,17 +3456,6 @@ private:
 template <> class VariableDefinition<Bytes> {
 public:
     VariableDefinition() = default;
-    VariableDefinition(Node& n, std::string_view name, const Schema* schema,
-                       const VariableOptions<Bytes>& o = {}) {
-        if (!n.valid()) { priv::raise_msg("rant::VariableDefinition: node is not valid"); return; }
-        create(n, name, schema, o, /*definition=*/true, false);
-    }
-    /* The same, typed by the mesh (see reflect_from_mesh). */
-    VariableDefinition(Node& n, std::string_view name, reflect_from_mesh_t,
-                       const VariableOptions<Bytes>& o = {}) {
-        if (!n.valid()) { priv::raise_msg("rant::VariableDefinition: node is not valid"); return; }
-        create(n, name, nullptr, o, /*definition=*/true, true);
-    }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
     bool refresh() { return var_ && detail::rant_variable_refresh(var_) == 1; }
 
@@ -3511,6 +3509,11 @@ public:
     }
 
 protected:
+    VariableDefinition(Node& n, std::string_view name, const Schema* schema,
+                       const VariableOptions<Bytes>& o) {
+        if (!n.valid()) { priv::raise_msg("rant::VariableDefinition: node is not valid"); return; }
+        create(n, name, schema, o, /*definition=*/true);
+    }
     struct UBox : priv::HandlerBox {
         std::function<void(const VariableUpdate&)> h;
         Node::Impl* impl = nullptr;
@@ -3536,7 +3539,7 @@ protected:
         }
     }
     void create(Node& n, std::string_view name, const Schema* schema,
-                const VariableOptions<Bytes>& o, bool definition, bool reflect) {
+                const VariableOptions<Bytes>& o, bool definition) {
         std::string nm(name);
         detail::RantVariableOpts co;
         std::memset(&co, 0, sizeof co);
@@ -3546,7 +3549,7 @@ protected:
         co.catch_up    = o.catch_up;
         co.keep_last   = o.keep_last;
         co.backpressure_wait_us = o.backpressure_wait_us;
-        co.reflect_from_mesh = reflect ? 1 : 0;
+        co.reflect_from_mesh = o.reflect_from_mesh ? 1 : 0;
         co.queue = priv::to_c(o.queue);
         node_ = n.impl_->node;
         impl_ = n.impl_.get();
@@ -3562,6 +3565,7 @@ protected:
     detail::RantNode*       node_ = nullptr;
     Node::Impl*             impl_ = nullptr;
     template <class A> friend class VariableDefinition;
+    friend class Node;
 };
 
 /* The untyped accessor of a value owned elsewhere: reads see the cached latest, writes go
@@ -3569,19 +3573,17 @@ protected:
 template <> class RemoteVariable<Bytes> : public VariableDefinition<Bytes> {
 public:
     RemoteVariable() = default;
-    RemoteVariable(Node& n, std::string_view name, const Schema* schema,
-                   const VariableOptions<Bytes>& o = {}) {
-        if (!n.valid()) { priv::raise_msg("rant::RemoteVariable: node is not valid"); return; }
-        create(n, name, schema, o, /*definition=*/false, false);
-    }
-    /* The same, typed by the mesh (see reflect_from_mesh). */
-    RemoteVariable(Node& n, std::string_view name, reflect_from_mesh_t,
-                   const VariableOptions<Bytes>& o = {}) {
-        if (!n.valid()) { priv::raise_msg("rant::RemoteVariable: node is not valid"); return; }
-        create(n, name, nullptr, o, /*definition=*/false, true);
-    }
     /* Block (driving the node loop) until a value exists or timeout_ms elapses. */
     bool wait(int timeout_ms) { return var_ && detail::rant_variable_wait(var_, timeout_ms) == 1; }
+
+private:
+    RemoteVariable(Node& n, std::string_view name, const Schema* schema,
+                   const VariableOptions<Bytes>& o) {
+        if (!n.valid()) { priv::raise_msg("rant::RemoteVariable: node is not valid"); return; }
+        create(n, name, schema, o, /*definition=*/false);
+    }
+    template <class A> friend class RemoteVariable;
+    friend class Node;
 };
 
 #endif /* !RANT_NO_PATTERNS */
@@ -3593,9 +3595,6 @@ public:
 template <> class Publisher<Bytes> {
 public:
     Publisher() = default;
-    Publisher(Node& n, std::string_view name, const Schema* schema = nullptr,
-              const Qos& qos = {})
-        : t_(n, name, Role::PubOnly, schema, qos) {}
 
     bool valid() const noexcept { return t_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3613,7 +3612,11 @@ public:
     SendStatus retire()           { return t_.retire(); }
 
 private:
+    Publisher(Node& n, std::string_view name, const Schema* schema, const Qos& qos)
+        : t_(n, name, Role::PubOnly, schema, qos) {}
     priv::TopicCore t_;
+    template <class A> friend class Publisher;
+    friend class Node;
 };
 
 /* Subscriber<Bytes>: the raw subscribe side. The handler fires per message on the polling
@@ -3622,15 +3625,6 @@ private:
 template <> class Subscriber<Bytes> {
 public:
     Subscriber() = default;
-    Subscriber(Node& n, std::string_view name, const Schema* schema,
-               Node::MessageHandler on_message, const Qos& qos = {})
-        : t_(on_message ? priv::TopicCore(n, name, Role::SubOnly, schema, qos)
-                        : priv::TopicCore::pulled(n, name, schema, qos)) {
-        if (t_.valid() && on_message) add_handler(n, t_, std::move(on_message));
-    }
-    /* A pulled subscriber: messages wait until take() or take_latest() reads them. */
-    Subscriber(Node& n, std::string_view name, const Schema* schema, const Qos& qos = {})
-        : t_(priv::TopicCore::pulled(n, name, schema, qos)) {}
 
     /* The oldest waiting message of a pulled subscriber, or nullopt when none arrived within
      * timeout_ms (0 = check, negative = forever). The view lives until the next take. */
@@ -3647,6 +3641,15 @@ public:
     SendStatus retire()       { return t_.retire(); }
 
 private:
+    Subscriber(Node& n, std::string_view name, const Schema* schema,
+               Node::MessageHandler on_message, const Qos& qos)
+        : t_(on_message ? priv::TopicCore(n, name, Role::SubOnly, schema, qos) : priv::TopicCore()) {
+        if (!on_message) { priv::raise_msg("rant::Subscriber: the handler is empty, make a pulled subscriber without one"); return; }
+        if (t_.valid()) add_handler(n, t_, std::move(on_message));
+    }
+    /* A pulled subscriber: messages wait until take() or take_latest() reads them. */
+    Subscriber(Node& n, std::string_view name, const Schema* schema, const Qos& qos)
+        : t_(priv::TopicCore::pulled(n, name, schema, qos)) {}
     std::optional<MessageView> pull(int timeout_ms, bool latest) {
         int r = t_.take(&msg_, timeout_ms, latest);
         if (r == static_cast<int>(SendStatus::State))
@@ -3666,6 +3669,7 @@ private:
     priv::TopicCore t_;
     detail::RantMsg msg_{};   /* the last take, which the returned view points at */
     template <class A> friend class Subscriber;
+    friend class Node;
 };
 
 /* Typed sugar: thin template layers over the Bytes cores using the RANT_SCHEMA codec.
@@ -3770,21 +3774,21 @@ private:
 template <class Req, class Rsp> class FunctionDefinition {
 public:
     FunctionDefinition() = default;
-    template <class H>
-    FunctionDefinition(Node& n, std::string_view name, H&& handler,
-                       const FunctionOptions& o = {}) {
-        priv::TypeCodec* cq = priv::type_codec<Req>(n);
-        priv::TypeCodec* cr = priv::type_codec<Rsp>(n);
-        if (!priv::codec_ok(cq) || !priv::codec_ok(cr)) { priv::raise_msg("rant::FunctionDefinition: RANT_SCHEMA compile failed"); return; }
-        Schema rq = cq->schema(), rs = cr->schema();
-        core_ = FunctionDefinition<Bytes, Bytes>(n, name, &rq, &rs, adapt(std::forward<H>(handler), cq, cr), o);
-    }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
     int match_count() const { return core_.match_count(); }
     SendStatus retire() { return core_.retire(); }
 
 private:
+    template <class H>
+    FunctionDefinition(Node& n, std::string_view name, H&& handler, const FunctionOptions& o) {
+        priv::TypeCodec* cq = priv::type_codec<Req>(n);
+        priv::TypeCodec* cr = priv::type_codec<Rsp>(n);
+        if (!priv::codec_ok(cq) || !priv::codec_ok(cr)) { priv::raise_msg("rant::FunctionDefinition: RANT_SCHEMA compile failed"); return; }
+        Schema rq = cq->schema(), rs = cr->schema();
+        core_ = FunctionDefinition<Bytes, Bytes>(n, name, &rq, &rs, adapt(std::forward<H>(handler), cq, cr), o);
+    }
+    friend class Node;
     template <class H>
     static typename FunctionDefinition<Bytes, Bytes>::Handler adapt(H&& h, priv::TypeCodec* cq,
                                                                     priv::TypeCodec* cr) {
@@ -3819,13 +3823,6 @@ private:
 template <class Req, class Rsp> class RemoteFunction {
 public:
     RemoteFunction() = default;
-    RemoteFunction(Node& n, std::string_view name, const FunctionOptions& o = {}) {
-        cq_ = priv::type_codec<Req>(n);
-        cr_ = priv::type_codec<Rsp>(n);
-        if (!priv::codec_ok(cq_) || !priv::codec_ok(cr_)) { priv::raise_msg("rant::RemoteFunction: RANT_SCHEMA compile failed"); return; }
-        Schema rq = cq_->schema(), rs = cr_->schema();
-        core_ = RemoteFunction<Bytes, Bytes>(n, name, &rq, &rs, o);
-    }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
@@ -3857,6 +3854,14 @@ public:
     SendStatus retire() { return core_.retire(); }
 
 private:
+    RemoteFunction(Node& n, std::string_view name, const FunctionOptions& o) {
+        cq_ = priv::type_codec<Req>(n);
+        cr_ = priv::type_codec<Rsp>(n);
+        if (!priv::codec_ok(cq_) || !priv::codec_ok(cr_)) { priv::raise_msg("rant::RemoteFunction: RANT_SCHEMA compile failed"); return; }
+        Schema rq = cq_->schema(), rs = cr_->schema();
+        core_ = RemoteFunction<Bytes, Bytes>(n, name, &rq, &rs, o);
+    }
+    friend class Node;
     RemoteFunction<Bytes, Bytes> core_;
     priv::TypeCodec* cq_ = nullptr;
     priv::TypeCodec* cr_ = nullptr;
@@ -3951,15 +3956,6 @@ private:
 template <class Req, class Prg, class Rsp> class TaskDefinition {
 public:
     TaskDefinition() = default;
-    template <class H>
-    TaskDefinition(Node& n, std::string_view name, H&& handler, const TaskOptions& o = {}) {
-        priv::TypeCodec* cq = priv::type_codec<Req>(n);
-        priv::TypeCodec* cp = priv::type_codec<Prg>(n);
-        priv::TypeCodec* cr = priv::type_codec<Rsp>(n);
-        if (!priv::codec_ok(cq) || !priv::codec_ok(cp) || !priv::codec_ok(cr)) { priv::raise_msg("rant::TaskDefinition: RANT_SCHEMA compile failed"); return; }
-        Schema rq = cq->schema(), pg = cp->schema(), rs = cr->schema();
-        core_ = TaskDefinition<Bytes, Bytes, Bytes>(n, name, &rq, &pg, &rs, adapt(std::forward<H>(handler), cq, cp, cr), o);
-    }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
     int match_count() const { return core_.match_count(); }
@@ -3967,6 +3963,16 @@ public:
     SendStatus retire() { return core_.retire(); }
 
 private:
+    template <class H>
+    TaskDefinition(Node& n, std::string_view name, H&& handler, const TaskOptions& o) {
+        priv::TypeCodec* cq = priv::type_codec<Req>(n);
+        priv::TypeCodec* cp = priv::type_codec<Prg>(n);
+        priv::TypeCodec* cr = priv::type_codec<Rsp>(n);
+        if (!priv::codec_ok(cq) || !priv::codec_ok(cp) || !priv::codec_ok(cr)) { priv::raise_msg("rant::TaskDefinition: RANT_SCHEMA compile failed"); return; }
+        Schema rq = cq->schema(), pg = cp->schema(), rs = cr->schema();
+        core_ = TaskDefinition<Bytes, Bytes, Bytes>(n, name, &rq, &pg, &rs, adapt(std::forward<H>(handler), cq, cp, cr), o);
+    }
+    friend class Node;
     template <class H>
     static typename TaskDefinition<Bytes, Bytes, Bytes>::Handler adapt(H&& h, priv::TypeCodec* cq,
                                                                        priv::TypeCodec* cp, priv::TypeCodec* cr) {
@@ -3988,14 +3994,6 @@ public:
     using ProgressHandler = std::function<void(const ProgressView<Prg>&)>;
 
     RemoteTask() = default;
-    RemoteTask(Node& n, std::string_view name, const TaskOptions& o = {}) {
-        cq_ = priv::type_codec<Req>(n);
-        cp_ = priv::type_codec<Prg>(n);
-        cr_ = priv::type_codec<Rsp>(n);
-        if (!priv::codec_ok(cq_) || !priv::codec_ok(cp_) || !priv::codec_ok(cr_)) { priv::raise_msg("rant::RemoteTask: RANT_SCHEMA compile failed"); return; }
-        Schema rq = cq_->schema(), pg = cp_->schema(), rs = cr_->schema();
-        core_ = RemoteTask<Bytes, Bytes, Bytes>(n, name, &rq, &pg, &rs, o);
-    }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
@@ -4034,6 +4032,15 @@ public:
     SendStatus retire() { return core_.retire(); }
 
 private:
+    RemoteTask(Node& n, std::string_view name, const TaskOptions& o) {
+        cq_ = priv::type_codec<Req>(n);
+        cp_ = priv::type_codec<Prg>(n);
+        cr_ = priv::type_codec<Rsp>(n);
+        if (!priv::codec_ok(cq_) || !priv::codec_ok(cp_) || !priv::codec_ok(cr_)) { priv::raise_msg("rant::RemoteTask: RANT_SCHEMA compile failed"); return; }
+        Schema rq = cq_->schema(), pg = cp_->schema(), rs = cr_->schema();
+        core_ = RemoteTask<Bytes, Bytes, Bytes>(n, name, &rq, &pg, &rs, o);
+    }
+    friend class Node;
     static RemoteTask<Bytes, Bytes, Bytes>::ProgressHandler adapt_progress(ProgressHandler h,
                                                                            priv::TypeCodec* cp) {
         if (!h) return {};
@@ -4056,18 +4063,6 @@ private:
 template <class T> class VariableDefinition {
 public:
     VariableDefinition() = default;
-    VariableDefinition(Node& n, std::string_view name, const VariableOptions<T>& o = {}) {
-        c_ = priv::type_codec<T>(n);
-        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::VariableDefinition: RANT_SCHEMA compile failed"); return; }
-        Schema sc = c_->schema();
-        std::vector<uint8_t> scratch;
-        VariableOptions<Bytes> uo;
-        if (o.initial) uo.initial = priv::encode(*c_, *o.initial, scratch);
-        uo.read_only = o.read_only; uo.allow_force = o.allow_force;
-        uo.catch_up = o.catch_up; uo.keep_last = o.keep_last;
-        uo.backpressure_wait_us = o.backpressure_wait_us; uo.queue = o.queue;
-        core_ = VariableDefinition<Bytes>(n, name, &sc, uo);
-    }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
@@ -4100,6 +4095,19 @@ public:
     SendStatus retire() { return core_.retire(); }
 
 private:
+    VariableDefinition(Node& n, std::string_view name, const VariableOptions<T>& o) {
+        c_ = priv::type_codec<T>(n);
+        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::VariableDefinition: RANT_SCHEMA compile failed"); return; }
+        Schema sc = c_->schema();
+        std::vector<uint8_t> scratch;
+        VariableOptions<Bytes> uo;
+        if (o.initial) uo.initial = priv::encode(*c_, *o.initial, scratch);
+        uo.read_only = o.read_only; uo.allow_force = o.allow_force;
+        uo.catch_up = o.catch_up; uo.keep_last = o.keep_last;
+        uo.backpressure_wait_us = o.backpressure_wait_us; uo.queue = o.queue;
+        core_ = VariableDefinition<Bytes>(n, name, &sc, uo);
+    }
+    friend class Node;
     template <class H>
     static std::function<void(const VariableUpdate&)> adapt(H&& h, priv::TypeCodec* c) {
         return [f = std::forward<H>(h), c](const VariableUpdate& u) mutable {
@@ -4119,15 +4127,6 @@ private:
 template <class T> class RemoteVariable {
 public:
     RemoteVariable() = default;
-    RemoteVariable(Node& n, std::string_view name, const VariableOptions<T>& o = {}) {
-        c_ = priv::type_codec<T>(n);
-        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::RemoteVariable: RANT_SCHEMA compile failed"); return; }
-        Schema sc = c_->schema();
-        VariableOptions<Bytes> uo;
-        uo.catch_up = o.catch_up; uo.keep_last = o.keep_last;
-        uo.backpressure_wait_us = o.backpressure_wait_us; uo.queue = o.queue;
-        core_ = RemoteVariable<Bytes>(n, name, &sc, uo);
-    }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
@@ -4161,6 +4160,16 @@ public:
     SendStatus retire() { return core_.retire(); }
 
 private:
+    RemoteVariable(Node& n, std::string_view name, const VariableOptions<T>& o) {
+        c_ = priv::type_codec<T>(n);
+        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::RemoteVariable: RANT_SCHEMA compile failed"); return; }
+        Schema sc = c_->schema();
+        VariableOptions<Bytes> uo;
+        uo.catch_up = o.catch_up; uo.keep_last = o.keep_last;
+        uo.backpressure_wait_us = o.backpressure_wait_us; uo.queue = o.queue;
+        core_ = RemoteVariable<Bytes>(n, name, &sc, uo);
+    }
+    friend class Node;
     template <class H>
     static std::function<void(const VariableUpdate&)> adapt(H&& h, priv::TypeCodec* c) {
         return [f = std::forward<H>(h), c](const VariableUpdate& u) mutable {
@@ -4182,12 +4191,6 @@ private:
 template <class T> class Publisher {
 public:
     Publisher() = default;
-    Publisher(Node& n, std::string_view name, const Qos& qos = {}) {
-        c_ = priv::type_codec<T>(n);
-        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::Publisher: RANT_SCHEMA compile failed"); return; }
-        Schema sc = c_->schema();
-        core_ = Publisher<Bytes>(n, name, &sc, qos);
-    }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
@@ -4201,6 +4204,13 @@ public:
     SendStatus retire()        { return core_.retire(); }
 
 private:
+    Publisher(Node& n, std::string_view name, const Qos& qos) {
+        c_ = priv::type_codec<T>(n);
+        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::Publisher: RANT_SCHEMA compile failed"); return; }
+        Schema sc = c_->schema();
+        core_ = Publisher<Bytes>(n, name, &sc, qos);
+    }
+    friend class Node;
     Publisher<Bytes> core_;
     priv::TypeCodec* c_ = nullptr;
 };
@@ -4210,22 +4220,6 @@ private:
 template <class T> class Subscriber {
 public:
     Subscriber() = default;
-    template <class H, class = std::enable_if_t<
-        std::is_invocable_v<std::decay_t<H>&, const T&> ||
-        std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>>>
-    Subscriber(Node& n, std::string_view name, H&& handler, const Qos& qos = {}) {
-        c_ = priv::type_codec<T>(n);
-        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
-        Schema sc = c_->schema();
-        core_ = Subscriber<Bytes>(n, name, &sc, adapt(std::forward<H>(handler), c_), qos);
-    }
-    /* A pulled subscriber: messages wait until take() or take_latest() reads them. */
-    Subscriber(Node& n, std::string_view name, const Qos& qos = {}) {
-        c_ = priv::type_codec<T>(n);
-        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
-        Schema sc = c_->schema();
-        core_ = Subscriber<Bytes>(n, name, &sc, qos);
-    }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
@@ -4239,6 +4233,21 @@ public:
     SendStatus retire()      { return core_.retire(); }
 
 private:
+    template <class H>
+    Subscriber(Node& n, std::string_view name, H&& handler, const Qos& qos) {
+        c_ = priv::type_codec<T>(n);
+        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
+        Schema sc = c_->schema();
+        core_ = Subscriber<Bytes>(n, name, &sc, adapt(std::forward<H>(handler), c_), qos);
+    }
+    /* A pulled subscriber: messages wait until take() or take_latest() reads them. */
+    Subscriber(Node& n, std::string_view name, const Qos& qos) {
+        c_ = priv::type_codec<T>(n);
+        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
+        Schema sc = c_->schema();
+        core_ = Subscriber<Bytes>(n, name, &sc, qos);
+    }
+    friend class Node;
     std::optional<T> decoded(const std::optional<MessageView>& m) {
         if (!m) return std::nullopt;
         T v{};
@@ -4262,6 +4271,132 @@ private:
     Subscriber<Bytes> core_;
     priv::TypeCodec* c_ = nullptr;
 };
+
+template <class T>
+Publisher<T> Node::publisher(std::string_view name, const Qos& qos, const Schema& schema) {
+    if constexpr (std::is_same_v<T, Bytes>) {
+        return Publisher<Bytes>(*this, name, priv::schema_ptr(schema), qos);
+    } else {
+        if (!priv::typed_takes_no_schema(bool(schema), qos.reflect_from_mesh,
+                "rant::Node::publisher: a typed handle takes its schema from T, use rant::Bytes for a schema or reflect_from_mesh"))
+            return {};
+        return Publisher<T>(*this, name, qos);
+    }
+}
+
+template <class T, class H, class>
+Subscriber<T> Node::subscriber(std::string_view name, H&& handler, const Qos& qos, const Schema& schema) {
+    if constexpr (std::is_same_v<T, Bytes>) {
+        return Subscriber<Bytes>(*this, name, priv::schema_ptr(schema),
+                                 MessageHandler(std::forward<H>(handler)), qos);
+    } else {
+        if (!priv::typed_takes_no_schema(bool(schema), qos.reflect_from_mesh,
+                "rant::Node::subscriber: a typed handle takes its schema from T, use rant::Bytes for a schema or reflect_from_mesh"))
+            return {};
+        return Subscriber<T>(*this, name, std::forward<H>(handler), qos);
+    }
+}
+
+template <class T>
+Subscriber<T> Node::subscriber(std::string_view name, const Qos& qos, const Schema& schema) {
+    if constexpr (std::is_same_v<T, Bytes>) {
+        return Subscriber<Bytes>(*this, name, priv::schema_ptr(schema), qos);
+    } else {
+        if (!priv::typed_takes_no_schema(bool(schema), qos.reflect_from_mesh,
+                "rant::Node::subscriber: a typed handle takes its schema from T, use rant::Bytes for a schema or reflect_from_mesh"))
+            return {};
+        return Subscriber<T>(*this, name, qos);
+    }
+}
+
+#ifndef RANT_NO_PATTERNS
+
+template <class Req, class Rsp, class H>
+FunctionDefinition<Req, Rsp> Node::function_definition(std::string_view name, H&& handler,
+        const FunctionOptions& o, const Schema& req_schema, const Schema& rsp_schema) {
+    if constexpr (std::is_same_v<Req, Bytes> && std::is_same_v<Rsp, Bytes>) {
+        return FunctionDefinition<Bytes, Bytes>(*this, name, priv::schema_ptr(req_schema),
+            priv::schema_ptr(rsp_schema),
+            typename FunctionDefinition<Bytes, Bytes>::Handler(std::forward<H>(handler)), o);
+    } else {
+        if (!priv::typed_takes_no_schema(req_schema || rsp_schema, o.reflect_from_mesh,
+                "rant::Node::function_definition: a typed handle takes its schemas from its types, use rant::Bytes for schemas or reflect_from_mesh"))
+            return {};
+        return FunctionDefinition<Req, Rsp>(*this, name, std::forward<H>(handler), o);
+    }
+}
+
+template <class Req, class Rsp>
+RemoteFunction<Req, Rsp> Node::remote_function(std::string_view name, const FunctionOptions& o,
+        const Schema& req_schema, const Schema& rsp_schema) {
+    if constexpr (std::is_same_v<Req, Bytes> && std::is_same_v<Rsp, Bytes>) {
+        return RemoteFunction<Bytes, Bytes>(*this, name, priv::schema_ptr(req_schema),
+                                            priv::schema_ptr(rsp_schema), o);
+    } else {
+        if (!priv::typed_takes_no_schema(req_schema || rsp_schema, o.reflect_from_mesh,
+                "rant::Node::remote_function: a typed handle takes its schemas from its types, use rant::Bytes for schemas or reflect_from_mesh"))
+            return {};
+        return RemoteFunction<Req, Rsp>(*this, name, o);
+    }
+}
+
+template <class Req, class Prg, class Rsp, class H>
+TaskDefinition<Req, Prg, Rsp> Node::task_definition(std::string_view name, H&& handler,
+        const TaskOptions& o, const Schema& req_schema, const Schema& prg_schema,
+        const Schema& rsp_schema) {
+    if constexpr (std::is_same_v<Req, Bytes> && std::is_same_v<Prg, Bytes> && std::is_same_v<Rsp, Bytes>) {
+        return TaskDefinition<Bytes, Bytes, Bytes>(*this, name, priv::schema_ptr(req_schema),
+            priv::schema_ptr(prg_schema), priv::schema_ptr(rsp_schema),
+            typename TaskDefinition<Bytes, Bytes, Bytes>::Handler(std::forward<H>(handler)), o);
+    } else {
+        if (!priv::typed_takes_no_schema(req_schema || prg_schema || rsp_schema, o.reflect_from_mesh,
+                "rant::Node::task_definition: a typed handle takes its schemas from its types, use rant::Bytes for schemas or reflect_from_mesh"))
+            return {};
+        return TaskDefinition<Req, Prg, Rsp>(*this, name, std::forward<H>(handler), o);
+    }
+}
+
+template <class Req, class Prg, class Rsp>
+RemoteTask<Req, Prg, Rsp> Node::remote_task(std::string_view name, const TaskOptions& o,
+        const Schema& req_schema, const Schema& prg_schema, const Schema& rsp_schema) {
+    if constexpr (std::is_same_v<Req, Bytes> && std::is_same_v<Prg, Bytes> && std::is_same_v<Rsp, Bytes>) {
+        return RemoteTask<Bytes, Bytes, Bytes>(*this, name, priv::schema_ptr(req_schema),
+            priv::schema_ptr(prg_schema), priv::schema_ptr(rsp_schema), o);
+    } else {
+        if (!priv::typed_takes_no_schema(req_schema || prg_schema || rsp_schema, o.reflect_from_mesh,
+                "rant::Node::remote_task: a typed handle takes its schemas from its types, use rant::Bytes for schemas or reflect_from_mesh"))
+            return {};
+        return RemoteTask<Req, Prg, Rsp>(*this, name, o);
+    }
+}
+
+template <class T>
+VariableDefinition<T> Node::variable_definition(std::string_view name, const VariableOptions<T>& o,
+        const Schema& schema) {
+    if constexpr (std::is_same_v<T, Bytes>) {
+        return VariableDefinition<Bytes>(*this, name, priv::schema_ptr(schema), o);
+    } else {
+        if (!priv::typed_takes_no_schema(bool(schema), o.reflect_from_mesh,
+                "rant::Node::variable_definition: a typed handle takes its schema from T, use rant::Bytes for a schema or reflect_from_mesh"))
+            return {};
+        return VariableDefinition<T>(*this, name, o);
+    }
+}
+
+template <class T>
+RemoteVariable<T> Node::remote_variable(std::string_view name, const VariableOptions<T>& o,
+        const Schema& schema) {
+    if constexpr (std::is_same_v<T, Bytes>) {
+        return RemoteVariable<Bytes>(*this, name, priv::schema_ptr(schema), o);
+    } else {
+        if (!priv::typed_takes_no_schema(bool(schema), o.reflect_from_mesh,
+                "rant::Node::remote_variable: a typed handle takes its schema from T, use rant::Bytes for a schema or reflect_from_mesh"))
+            return {};
+        return RemoteVariable<T>(*this, name, o);
+    }
+}
+
+#endif /* !RANT_NO_PATTERNS */
 
 }   /* namespace rant */
 

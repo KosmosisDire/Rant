@@ -35,8 +35,8 @@ rant::Node node("robot1", {},
     [](const rant::Event& e){ std::fprintf(stderr, "%s\n", e.to_string().c_str()); },
     { .domain = 7 });
 rant::Qos reliable{ rant::Reliability::Reliable };
-rant::Publisher<rant::Bytes>  out(node, "chat", nullptr, reliable);
-rant::Subscriber<rant::Bytes> in(node, "chat", nullptr,
+auto out = node.publisher<rant::Bytes>("chat", reliable);
+auto in  = node.subscriber<rant::Bytes>("chat",
     [](const rant::MessageView& m){ /* every delivery on chat */ }, reliable);
 node.start();
 out.send("hello");
@@ -47,7 +47,11 @@ its own. The event handler is required. Options are plain structs mirroring the 
 and all zero means every default. `Qos::queue_bytes`, `Qos::max_rate_hz` and
 `Qos::no_timestamp` are the C fields of the same meaning.
 
-Every failed constructor throws `rant::Error`, which carries the error kind, the OS errno
+Every handle comes from a factory on the node named after it: `publisher`, `subscriber`,
+`function_definition`, `remote_function`, `task_definition`, `remote_task`,
+`variable_definition` and `remote_variable`. A default constructed handle is empty.
+
+Every failed factory or constructor throws `rant::Error`, which carries the error kind, the OS errno
 of a socket fault and the formatted text as `what()`. With `-fno-exceptions` nothing
 throws: the object is not `valid()` and `node.last_error()` holds the text. Data path
 results are `SendStatus` and the status enums in both modes.
@@ -72,13 +76,14 @@ to end.
 ## Topics and messages
 
 Every handle is a template over its message type, and `rant::Bytes` as the type argument
-is the raw form: `Publisher<rant::Bytes>(node, name, schema, qos)` sends a `MessageBuilder`
-or any bytes, `Subscriber<rant::Bytes>(node, name, schema, handler, qos)` delivers a
-`MessageView` that reads fields by name. A null schema means untyped bytes. A publisher
-and a subscriber of the same name share one topic slot with a widened role. A live same
-name topic with a different schema refuses, so `retire()` the old one first to retype a
-name. After a successful retire every handle sharing the slot is invalid and the next
-construction of the name creates fresh. `match_count()` on any handle counts the matched
+is the raw form: `node.publisher<rant::Bytes>(name, qos, schema)` sends a `MessageBuilder`
+or any bytes, `node.subscriber<rant::Bytes>(name, handler, qos, schema)` delivers a
+`MessageView` that reads fields by name. An empty schema means untyped bytes. Only a
+`rant::Bytes` handle takes a schema, a typed one refuses it. A publisher and a subscriber
+of the same name share one topic slot with a widened role. A live same name topic with a
+different schema refuses, so `retire()` the old one first to retype a name. After a
+successful retire every handle sharing the slot is invalid and the next factory call for
+the name creates fresh. `match_count()` on any handle counts the matched
 counterparts, and `drain(timeout_ms)` on a publisher waits until every reader has acked,
 the flush before close.
 
@@ -89,7 +94,7 @@ waiting message and `take_latest(timeout_ms)` the newest, dropping the older one
 throws.
 
 ```cpp
-rant::Subscriber<Pose> poses(node, "pose");     // no handler: pulled
+auto poses = node.subscriber<Pose>("pose");     // no handler: pulled
 if (auto p = poses.take_latest()) draw(*p);
 ```
 
@@ -121,7 +126,7 @@ kinds, and a type mismatch yields the zero value rather than throwing.
 ```cpp
 struct Pose { double x, y; rant::String<16> frame; };
 RANT_SCHEMA(Pose, x, y, frame);
-rant::Publisher<Pose> pub(node, "pose");
+auto pub = node.publisher<Pose>("pose");
 pub.send({ 1.0, 2.0, {} });
 ```
 
@@ -174,11 +179,19 @@ two values that need the platform.
 
 ## Functions, tasks and variables
 
-The typed handles are `FunctionDefinition<Req, Rsp>`, `RemoteFunction<Req, Rsp>`,
+The handles are `FunctionDefinition<Req, Rsp>`, `RemoteFunction<Req, Rsp>`,
 `TaskDefinition<Req, Prg, Rsp>`, `RemoteTask<Req, Prg, Rsp>`, `VariableDefinition<T>` and
-`RemoteVariable<T>`. With `rant::Bytes` as every type argument the same handle is the raw
-form over DSL schemas, used by the bridge. Every handle is thin and non owning: the entity
-lives in the node until close.
+`RemoteVariable<T>`, from `node.function_definition<Req, Rsp>(name, handler, options)`
+and the other factories. With `rant::Bytes` as every type argument the same handle is the
+raw form, and the factory takes the schemas after the options. A definition needs a
+handler. Every handle is thin and non owning: the entity lives in the node until close.
+
+```cpp
+auto add = node.function_definition<AddReq, AddRsp>("add",
+    [](const AddReq& r) { return AddRsp{ r.x + r.y }; });
+auto fn  = node.remote_function<AddReq, AddRsp>("add");
+auto speed = node.variable_definition<float>("speed", { .initial = 1.5f });
+```
 
 A function handler is either `Rsp(const Req&)`, where the return value is the reply, or
 `void(const Req&, Request<Rsp>&)`, which replies, fails or defers explicitly. Returning
@@ -197,7 +210,7 @@ operation would read as success. Complete or drop a `PendingTask` before retirin
 definition.
 
 A blocking `call()` waits on the service thread's progress under `start()` and drives
-the node loop otherwise. From a callback it is refused with `SendStatus::State`, so use
+the node loop otherwise. From an inline callback it is refused with `SendStatus::State`, so use
 `call_async()` there. A
 `Response` owns its payload, and `message()` is the provider's text or the default
 status text on any non OK outcome. On a task, the timeout bounds only the wait for the
@@ -207,12 +220,13 @@ and `State` when the call is not pending.
 
 A variable's `on_change` handler replays the current value at registration and then fires
 on every state change. `on_write` fires on every applied write, identical bytes or not.
-Both run inline on the thread that applied the write. `RemoteVariable::wait()` blocks,
+Both run inline on the thread that applied the write, or at `dispatch()` of the handle's
+queue. `RemoteVariable::wait()` blocks,
 driving the loop, until a value exists.
 
-Pass `rant::reflect_from_mesh` where a constructor takes a schema pointer and the handle
-types itself from the mesh: a reader takes its provider's schema, a writer the widest
-every reader accepts. `refresh()` re types the handle in place when the mesh moved.
+A `rant::Bytes` handle made without a schema and with `reflect_from_mesh` set in its
+options types itself from the mesh: a reader takes its provider's schema, a writer the
+widest every reader accepts. `refresh()` re types the handle in place when the mesh moved.
 
 Every handle has `retire()`. It is refused with `SendStatus::State` from a callback, and
 after success the handle is empty. Retiring a remote completes every outstanding call

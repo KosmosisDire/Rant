@@ -11,11 +11,9 @@ about a wrapper API, this file wins.
   `create_remote_function`, `create_variable_definition`, `create_remote_variable`.
 - `call` is the completed transaction in every language. `_async` marks the callback or
   Task form. JS has no callAsync, the Promise is it.
-- Match queries in C++ are side named: the remote side exposes a bool `has_definition`,
-  the definition side `caller_count` or `remote_count`. Python and C# spell every one
-  `match_count` and `MatchCount`, the count of the other side, except that a C# or Python
-  subscriber has none since the C exposes no publisher count on the subscribing side.
-  C keeps its generic primitives.
+- Match queries are `match_count` and `MatchCount` on every handle, the count of the
+  other side. A C# or Python subscriber has none yet since the C exposes no publisher
+  count on the subscribing side. C keeps its generic primitives.
 - A call outcome is a value, never a fault, and reading `.Value` off OK throws. JS
   `call()` rejects only on connection loss. C# is the exception: `Call` and `CallAsync`
   return the response itself and throw `CallException` off OK, and `TryCall` and
@@ -23,9 +21,13 @@ about a wrapper API, this file wins.
 - Variable reads are local and status free. Writes return a status. C# `Value` has a
   setter that throws on a non OK status. A remote set round trips through the definition.
   The cache is authoritative only, never an optimistic echo.
-- Construction failures throw or reject. Data path outcomes are statuses and events. C++
-  has a constructor, not `open`, and throws `rant::Error`. `-fno-exceptions` degrades to
-  `valid()` and `last_open_error()` at compile time.
+- Every handle comes from a factory on the node named after it: `publisher`,
+  `subscriber`, `function_definition`, `remote_function`, `task_definition`, `remote_task`,
+  `variable_definition`, `remote_variable`, PascalCase in C#. Only a raw handle takes a
+  schema, after its options, and `reflect_from_mesh` is an option field.
+- Construction failures throw or reject. Data path outcomes are statuses and events. A C++
+  node has a constructor, not `open`, and it and every factory throw `rant::Error`.
+  `-fno-exceptions` degrades to an empty handle, `valid()` and `node.last_error()`.
 - Node open takes `(name, on_message, on_event, opts)`. `on_message` is nullable, since
   typed subscribers and pattern handles carry their own handlers. `on_event` is validated
   non null by every wrapper so the first diagnostics are never missed. Setter methods
