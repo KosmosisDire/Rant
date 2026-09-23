@@ -569,12 +569,14 @@ def _elem_token(elem, str_cap):
 
 
 def _spec_text(spec):
-    """The schema DSL text a spec compiles to, the members in their wire spelling."""
+    """The schema DSL text a spec compiles to, the members in their wire spelling. Every
+    nested class is a definition of its own first, dependencies before their users and
+    each name once, then the root. A standard type is its name alone."""
     def type_text(f):
         if f.type_name:               # a standard type: the name IS the spelling
             return f.type_name
         if f.kind == _STRUCT:
-            return "{ %s }" % ", ".join(line(g) for g in f.nested.fields)
+            return f.nested.name
         if f.kind == _ARR:
             return "%s[%d]" % (elem_text(f), f.count)
         if f.kind == _VARR:
@@ -592,12 +594,24 @@ def _spec_text(spec):
     def elem_text(f):
         if f.elem != _STRUCT:
             return _elem_token(f.elem, f.str_cap)
-        return f.elem_name or "{ %s }" % ", ".join(line(g) for g in f.nested.fields)
+        return f.elem_name or f.nested.name
     def line(f):
         return "%s: %s" % (f.wire, type_text(f))
-    if spec.name is None:                     # a bare type: the whole schema is its spelling
-        return type_text(spec.fields[0]) + "\n"
-    return spec.name + "\n{\n" + ",\n".join("    " + line(f) for f in spec.fields) + "\n}\n"
+    def define(s):
+        return s.name + "\n{\n" + ",\n".join("    " + line(f) for f in s.fields) + "\n}\n"
+    defs, seen = [], {spec.cls}
+    def hoist(s):
+        for f in s.fields:
+            n = f.nested
+            if n is None or f.type_name or f.elem_name or n.cls in seen:
+                continue
+            seen.add(n.cls)
+            hoist(n)
+            defs.append(define(n))
+    hoist(spec)
+    if spec.name is None:                     # a bare type: its spelling after the definitions
+        return "".join(defs) + type_text(spec.fields[0]) + "\n"
+    return "".join(defs) + define(spec)
 
 
 def _fields_of(lib, s):

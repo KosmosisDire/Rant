@@ -159,9 +159,8 @@ f677bd147b513fbc, `ExternalVideoStream` aae502077016ac13.
 
 ## Not done
 
-A standalone `dist/rant_serialize.h`. Eigen, GLM, numpy and Unity converters. In Python a
-standard type cannot be an array element and user named types are unsupported, since its
-emitter does not hoist a definition yet. C, C++, C# and DSL text handle both.
+A standalone `dist/rant_serialize.h`. Eigen, GLM, numpy and Unity converters. C++ refuses
+struct array members and roots, which C, C#, Python and DSL text all take.
 
 ## DSL grammar
 

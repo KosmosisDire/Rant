@@ -73,9 +73,12 @@ the wire names and a dictionary source may spell its keys any way. `__rant_name_
 class overrides the wire type name. `rant.dsl(source)` gives the DSL text of a class, a bare type, a compiled
 `Schema` or DSL text, with no library load, for display or for pasting into a C node.
 
-`list[Cls]` is an array of structs. The element spells inline, so `codes: list[Code]` is
-`codes: { ... }[]`, and a standard type element spells by its name (`list[rant.types.Float3]`
-is `Float3[]`). An element is fixed all the way down, so a `str`, a `list` or a `dict` inside
+A nested class, alone or as `list[Cls]` for an array of structs, takes its class name on
+the wire: the reflected text defines it once above its first use, as
+`Code { type: string<16>, angle: f32 }`, and each use is the name, so `codes: list[Code]`
+is `codes: Code[]` and a C# or C peer spells `Code` too. A name has one shape per node, so
+a class called `Twist` with fields of its own is refused. A standard type spells by its
+name alone (`list[rant.types.Float3]` is `Float3[]`). An element is fixed all the way down, so a `str`, a `list` or a `dict` inside
 one is refused at compile, and so is an array of them. `encode` takes a list of instances
 or of dicts and `decode` gives one back, typed when the schema came from a class. DSL text
 also declares the fixed form, `{ x: f32, y: f32 }[3]`, which zero fills to its count.

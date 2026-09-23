@@ -342,6 +342,17 @@ def struct_arrays():
           len(fixed.encode({"pts": []})) == 24 and len(short["pts"]) == 3
           and short["pts"][2] == {"x": 0.0, "y": 0.0})
 
+    text = rant.dsl(Detections)
+    check("a nested class is defined once and used by name",
+          text.count("Code\n{") == 1 and text.count("Velocity\n{") == 1
+          and "codes: Code[]" in text and "pt: Velocity" in text)
+    check("the reflected text is the spelled out text",
+          node.schema("Velocity { dx: f32, dy: f32 }\n"
+                      "Code { type: string<16>, angle: f32, pt: Velocity }\n"
+                      "Detections { stamp: u64, codes: Code[], note: string }").hash == sch.hash)
+    root = rant.dsl(list[Code])
+    check("a struct array root defines its element above it",
+          root.startswith("Velocity\n{") and root.endswith("\nCode[]\n"))
     bare = node.schema(list[Code])
     check("a struct array is a bare root too",
           bare.decode(bare.encode([Code("A", 1.0)]))[0].type == "A")
