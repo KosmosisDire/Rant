@@ -876,6 +876,10 @@ template <uint16_t N> struct String {
  * representation type for an alias. Unspecialized means an ordinary anonymous type. */
 template <class T> struct std_type { static constexpr const char* name = nullptr; using repr = void; };
 
+/* Apart from the root so Color or Quaternion never clashes with an engine type under a
+ * using directive. */
+namespace types {
+
 struct Float2  { float x, y; };
 struct Float3  { float x, y, z; };
 struct Float4  { float x, y, z, w; };
@@ -996,21 +1000,23 @@ inline bool is_nil(const Uuid& u) {
 inline Timestamp now() { return Timestamp{ detail::rant_timestamp_now() }; }
 inline Uuid      new_uuid() { Uuid u; detail::rant_uuid_new((detail::RantUuid*)&u); return u; }
 
+}   /* namespace types */
+
 /* Give a struct-shaped type a wire name: reflect its members, then name it. */
 #define RANT_STD_STRUCT(T, ...) \
-    template <> struct rant::reflect<rant::T> { \
+    template <> struct rant::reflect<rant::types::T> { \
         using is_rant_schema = void; \
         static constexpr const char* type_name = #T; \
         template <class V> static void visit(V&& v) { RANT_STD_MEMBERS_##T(v) } \
     }; \
-    template <> struct rant::std_type<rant::T> { \
+    template <> struct rant::std_type<rant::types::T> { \
         static constexpr const char* name = #T; using repr = void; }
 /* Give an ALIAS-shaped type a wire name: it copies as R (`Uuid = u8[16]`, R = uint8_t[16]). */
 #define RANT_STD_ALIAS(T, R) \
-    template <> struct rant::std_type<rant::T> { \
+    template <> struct rant::std_type<rant::types::T> { \
         static constexpr const char* name = #T; using repr = R; }
 
-#define RANT_STD_F(T, f) v(::rant::field_tag<decltype(::rant::T::f)>{}, #f, offsetof(::rant::T, f));
+#define RANT_STD_F(T, f) v(::rant::field_tag<decltype(::rant::types::T::f)>{}, #f, offsetof(::rant::types::T, f));
 #define RANT_STD_MEMBERS_Float2(v)    RANT_STD_F(Float2,x)    RANT_STD_F(Float2,y)
 #define RANT_STD_MEMBERS_Float3(v)    RANT_STD_F(Float3,x)    RANT_STD_F(Float3,y)    RANT_STD_F(Float3,z)
 #define RANT_STD_MEMBERS_Float4(v)    RANT_STD_F(Float4,x)    RANT_STD_F(Float4,y)    RANT_STD_F(Float4,z)    RANT_STD_F(Float4,w)
@@ -1024,11 +1030,11 @@ inline Uuid      new_uuid() { Uuid u; detail::rant_uuid_new((detail::RantUuid*)&
 #define RANT_STD_MEMBERS_Color(v)     RANT_STD_F(Color,r)     RANT_STD_F(Color,g)     RANT_STD_F(Color,b)     RANT_STD_F(Color,a)
 #define RANT_STD_MEMBERS_Rect(v)      RANT_STD_F(Rect,x)      RANT_STD_F(Rect,y)      RANT_STD_F(Rect,w)      RANT_STD_F(Rect,h)
 #define RANT_STD_MEMBERS_RectI(v)     RANT_STD_F(RectI,x)     RANT_STD_F(RectI,y)     RANT_STD_F(RectI,w)     RANT_STD_F(RectI,h)
-#define RANT_STD_MEMBERS_Transform(v) v(::rant::field_tag<::rant::Double3>{}, "translation", offsetof(::rant::Transform, translation)); \
-                                    v(::rant::field_tag<::rant::Quaternion>{}, "rotation", offsetof(::rant::Transform, rotation)); \
+#define RANT_STD_MEMBERS_Transform(v) v(::rant::field_tag<::rant::types::Double3>{}, "translation", offsetof(::rant::types::Transform, translation)); \
+                                    v(::rant::field_tag<::rant::types::Quaternion>{}, "rotation", offsetof(::rant::types::Transform, rotation)); \
                                     RANT_STD_F(Transform,parent)
-#define RANT_STD_MEMBERS_Twist(v)     v(::rant::field_tag<::rant::Double3>{}, "linear", offsetof(::rant::Twist, linear)); \
-                                    v(::rant::field_tag<::rant::Double3>{}, "angular", offsetof(::rant::Twist, angular));
+#define RANT_STD_MEMBERS_Twist(v)     v(::rant::field_tag<::rant::types::Double3>{}, "linear", offsetof(::rant::types::Twist, linear)); \
+                                    v(::rant::field_tag<::rant::types::Double3>{}, "angular", offsetof(::rant::types::Twist, angular));
 #define RANT_STD_MEMBERS_GeoPoint(v) RANT_STD_F(GeoPoint,lat) RANT_STD_F(GeoPoint,lon) RANT_STD_F(GeoPoint,alt)
 #define RANT_STD_MEMBERS_Image(v)        RANT_STD_F(Image,width) RANT_STD_F(Image,height) \
                                        RANT_STD_F(Image,stride) RANT_STD_F(Image,format) RANT_STD_F(Image,data)
@@ -1643,7 +1649,7 @@ public:
 
     /* capture is when the data was true, as against when it was sent. The default is
      * unstated, which costs no wire bytes. */
-    SendStatus send(Bytes data, Timestamp capture = {}) {
+    SendStatus send(Bytes data, types::Timestamp capture = {}) {
         detail::RantSendOpts o;
         if (!ch_) return SendStatus::NoTopic;
         o.capture_us = static_cast<uint64_t>(capture.us);
@@ -3262,7 +3268,7 @@ public:
 
     /* capture is when the data was true, as against when it was sent. The default is
      * unstated, which costs no wire bytes. */
-    SendStatus send(Bytes data, Timestamp capture = {}) { return t_.send(data, capture); }
+    SendStatus send(Bytes data, types::Timestamp capture = {}) { return t_.send(data, capture); }
     /* subscribers currently matched */
     int  match_count()      const { return t_.match_count(); }
     /* true when a send would not wait: a subscriber is matched or matching has converged */
@@ -3830,7 +3836,7 @@ public:
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
 
-    SendStatus send(const T& v, Timestamp capture = {}) {
+    SendStatus send(const T& v, types::Timestamp capture = {}) {
         std::vector<uint8_t> s;
         return core_.send(priv::encode(*c_, v, s), capture);
     }
@@ -4006,11 +4012,11 @@ RANT_STD_ALIAS(Matrix4x4, float[16]);
 RANT_STD_ALIAS(Uri,         rant::String<256>);
 /* the video family: the enums are RANT_ENUM-registered so a member of one (in these
  * mirrors or in a user struct) ships as the canonical named integer */
-RANT_ENUM(rant::ImageFormat, Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32, Jpeg, Png);
-RANT_ENUM(rant::VideoCodec, Unknown, Mjpeg, H264, H265, Av1);
-RANT_ENUM(rant::VideoStreamKind, Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other);
+RANT_ENUM(rant::types::ImageFormat, Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32, Jpeg, Png);
+RANT_ENUM(rant::types::VideoCodec, Unknown, Mjpeg, H264, H265, Av1);
+RANT_ENUM(rant::types::VideoStreamKind, Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other);
 RANT_STD_STRUCT(Image); RANT_STD_STRUCT(VideoFrame); RANT_STD_STRUCT(ExternalVideoStream);
-RANT_ENUM(rant::DistortionModel, NoDistortion, BrownConrady, Fisheye, Rational);
+RANT_ENUM(rant::types::DistortionModel, NoDistortion, BrownConrady, Fisheye, Rational);
 RANT_STD_STRUCT(CameraIntrinsics);
 RANT_STD_STRUCT(JointState); RANT_STD_STRUCT(JointNames);
 

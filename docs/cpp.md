@@ -135,15 +135,15 @@ integer and matches an `enum<uN>` by width only.
 
 ## Standard types
 
-The roster in docs/stdtypes.md is mirrored as `rant::Timestamp`, `rant::Transform`,
-`rant::Color`, `rant::Uuid` and the rest. Each fixed mirror is standard layout and
-identical to the wire, so the memcpy path applies. `Image` and `VideoFrame` carry a
+The roster in docs/stdtypes.md is mirrored in the `rant::types` namespace:
+`rant::types::Timestamp`, `rant::types::Transform`, `rant::types::Color`,
+`rant::types::Uuid` and the rest, with their helpers such as `rotate` and
+`color_from_hex`. The namespace keeps `Color` or `Quaternion` from clashing with an engine
+type under `using namespace rant;`. Each fixed mirror is standard layout and identical to
+the wire, so the memcpy path applies. `Image` and `VideoFrame` carry a
 `std::vector<uint8_t>` data member, so they take the tail path, and they nest as a member
-but never as an array element. `rant::now()` and `rant::new_uuid()` are the two values
-that need the platform.
-
-Name your own type the same way: `RANT_STD_STRUCT(T, fields...)` reflects the members and
-names the type, and `RANT_STD_ALIAS(T, R)` names a type that copies as `R`.
+but never as an array element. `rant::types::now()` and `rant::types::new_uuid()` are the
+two values that need the platform.
 
 ## Functions, tasks and variables
 

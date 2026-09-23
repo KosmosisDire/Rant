@@ -31,7 +31,7 @@ static void handle_message(const rant::MessageView& m) {
                     (int)m.topic_name().size(), m.topic_name().data(),
                     (int)n, reinterpret_cast<const char*>(text.data()),
                     (unsigned long long)m.get_uint("seq"),
-                    (double)(rant::now().us - ts) / 1000.0);
+                    (double)(rant::types::now().us - ts) / 1000.0);
     } else {
         std::printf("[%.*s] %.*s > %.*s\n",
                     (int)m.publisher_name().size(),  m.publisher_name().data(),
@@ -72,9 +72,9 @@ int main(int argc, char** argv) {
         size_t len = std::strcspn(line, "\n");
         if (!len) continue;
         if (len > 240) len = 240;
-        rant::Color tint = rant::color_from_hex(0x3080C0FFu);       /* 0xRRGGBBAA */
+        rant::types::Color tint = rant::types::color_from_hex(0x3080C0FFu);       /* 0xRRGGBBAA */
         rant::MessageBuilder msg(schema);
-        msg.set_int("ts", rant::now().us)
+        msg.set_int("ts", rant::types::now().us)
            .set_uint("seq", ++seq)
            .set_uint("tint.r", tint.r).set_uint("tint.g", tint.g)
            .set_uint("tint.b", tint.b).set_uint("tint.a", tint.a)

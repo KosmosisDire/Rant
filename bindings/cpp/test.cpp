@@ -363,11 +363,11 @@ static const uint64_t HASH_VIDEO     = 0xf677bd147b513fbcULL;   /* `VideoFrame` 
 static const uint64_t HASH_EXTSTREAM = 0xaae502077016ac13ULL;   /* `ExternalVideoStream` */
 
 struct Track {
-    rant::Transform at;
-    rant::Uuid        id;
-    rant::Timestamp when;
-    rant::Color       tag;
-    rant::Float3      velocity;
+    rant::types::Transform at;
+    rant::types::Uuid        id;
+    rant::types::Timestamp when;
+    rant::types::Color       tag;
+    rant::types::Float3      velocity;
 };
 RANT_SCHEMA(Track, at, id, when, tag, velocity);
 
@@ -391,9 +391,9 @@ static bool stdtypes_leg() {
     chk("std: A started", a.start());     /* A on its service thread, B pumped by wait_for */
 
     /* the mirrors ARE the wire, so the memcpy fast path stays available */
-    chk("std: Transform is 88 bytes", sizeof(rant::Transform) == 88);
-    chk("std: Uuid is 16 bytes", sizeof(rant::Uuid) == 16);
-    chk("std: Color is 4 bytes", sizeof(rant::Color) == 4);
+    chk("std: Transform is 88 bytes", sizeof(rant::types::Transform) == 88);
+    chk("std: Uuid is 16 bytes", sizeof(rant::types::Uuid) == 16);
+    chk("std: Color is 4 bytes", sizeof(rant::types::Color) == 4);
 
     {   /* a standard type as a whole schema: its name, its canonical hash */
         rant::Schema f3 = a.schema("Float3");
@@ -458,10 +458,10 @@ static bool stdtypes_leg() {
             wait_for(4000, [&] { return pub.match_count() == 1; }, &b));
         Track t{};
         t.at.translation = { 4.5, -1.25, 9.0 };
-        t.at.rotation = rant::identity_rotation();
+        t.at.rotation = rant::types::identity_rotation();
         t.id.bytes[0] = 0xAB;
-        t.when = rant::now();
-        t.tag = rant::color_from_hex(0x112233FFu);
+        t.when = rant::types::now();
+        t.tag = rant::types::color_from_hex(0x112233FFu);
         t.velocity = { 1.0f, 2.0f, 3.0f };
         pub.send(t);
         chk("std: a Track crosses whole",
@@ -470,9 +470,9 @@ static bool stdtypes_leg() {
     }
 
     {   /* the video family: mirrors with a variable member ride the codec's tail path */
-        auto im = rant::priv::schema_of<rant::Image>(a);
-        auto vf = rant::priv::schema_of<rant::VideoFrame>(a);
-        auto xs = rant::priv::schema_of<rant::ExternalVideoStream>(a);
+        auto im = rant::priv::schema_of<rant::types::Image>(a);
+        auto vf = rant::priv::schema_of<rant::types::VideoFrame>(a);
+        auto xs = rant::priv::schema_of<rant::types::ExternalVideoStream>(a);
         rant::Schema imc = a.schema("Image");
         rant::Schema vfc = a.schema("VideoFrame");
         rant::Schema xsc = a.schema("ExternalVideoStream");
@@ -486,41 +486,41 @@ static bool stdtypes_leg() {
 
         /* an Image end to end: the variable payload crosses beside the fixed fields */
         std::atomic<int> img_recv{ 0 };
-        rant::Image img_got;
-        rant::Publisher<rant::Image> ipub(a, "std/frame");
-        rant::Subscriber<rant::Image> isub(b, "std/frame", [&](const rant::Image& i) {
+        rant::types::Image img_got;
+        rant::Publisher<rant::types::Image> ipub(a, "std/frame");
+        rant::Subscriber<rant::types::Image> isub(b, "std/frame", [&](const rant::types::Image& i) {
             img_got = i;
             img_recv++;
         });
         chk("std: image pair matched",
             wait_for(4000, [&] { return ipub.match_count() == 1 && ipub.ready(); }, &b));
-        rant::Image img;
+        rant::types::Image img;
         img.width = 320; img.height = 4; img.stride = 320;
-        img.format = rant::ImageFormat::Mono8;
+        img.format = rant::types::ImageFormat::Mono8;
         img.data.resize((size_t)img.stride * img.height);
         for (size_t i = 0; i < img.data.size(); i++) img.data[i] = (uint8_t)(i * 7);
         chk("std: image send", ipub.send(img) == rant::SendStatus::Ok);
         chk("std: image crosses whole",
             wait_for(4000, [&] { return img_recv.load() > 0; }, &b)
-            && img_got.width == 320 && img_got.format == rant::ImageFormat::Mono8
+            && img_got.width == 320 && img_got.format == rant::types::ImageFormat::Mono8
             && img_got.data.size() == img.data.size()
             && img_got.data == img.data);
 
         /* ExternalVideoStream is fully fixed: the latched-variable use it exists for */
-        rant::VariableOptions<rant::ExternalVideoStream> vo;
-        rant::ExternalVideoStream st;
-        st.kind = rant::VideoStreamKind::Rtsp;
-        st.codec = rant::VideoCodec::H264;
+        rant::VariableOptions<rant::types::ExternalVideoStream> vo;
+        rant::types::ExternalVideoStream st;
+        st.kind = rant::types::VideoStreamKind::Rtsp;
+        st.codec = rant::types::VideoCodec::H264;
         st.width = 1920; st.height = 1080;
         st.url.value.assign("rtsp://cam.local/main");
         st.name.assign("front door");
         vo.initial = st;
-        rant::VariableDefinition<rant::ExternalVideoStream> vdef(a, "std/stream", vo);
-        rant::RemoteVariable<rant::ExternalVideoStream>         vrem(b, "std/stream");
+        rant::VariableDefinition<rant::types::ExternalVideoStream> vdef(a, "std/stream", vo);
+        rant::RemoteVariable<rant::types::ExternalVideoStream>         vrem(b, "std/stream");
         chk("std: stream variable replicates", wait_for(4000, [&] {
                 auto v = vrem.get();
-                return v && v->kind == rant::VideoStreamKind::Rtsp
-                         && v->codec == rant::VideoCodec::H264
+                return v && v->kind == rant::types::VideoStreamKind::Rtsp
+                         && v->codec == rant::types::VideoCodec::H264
                          && v->width == 1920 && v->height == 1080
                          && v->url.value == "rtsp://cam.local/main"
                          && v->name == "front door";
@@ -528,18 +528,18 @@ static bool stdtypes_leg() {
     }
 
     {   /* the thin operations */
-        rant::Color c = rant::color_from_hex(0x11223344u);
+        rant::types::Color c = rant::types::color_from_hex(0x11223344u);
         chk("std: Color hex round-trips", c.r == 0x11 && c.a == 0x44
-                                          && rant::color_to_hex(c) == 0x11223344u);
-        chk("std: vector length", rant::length(rant::Double3{ 3.0, 4.0, 0.0 }) == 5.0);
-        rant::Double3 r = rant::rotate(rant::Quaternion{ 0.0, 0.0, 1.0, 0.0 },
-                                       rant::Double3{ 1.0, 0.0, 0.0 });
+                                          && rant::types::color_to_hex(c) == 0x11223344u);
+        chk("std: vector length", rant::types::length(rant::types::Double3{ 3.0, 4.0, 0.0 }) == 5.0);
+        rant::types::Double3 r = rant::types::rotate(rant::types::Quaternion{ 0.0, 0.0, 1.0, 0.0 },
+                                       rant::types::Double3{ 1.0, 0.0, 0.0 });
         chk("std: quaternion rotate", r.x < -0.999 && r.x > -1.001);
-        rant::Uuid u1 = rant::new_uuid(), u2 = rant::new_uuid();
+        rant::types::Uuid u1 = rant::types::new_uuid(), u2 = rant::types::new_uuid();
         chk("std: new_uuid is random and version 4",
-            !rant::is_nil(u1) && std::memcmp(u1.bytes, u2.bytes, 16) != 0
+            !rant::types::is_nil(u1) && std::memcmp(u1.bytes, u2.bytes, 16) != 0
             && (u1.bytes[6] & 0xF0u) == 0x40u);
-        chk("std: now() is Unix-epoch microseconds", rant::now().us > 1600000000000000LL);
+        chk("std: now() is Unix-epoch microseconds", rant::types::now().us > 1600000000000000LL);
     }
     a.stop();
     return g_failures == fails_at_entry;
