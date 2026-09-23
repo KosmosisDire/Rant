@@ -34,9 +34,12 @@ about a wrapper API, this file wins.
   subscribers carry every one. C# events are the optional `OnEvent` C# event since
   `LastError` records the last diagnostic either way, and Python's optional `on_event`
   keyword prints to stderr when unset.
-- Handlers come in two forms: payload only, or payload plus message envelope. C# has one:
-  every handler is a C# event (`OnMessage`, `OnChange`, `OnWrite`, `OnEvent`, `OnLog`)
-  whose delegate takes the value and the envelope, discarded with `_` when unwanted.
+- Handlers come in two forms: payload only, or payload plus message envelope. A
+  subscriber takes its handler at creation in every binding, and a subscriber created
+  without one is pulled: `take` and `latest` in Python, `TryTake` and `TryTakeLatest` in
+  C#, `take` and `take_latest` in C++. C# node and variable handlers are events
+  (`OnChange`, `OnWrite`, `OnEvent`, `OnLog`) whose delegate takes the value and the
+  envelope, discarded with `_` when unwanted.
 - An owning message copies its payload, since the transport buffer is reused after the
   callback, but decodes only when the fields or the typed value are read. A handler that
   wants the bytes must not pay for the topic's schema. The decode outlives the callback,

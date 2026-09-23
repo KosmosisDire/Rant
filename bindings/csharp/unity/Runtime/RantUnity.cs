@@ -185,8 +185,7 @@ namespace Rant
             => _pub = node.Publisher<byte[]>(name, qos);
         internal override void CreateSub(RantNode node, string name, Qos qos, Action<RantMessage> deliver)
         {
-            _sub = node.Subscriber<byte[]>(name, qos);
-            _sub.OnMessage += (byte[] b, RantMessage m) => deliver(m);
+            _sub = node.Subscriber<byte[]>(name, (byte[] b, RantMessage m) => deliver(m), qos);
         }
         internal override void DisposeSub() { _sub.Dispose(); _sub = null; }
         internal override void DropHandles() { _pub = null; _sub = null; }
@@ -226,8 +225,7 @@ namespace Rant
             => _pub = node.Publisher<T>(name, qos);
         internal override void CreateSub(RantNode node, string name, Qos qos, Action<RantMessage> deliver)
         {
-            _sub = node.Subscriber<T>(name, qos);
-            _sub.OnMessage += (T v, RantMessage m) => deliver(m);
+            _sub = node.Subscriber<T>(name, (T v, RantMessage m) => deliver(m), qos);
         }
         internal override void DisposeSub() { _sub.Dispose(); _sub = null; }
         internal override void DropHandles() { _pub = null; _sub = null; }

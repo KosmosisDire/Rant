@@ -19,7 +19,7 @@ robot.FunctionDefinition<(double, double), double>("add", r => r.Item1 + r.Item2
 
 var viewer = new RantNode("viewer", new NodeOptions { Domain = 7 });   // usually another process
 viewer.OnEvent += e => Console.Error.WriteLine(e);
-viewer.Subscriber<Pose>("pose").OnMessage += (p, _) => Console.WriteLine(p.X);
+viewer.Subscriber<Pose>("pose", p => Console.WriteLine(p.X));
 double sum = viewer.RemoteFunction<(double, double), double>("add").Call((2, 3));
 pub.Send(new Pose(1, 2, "map"));
 ```
@@ -44,8 +44,8 @@ every handle it gave out, so a call on one that outlived its node returns `NoTop
 rather than reading freed memory.
 
 Every call is thread safe. `NodeOptions.Threading` says where every callback runs:
-OnMessage, OnEvent, OnLog, function and task handlers, progress, OnChange, OnWrite and
-awaited call results.
+subscriber handlers, OnEvent, OnLog, function and task handlers, progress, OnChange,
+OnWrite and awaited call results.
 
 - `ServiceThread`, the default: the service thread runs the loop from construction and
   every callback fires on it, one at a time. From inside one, `Send` and read only
@@ -143,11 +143,18 @@ A topic's QoS is one `Qos` object, and a null one means every default. The field
 C ones of docs/topics.md under C# names, and a `Us` suffix means microseconds.
 
 ```csharp
-var sub = node.Subscriber<Pose>("pose", new Qos { Reliability = Reliability.Reliable, KeepLast = 8 });
-sub.OnMessage += (pose, msg) => Console.WriteLine($"{pose.X} from {msg.PublisherName}");
+var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
+var sub = node.Subscriber<Pose>("pose", (pose, msg) => Console.WriteLine($"{pose.X} from {msg.PublisherName}"), qos);
+
+var frames = node.Subscriber<Pose>("pose");        // no handler: pulled
+if (frames.TryTakeLatest(out Pose newest)) Draw(newest);
 ```
 
-An `OnMessage` handler takes the value and the `RantMessage` envelope. The envelope copies
+A subscriber's handler is given at creation and takes the value alone, or the value and the
+`RantMessage` envelope. Without a handler the subscriber is pulled: `TryTake(out v,
+timeoutMs)` reads the oldest waiting message and `TryTakeLatest` the newest, dropping the
+older ones, on whatever thread calls. A pulled subscriber takes no `Qos.Queue` and never
+parks on the node's Dispatch queue. The envelope copies
 its payload out, so `Data` outlives the callback. Its `Value` decodes on the first read and
 never if not read, so a handler that only wants the bytes pays nothing for the schema.
 Read one message from one thread, as a handler does. `RecvUs` is this node's monotonic

@@ -651,6 +651,10 @@ namespace Rant
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_node_set_log_queue(IntPtr node, IntPtr q);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_topic_take(IntPtr topic, out RantMsg msg, int timeoutMs);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_topic_take_latest(IntPtr topic, out RantMsg msg, int timeoutMs);
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern void rant_topic_queue_stats(IntPtr ch, out uint msgs,
             out uint bytes, out uint capacity, out uint dropped);
         [DllImport(LIB, CallingConvention = CC)]
@@ -2123,12 +2127,12 @@ namespace Rant
 
         void INodeHandle.Invalidate() { _handle = IntPtr.Zero; }
 
-        internal TopicCore(RantNode node, string name, Schema schema, Role role, Qos qos)
+        internal TopicCore(RantNode node, string name, Schema schema, Role role, Qos qos, bool pull = false)
         {
             _node = node;
             Schema = schema;
             Role = role;
-            _handle = node.AcquireTopic(name, role, schema, qos);
+            _handle = node.AcquireTopic(name, role, schema, qos, pull);
             node.RegisterHandle(this);
         }
 
@@ -2196,7 +2200,7 @@ namespace Rant
         private readonly object _msgSchemaLock = new object();
         // same name topic sharing: one native slot per name and a hold count per role, so the
         // role follows the live handles and the last release retires the slot
-        private sealed class TopicRec { public IntPtr Handle; public IntPtr Queue; public ulong SchemaHash; public int Pubs, Subs; }
+        private sealed class TopicRec { public IntPtr Handle; public IntPtr Queue; public bool Pull; public ulong SchemaHash; public int Pubs, Subs; }
         private readonly Dictionary<string, TopicRec> _topicsByName = new Dictionary<string, TopicRec>();
         private readonly object _createLock = new object();
         // per topic subscriber handlers, copy on write arrays so the poll thread read never
@@ -2365,24 +2369,26 @@ namespace Rant
 
         // The native create behind Publisher<T> and Subscriber<T>. A same name handle on this
         // node shares the slot, widening its role, and a different schema is refused.
-        internal IntPtr AcquireTopic(string name, Role role, Schema schema, Qos qos)
+        internal IntPtr AcquireTopic(string name, Role role, Schema schema, Qos qos, bool pull = false)
         {
             if (string.IsNullOrEmpty(name)) throw new ArgumentException("topic name required", nameof(name));
+            if (pull && qos != null && qos.Queue != null)
+                throw new ArgumentException("a subscriber without a handler is pulled, it takes no Queue");
             lock (_createLock)
             {
                 TopicRec rec;
                 ulong sh = schema != null ? schema.Hash : 0;
-                IntPtr wantQueue = QueueHandle(qos != null ? qos.Queue : null);
+                IntPtr wantQueue = pull ? IntPtr.Zero : QueueHandle(qos != null ? qos.Queue : null);
                 if (_topicsByName.TryGetValue(name, out rec))
                 {
                     if (sh != 0 && rec.SchemaHash != 0 && sh != rec.SchemaHash)
                         throw new RantException(SendStatus.Schema,
                             "topic '" + name + "' already exists on this node with a different schema"
                             + " (dispose every handle on it to retype the name)");
-                    if (wantQueue != rec.Queue)
+                    if (wantQueue != rec.Queue || pull != rec.Pull)
                         throw new RantException(SendStatus.State,
                             "topic '" + name + "' already exists on this node with a different queue"
-                            + " (same name handles share one slot and its queue)");
+                            + " or delivery (same name handles share one slot)");
                     Role before = RoleOf(rec);
                     Hold(rec, role, 1);
                     Role after = RoleOf(rec);
@@ -2396,6 +2402,7 @@ namespace Rant
                     qos = qos.ToNative(),
                     reflect_from_mesh = (byte)(qos.ReflectFromMesh ? 1 : 0),
                     queue = wantQueue,
+                    pull = (byte)(pull ? 1 : 0),
                 };
                 IntPtr h = Native.rant_node_create_topic(_handle, Codec.CStr(name), (int)role,
                     schema != null ? schema.Handle : IntPtr.Zero, ref co);
@@ -2403,7 +2410,7 @@ namespace Rant
                     throw new RantException("topic '" + name + "' create failed", LastError);
                 ushort idx = Native.rant_topic_index(h);
                 if (schema != null) _topicTypes[idx] = schema.ClrType;
-                rec = new TopicRec { Handle = h, Queue = wantQueue, SchemaHash = sh };
+                rec = new TopicRec { Handle = h, Queue = wantQueue, Pull = pull, SchemaHash = sh };
                 Hold(rec, role, 1);
                 _topicsByName[name] = rec;
                 return h;
@@ -2571,9 +2578,26 @@ namespace Rant
         public Publisher<T> Publisher<T>(string name, Qos qos = null, Schema schema = null)
             => new Publisher<T>(this, name, qos, schema);
 
-        /// <summary>The subscribing side of a topic: add an OnMessage handler.</summary>
+        /// <summary>The subscribing side of a topic. The handler gets the value and the
+        /// envelope on the loop thread, or at Dispatch() of its queue.</summary>
+        public Subscriber<T> Subscriber<T>(string name, Action<T, RantMessage> handler, Qos qos = null,
+                                           Schema schema = null)
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            return new Subscriber<T>(this, name, handler, qos, schema);
+        }
+
+        /// <summary>The subscribing side of a topic, the handler taking the value alone.</summary>
+        public Subscriber<T> Subscriber<T>(string name, Action<T> handler, Qos qos = null, Schema schema = null)
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            return new Subscriber<T>(this, name, (v, _) => handler(v), qos, schema);
+        }
+
+        /// <summary>A pulled subscriber: messages wait until TryTake or TryTakeLatest reads
+        /// them, on whatever thread calls.</summary>
         public Subscriber<T> Subscriber<T>(string name, Qos qos = null, Schema schema = null)
-            => new Subscriber<T>(this, name, qos, schema);
+            => new Subscriber<T>(this, name, null, qos, schema);
 
         /// <summary>Define a function, one definition per name on the mesh. The return value
         /// is the reply and a thrown exception answers AppError with its message.</summary>
@@ -4496,44 +4520,57 @@ namespace Rant
         private readonly TopicCore _topic;
         private readonly Action<RantMessage> _deliver;
         private readonly object _lock = new object();
-        private Action<T, RantMessage> _onMessage;
-        private bool _bound;
+        private Action<T, RantMessage> _handler;   // null on a pulled subscriber
+        private readonly bool _pull;
         internal TopicCore Topic => _topic;
 
-        internal Subscriber(RantNode node, string name, Qos qos, Schema schema)
+        internal Subscriber(RantNode node, string name, Action<T, RantMessage> handler, Qos qos, Schema schema)
         {
-            _topic = new TopicCore(node, name, Schema.For(node, typeof(T), schema, name), Role.SubOnly, qos);
+            _pull = handler == null;
+            _topic = new TopicCore(node, name, Schema.For(node, typeof(T), schema, name), Role.SubOnly, qos, _pull);
+            if (_pull) return;
+            _handler = handler;
             _deliver = Deliver;
-        }
-
-        /// <summary>A message as the decoded value and its envelope: sender, clocks, raw
-        /// bytes. The first handler binds the topic to handler delivery.</summary>
-        public event Action<T, RantMessage> OnMessage
-        {
-            add
-            {
-                if (value == null) return;
-                lock (_lock)
-                {
-                    _onMessage += value;
-                    if (_bound || _topic._handle == IntPtr.Zero) return;
-                    _bound = true;
-                    _topic._node.AddSubHandler(_topic.Index, _deliver);
-                }
-            }
-            remove { lock (_lock) _onMessage -= value; }
+            _topic._node.AddSubHandler(_topic.Index, _deliver);
         }
 
         private void Deliver(RantMessage m)
         {
-            Action<T, RantMessage> hs = _onMessage;
-            if (hs == null) return;
+            Action<T, RantMessage> h = _handler;
+            if (h == null) return;
             T v;
             if (!Patterns.TryValue(m, out v)) return;
-            hs(v, m);
+            h(v, m);
         }
 
-        /// <summary>The ring behind a queued subscriber, all zeros when inline.</summary>
+        /// <summary>The oldest waiting message of a pulled subscriber. False when none arrived
+        /// within timeoutMs (0 = check, negative = forever).</summary>
+        public bool TryTake(out T value, int timeoutMs = 0) => Pull(out value, timeoutMs, false);
+
+        /// <summary>The newest waiting message of a pulled subscriber, dropping the older
+        /// ones. False when none arrived within timeoutMs.</summary>
+        public bool TryTakeLatest(out T value, int timeoutMs = 0) => Pull(out value, timeoutMs, true);
+
+        private bool Pull(out T value, int timeoutMs, bool latest)
+        {
+            value = default(T);
+            if (!_pull)
+                throw new InvalidOperationException("TryTake needs a subscriber created without a handler");
+            IntPtr h = _topic._handle;
+            if (h == IntPtr.Zero) return false;
+            RantMsg m;
+            int r = latest ? Native.rant_topic_take_latest(h, out m, timeoutMs)
+                           : Native.rant_topic_take(h, out m, timeoutMs);
+            if (r != 1) return false;
+            RantNode node = _topic._node;
+            var msg = RantMessage.FromNative(ref m, node.ClrTypeOf(m.topic_index), node.OwnedSchema(m.schema));
+            if (!Patterns.TryValue(msg, out value))
+                throw new RantException(SendStatus.Schema,
+                    "a message on '" + msg.TopicName + "' did not decode as " + typeof(T).Name);
+            return true;
+        }
+
+        /// <summary>The ring behind a queued or pulled subscriber, all zeros when inline.</summary>
         public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats() => _topic.QueueStats();
         /// <summary>The cumulative traffic this node committed to the topic and delivered from
         /// it.</summary>
@@ -4548,9 +4585,8 @@ namespace Rant
         {
             lock (_lock)
             {
-                if (_bound && _topic._handle != IntPtr.Zero) _topic._node.RemoveSubHandler(_topic.Index, _deliver);
-                _bound = false;
-                _onMessage = null;
+                if (_handler != null && _topic._handle != IntPtr.Zero) _topic._node.RemoveSubHandler(_topic.Index, _deliver);
+                _handler = null;
             }
             _topic.Release();
         }

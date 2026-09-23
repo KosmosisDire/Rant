@@ -706,7 +706,19 @@ static class Program
         {
             var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 4 };
             var pub = a.Publisher<Rant.Types.Image>("frame", qos);
-            var sub = b.Subscriber<Rant.Types.Image>("frame", qos: qos);
+            bool gotImage = false;
+            var img = new Rant.Types.Image
+            {
+                Width = 64, Height = 4, Stride = 64,
+                Format = Rant.Types.ImageFormat.Mono8,
+                Data = new byte[256],
+            };
+            for (int i = 0; i < img.Data.Length; i++) img.Data[i] = (byte)(i * 7);
+            var sub = b.Subscriber<Rant.Types.Image>("frame", (got, m) =>
+                gotImage = got.Width == 64 && got.Height == 4 && got.Stride == 64
+                           && got.Format == Rant.Types.ImageFormat.Mono8
+                           && got.Data != null && got.Data.Length == img.Data.Length
+                           && got.Data[0] == img.Data[0] && got.Data[255] == img.Data[255], qos);
             var initial = new Rant.Types.ExternalVideoStream
             {
                 Kind = Rant.Types.VideoStreamKind.Rtsp,
@@ -728,19 +740,6 @@ static class Program
             }
             Check("image topic matched", pub.MatchCount == 1);
 
-            var img = new Rant.Types.Image
-            {
-                Width = 64, Height = 4, Stride = 64,
-                Format = Rant.Types.ImageFormat.Mono8,
-                Data = new byte[256],
-            };
-            for (int i = 0; i < img.Data.Length; i++) img.Data[i] = (byte)(i * 7);
-            bool gotImage = false;
-            sub.OnMessage += (got, m) =>
-                gotImage = got.Width == 64 && got.Height == 4 && got.Stride == 64
-                           && got.Format == Rant.Types.ImageFormat.Mono8
-                           && got.Data != null && got.Data.Length == img.Data.Length
-                           && got.Data[0] == img.Data[0] && got.Data[255] == img.Data[255];
             Check("image send", pub.Send(img) == SendStatus.Ok);
 
             deadline = DateTime.UtcNow.AddSeconds(5);
@@ -874,15 +873,12 @@ static class Program
         {
             var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 4 };
             var pubFlag = a.Publisher<bool>("flag", qos);
-            var subFlag = b.Subscriber<bool>("flag", qos: qos);
-            var pubNote = a.Publisher<string>("note", qos);
-            var subNote = b.Subscriber<string>("note", qos: qos);
-            var pubPts = a.Publisher<Corner[]>("pts", qos);
-            var subPts = b.Subscriber<Corner[]>("pts", qos: qos);
             bool gotFlag = false, gotNote = false, gotPts = false;
-            subFlag.OnMessage += (f, m) => { if (f) gotFlag = true; };
-            subNote.OnMessage += (str, m) => { if (str == "a bare unbounded string") gotNote = true; };
-            subPts.OnMessage += (pts, m) => { if (pts.Length == 2 && pts[1].Y == 8) gotPts = true; };
+            var subFlag = b.Subscriber<bool>("flag", f => { if (f) gotFlag = true; }, qos);
+            var pubNote = a.Publisher<string>("note", qos);
+            var subNote = b.Subscriber<string>("note", str => { if (str == "a bare unbounded string") gotNote = true; }, qos);
+            var pubPts = a.Publisher<Corner[]>("pts", qos);
+            var subPts = b.Subscriber<Corner[]>("pts", pts => { if (pts.Length == 2 && pts[1].Y == 8) gotPts = true; }, qos);
             var vd = a.VariableDefinition<double>("gain", 1.25);
             var rv = b.RemoteVariable<double>("gain");
             var deadline = DateTime.UtcNow.AddSeconds(8);
@@ -1073,6 +1069,43 @@ static class Program
         return ok;
     }
 
+    // A subscriber made without a handler is pulled: TryTake and TryTakeLatest read it on the
+    // calling thread, and it never parks on the node's Dispatch queue
+    static bool PullLeg()
+    {
+        Console.WriteLine("pull leg: two nodes, domain 54, loopback");
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        using var a = new RantNode("psrc", Local(54));
+        using var b = new RantNode("psink", Local(54, Threading.Dispatch));
+        var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
+        var pub = a.Publisher<Level>("pulled", qos);
+        var sub = b.Subscriber<Level>("pulled", qos);
+        var deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline && pub.MatchCount == 0) Thread.Sleep(5);
+        Check("matched", pub.MatchCount == 1);
+        for (int i = 1; i <= 3; i++) pub.Send(new Level { Value = i });
+        Level v;
+        Check("TryTake waits for the oldest", sub.TryTake(out v, 2000) && v.Value == 1);
+        deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline && sub.QueueStats().Messages < 2) Thread.Sleep(5);
+        Check("the node's Dispatch leaves it waiting", b.Dispatch() >= 0 && sub.QueueStats().Messages >= 2);
+        Check("TryTakeLatest returns the newest", sub.TryTakeLatest(out v) && v.Value == 3);
+        Check("and dropped the older ones", !sub.TryTake(out v));
+
+        var pushed = b.Subscriber<Level>("pushed", x => { }, qos);
+        bool threw = false;
+        try { pushed.TryTake(out v); } catch (InvalidOperationException) { threw = true; }
+        Check("TryTake on a handler subscriber throws", threw);
+        threw = false;
+        try { b.Subscriber<Level>("pq", new Qos { Queue = b.CreateQueue() }); } catch (ArgumentException) { threw = true; }
+        Check("a pulled subscriber refuses a Queue", threw);
+
+        Console.WriteLine(ok ? "pull: PASS\n" : "pull: FAIL\n");
+        return ok;
+    }
+
     // reflect_from_mesh: a handle carrying no type of its own takes the provider's from the
     // mesh, which is what an observer tool or a generic HMI needs.
     static bool ReflectLeg()
@@ -1126,10 +1159,8 @@ static class Program
             var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 4 };
             int n1 = 0, n2 = 0;
             var pub = a.Publisher<Level>("shared", qos);
-            var s1 = b.Subscriber<Level>("shared", qos);
-            s1.OnMessage += (v, m) => n1 = v.Value;
-            var s2 = b.Subscriber<Level>("shared", qos);
-            s2.OnMessage += (v, m) => n2 = v.Value;
+            var s1 = b.Subscriber<Level>("shared", v => n1 = v.Value, qos);
+            var s2 = b.Subscriber<Level>("shared", v => n2 = v.Value, qos);
             var deadline = DateTime.UtcNow.AddSeconds(8);
             while (DateTime.UtcNow < deadline && !(n1 == 1 && n2 == 1))
             {
@@ -1189,13 +1220,13 @@ static class Program
 
         var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
         // the handler gets the value and the envelope: the stamps are checked below
-        sub.Subscriber<Pose>("pose", qos).OnMessage += (p, m) =>
+        sub.Subscriber<Pose>("pose", (p, m) =>
         {
             Received = m;
             ReceivedPose = p;
             Console.WriteLine($"recv: [{m.TopicName}] from {m.PublisherName} -> {p}");
             Got.Set();
-        };
+        }, qos);
         var pubch = pub.Publisher<Pose>("pose", qos);
 
         var sent = new Pose
@@ -1267,7 +1298,7 @@ static class Program
         {
             var subT = new RantNode("sub", Local(42));
             var pubT = new RantNode("pub", Local(42));
-            subT.Subscriber<Pose>("pose", qos).OnMessage += (p, m) => { ReceivedPose = p; Got.Set(); };
+            subT.Subscriber<Pose>("pose", p => { ReceivedPose = p; Got.Set(); }, qos);
             var pubchT = pubT.Publisher<Pose>("pose", qos);
             if (pubT.Poll(0) != (int)SendStatus.State) { Console.WriteLine("FAIL: Poll not refused under the service thread"); ok = false; }
             else
@@ -1294,6 +1325,7 @@ static class Program
         if (ok) ok = Tasks();
         if (ok) ok = DispatchLeg();
         if (ok) ok = LogLeg();
+        if (ok) ok = PullLeg();
         if (ok) ok = ReflectLeg();
         if (ok) ok = DisposeLeg();
         Console.WriteLine(ok ? "ALL PASS" : "FAIL");
