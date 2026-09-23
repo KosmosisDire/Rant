@@ -63,8 +63,9 @@ rant_function_cancel(r, id);
 ```
 
 `RantCallOpts.on_progress` fires per update where the handle's callbacks run, the loop
-thread or the handle's queue. The RUNNING ack fires it once with zero length data. The blocking `rant_function_call` fires it on the
-calling thread while it waits. Its timeout bounds only the wait for the first response,
+thread or the handle's queue. The RUNNING ack fires it once with zero length data. During a
+blocking `rant_function_call` it fires the same way, so on the calling thread only when that
+thread drives the loop itself. Its timeout bounds only the wait for the first response,
 then it waits for the terminal outcome (a cancel from another thread is the way out).
 
 Task requests are always directed at one provider. `.provider` picks explicitly, and 0

@@ -3590,9 +3590,9 @@ public:
     bool valid() const noexcept { return live() != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
 
-    /* Blocking call: waits for the terminal outcome, with on_progress on this thread, on
-     * the service thread's progress under start() and driving the loop otherwise. Refused
-     * from a callback. id_out allows a cancel(). */
+    /* Blocking call: waits for the terminal outcome on the service thread's progress, or
+     * drives a Manual node's loop. on_progress fires where the node's callbacks run, so on
+     * this thread only under Manual. Refused from a callback. id_out allows a cancel(). */
     Response<Bytes> call(Bytes req, ProgressHandler on_progress = {}, int timeout_ms = -1,
                     const CallOptions& opts = {}) {
         Response<Bytes> r;
