@@ -1666,13 +1666,14 @@ def _topic_opts(node, reliable=False, keep_last=0, catch_up=0, max_message_bytes
 
 class _TopicRec:
     """One native topic slot in the node's registry, held once per live handle and role."""
-    __slots__ = ("handle", "index", "schema_hash", "queue", "pubs", "subs")
+    __slots__ = ("handle", "index", "schema_hash", "queue", "pull", "pubs", "subs")
 
-    def __init__(self, handle, index, schema_hash, queue):
+    def __init__(self, handle, index, schema_hash, queue, pull):
         self.handle = handle
         self.index = index
         self.schema_hash = schema_hash
         self.queue = queue
+        self.pull = pull
         self.pubs = 0
         self.subs = 0
 
@@ -1709,6 +1710,13 @@ class _Topic:
     @property
     def index(self):
         return self._node._lib.rant_topic_index(self._ptr())
+
+    def take(self, timeout, latest):
+        m = _c.RantMsg()
+        take = self._node._lib.rant_topic_take_latest if latest else self._node._lib.rant_topic_take
+        if take(self._ptr(), _c.byref(m), _ms(timeout)) != 1:
+            return None
+        return Message._from_c(m, self._node._topic_specs.get(m.topic_index))
 
     def send(self, value, capture_us):
         b, buf = _c_view(_payload_bytes(self._schema, value))
@@ -1910,7 +1918,8 @@ class Node:
     def subscriber(self, name, schema=None, handler=None, **qos):
         """The subscribing side of a topic. handler takes the decoded value, or the value and
                 the Message, and runs on the polling thread, or at dispatch() of its queue.
-                The keywords are publisher's."""
+                Without a handler the subscriber is pulled with take() and latest(). The
+                keywords are publisher's."""
         return Subscriber(self, name, schema, handler, **qos)
 
     def function_definition(self, name, handler, req_schema=None, rsp_schema=None, **opts):
@@ -1965,9 +1974,9 @@ class Node:
                 if sh and rec.schema_hash and sh != rec.schema_hash:
                     raise Error("topic %r already exists on this node with a different schema"
                                 % name)
-                if opts.queue != rec.queue:
+                if opts.queue != rec.queue or opts.pull != rec.pull:
                     raise Error("topic %r already exists on this node with a different queue "
-                                "(same name handles share one slot and its queue)" % name)
+                                "or delivery (same name handles share one slot)" % name)
                 bits = rec.bits | bit
                 if bits != rec.bits:
                     r = self._lib.rant_topic_set_role(rec.handle, _role_from_bits(bits))
@@ -1986,7 +1995,7 @@ class Node:
                 if not h:
                     err = self.last_error
                     raise Error("topic %r create failed: %s" % (name, err), err)
-                rec = _TopicRec(h, self._lib.rant_topic_index(h), sh, opts.queue)
+                rec = _TopicRec(h, self._lib.rant_topic_index(h), sh, opts.queue, opts.pull)
                 self._topic_specs[rec.index] = sch._spec if sch else None
                 self._topics_by_name[name] = rec
             rec.hold(bit)
@@ -3252,11 +3261,18 @@ class Publisher:
 
 class Subscriber:
     """The subscribing side of a topic, from node.subscriber. The handler fires per message
-        on the polling thread, or at dispatch() of its queue."""
+        on the polling thread, or at dispatch() of its queue. Without a handler, messages
+        wait for take() and latest()."""
     __slots__ = ("_topic", "_fn")
 
     def __init__(self, node, name, schema=None, handler=None, **qos):
-        self._topic = _Topic(node, name, schema, _SUB_BIT, _topic_opts(node, **qos))
+        opts = _topic_opts(node, **qos)
+        if handler is None:
+            if qos.get("queue") is not None:
+                raise ValueError("a subscriber without a handler is pulled, it takes no queue")
+            opts.queue = None
+            opts.pull = 1
+        self._topic = _Topic(node, name, schema, _SUB_BIT, opts)
         self._fn = None
         if handler is not None:
             if _arity(handler) == 1:
@@ -3281,9 +3297,27 @@ class Subscriber:
         """The cumulative traffic on the topic as a TopicCounts."""
         return self._topic.counts
 
+    def take(self, timeout=0.0):
+        """The oldest waiting message as a handler would get it: the decoded value, the bytes
+                on a raw topic, None when nothing arrived in time. timeout in seconds, None =
+                forever. Only on a subscriber created without a handler."""
+        return self._pull(timeout, False)
+
+    def latest(self, timeout=0.0):
+        """The newest waiting message, dropping the older ones, or None. As take()."""
+        return self._pull(timeout, True)
+
+    def _pull(self, timeout, latest):
+        if self._fn is not None:
+            raise Error("take() and latest() need a subscriber created without a handler")
+        m = self._topic.take(timeout, latest)
+        if m is None:
+            return None
+        return m.value if m.value is not None else m.data
+
     @property
     def queue_stats(self):
-        """The subscriber's ring on its queue as a QueueStats, all zeros when not queued."""
+        """The subscriber's ring, all zeros on a handler subscriber that runs inline."""
         return self._topic.queue_stats
 
     def refresh(self):

@@ -1099,6 +1099,31 @@ def dispatch_leg():
         foreign = False
     check("another node's queue is refused", not foreign)
 
+    # pull: no handler, the app takes when it wants
+    pulled = srv.subscriber("pulled", Level, reliable=True, keep_last=8)
+    pub3 = cli.publisher("pulled", Level, reliable=True)
+    check("the pull topic matched", wait(lambda: pub3.match_count > 0))
+    for v in (1, 2, 3):
+        pub3.send(Level(value=v))
+    first = pulled.take(timeout=2.0)
+    check("take returns the oldest", first is not None and first.value == 1)
+    wait(lambda: pulled.queue_stats.messages >= 2)
+    newest = pulled.latest()
+    check("latest returns the newest and drops the rest",
+          newest is not None and newest.value == 3 and pulled.take() is None)
+    try:
+        srv.subscriber("down", Level, lambda v: None, queue=q).take()
+        refused = False
+    except rant.Error:
+        refused = True
+    check("take on a handler subscriber raises", refused)
+    try:
+        srv.subscriber("pq", Level, queue=q)
+        refused = False
+    except ValueError:
+        refused = True
+    check("a pulled subscriber refuses a queue", refused)
+
     plain = rant.Node("dplain", on_event=lambda e: None, domain=55, multicast_interface=IFACE)
     try:
         plain.dispatch()

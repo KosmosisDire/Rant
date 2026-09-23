@@ -433,6 +433,8 @@ def bind(lib):
     F("rant_topic_index", [c_void_p], c_uint16)
     F("rant_topic_match_count", [c_void_p], c_int)
     F("rant_topic_drain", [c_void_p, c_int], c_int)
+    F("rant_topic_take", [c_void_p, POINTER(RantMsg), c_int], c_int)
+    F("rant_topic_take_latest", [c_void_p, POINTER(RantMsg), c_int], c_int)
     F("rant_node_create_queue", [c_void_p], c_void_p)
     F("rant_queue_dispatch", [c_void_p, c_int, c_int], c_int)
     F("rant_queue_stats", [c_void_p, POINTER(c_uint32), POINTER(c_uint32)], None)

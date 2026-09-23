@@ -130,8 +130,16 @@ A subscriber's handler takes the decoded value, or the value and the `Message`, 
 the polling thread. A `Message` is copied out, so it outlives the callback. `value` is the
 decoded object, None on a raw topic, and `data` the wire bytes. `recv_us` is the node's
 monotonic clock at receipt and `written_us` the writer's wall clock, 0 when the publisher
-opted out, as in docs/node.md. `queue_stats` on a subscriber and `counts` on either side
-are the queue and traffic counters.
+opted out, as in docs/node.md. A subscriber created without a handler is pulled instead:
+`take(timeout)` returns the oldest waiting message and `latest(timeout)` the newest,
+dropping the older ones, each as a one argument handler would get it, or None. Such a
+subscriber takes no `queue`. `queue_stats` on a subscriber and `counts` on either side are
+the ring and traffic counters.
+
+```python
+frames = node.subscriber("camera/image", rant.types.Image)
+img = frames.latest()          # newest frame since the last call, or None
+```
 
 Same name handles on one node share the topic slot: the node advertises the roles the live
 handles hold, `close()` on one leaves its siblings working, and the last close retires the
