@@ -486,6 +486,13 @@ static class Program
                 await Task.Delay(Timeout.Infinite, ctx.CancellationToken).ConfigureAwait(false);
                 return new XferRsp();
             });
+            // honors a cancel with what it got done so far
+            var partial = srv.TaskDefinition<XferReq, XferPrg, XferRsp>("partial", async (q, ctx) =>
+            {
+                try { await Task.Delay(Timeout.Infinite, ctx.CancellationToken).ConfigureAwait(false); }
+                catch (OperationCanceledException) { throw new CancelledException<XferRsp>(new XferRsp { Total = 7 }, "stopped"); }
+                return new XferRsp();
+            });
             // declares cancellation will not be honored
             var stubborn = srv.TaskDefinition<XferReq, XferPrg, XferRsp>("stubborn", async (q, ctx) =>
             {
@@ -513,6 +520,7 @@ static class Program
             var xferR = cli.RemoteTask<XferReq, XferPrg, XferRsp>("xfer");
             var foreverR = cli.RemoteTask<XferReq, XferPrg, XferRsp>("forever");
             var stubbornR = cli.RemoteTask<XferReq, XferPrg, XferRsp>("stubborn");
+            var partialR = cli.RemoteTask<XferReq, XferPrg, XferRsp>("partial");
             var reqS = cli.Schema(typeof(XferReq));
             var prgS = cli.Schema(typeof(XferPrg));
             var rspS = cli.Schema(typeof(XferRsp));
@@ -527,7 +535,8 @@ static class Program
                         && xferRaw.MatchCount > 0 && amulR.MatchCount > 0))
                 Thread.Sleep(5);
             Check("definitions discovered", xferR.MatchCount > 0 && foreverR.MatchCount > 0
-                  && stubbornR.MatchCount > 0 && xferRaw.MatchCount > 0 && amulR.MatchCount > 0);
+                  && stubbornR.MatchCount > 0 && xferRaw.MatchCount > 0 && amulR.MatchCount > 0
+                  && partialR.MatchCount > 0);
             // CallAsync outcomes and progress fire on cli's service thread
 
             // typed: progress values in order, terminal Ok with the decoded result
@@ -587,6 +596,12 @@ static class Program
             var bcts = new CancellationTokenSource(300);
             var tr = foreverR.TryCall(new XferReq(), null, 10000, bcts.Token);
             Check("a blocking task call cancels by token", tr.Status == CallStatus.Cancelled);
+
+            // a cancel honored with a partial result: Value reads it though the call was not Ok
+            var pcts = new CancellationTokenSource(300);
+            var pr = partialR.TryCall(new XferReq(), null, 10000, pcts.Token);
+            Check("a partial result comes back Cancelled", pr.Status == CallStatus.Cancelled && pr.HasValue);
+            Check("and Value reads it", pr.HasValue && pr.Value.Total == 7);
         }
         finally
         {
@@ -1155,6 +1170,13 @@ static class Program
         Check("the peer is known", aId != 0);
         var snap = b.Reflection.Meta(aId, MetaSection.All, 2000);
         Check("blocking meta names the peer", snap.Name == "rsrv");
+
+        // a payload that does not decode is an event naming the topic, never a silent drop
+        RantEvent decodeEvt = null;
+        b.OnEvent += e => { if (e.IsError && e.TopicName == "t/undecodable") decodeEvt = e; };
+        b.ReportDecode("t/undecodable", "a message did not decode");
+        Check("a decode failure is a SchemaMismatch event naming the topic",
+              decodeEvt != null && decodeEvt.Error == ErrorKind.SchemaMismatch);
 
         a.Close();
         b.Close();

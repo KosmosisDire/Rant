@@ -1566,6 +1566,22 @@ namespace Rant
             : base(send, m) { Status = status; Provider = provider; }
     }
 
+    /// <summary>Throw from a task handler to honor a cancel with a partial result: the
+    /// caller's outcome is Cancelled, and its Value reads the partial result.</summary>
+    public sealed class CancelledException<TRsp> : OperationCanceledException
+    {
+        /// <summary>What the task got done before it stopped.</summary>
+        public TRsp Partial { get; }
+        public CancelledException(TRsp partial, string message = "cancelled") : base(message) { Partial = partial; }
+    }
+
+    // a partial result, encoded, on its way from the typed handler to the task core
+    internal sealed class PartialCancel : OperationCanceledException
+    {
+        internal readonly byte[] Data;
+        internal PartialCancel(string message, byte[] data) : base(message) { Data = data; }
+    }
+
     // ---- schema: DSL compile, reflection, encode/decode -------------------------
 
     /// <summary>A compiled message schema: the wire shape of a topic, request, response or
@@ -2907,17 +2923,47 @@ namespace Rant
                 RantNode node;
                 s_nodes.TryGetValue((long)e.user, out node);
                 if (node == null) return;
-                Action<RantEvent> fn = node.OnEvent;
-                if (fn == null)
-                {
-                    // the default: nothing goes unseen when no handler is attached
-                    if (e.kind == (int)EventKind.Error)
-                        Console.Error.WriteLine("rant: " + RantEvent.FromNative(evPtr, ref e));
-                    return;
-                }
-                fn(RantEvent.FromNative(evPtr, ref e));
+                if (node.OnEvent == null && e.kind != (int)EventKind.Error) return;
+                node.EmitEvent(RantEvent.FromNative(evPtr, ref e));
             }
             catch (Exception ex) { Console.Error.WriteLine("rant on_event: " + ex); }
+        }
+
+        // OnEvent, else the default: no error goes unseen when no handler is attached
+        internal void EmitEvent(RantEvent ev)
+        {
+            Action<RantEvent> fn = OnEvent;
+            if (fn == null)
+            {
+                if (ev.IsError) Console.Error.WriteLine("rant: " + ev);
+                return;
+            }
+            try { fn(ev); }
+            catch (Exception ex) { Console.Error.WriteLine("rant on_event: " + ex); }
+        }
+
+        // A payload that did not decode into the handle's type: an Error event of kind
+        // SchemaMismatch naming the topic, never a silent drop.
+        internal void ReportDecode(string topic, string detail)
+        {
+            IntPtr t = Marshal.StringToHGlobalAnsi(topic ?? "");
+            IntPtr d = Marshal.StringToHGlobalAnsi(detail);
+            try
+            {
+                var e = new RantEventNative
+                {
+                    kind = (int)EventKind.Error,
+                    error = (int)ErrorKind.SchemaMismatch,
+                    topic_name = t,
+                    schema_detail = d,
+                };
+                EmitEvent(RantEvent.FromValue(e));
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(t);
+                Marshal.FreeHGlobal(d);
+            }
         }
     }
 
@@ -3387,7 +3433,7 @@ namespace Rant
         public bool Complete(byte[] rsp = null, string message = null) => Finish(CallStatus.Ok, message, rsp);
         public bool Fail(string message = null, byte[] rsp = null) => Finish(CallStatus.AppError, message, rsp);
         /// <summary>Complete Cancelled, the cooperative honor of a task cancel.</summary>
-        public bool CompleteCancelled(string message = null) => Finish(CallStatus.Cancelled, message, null);
+        public bool CompleteCancelled(string message = null, byte[] rsp = null) => Finish(CallStatus.Cancelled, message, rsp);
 
         internal IntPtr Fn => _fn;
         internal ulong Token => (ulong)Interlocked.Read(ref _token);
@@ -3725,6 +3771,7 @@ namespace Rant
             var ctx = new TaskContextCore(box.Fn, token, cts.Token, r);
             Task<byte[]> t;
             try { t = handler(r, ctx); }
+            catch (PartialCancel p) { cancels.Drop(token); d.CompleteCancelled(p.Message, p.Data); return; }
             catch (OperationCanceledException) { cancels.Drop(token); d.CompleteCancelled(); return; }
             catch (Exception e) { cancels.Drop(token); d.Fail(Patterns.FailText(e)); return; }
             _ = FinishCall(t, d, cancels, token);
@@ -3734,6 +3781,7 @@ namespace Rant
                                              Patterns.TaskCancelBox cancels, ulong token)
         {
             try { d.Complete(await t.ConfigureAwait(false)); }
+            catch (PartialCancel p) { d.CompleteCancelled(p.Message, p.Data); }
             catch (OperationCanceledException) { d.CompleteCancelled(); }
             catch (Exception e) { d.Fail(Patterns.FailText(e)); }
             finally { cancels.Drop(token); }
@@ -4194,8 +4242,11 @@ namespace Rant
 
         /// <summary>How the call ended. Never throws.</summary>
         public CallStatus Status => Core.Status;
-        /// <summary>True when Status is Ok, so Value is safe to read.</summary>
+        /// <summary>True when Status is Ok.</summary>
         public bool Ok => Core.Ok;
+        /// <summary>True when a payload came back, whatever the status: the reply on Ok, a
+        /// partial result or failure data otherwise.</summary>
+        public bool HasValue => Core.Data != null && Core.Data.Length > 0;
         /// <summary>The peer that answered.</summary>
         public uint Provider => Core.Provider;
         /// <summary>The provider's wall clock when it sent the response, 0 = synthesized.</summary>
@@ -4206,12 +4257,14 @@ namespace Rant
         /// the default status text.</summary>
         public string Message => Core.Message;
 
-        /// <summary>The response. Throws CallException when the call did not end Ok.</summary>
+        /// <summary>The decoded payload: the reply on Ok, and on another status the partial
+        /// result or failure data that came back. Throws CallException when the call did not
+        /// end Ok and nothing came back, or when the payload does not decode as TRsp.</summary>
         public TRsp Value
         {
             get
             {
-                if (!Ok) throw Core.Failure(Name);
+                if (!Ok && !HasValue) throw Core.Failure(Name);
                 object v;
                 if (!Patterns.TryDecode(RspSchema, Core.SchemaPtr, Core.Data, typeof(TRsp), out v))
                     throw new CallException(Status, "call '" + Name + "' answered a payload that failed to decode as "
@@ -4327,7 +4380,9 @@ namespace Rant
                     object q;
                     if (!Patterns.TryDecode(req, r.SchemaPtr, r.Data, typeof(TReq), out q))
                         throw new Exception("request decode failed");
-                    TRsp outv = await handler((TReq)q, new TaskContext<TPrg>(ctx, prg)).ConfigureAwait(false);
+                    TRsp outv;
+                    try { outv = await handler((TReq)q, new TaskContext<TPrg>(ctx, prg)).ConfigureAwait(false); }
+                    catch (CancelledException<TRsp> c) { throw new PartialCancel(c.Message, Patterns.Encode(rsp, c.Partial)); }
                     return Patterns.Encode(rsp, outv);
                 };
             }
@@ -4421,12 +4476,16 @@ namespace Rant
         {
             if (progress == null) return null;
             Schema prg = _prg;
+            RantNode node = _core.RantNode;
+            string name = _name;
             return info =>
             {
                 object v;
                 if (info.Value == null) return;   // the RUNNING ack: no TPrg to decode
                 if (Patterns.TryDecode(prg, info.SchemaPtr, info.Value, typeof(TPrg), out v))
                     progress.Report((TPrg)v);
+                else
+                    node.ReportDecode(name, "a progress update did not decode as " + typeof(TPrg).Name);
             };
         }
 
@@ -4547,7 +4606,11 @@ namespace Rant
         {
             if (hs == null) return;
             object v;
-            if (!Patterns.TryDecode(_schema, u.SchemaPtr, u.Data, typeof(T), out v)) return;
+            if (!Patterns.TryDecode(_schema, u.SchemaPtr, u.Data, typeof(T), out v))
+            {
+                _core.RantNode.ReportDecode(_core.Name, "a variable update did not decode as " + typeof(T).Name);
+                return;
+            }
             foreach (Delegate d in hs.GetInvocationList())
             {
                 try { ((Action<T, VariableUpdate>)d)((T)v, u); }
@@ -4644,7 +4707,11 @@ namespace Rant
             Action<T, RantMessage> h = _handler;
             if (h == null) return;
             T v;
-            if (!Patterns.TryValue(m, out v)) return;
+            if (!Patterns.TryValue(m, out v))
+            {
+                _topic._node.ReportDecode(m.TopicName, "a message did not decode as " + typeof(T).Name);
+                return;
+            }
             h(v, m);
         }
 

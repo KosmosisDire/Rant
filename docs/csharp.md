@@ -185,7 +185,8 @@ NoHandler.
 
 A task handler is an async delegate taking the request and a `TaskContext<TPrg>`. The call
 is deferred and RUNNING sent before it runs. Its result answers Ok,
-`OperationCanceledException` answers Cancelled and any other exception AppError. The
+`OperationCanceledException` answers Cancelled, `CancelledException<TRsp>(partial,
+message)` answers Cancelled with a partial result, and any other exception AppError. The
 context streams `Progress` and exposes a real `CancellationToken`. A completion after
 `Dispose` or `Close` is refused by the C and dropped.
 
@@ -193,8 +194,12 @@ A call is loud. `Call(req)` blocks and returns the response, `await CallAsync(re
 same without blocking, and both throw `CallException` when the call did not end Ok. The
 exception names the call and carries `Status`, `SendStatus`, `Provider` and the provider's
 text, for a handler that threw its exception message. `TryCall` and `TryCallAsync` are the
-quiet forms for an expected failure: they return a `RantResponse<TRsp>` and never throw,
-and reading its `Value` off Ok throws the same `CallException`. `Call()` waits on the
+quiet forms for an expected failure: they return a `RantResponse<TRsp>` and never throw.
+Its `Value` reads whatever payload came back, a partial result or failure data too, and
+`HasValue` says whether one did. `Value` throws the same `CallException` only when the call
+did not end Ok and nothing came back. A payload that does not decode as the handle's type
+raises an Error event of kind `SchemaMismatch` naming the topic, and the handler does not
+run. `Call()` waits on the
 service thread or drives a Manual node's loop, and is refused from a service thread
 callback. On a task, `CallAsync(req, progress, cancellationToken)` reports each progress
 update, skipping the valueless RUNNING. Cancelling the token asks for a cooperative
