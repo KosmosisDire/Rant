@@ -262,6 +262,38 @@ inline detail::RantBytes    to_c(Bytes b) { return detail::rant_bytes(b.data(), 
 struct reflect_from_mesh_t { explicit reflect_from_mesh_t() = default; };
 inline constexpr reflect_from_mesh_t reflect_from_mesh{};
 
+/* A callback queue of a node, from Node::create_queue. A handle whose options name it parks
+ * its callbacks until dispatch() runs them on the calling thread. Non owning, freed with the node. */
+class Queue {
+public:
+    Queue() = default;
+    bool valid() const noexcept { return q_ != nullptr; }
+    explicit operator bool() const noexcept { return valid(); }
+    /* Run the callbacks parked at entry, oldest first, up to max_callbacks (0 = all), waiting
+     * up to timeout_ms for the first (negative = forever). The count run, or State from a
+     * callback or while another thread dispatches this queue. */
+    int dispatch(int max_callbacks = 0, int timeout_ms = 0) {
+        return q_ ? detail::rant_queue_dispatch(q_, max_callbacks, timeout_ms)
+                  : static_cast<int>(SendStatus::State);
+    }
+    struct Stats { uint32_t waiting = 0; uint32_t dropped = 0; };
+    /* Callbacks parked now, and dropped since open. */
+    Stats stats() const {
+        Stats s;
+        if (q_) detail::rant_queue_stats(q_, &s.waiting, &s.dropped);
+        return s;
+    }
+    detail::RantQueue* raw() const noexcept { return q_; }
+private:
+    friend class Node;
+    explicit Queue(detail::RantQueue* q) : q_(q) {}
+    detail::RantQueue* q_ = nullptr;
+};
+
+namespace priv {
+inline detail::RantQueue* to_c(const Queue* q) { return q ? q->raw() : nullptr; }
+}
+
 /* Qos / NodeOptions: plain structs mirroring the C config, all zero = default. */
 struct Qos {
     Reliability reliability          = Reliability::BestEffort;
@@ -272,9 +304,12 @@ struct Qos {
     uint32_t    repair_delay_us      = 0;   /* reader re ask bound, 0 = adaptive from the RTT */
     uint32_t    backpressure_wait_us = 0;   /* reliable: send pause for a slow reader (0 = none) */
     uint32_t    shm_max_bytes        = 0;   /* pin topic to one same-host SHM size class */
-    uint32_t    queue_bytes          = 0;   /* take and dispatch queue cap, 0 = 1 MB */
+    uint32_t    queue_bytes          = 0;   /* the handle's ring on its queue, 0 = 1 MB */
     uint16_t    max_rate_hz          = 0;   /* best effort sub: kept samples per second, 0 = all */
     bool        no_timestamp         = false;   /* omit the source stamp, written_us() reads 0 */
+    /* The queue a subscriber's handler parks on, null = inline on the loop thread. Same name
+     * handles share one slot and must agree on it. */
+    const Queue* queue               = nullptr;
 };
 
 struct NodeOptions {
@@ -322,6 +357,7 @@ struct FunctionOptions {
     uint32_t backpressure_wait_us = 0;   /* 0 = 1s (patterns are low-rate, loss unacceptable) */
     uint32_t timeout_us           = 0;   /* remote call timeout, 0 = 5 s */
     uint16_t keep_last            = 0;   /* req and rsp ring depth, 0 = 10 */
+    const Queue* queue            = nullptr;   /* where every callback parks, null = inline */
 };
 /* Task options, mirrors RantTaskOpts (docs/tasks.md). */
 struct TaskOptions {
@@ -333,6 +369,7 @@ struct TaskOptions {
     uint32_t timeout_us           = 0;   /* remote: bound until the first response, 0 = 5 s */
     uint32_t backpressure_wait_us = 0;     /* 0 = 1s */
     uint16_t keep_last            = 0;     /* req + rsp ring depth (FunctionOptions::keep_last) */
+    const Queue* queue            = nullptr;   /* where every callback parks, null = inline */
 };
 /* Per call options, mirrors RantCallOpts. provider directs a call at one definition by peer
  * id, 0 = first answer wins. A task request is always directed, 0 = the oldest provider. */
@@ -350,6 +387,7 @@ template <class T> struct VariableOptions {
     uint16_t catch_up             = 0;   /* value channel catch_up, 0 = 1 */
     uint16_t keep_last            = 0;   /* both channels' repair window, 0 = 10 */
     uint32_t backpressure_wait_us = 0;       /* 0 = 1s */
+    const Queue* queue            = nullptr;   /* where on_change and on_write park, null = inline */
 };
 template <> struct VariableOptions<Bytes> {
     Bytes    initial{};
@@ -358,6 +396,7 @@ template <> struct VariableOptions<Bytes> {
     uint16_t catch_up             = 0;
     uint16_t keep_last            = 0;
     uint32_t backpressure_wait_us = 0;
+    const Queue* queue            = nullptr;
 };
 #endif /* !RANT_NO_PATTERNS */
 
@@ -2496,8 +2535,29 @@ public:
         return log(level, std::string_view(text, static_cast<size_t>(len)));
     }
 
+    /* A callback queue of this node, for handles that want their callbacks on a thread of
+     * their own: name it in their options. At most 8 per node, freed with the node. */
+    Queue create_queue() {
+        if (!valid()) { priv::raise_msg("rant::Node::create_queue: node is not valid"); return {}; }
+        detail::RantQueue* q = detail::rant_node_create_queue(impl_->node);
+        if (!q) { priv::raise_last(impl_->node, "rant::Node::create_queue"); return {}; }
+        return Queue(q);
+    }
+    /* Park on_event on q from now on, null = inline again, dropping what is parked. */
+    SendStatus set_event_queue(const Queue* q) {
+        if (!valid()) return SendStatus::State;
+        return static_cast<SendStatus>(detail::rant_node_set_event_queue(impl_->node, priv::to_c(q)));
+    }
+    /* Park the log lines on_log receives on q from now on, null = inline again, dropping
+     * what is parked. Set it before on_log so the catch up replay parks too. */
+    SendStatus set_log_queue(const Queue* q) {
+        if (!valid()) return SendStatus::State;
+        return static_cast<SendStatus>(detail::rant_node_set_log_queue(impl_->node, priv::to_c(q)));
+    }
+
     /* Subscribe to a level's mesh wide log stream: every other node's lines, decoded to a
-     * LogLine, on the polling thread. Call it once per level from setup. false when disabled. */
+     * LogLine, on the polling thread or at dispatch() of the log queue. Call it once per
+     * level from setup. false when disabled. */
     bool on_log(LogLevel level, std::function<void(const LogLine&)> cb) {
         if (!valid() || !cb) return false;
         detail::RantTopic* ch = detail::rant_node_log_topic(
@@ -2534,7 +2594,7 @@ public:
 #endif
 
 private:
-    struct TopicRec { detail::RantTopic* ch; uint8_t bits; uint64_t schema_hash; };
+    struct TopicRec { detail::RantTopic* ch; uint8_t bits; uint64_t schema_hash; detail::RantQueue* queue; };
 #ifndef RANT_NO_PATTERNS
     /* the local @rant/meta caller handle behind meta_request, invalid when meta is disabled */
     RemoteFunction<Bytes, Bytes> meta();
@@ -2768,6 +2828,11 @@ inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
                             " (retire() it to retype the name)");
             return;
         }
+        if (priv::to_c(qos.queue) != it->second.queue) {
+            priv::raise_msg("rant topic create: the name already exists with a different queue"
+                            " (same name handles share one slot and its queue)");
+            return;
+        }
         uint8_t bits = (uint8_t)(it->second.bits | priv::role_bits(role));
         if (bits != it->second.bits) {
             detail::rant_topic_set_role(it->second.ch, static_cast<detail::RantRole>(priv::role_from_bits(bits)));
@@ -2780,10 +2845,11 @@ inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
     std::memset(&co, 0, sizeof co);
     co.qos = Node::to_c(qos);
     co.reflect_from_mesh = reflect ? 1 : 0;
+    co.queue = priv::to_c(qos.queue);
     ch_ = detail::rant_node_create_topic(impl->node, nm.c_str(),
               static_cast<detail::RantRole>(role), schema ? schema->raw() : nullptr, &co);
     if (!ch_) { priv::raise_last(impl->node, "rant topic create"); return; }
-    impl->topics.emplace(std::move(nm), Node::TopicRec{ ch_, priv::role_bits(role), sh });
+    impl->topics.emplace(std::move(nm), Node::TopicRec{ ch_, priv::role_bits(role), sh, co.queue });
 }
 
 /* Retire: on success the C handle is freed, the name cache entry and this topic's wrapper
@@ -2847,6 +2913,7 @@ private:
         co.timeout_us           = o.timeout_us;
         co.keep_last            = o.keep_last;
         co.reflect_from_mesh    = reflect ? 1 : 0;
+        co.queue                = priv::to_c(o.queue);
         Box* box = nullptr;
         if (handler) { box = new Box(); box->h = std::move(handler); }
         fn_ = detail::rant_node_create_function_definition(n.impl_->node, nm.c_str(),
@@ -2926,6 +2993,7 @@ private:
         co.timeout_us           = o.timeout_us;
         co.keep_last            = o.keep_last;
         co.reflect_from_mesh    = reflect ? 1 : 0;
+        co.queue                = priv::to_c(o.queue);
         fn_ = detail::rant_node_create_remote_function(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   rsp_schema ? rsp_schema->raw() : nullptr, &co);
@@ -3088,6 +3156,7 @@ private:
         co.timeout_us           = o.timeout_us;
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.reflect_from_mesh    = reflect ? 1 : 0;
+        co.queue                = priv::to_c(o.queue);
         Box* box = nullptr;
         if (handler) { box = new Box(); box->h = std::move(handler); }
         fn_ = detail::rant_node_create_task_definition(n.impl_->node, nm.c_str(),
@@ -3202,6 +3271,7 @@ private:
         co.timeout_us           = o.timeout_us;
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.reflect_from_mesh    = reflect ? 1 : 0;
+        co.queue                = priv::to_c(o.queue);
         fn_ = detail::rant_node_create_remote_task(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   prg_schema ? prg_schema->raw() : nullptr,
@@ -3463,6 +3533,7 @@ protected:
         co.keep_last   = o.keep_last;
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.reflect_from_mesh = reflect ? 1 : 0;
+        co.queue = priv::to_c(o.queue);
         node_ = n.impl_->node;
         impl_ = n.impl_.get();
         var_ = definition
@@ -3960,7 +4031,8 @@ public:
         VariableOptions<Bytes> uo;
         if (o.initial) uo.initial = priv::encode(*c_, *o.initial, scratch);
         uo.read_only = o.read_only; uo.allow_force = o.allow_force;
-        uo.catch_up = o.catch_up; uo.backpressure_wait_us = o.backpressure_wait_us;
+        uo.catch_up = o.catch_up; uo.keep_last = o.keep_last;
+        uo.backpressure_wait_us = o.backpressure_wait_us; uo.queue = o.queue;
         core_ = VariableDefinition<Bytes>(n, name, &sc, uo);
     }
     bool valid() const noexcept { return core_.valid(); }
@@ -4019,7 +4091,8 @@ public:
         if (!priv::codec_ok(c_)) { priv::raise_msg("rant::RemoteVariable: RANT_SCHEMA compile failed"); return; }
         Schema sc = c_->schema();
         VariableOptions<Bytes> uo;
-        uo.catch_up = o.catch_up; uo.backpressure_wait_us = o.backpressure_wait_us;
+        uo.catch_up = o.catch_up; uo.keep_last = o.keep_last;
+        uo.backpressure_wait_us = o.backpressure_wait_us; uo.queue = o.queue;
         core_ = RemoteVariable<Bytes>(n, name, &sc, uo);
     }
     bool valid() const noexcept { return core_.valid(); }

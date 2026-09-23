@@ -85,8 +85,8 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
 - Surface: `Node`, `Topic`, `Publisher<T>`, `Subscriber<T>`, `FunctionDefinition<Req,Rsp>`,
   `RemoteFunction<Req,Rsp>`, `TaskDefinition`, `RemoteTask`, `VariableDefinition<T>`,
   `RemoteVariable<T>`, `Schema`, `MessageBuilder`, `MessageView`, `Message`, `Response`,
-  `ResponseView`, `Event`, `Peer`, `Entity`, `Bytes`, `Qos`, `NodeOptions`, `MapWriter`,
-  `MapReader`. Every typed handle has an untyped `<void>` twin for the bridge and explorer.
+  `ResponseView`, `Event`, `Peer`, `Entity`, `Bytes`, `Qos`, `NodeOptions`, `Queue`,
+  `MapWriter`, `MapReader`. Every typed handle has an untyped `<void>` twin for the bridge and explorer.
 - `RANT_SCHEMA(T, fields...)` synthesizes DSL text and compiles it through
   `rant_node_schema`, once per node and type, so the C compiler stays the single source of
   wire truth. It builds
@@ -94,9 +94,9 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   endian and padding free. The decode cache is keyed per incoming schema pointer, not per
   hash, because a rebased schema keeps our hash with the publisher's offsets.
 - Tail members: `std::vector<scalar>` and `std::string` struct members ride their tail
-  frame through the C accessors by dotted path. Bare `std::vector<E>` roots work. Still
-  refused at compile time: `vector<bool>`, vectors of structs or strings, struct array
-  members, maps, pointers.
+  frame through the C accessors by dotted path. Bare `std::vector<E>` roots work, and so
+  do fixed and variable arrays of structs and of `String<N>`. Still refused at compile
+  time: `vector<bool>`, maps, pointers.
 - `rant::std_type<T>` names a user type the way the standard roster is named. `RANT_ENUM`
   registers an `enum class`. Unregistered enums ship as their backing integer.
 - With `RANT_IMPLEMENTATION` the C header embeds at global scope. Otherwise declarations

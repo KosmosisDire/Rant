@@ -1142,6 +1142,77 @@ template <class Send, class Pump> static double us_per_round_trip(int n, Send&& 
     return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / n;
 }
 
+/* callback queues: a subscriber, an async response and log lines park on B's queue and run
+ * only at its dispatch, on this thread, while both service threads run */
+static bool queue_leg() {
+    int fails_at_entry = g_failures;
+    rant::NodeOptions opts;
+    opts.domain = 50;
+    opts.multicast_interface = "127.0.0.1";
+    opts.max_topics = 32;
+    rant::Node a("QA", {}, [](const rant::Event&) {}, opts);
+    std::atomic<int> events{ 0 };
+    rant::Node b("QB", {}, [&](const rant::Event&) { events++; }, opts);
+    chk("queue: nodes constructed", a.valid() && b.valid());
+    if (!a.valid() || !b.valid()) return false;
+    chk("queue: services start", a.start() && b.start());
+
+    rant::Queue q = b.create_queue();
+    chk("queue: created", q.valid());
+    chk("queue: events park on it", b.set_event_queue(&q) == rant::SendStatus::Ok);
+    chk("queue: log lines park on it", b.set_log_queue(&q) == rant::SendStatus::Ok);
+    std::thread::id me = std::this_thread::get_id();
+    std::atomic<bool> stray{ false };
+    auto mark = [&] { if (std::this_thread::get_id() != me) stray = true; };
+
+    std::vector<std::string> lines;
+    a.log(rant::LogLevel::Warn, "before");
+    chk("queue: on_log binds", b.on_log(rant::LogLevel::Warn,
+        [&](const rant::LogLine& l) { mark(); lines.emplace_back(l.text); }));
+
+    rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
+    rant::Qos queued = rel; queued.queue = &q;
+    std::vector<int32_t> got;
+    rant::Publisher<Speed> pub(a, "q/speed", rel);
+    rant::Subscriber<Speed> sub(b, "q/speed", [&](const Speed& s) { mark(); got.push_back(s.v); }, queued);
+    rant::FunctionDefinition<AddReq, AddRsp> def(a, "q/add",
+        [](const AddReq& r) { return AddRsp{ (int64_t)r.x + r.y }; });
+    rant::FunctionOptions fo; fo.queue = &q;
+    rant::RemoteFunction<AddReq, AddRsp> rf(b, "q/add", fo);
+    auto drained = [&](const std::function<bool()>& pred) {
+        return wait_for(4000, [&] { q.dispatch(0, 0); return pred(); });
+    };
+    chk("queue: matched", drained([&] { return pub.match_count() > 0 && pub.ready()
+                                             && rf.match_count() > 0; }));
+    chk("queue: the replayed line arrives at dispatch",
+        drained([&] { return !lines.empty() && lines[0] == "before"; }));
+
+    chk("queue: send", pub.send(Speed{ 5 }) == rant::SendStatus::Ok);
+    chk("queue: the message waits for dispatch",
+        wait_for(4000, [&] { return q.stats().waiting > 0; }) && got.empty());
+    chk("queue: dispatch runs it", drained([&] { return got.size() == 1 && got[0] == 5; }));
+
+    int64_t sum = 0;
+    chk("queue: async call accepted", rf.call_async(AddReq{ 2, 3 },
+        [&](const rant::ResponseView<AddRsp>& rv) { mark(); if (rv.ok()) sum = rv->sum; })
+        == rant::SendStatus::Ok);
+    chk("queue: the response arrives at dispatch", drained([&] { return sum == 5; }));
+    a.log(rant::LogLevel::Warn, "live");
+    chk("queue: a live line arrives at dispatch",
+        drained([&] { return lines.size() >= 2 && lines.back() == "live"; }));
+    chk("queue: events arrive at dispatch", drained([&] { return events.load() > 0; }));
+    chk("queue: every callback ran on this thread", !stray.load());
+#if defined(__cpp_exceptions)
+    bool refused = false;
+    try { rant::Publisher<Speed> other(b, "q/speed", rel); }
+    catch (const rant::Error&) { refused = true; }
+    chk("queue: a same name handle on another queue is refused", refused);
+#endif
+    b.set_event_queue(nullptr);
+    b.set_log_queue(nullptr);
+    return g_failures == fails_at_entry;
+}
+
 static bool bench_leg() {
     bool ok = true;
     size_t sink = 0;   /* keeps the optimizer from dropping an encode or decode */
@@ -1359,6 +1430,11 @@ int main(int argc, char** argv) {
     std::printf("tasks leg:\n");
     bool task_ok = tasks_leg();
     std::printf("%s\n", task_ok ? "PASS: tasks" : "FAIL: tasks leg");
+
+    /* callback queues */
+    std::printf("queue leg:\n");
+    bool queue_ok = queue_leg();
+    std::printf("%s\n", queue_ok ? "PASS: callback queues" : "FAIL: queue leg");
 
 #if defined(__cpp_exceptions)
     /* a failed constructor throws rant::Error (on_event is required) */

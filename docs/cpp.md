@@ -57,6 +57,13 @@ results are `SendStatus` and the status enums in both modes.
 after creating the topics. From inside a handler, sends and read only queries are
 allowed, and poll, create, drain and stop are refused with `SendStatus::State`.
 
+`create_queue()` returns a `Queue`, and a handle whose options name it (`Qos::queue`, or
+`queue` in the function, task and variable options) parks its callbacks until
+`queue.dispatch(max, timeout_ms)` runs them on the calling thread. `set_event_queue(&q)`
+parks the node's events there too and `set_log_queue(&q)` the lines `on_log` receives.
+Same name topic handles must agree on the queue. A `Queue` is non owning and lives as long
+as its node.
+
 Memory is configured on `NodeOptions::memory`: a buffer plus size means static mode, where
 the node draws all its memory from the buffer, never grows, and turns the shared memory
 path off. The node's schemas live in that buffer too, so a static node is heap free end
@@ -205,7 +212,8 @@ with `CallStatus::Cancelled`.
 `Node::log(level, text)` publishes on a level's built in topic, with printf style
 overloads that truncate at `RANT_LOG_MAX`. `on_log(level, handler)` widens the node's own
 log handle and delivers every other node's lines at that level as a `LogLine`, whose views
-are valid for the callback only. Call it once per level from setup.
+are valid for the callback only, inline or at the dispatch of the log queue. Call it once
+per level from setup, after `set_log_queue` so the catch up replay parks too.
 
 `meta_request(peer, handler, sections)` sends a directed `@rant/meta` call and decodes the
 reply into an owning `MetaSnapshot`: the node and proc scalars are pulled out and the whole
