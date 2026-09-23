@@ -167,6 +167,9 @@ RANT_API void       rant_queue_stats(RantQueue *q, uint32_t *waiting, uint32_t *
  * rant_last_error stays current either way. RANT_ERR_STATE from a callback, for another
  * node's queue or while the events are being dispatched, RANT_ERR_OOM for the ring. */
 RANT_API int        rant_node_set_event_queue(RantNode *n, RantQueue *q);
+/* Parks the log lines this node receives on q from now on, NULL = inline again and the
+ * parked lines are dropped. RANT_ERR_STATE as above, RANT_ERR_NOSYS when logs are disabled. */
+RANT_API int        rant_node_set_log_queue(RantNode *n, RantQueue *q);
 
 /* Consumer queues: a topic becomes queued on its first take or dispatch, or from creation
  * with qos.queue_bytes. docs/node.md explains the rules. */

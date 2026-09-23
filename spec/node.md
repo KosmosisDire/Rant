@@ -242,8 +242,9 @@ Catch up replay is per writer lane, so a late subscriber gets each node's last l
 level. The record schema is `RantLog { wallUs: u64, monoUs: u64, text: string }`, and the
 text is capped at `RANT_LOG_MAX` (512) bytes. A node never delivers to itself, so
 consuming a level means reading every other node's lines.
-`set_role` queues a log builtin before its subscribe side goes live, or its catch up
-replay could land in the inline callback path before the first take creates the queue.
+`rant_node_set_log_queue` gives the three log handles a ring and the queue after creation,
+the one handle queue that changes. A binding sets it before widening the role, so the
+catch up replay parks rather than landing inline.
 
 `@rant/meta` is one handle carrying both sides: PUBSUB channels, a handler plus a pending
 list, directed requests so a call aimed at one peer never wakes the rest, keep_last 2

@@ -2272,12 +2272,7 @@ int rant_topic_set_role(RantTopic *topic, RantRole role){
         i_rant_node_unlock(topic->n, acquired);
         return RANT_ERR_STATE;
     }
-    /* a log builtin is queued before its subscribe side goes live, so the catch up replay
-       can never race the first take into the inline path. See spec/node.md */
-    if (i_rant_role_subs((uint8_t)role) && !topic->q
-        && i_rant_node_is_log_topic(topic->n, topic->index))
-        (void)i_rant_node_queue_ensure(topic->n, topic, NULL);
-    r = i_rant_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
+    r =i_rant_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
     if (r == 0){
         topic->role = (uint8_t)role;
         topic->came_up_us = i_rant_plat_now_us();
@@ -3127,6 +3122,28 @@ int rant_node_set_event_queue(RantNode *n, RantQueue *q){
         n->event_q = r;
     }
     n->event_queue = q;
+    i_rant_node_unlock(n, acquired);
+    return RANT_OK;
+}
+
+int rant_node_set_log_queue(RantNode *n, RantQueue *q){
+    int acquired, lvl;
+    if (!n) return RANT_ERR_STATE;
+    acquired = i_rant_node_lock(n);
+    if (acquired) i_rant_node_callbacks_settle(n);
+    if (!acquired || (q && q->n != n)){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }
+    if (!n->log_topics[RANT_LOG_ERROR]){ i_rant_node_unlock(n, acquired); return RANT_ERR_NOSYS; }
+    for (lvl = 0; lvl < 3; lvl++){
+        RantTopic *h = n->log_topics[lvl];
+        if (h && h->q && h->q->busy){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }
+    }
+    for (lvl = 0; lvl < 3; lvl++){
+        RantTopic *h = n->log_topics[lvl];
+        if (!h) continue;
+        if (!q){ i_rant_node_queue_drop(n, h); h->queue = NULL; continue; }   /* the parked lines go */
+        if (!i_rant_node_queue_ensure(n, h, NULL)){ i_rant_node_unlock(n, acquired); return RANT_ERR_OOM; }
+        h->queue = q;
+    }
     i_rant_node_unlock(n, acquired);
     return RANT_OK;
 }

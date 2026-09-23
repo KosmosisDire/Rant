@@ -49,6 +49,9 @@ whole API. The choice is made at creation and never changes.
   makes events inline again and drops what is parked. `rant_last_error` is current either
   way. Functions, tasks and variables take `queue` in their options the same way, see
   docs/patterns.md.
+- `rant_node_set_log_queue(n, q)` parks the log lines this node receives on `q`, the
+  built in log topics being created at open without one. NULL makes them inline again and
+  drops what is parked.
 
 One thread drains a queue at a time. A concurrent dispatch, a dispatch from an inline
 callback or from one of the queue's own callbacks returns `RANT_ERR_STATE`. Retiring a
@@ -159,7 +162,8 @@ costs nothing on the data path, and `RANT_NO_DIAG` strips the text.
 Every node hosts three shared reliable log topics: `@rant/log/error`, `@rant/log/warn` and
 `@rant/log/info`. `rant_node_log(n, level, fmt, ...)` publishes a line, also from inside
 callbacks. To read other nodes' lines, take your own handle with `rant_node_log_topic`,
-widen its role to `RANT_PUBSUB`, and read it like any topic. A node never receives its
+widen its role to `RANT_PUBSUB`, and its lines reach `on_message` like any topic's, inline
+or on the queue given to `rant_node_set_log_queue`. A node never receives its
 own lines. A late subscriber gets each node's last lines per level. A slow subscriber never
 blocks the app, it only loses the oldest lines. `opts.disable_logs` strips the topics.
 Internal `RANT_ERROR` events are mirrored to the error level unless

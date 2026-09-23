@@ -8079,8 +8079,23 @@ static void interest_external_checks(void){
     rant_node_close(P,1); rant_node_close(S,1);
 }
 
+/* B's log lines as they reach on_message, and whether a queue dispatch ran them */
+static int ml_n, ml_boom0, ml_mirror, ml_live, ml_in_dispatch, ml_dispatching;
+static void ml_on_msg(const RantMsg *m){
+    RantString txt = rant_get_string(m->data, m->schema, "text");
+    uint64_t wall = rant_get_uint(m->data, m->schema, "wallUs");
+    char tb[64]; size_t tl = txt.len < sizeof tb - 1 ? txt.len : sizeof tb - 1;
+    memcpy(tb, txt.data, tl); tb[tl] = '\0';
+    ml_n++;
+    if (ml_dispatching) ml_in_dispatch++;
+    if (strcmp(tb, "boom 0") == 0 && wall) ml_boom0 = 1;
+    if (strstr(tb, "unmatched-send")) ml_mirror = 1;
+    if (strcmp(tb, "live") == 0) ml_live = 1;
+}
+
 /* The metalog phase: A logs before anyone listens and triggers a mirrored error, B late
- * joins the error level and reads both, then calls A's @rant/meta directed at A. */
+ * joins the error level on a queue and reads both, then reads a live line inline, then
+ * calls A's @rant/meta directed at A. */
 static void metalog_checks(void){
     RantAllocator aa = rant_allocator_heap(0);
     RantAllocator ba = rant_allocator_heap(0);
@@ -8093,7 +8108,7 @@ static void metalog_checks(void){
     bo=ao;
     ao.match_wait_ms = -1;    /* so the unmatched send below commits + fires immediately */
     A = rant_node_open(&aa, "meta-a", NULL, NULL, &ao);
-    B = rant_node_open(&ba, "meta-b", NULL, NULL, &bo);
+    B = rant_node_open(&ba, "meta-b", ml_on_msg, NULL, &bo);
     ST_CHECK(A && B, "metalog: nodes open");
     if (!(A && B)){ if(A)rant_node_close(A,0); if(B)rant_node_close(B,0);
                     rant_allocator_reset(&ba); rant_allocator_reset(&aa); return; }
@@ -8122,26 +8137,34 @@ static void metalog_checks(void){
       rant_node_poll(A, 0);     /* flush the mirror ring into the log topic */
     }
 
-    /* late subscriber: widen B's own handle of the error level to PUBSUB, take the replay */
+    /* late subscriber: B parks its log lines on a queue, then widens its own handle of the
+       error level to PUBSUB, so the replay parks and runs only at a dispatch */
     { RantTopic *eh = rant_node_log_topic(B, RANT_LOG_ERROR);
-      RantMsg m; int got_boom0=0, got_mirror=0, n_got=0;
-      int sub_ok = eh && rant_topic_set_role(eh, RANT_PUBSUB) == 0;
-      ST_CHECK(sub_ok, "metalog: log subscribe");
-      for (t=0;t<1500 && !(got_boom0 && got_mirror);t++){
+      RantQueue *lq = rant_node_create_queue(B), *other = rant_node_create_queue(A);
+      int rc = rant_node_set_log_queue(B, other);
+      ST_CHECK(rc == RANT_ERR_STATE, "metalog: another node's queue refused (%d)", rc);
+      rc = rant_node_set_log_queue(B, lq);
+      ST_CHECK(lq && rc == RANT_OK, "metalog: log queue set (%d)", rc);
+      rc = eh ? rant_topic_set_role(eh, RANT_PUBSUB) : -1;
+      ST_CHECK(rc == 0, "metalog: log subscribe (%d)", rc);
+      for (t=0;t<1500 && !(ml_boom0 && ml_mirror);t++){
           pf_pump(A,B,2);
-          while (n_got<16 && rant_topic_take(eh, &m, 0) == 1){
-              RantString txt = rant_get_string(m.data, m.schema, "text");
-              uint64_t wall = rant_get_uint(m.data, m.schema, "wallUs");
-              char tb[64]; size_t tl = txt.len < sizeof tb - 1 ? txt.len : sizeof tb - 1;
-              memcpy(tb, txt.data, tl); tb[tl]='\0';
-              n_got++;
-              if (strcmp(tb, "boom 0") == 0 && wall) got_boom0 = 1;
-              if (strstr(tb, "unmatched-send")) got_mirror = 1;
-          }
+          ml_dispatching = 1;
+          (void)rant_queue_dispatch(lq, 0, 0);
+          ml_dispatching = 0;
       }
-      ST_CHECK(n_got >= 4 && got_boom0 && got_mirror,
-               "metalog: replay + mirrored error received (n=%d boom0=%d mirror=%d)",
-               n_got, got_boom0, got_mirror); }
+      ST_CHECK(ml_n >= 4 && ml_boom0 && ml_mirror && ml_in_dispatch == ml_n,
+               "metalog: replay + mirrored error dispatched (n=%d boom0=%d mirror=%d queued=%d)",
+               ml_n, ml_boom0, ml_mirror, ml_in_dispatch);
+
+      /* NULL makes the lines inline again: a live line reaches on_message from the poll */
+      rc = rant_node_set_log_queue(B, NULL);
+      ST_CHECK(rc == RANT_OK, "metalog: log queue cleared (%d)", rc);
+      ml_in_dispatch = 0;
+      rc = rant_node_log(A, RANT_LOG_ERROR, "live");
+      ST_CHECK(rc == RANT_OK, "metalog: live line accepted (%d)", rc);
+      for (t=0;t<1500 && !ml_live;t++) pf_pump(A,B,2);
+      ST_CHECK(ml_live && ml_in_dispatch == 0, "metalog: live line delivered inline (%d)", ml_live); }
 
     /* @rant/meta: B calls A's endpoint directed at A's peer id. A answers on its service
        thread while B blocks in the call */
