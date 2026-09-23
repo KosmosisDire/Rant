@@ -40,7 +40,7 @@ struct Shape
 {
     public Corner[] Corners;
     [RantArray(2)] public Corner[] Bounds;
-    public Rant.Float3[] Normals;
+    public Rant.Types.Float3[] Normals;
     public Corner Origin;
 }
 
@@ -197,7 +197,7 @@ static class Program
             {
                 Corners = new[] { new Corner { X = 1, Y = 2 }, new Corner { X = 3, Y = 4 }, new Corner { X = 5, Y = 6 } },
                 Bounds = new[] { new Corner { X = -1, Y = -2 }, new Corner { X = 7, Y = 8 } },
-                Normals = new[] { new Rant.Float3 { X = 0, Y = 0, Z = 1 } },
+                Normals = new[] { new Rant.Types.Float3 { X = 0, Y = 0, Z = 1 } },
                 Origin = new Corner { X = 9, Y = 10 },
             };
             var back = (Shape)sh.Decode(sh.Encode(shape));
@@ -577,11 +577,11 @@ static class Program
     // a shipped mirror struct that names itself. Both narrow matching.
     struct Track
     {
-        [RantField("at")]   public Rant.Transform At;
+        [RantField("at")]   public Rant.Types.Transform At;
         [RantField("when")] [RantTypeName("Timestamp")] public long When;
-        [RantField("tag")]  public Rant.Color Tag;
+        [RantField("tag")]  public Rant.Types.Color Tag;
         [RantField("id")]   [RantTypeName("Uuid")] [RantArray(16)] public byte[] Id;
-        [RantField("velocity")] public Rant.Float3 Velocity;
+        [RantField("velocity")] public Rant.Types.Float3 Velocity;
     }
 
     // The fixed message size of a schema: its default message with nothing set.
@@ -596,7 +596,7 @@ static class Program
         using var b = new RantNode("sb", Local(52, Threading.Manual));
         {
             var f3 = a.Schema("Float3");
-            var mirror = a.Schema(typeof(Rant.Float3));
+            var mirror = a.Schema(typeof(Rant.Types.Float3));
             Check("Float3 compiles by name alone, golden hash", f3.Hash == HashFloat3);
             Check("Float3 is 12 message bytes", SizeOf(f3) == 12);
             Check("the mirror struct IS that type", mirror.Hash == HashFloat3);
@@ -627,27 +627,27 @@ static class Program
             Check("its message is the sum of the wire shapes (88+8+4+16+12)", SizeOf(sch) == 128);
 
             var t = new Track {
-                At = new Rant.Transform { Translation = new Rant.Double3 { X = 4.5, Y = -1.25, Z = 9.0 },
-                                Rotation = new Rant.Quaternion { W = 1.0 } },
-                When = Timestamp.Now(),
-                Tag = new Rant.Color { R = 0x11, G = 0x22, B = 0x33, A = 0xFF },
+                At = new Rant.Types.Transform { Translation = new Rant.Types.Double3 { X = 4.5, Y = -1.25, Z = 9.0 },
+                                Rotation = new Rant.Types.Quaternion { W = 1.0 } },
+                When = Rant.Types.Timestamp.Now(),
+                Tag = new Rant.Types.Color { R = 0x11, G = 0x22, B = 0x33, A = 0xFF },
                 Id = new byte[16],
-                Velocity = new Rant.Float3 { X = 1.0f, Y = 2.0f, Z = 3.0f } };
+                Velocity = new Rant.Types.Float3 { X = 1.0f, Y = 2.0f, Z = 3.0f } };
             for (int i = 0; i < 16; i++) t.Id[i] = (byte)i;
             var back = (Track)sch.Decode(sch.Encode(t));
             Check("a Track round-trips whole",
                   back.At.Translation.X == 4.5 && back.At.Rotation.W == 1.0
                   && back.When == t.When && back.Tag.R == 0x11 && back.Tag.A == 0xFF
                   && back.Id != null && back.Id[15] == 15 && back.Velocity.Z == 3.0f);
-            Check("Timestamp.Now is Unix-epoch microseconds", Timestamp.Now() > 1600000000000000L);
+            Check("Timestamp.Now is Unix-epoch microseconds", Rant.Types.Timestamp.Now() > 1600000000000000L);
         }
         // the video family: the shipped mirror must compile to the canonical bytes, and the
         // bare name must resolve to the same ones, so both forms are checked hash-exact
         (string, Type, ulong)[] video =
         {
-            ("Image", typeof(Rant.Image), HashImage),
-            ("VideoFrame", typeof(Rant.VideoFrame), HashVideoFrame),
-            ("ExternalVideoStream", typeof(Rant.ExternalVideoStream), HashExternalVideoStream),
+            ("Image", typeof(Rant.Types.Image), HashImage),
+            ("VideoFrame", typeof(Rant.Types.VideoFrame), HashVideoFrame),
+            ("ExternalVideoStream", typeof(Rant.Types.ExternalVideoStream), HashExternalVideoStream),
         };
         foreach (var (name, clr, gold) in video)
         {
@@ -675,40 +675,40 @@ static class Program
         try
         {
             var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 4 };
-            var pub = a.Publisher<Rant.Image>("frame", qos);
-            var sub = b.Subscriber<Rant.Image>("frame", qos: qos);
-            var initial = new Rant.ExternalVideoStream
+            var pub = a.Publisher<Rant.Types.Image>("frame", qos);
+            var sub = b.Subscriber<Rant.Types.Image>("frame", qos: qos);
+            var initial = new Rant.Types.ExternalVideoStream
             {
-                Kind = Rant.VideoStreamKind.Rtsp,
-                Codec = Rant.VideoCodec.H264,
+                Kind = Rant.Types.VideoStreamKind.Rtsp,
+                Codec = Rant.Types.VideoCodec.H264,
                 Width = 1920,
                 Height = 1080,
                 Url = "rtsp://cam.local/main",
                 Name = "front door",
             };
-            var vd = a.VariableDefinition<Rant.ExternalVideoStream>("stream", initial);
-            var rv = b.RemoteVariable<Rant.ExternalVideoStream>("stream");
+            var vd = a.VariableDefinition<Rant.Types.ExternalVideoStream>("stream", initial);
+            var rv = b.RemoteVariable<Rant.Types.ExternalVideoStream>("stream");
 
             var deadline = DateTime.UtcNow.AddSeconds(8);
             while (DateTime.UtcNow < deadline
-                   && (pub.MatchCount == 0 || !rv.TryGet(out Rant.ExternalVideoStream _)))
+                   && (pub.MatchCount == 0 || !rv.TryGet(out Rant.Types.ExternalVideoStream _)))
             {
                 a.Poll(1);
                 b.Poll(1);
             }
             Check("image topic matched", pub.MatchCount == 1);
 
-            var img = new Rant.Image
+            var img = new Rant.Types.Image
             {
                 Width = 64, Height = 4, Stride = 64,
-                Format = Rant.ImageFormat.Mono8,
+                Format = Rant.Types.ImageFormat.Mono8,
                 Data = new byte[256],
             };
             for (int i = 0; i < img.Data.Length; i++) img.Data[i] = (byte)(i * 7);
             bool gotImage = false;
             sub.OnMessage += (got, m) =>
                 gotImage = got.Width == 64 && got.Height == 4 && got.Stride == 64
-                           && got.Format == Rant.ImageFormat.Mono8
+                           && got.Format == Rant.Types.ImageFormat.Mono8
                            && got.Data != null && got.Data.Length == img.Data.Length
                            && got.Data[0] == img.Data[0] && got.Data[255] == img.Data[255];
             Check("image send", pub.Send(img) == SendStatus.Ok);
@@ -722,29 +722,29 @@ static class Program
             Check("an Image crosses whole (fixed fields + the variable payload)", gotImage);
 
             Check("stream variable replicated the initial",
-                  rv.TryGet(out Rant.ExternalVideoStream s0)
-                  && s0.Kind == Rant.VideoStreamKind.Rtsp
-                  && s0.Codec == Rant.VideoCodec.H264
+                  rv.TryGet(out Rant.Types.ExternalVideoStream s0)
+                  && s0.Kind == Rant.Types.VideoStreamKind.Rtsp
+                  && s0.Codec == Rant.Types.VideoCodec.H264
                   && s0.Width == 1920 && s0.Height == 1080
                   && s0.Url == "rtsp://cam.local/main" && s0.Name == "front door");
 
-            Check("stream variable set accepted", rv.Set(new Rant.ExternalVideoStream
+            Check("stream variable set accepted", rv.Set(new Rant.Types.ExternalVideoStream
             {
-                Kind = Rant.VideoStreamKind.WebrtcWhep,
+                Kind = Rant.Types.VideoStreamKind.WebrtcWhep,
                 Url = "https://gw.local/whep/cam1",
                 Name = "front door",
             }) == SendStatus.Ok);
             deadline = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < deadline
-                   && !(vd.TryGet(out Rant.ExternalVideoStream v)
-                        && v.Kind == Rant.VideoStreamKind.WebrtcWhep))
+                   && !(vd.TryGet(out Rant.Types.ExternalVideoStream v)
+                        && v.Kind == Rant.Types.VideoStreamKind.WebrtcWhep))
             {
                 a.Poll(1);
                 b.Poll(1);
             }
             Check("stream variable set converged at the owner",
-                  vd.TryGet(out Rant.ExternalVideoStream s1)
-                  && s1.Kind == Rant.VideoStreamKind.WebrtcWhep
+                  vd.TryGet(out Rant.Types.ExternalVideoStream s1)
+                  && s1.Kind == Rant.Types.VideoStreamKind.WebrtcWhep
                   && s1.Url == "https://gw.local/whep/cam1");
         }
         finally
@@ -1107,7 +1107,7 @@ static class Program
             Vel = new Velocity { Dx = 0.5f, Dy = 0.25f },
         };
 
-        long captured = Timestamp.Now() - 5000;   // "true" 5 ms before the send, to read back
+        long captured = Rant.Types.Timestamp.Now() - 5000;   // "true" 5 ms before the send, to read back
         var deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline && !Got.IsSet)
         {

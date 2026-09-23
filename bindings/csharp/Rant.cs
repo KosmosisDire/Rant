@@ -962,110 +962,115 @@ namespace Rant
         public RantTypeNameAttribute(string name) { Name = name; }
     }
 
-    // The standard composites as plain mirrors of their wire shape (docs/stdtypes.md). Each
-    // compiles against the standard definition of its name, so a drift is refused.
-    [RantSchema("Float2")] public struct Float2
-    { public float X; public float Y; }
-    [RantSchema("Float3")] public struct Float3
-    { public float X; public float Y;
-      public float Z; }
-    [RantSchema("Float4")] public struct Float4
-    { public float X; public float Y;
-      public float Z; public float W; }
-    [RantSchema("Double2")] public struct Double2
-    { public double X; public double Y; }
-    [RantSchema("Double3")] public struct Double3
-    { public double X; public double Y;
-      public double Z; }
-    [RantSchema("Double4")] public struct Double4
-    { public double X; public double Y;
-      public double Z; public double W; }
-    [RantSchema("Int2")] public struct Int2
-    { public int X; public int Y; }
-    [RantSchema("Int3")] public struct Int3
-    { public int X; public int Y; public int Z; }
-    [RantSchema("Int4")] public struct Int4
-    { public int X; public int Y;
-      public int Z; public int W; }
-    [RantSchema("Quaternion")] public struct Quaternion    // stored x, y, z, w
-    { public double X; public double Y;
-      public double Z; public double W; }
-    [RantSchema("Color")] public struct Color              // sRGB, straight alpha
-    { public byte R; public byte G;
-      public byte B; public byte A; }
-    [RantSchema("Rect")] public struct Rect
-    { public float X; public float Y;
-      public float W; public float H; }
-    [RantSchema("RectI")] public struct RectI
-    { public int X; public int Y;
-      public int W; public int H; }
-    // Meters and radians. Parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
-    [RantSchema("Transform")] public struct Transform
-    { public Double3 Translation;
-      public Quaternion Rotation;
-      [RantString(30)] public string Parent; }
-    [RantSchema("Twist")] public struct Twist               // m/s and rad/s
-    { public Double3 Linear; public Double3 Angular; }
-    [RantSchema("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
-    { public double Lat; public double Lon;
-      public double Alt; }
-
-    /// <summary>How an Image's data is laid out. A value of 16 or more is a compressed
-    /// container, so data holds the file bytes rather than pixels.</summary>
-    public enum ImageFormat : byte
-    { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3, Bgr8 = 4, Yuyv = 5, Nv12 = 6, Monof32 = 7,
-      Jpeg = 16, Png = 17 }
-    /// <summary>The codec a VideoFrame's data is encoded with. Unknown is the unstated
-    /// codec hint (an ExternalVideoStream that does not state one).</summary>
-    public enum VideoCodec : byte { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 }
-    /// <summary>The protocol an ExternalVideoStream's url speaks.</summary>
-    public enum VideoStreamKind : byte
-    { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3, Rtp = 4, HttpMjpeg = 5, Other = 15 }
-    [RantSchema("Image")] public struct Image               // stride 0 = packed rows
-    { public uint Width; public uint Height;
-      public uint Stride;
-      public ImageFormat Format;
-      public byte[] Data; }               // pixels, or the file bytes
-    [RantSchema("VideoFrame")] public struct VideoFrame     // width/height 0 = unstated
-    { public VideoCodec Codec;
-      public uint Width; public uint Height;
-      public bool Keyframe;
-      [RantTypeName("Timestamp")] public long Pts;   // the Timestamp clock
-      public byte[] Data; }
-    // Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. Codec,
-    // Width and Height are hints for pickers, the stream stays authoritative once connected.
-    [RantSchema("ExternalVideoStream")] public struct ExternalVideoStream
-    { public VideoStreamKind Kind;
-      public VideoCodec Codec;
-      public uint Width; public uint Height;
-      [RantTypeName("Uri")] [RantString(256)] public string Url;
-      [RantString(32)] public string Name; }
-
-    /// <summary>A lens distortion model. NoDistortion is an ideal pinhole.</summary>
-    public enum DistortionModel : byte
-    { NoDistortion = 0, BrownConrady = 1, Fisheye = 2, Rational = 3 }
-    // The pinhole model and its lens distortion. Coeffs is zero filled past the model's count.
-    [RantSchema("CameraIntrinsics")] public struct CameraIntrinsics
-    { public uint Width; public uint Height;
-      public double Fx; public double Fy;
-      public double Cx; public double Cy;
-      public DistortionModel Model;
-      [RantArray(8)] public double[] Coeffs; }
-    // SI: radians or meters, per second, and newtons or newton meters. Velocity and Effort
-    // may be empty. The names ride a JointNames variable, not every sample.
-    [RantSchema("JointState")] public struct JointState
-    { public double[] Position;
-      public double[] Velocity;
-      public double[] Effort; }
-    // Published once as a variable. The order every JointState array follows.
-    [RantSchema("JointNames")] public struct JointNames
-    { [RantString(32)] public string[] Name; }
-
-    /// <summary>The Timestamp clock: microseconds since the Unix epoch UTC, the units of a
-    /// message's WrittenUs and of a Send's captureUs.</summary>
-    public static class Timestamp
+    // The standard types of docs/stdtypes.md, apart from the root so a mirror such
+    // as Color or Quaternion never clashes with an engine type of the same name.
+    namespace Types
     {
-        public static long Now() => Native.rant_timestamp_now();
+        // The standard composites as plain mirrors of their wire shape (docs/stdtypes.md). Each
+        // compiles against the standard definition of its name, so a drift is refused.
+        [RantSchema("Float2")] public struct Float2
+        { public float X; public float Y; }
+        [RantSchema("Float3")] public struct Float3
+        { public float X; public float Y;
+          public float Z; }
+        [RantSchema("Float4")] public struct Float4
+        { public float X; public float Y;
+          public float Z; public float W; }
+        [RantSchema("Double2")] public struct Double2
+        { public double X; public double Y; }
+        [RantSchema("Double3")] public struct Double3
+        { public double X; public double Y;
+          public double Z; }
+        [RantSchema("Double4")] public struct Double4
+        { public double X; public double Y;
+          public double Z; public double W; }
+        [RantSchema("Int2")] public struct Int2
+        { public int X; public int Y; }
+        [RantSchema("Int3")] public struct Int3
+        { public int X; public int Y; public int Z; }
+        [RantSchema("Int4")] public struct Int4
+        { public int X; public int Y;
+          public int Z; public int W; }
+        [RantSchema("Quaternion")] public struct Quaternion    // stored x, y, z, w
+        { public double X; public double Y;
+          public double Z; public double W; }
+        [RantSchema("Color")] public struct Color              // sRGB, straight alpha
+        { public byte R; public byte G;
+          public byte B; public byte A; }
+        [RantSchema("Rect")] public struct Rect
+        { public float X; public float Y;
+          public float W; public float H; }
+        [RantSchema("RectI")] public struct RectI
+        { public int X; public int Y;
+          public int W; public int H; }
+        // Meters and radians. Parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
+        [RantSchema("Transform")] public struct Transform
+        { public Double3 Translation;
+          public Quaternion Rotation;
+          [RantString(30)] public string Parent; }
+        [RantSchema("Twist")] public struct Twist               // m/s and rad/s
+        { public Double3 Linear; public Double3 Angular; }
+        [RantSchema("GeoPoint")] public struct GeoPoint         // degrees, degrees, meters
+        { public double Lat; public double Lon;
+          public double Alt; }
+
+        /// <summary>How an Image's data is laid out. A value of 16 or more is a compressed
+        /// container, so data holds the file bytes rather than pixels.</summary>
+        public enum ImageFormat : byte
+        { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3, Bgr8 = 4, Yuyv = 5, Nv12 = 6, Monof32 = 7,
+          Jpeg = 16, Png = 17 }
+        /// <summary>The codec a VideoFrame's data is encoded with. Unknown is the unstated
+        /// codec hint (an ExternalVideoStream that does not state one).</summary>
+        public enum VideoCodec : byte { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 }
+        /// <summary>The protocol an ExternalVideoStream's url speaks.</summary>
+        public enum VideoStreamKind : byte
+        { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3, Rtp = 4, HttpMjpeg = 5, Other = 15 }
+        [RantSchema("Image")] public struct Image               // stride 0 = packed rows
+        { public uint Width; public uint Height;
+          public uint Stride;
+          public ImageFormat Format;
+          public byte[] Data; }               // pixels, or the file bytes
+        [RantSchema("VideoFrame")] public struct VideoFrame     // width/height 0 = unstated
+        { public VideoCodec Codec;
+          public uint Width; public uint Height;
+          public bool Keyframe;
+          [RantTypeName("Timestamp")] public long Pts;   // the Timestamp clock
+          public byte[] Data; }
+        // Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. Codec,
+        // Width and Height are hints for pickers, the stream stays authoritative once connected.
+        [RantSchema("ExternalVideoStream")] public struct ExternalVideoStream
+        { public VideoStreamKind Kind;
+          public VideoCodec Codec;
+          public uint Width; public uint Height;
+          [RantTypeName("Uri")] [RantString(256)] public string Url;
+          [RantString(32)] public string Name; }
+
+        /// <summary>A lens distortion model. NoDistortion is an ideal pinhole.</summary>
+        public enum DistortionModel : byte
+        { NoDistortion = 0, BrownConrady = 1, Fisheye = 2, Rational = 3 }
+        // The pinhole model and its lens distortion. Coeffs is zero filled past the model's count.
+        [RantSchema("CameraIntrinsics")] public struct CameraIntrinsics
+        { public uint Width; public uint Height;
+          public double Fx; public double Fy;
+          public double Cx; public double Cy;
+          public DistortionModel Model;
+          [RantArray(8)] public double[] Coeffs; }
+        // SI: radians or meters, per second, and newtons or newton meters. Velocity and Effort
+        // may be empty. The names ride a JointNames variable, not every sample.
+        [RantSchema("JointState")] public struct JointState
+        { public double[] Position;
+          public double[] Velocity;
+          public double[] Effort; }
+        // Published once as a variable. The order every JointState array follows.
+        [RantSchema("JointNames")] public struct JointNames
+        { [RantString(32)] public string[] Name; }
+
+        /// <summary>The Timestamp clock: microseconds since the Unix epoch UTC, the units of a
+        /// message's WrittenUs and of a Send's captureUs.</summary>
+        public static class Timestamp
+        {
+            public static long Now() => Native.rant_timestamp_now();
+        }
     }
 
     /// <summary>Name a member on the wire when its own name will not do. Any spelling works,

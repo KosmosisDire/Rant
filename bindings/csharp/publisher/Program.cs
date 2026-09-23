@@ -5,6 +5,7 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 using Rant;
+using Rant.Types;
 
 struct Tick
 {

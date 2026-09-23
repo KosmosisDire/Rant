@@ -109,8 +109,10 @@ the node's later compiles, and a name on its own is a schema. The node owns ever
 for its life, one handle per shape, so there is nothing to dispose, and a read after
 `Close` throws.
 
-The standard types of docs/stdtypes.md ship as mirror structs,
-`Timestamp.Now()` is the Timestamp clock, and the video enums carry the wire values.
+The standard types of docs/stdtypes.md ship as mirror structs in the `Rant.Types`
+namespace, apart from the root so `Color` or `Quaternion` never clashes with a Unity or
+`System.Numerics` type under `using Rant;`. `Rant.Types.Timestamp.Now()` is the Timestamp
+clock, and the video enums carry the wire values.
 
 ## QoS
 

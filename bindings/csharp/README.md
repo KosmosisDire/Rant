@@ -57,12 +57,12 @@ dotnet add package Rant
 ```csharp
 using Rant;
 
-public struct Twist { public float Dx; public float Dy; }
+public struct Motion { public float Dx; public float Dy; }
 public struct Pose  {
     public ulong Stamp; public double X; public double Y;
     [RantArray(4)] public byte[] Uuid;
     [RantString(16)] public string Frame;
-    public Twist Vel;
+    public Motion Vel;
 }
 
 var node = new RantNode("robot1", new NodeOptions { Domain = 7 });   // the service thread runs from here
