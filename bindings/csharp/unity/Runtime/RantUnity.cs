@@ -55,7 +55,7 @@ namespace Rant
         public int SubscriberCount => _live;
         /// <summary>True when a publish would not wait on the match wait.</summary>
         public bool Ready => _havePub && PubReady();
-        /// <summary>Consumer queue depth, bytes, capacity and drops since open.</summary>
+        /// <summary>The topic's ring on the node's queue: depth, bytes, capacity and drops since open.</summary>
         public (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
             => _haveSub ? SubQueueStats() : (0u, 0u, 0u, 0u);
 

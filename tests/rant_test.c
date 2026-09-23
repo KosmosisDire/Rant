@@ -4655,21 +4655,40 @@ static void threaded_checks(void){
 }
 #endif /* RANT_THREADS */
 
-/* The consumer queue phases Q1 to Q5 over one manually pumped pair, a pub only A and a
- * sub only B (spec/testing.md). */
-static unsigned long qc_dispatched;
-static void qc_on_message(const RantMsg *msg){ (void)msg; qc_dispatched++; }
+/* B's three topics share one callback queue: per topic counts, the last value and order */
+static unsigned long qc_n[3], qc_bad[3];
+static uint32_t      qc_last[3];
+static uint64_t      qc_recv_us;
+static char          qc_topic[16], qc_pub[16];
+static void qc_on_message(const RantMsg *msg){
+    uint16_t c = msg->topic_index;
+    uint32_t v = msg->data.len >= 4 ? get32(msg->data.data) : 0;
+    if (c >= 3) return;
+    if (v != (qc_n[c] ? qc_last[c] + 1u : 0u)) qc_bad[c]++;
+    if (c == 0 && !qc_n[0]){
+        size_t tl = msg->topic_name.len < sizeof qc_topic - 1 ? msg->topic_name.len : sizeof qc_topic - 1;
+        size_t pl = msg->publisher_name.len < sizeof qc_pub - 1 ? msg->publisher_name.len : sizeof qc_pub - 1;
+        memcpy(qc_topic, msg->topic_name.data, tl); qc_topic[tl] = '\0';
+        memcpy(qc_pub, msg->publisher_name.data, pl); qc_pub[pl] = '\0';
+        qc_recv_us = msg->recv_us;
+    }
+    qc_last[c] = v; qc_n[c]++;
+}
 
+/* The ring phase: what a handle's ring on a callback queue does at its cap, under the
+ * reliability QoS. A timed dispatch drives the loop itself. */
 static void queue_checks(void){
-    static uint8_t mem_a[1], mem_b[1];
+    static uint8_t mem_a[1];
     uint8_t payload[512];
-    i_RantTopicDef ca[4], cb[4];
+    i_RantTopicDef ca[3];
     RantNodeOpts ao, bo;
+    RantAllocator ba = rant_allocator_heap(0);
     RantNode *a, *b;
-    RantTopic *lazy, *be, *rel, *disp;
-    RantMsg m;
-    int i, r, got;
-    memset(ca, 0, sizeof ca); memset(payload, 0, sizeof payload); memset(&m, 0, sizeof m);
+    RantQueue *q = NULL;
+    RantTopic *lazy = NULL, *be = NULL, *rel = NULL;
+    int i;
+    memset(ca, 0, sizeof ca); memset(payload, 0, sizeof payload);
+    memset(qc_n, 0, sizeof qc_n); memset(qc_bad, 0, sizeof qc_bad);
     ca[0].name="q/lazy"; ca[0].role=RANT_PUB_ONLY;
     ca[0].qos.reliability=RANT_RELIABLE; ca[0].qos.keep_last=8; ca[0].qos.heartbeat_us=20000;
     ca[1].name="q/be";   ca[1].role=RANT_PUB_ONLY;                    /* best-effort */
@@ -4677,81 +4696,77 @@ static void queue_checks(void){
     ca[2].name="q/rel";  ca[2].role=RANT_PUB_ONLY;
     ca[2].qos.reliability=RANT_RELIABLE; ca[2].qos.keep_last=16;      /* holds the whole burst */
     ca[2].qos.heartbeat_us=20000; ca[2].qos.repair_delay_us=5000;
-    ca[3].name="q/disp"; ca[3].role=RANT_PUB_ONLY;
-    ca[3].qos.reliability=RANT_RELIABLE; ca[3].qos.keep_last=8; ca[3].qos.heartbeat_us=20000;
-    memcpy(cb, ca, sizeof ca);
-    for (i=0;i<4;i++) cb[i].role=RANT_SUB_ONLY;
-    cb[1].qos.queue_bytes=4096;    /* hard consumer cap: forces overwrite-oldest */
-    cb[2].qos.queue_bytes=2048;    /* holds ~4 of the 400 B messages: forces parking */
-    cb[3].qos.queue_bytes=65536;   /* queued from creation: the dispatch tests */
     ao = (RantNodeOpts){ .domain=ST_DOMAIN+4, .discovery={ .max_peers=4 } };
-    bo = ao;
+    bo = ao; bo.max_topics = 3;
     st_gap_calls[0]=st_gap_calls[1]=st_gap_calls[2]=st_gap_calls[3]=0;
-    a = test_node_open(mem_a, sizeof mem_a, "qa-node", NULL, NULL, ao, ca, 4);
-    b = test_node_open(mem_b, sizeof mem_b, "qb-node", qc_on_message, st_on_event, bo, cb, 4);
-    ST_CHECK(a && b, "queue: nodes open");
-    if (!a || !b){ if (a) rant_node_close(a,0); if (b) rant_node_close(b,0); return; }
-    lazy = rant_node_topic(b, 0); be     = rant_node_topic(b, 1);
-    rel  = rant_node_topic(b, 2); disp = rant_node_topic(b, 3);
+    a = test_node_open(mem_a, sizeof mem_a, "qa-node", NULL, NULL, ao, ca, 3);
+    b = rant_node_open(&ba, "qb-node", qc_on_message, st_on_event, &bo);
+    if (b) q = rant_node_create_queue(b);
+    if (q){
+        RantTopicOpts co; memset(&co, 0, sizeof co);
+        co.queue = q;
+        co.qos = ca[0].qos; lazy = rant_node_create_topic(b, "q/lazy", RANT_SUB_ONLY, NULL, &co);
+        co.qos = ca[1].qos; co.qos.queue_bytes = 4096;   /* a hard cap: forces overwrite oldest */
+        be = rant_node_create_topic(b, "q/be", RANT_SUB_ONLY, NULL, &co);
+        co.qos = ca[2].qos; co.qos.queue_bytes = 2048;   /* holds about 4 of the 400 B messages: parks */
+        rel = rant_node_create_topic(b, "q/rel", RANT_SUB_ONLY, NULL, &co);
+    }
+    ST_CHECK(a && b && lazy && be && rel, "queue: nodes and queued topics open");
+    if (!(a && b && lazy && be && rel)){
+        if (a) rant_node_close(a,0);
+        if (b) rant_node_close(b,0);
+        rant_allocator_reset(&ba); return;
+    }
 
-    { uint64_t end = i_rant_plat_now_us()+5000000u;      /* all four matches first */
+    { uint64_t end = i_rant_plat_now_us()+5000000u;      /* all three matches first */
       while (i_rant_plat_now_us()<end &&
              (rant_node_publisher_match_count(a,0)<1 || rant_node_publisher_match_count(a,1)<1 ||
-              rant_node_publisher_match_count(a,2)<1 || rant_node_publisher_match_count(a,3)<1))
+              rant_node_publisher_match_count(a,2)<1))
           st_pump(a,b,10); }
     ST_CHECK(rant_node_publisher_match_count(a,0)==1 && rant_node_publisher_match_count(a,2)==1,
              "queue: matches formed");
 
-    /* Q1: the first take enables the queue, a timeout take pumps the loop itself */
-    r = rant_topic_take(lazy, &m, 0);
-    ST_CHECK(r == 0, "queue: first take is empty (rc=%d) and enables queued delivery", r);
-    qc_dispatched = 0;
+    /* Q1: polling only parks, and a timed dispatch drives B's own loop */
     for (i=0;i<5;i++){ put32(payload,(uint32_t)i); rant_node_send(a, 0, payload, 64); }
-    got = 0;
+    { uint64_t end = i_rant_plat_now_us()+5000000u; uint32_t msgs = 0;
+      while (msgs<5 && i_rant_plat_now_us()<end){ st_pump(a,b,5); rant_topic_queue_stats(lazy,&msgs,NULL,NULL,NULL); }
+      ST_CHECK(msgs==5 && qc_n[0]==0, "queue: polling parks 5, no inline callback (%u, cb=%lu)", msgs, qc_n[0]); }
     { uint64_t end = i_rant_plat_now_us()+5000000u;
-      while (got<5 && i_rant_plat_now_us()<end){
+      put32(payload, 5u); rant_node_send(a, 0, payload, 64);
+      while (qc_n[0]<6 && i_rant_plat_now_us()<end){
           rant_node_poll(a, 0);
-          if (rant_topic_take(lazy, &m, 50) == 1){      /* waits by pumping b's own loop */
-              if ((int)get32(m.data.data) != got || m.data.len != 64) break;
-              got++;
-          }
+          (void)rant_queue_dispatch(q, 0, 50);          /* waits by pumping b's own loop */
       } }
-    ST_CHECK(got==5, "queue: take drains 5 in order via its own pump (%d)", got);
-    ST_CHECK(m.recv_us != 0, "queue: taken msg carries the poll-side arrival stamp");
-    ST_CHECK(m.topic_name.len==6 && !memcmp(m.topic_name.data,"q/lazy",6),
-             "queue: taken msg carries the topic name");
-    ST_CHECK(m.publisher_name.len==7 && !memcmp(m.publisher_name.data,"qa-node",7),
-             "queue: taken msg carries the sender name");
-    ST_CHECK(qc_dispatched==0, "queue: no inline callback once queued (%lu)", qc_dispatched);
+    ST_CHECK(qc_n[0]==6 && qc_bad[0]==0, "queue: a timed dispatch drains 6 in order (%lu, bad=%lu)",
+             qc_n[0], qc_bad[0]);
+    ST_CHECK(qc_recv_us != 0, "queue: a dispatched msg carries the poll side arrival stamp");
+    ST_CHECK(strcmp(qc_topic, "q/lazy")==0 && strcmp(qc_pub, "qa-node")==0,
+             "queue: a dispatched msg carries the topic and sender names (%s, %s)", qc_topic, qc_pub);
 
     /* Q2: best-effort at a hard cap overwrites oldest, fires RANT_MSG_LOST, keeps newest */
-    { uint32_t msgs=0, bytes=0, cap=0, dropped=0, last=0;
+    { uint32_t msgs=0, bytes=0, cap=0, dropped=0;
       for (i=0;i<60;i++){ put32(payload,(uint32_t)i); rant_node_send(a, 1, payload, 256); st_pump(a,b,1); }
       st_pump(a,b,50);
       rant_topic_queue_stats(be, &msgs, &bytes, &cap, &dropped);
       ST_CHECK(cap==4096 && dropped>0 && msgs>0,
                "queue: BE cap held, oldest dropped (cap=%u msgs=%u dropped=%u)", cap, msgs, dropped);
-      got=0;
-      while (rant_topic_take(be, &m, 0)==1){ last=get32(m.data.data); got++; }
-      ST_CHECK(got>0 && last==59u, "queue: newest survive a BE overflow (got=%d last=%u)", got, last);
+      (void)rant_queue_dispatch(q, 0, 0);
+      ST_CHECK(qc_n[1]>0 && qc_last[1]==59u, "queue: newest survive a BE overflow (got=%lu last=%u)",
+               qc_n[1], qc_last[1]);
       ST_CHECK(st_gap_calls[1]>0, "queue: BE queue loss fired RANT_MSG_LOST (%lu)", st_gap_calls[1]);
     }
 
-    /* Q3: reliable plus a tiny queue parks instead of losing. A slow take loop still
+    /* Q3: reliable plus a tiny ring parks instead of losing. A slow dispatch loop still
        receives everything in order via unpark and the normal repair machinery */
-    got=0;
     for (i=0;i<12;i++){ put32(payload,(uint32_t)i); rant_node_send(a, 2, payload, 400); st_pump(a,b,2); }
     st_pump(a,b,30);
     ST_CHECK(rant_node_drain(a, 2, 0)==0, "queue: parked reader withholds acks (writer not drained)");
     { uint64_t end=i_rant_plat_now_us()+8000000u;
-      while (got<12 && i_rant_plat_now_us()<end){
-          if (rant_topic_take(rel, &m, 20)==1){
-              if ((int)get32(m.data.data)!=got) break;
-              got++;
-          }
+      while (qc_n[2]<12 && i_rant_plat_now_us()<end){
+          (void)rant_queue_dispatch(q, 1, 20);
           rant_node_poll(a, 0);
       } }
-    ST_CHECK(got==12, "queue: reliable park loses nothing, in order (%d/12)", got);
+    ST_CHECK(qc_n[2]==12 && qc_bad[2]==0, "queue: reliable park loses nothing, in order (%lu/12)", qc_n[2]);
     { RantRepairStats rs; rant_node_repair_stats(b, 2, &rs);
       ST_CHECK(rs.msgs_skipped==0 && st_gap_calls[2]==0,
                "queue: no skip during park (skipped=%llu lost_events=%lu)",
@@ -4759,32 +4774,9 @@ static void queue_checks(void){
     st_pump(a,b,50);
     ST_CHECK(rant_node_drain(a, 2, 2000)==1, "queue: writer fully acked once drained");
 
-    /* Q4: dispatch runs the node's on_message on the calling thread */
-    qc_dispatched=0;
-    for (i=0;i<3;i++){ put32(payload,(uint32_t)i); rant_node_send(a, 3, payload, 64); }
-    { uint64_t end=i_rant_plat_now_us()+5000000u; uint32_t msgs=0;
-      while (msgs<3 && i_rant_plat_now_us()<end){ st_pump(a,b,10); rant_topic_queue_stats(disp,&msgs,NULL,NULL,NULL); } }
-    r = rant_topic_dispatch(disp, 0, 0);
-    ST_CHECK(r==3 && qc_dispatched==3, "queue: dispatch runs the callback here (r=%d cb=%lu)", r, qc_dispatched);
-    r = rant_node_dispatch(b, 0, 0);
-    ST_CHECK(r==0, "queue: node dispatch finds nothing left (%d)", r);
-
-#ifdef RANT_THREADS
-    /* Q5: take alongside service threads (the cv-wait path). ST_CHECK evaluates its
-       condition twice, so the side-effecting starts run outside it. */
-    r = (rant_node_start(a)==RANT_OK && rant_node_start(b)==RANT_OK);
-    ST_CHECK(r, "queue: services start");
-    for (i=0;i<40;i++){
-        put32(payload,(uint32_t)i);
-        rant_node_send(a, 3, payload, 64);
-        if (rant_topic_take(disp, &m, 2000)!=1 || (int)get32(m.data.data)!=i) break;
-    }
-    ST_CHECK(i==40, "queue: threaded take (cv wait) delivers 40 in order (%d)", i);
-    rant_node_stop(b); rant_node_stop(a);
-#endif
-
     rant_node_close(b, 1);
     rant_node_close(a, 1);
+    rant_allocator_reset(&ba);
 }
 
 /* The callback queue phases (spec/testing.md): a pub only A and a sub only B whose topics
@@ -7652,7 +7644,7 @@ static void selfip_checks(void){
  * topic opts out. Delivery, opt out, replay, the queued path and the patterns are covered. */
 #define TS_CH_PLAIN  0   /* reliable, catch_up 2: the stamp + the late-joiner replay */
 #define TS_CH_OFF    1   /* publisher sets qos.no_timestamp: stamp 0, bytes untouched */
-#define TS_CH_QUEUED 2   /* the subscriber drains it with rant_topic_take */
+#define TS_CH_QUEUED 2   /* the subscriber parks it on a callback queue */
 #define TS_CH_BIG    3   /* payload past the fragment size: SHM where available */
 static uint64_t ts_sent[8], ts_recv_wall[8], ts_capture[8];
 static unsigned long ts_msgs[8];
@@ -7687,6 +7679,7 @@ static void ts_checks(void){
     i_RantTopicDef ca[4], cb[4];
     RantNodeOpts ao, bo; RantAddr seed;
     RantNode *A, *B;
+    RantQueue *ts_q = NULL;
     uint8_t payload[64];
     uint64_t before, after;
     int i, t;
@@ -7713,8 +7706,17 @@ static void ts_checks(void){
     ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
     bo = ao;
     A = test_node_open(mem_a, sizeof mem_a, "ts-pub", NULL, NULL, ao, ca, 4);
-    B = test_node_open(mem_b, sizeof mem_b, "ts-sub", ts_on_message, NULL, bo, cb, 4);
-    ST_CHECK(A && B, "writets: nodes open");
+    bo.max_topics = 4;
+    B = test_node_open(mem_b, sizeof mem_b, "ts-sub", ts_on_message, NULL, bo, cb, 0);
+    if (B) ts_q = rant_node_create_queue(B);
+    for (i=0;i<4 && ts_q;i++){
+        RantTopicOpts co; memset(&co, 0, sizeof co);
+        co.qos = cb[i].qos;
+        co.queue = i == TS_CH_QUEUED ? ts_q : NULL;
+        if (!rant_node_create_topic(B, cb[i].name, RANT_SUB_ONLY, NULL, &co)) ts_q = NULL;
+    }
+    ST_CHECK(A && B && ts_q, "writets: nodes open");
+    if (!ts_q && B){ rant_node_close(B,0); B = NULL; }
     if (!(A && B)){ if (A) rant_node_close(A,0); if (B) rant_node_close(B,0); return; }
     { uint64_t end = i_rant_plat_now_us()+5000000u;
       while (i_rant_plat_now_us()<end &&
@@ -7779,23 +7781,21 @@ static void ts_checks(void){
         rant_allocator_reset(&la);
     }
 
-    /* (d) the queued path: take surfaces the same stamp an inline callback would */
-    {   RantTopic *qt = rant_node_topic(B, TS_CH_QUEUED); RantMsg m;
-        int r; uint64_t q_before;
-        memset(&m,0,sizeof m);
-        r = rant_topic_take(qt, &m, 0);            /* the first take makes the topic queued */
-        ST_CHECK(r==0, "writets: queued topic starts empty (%d)", r);
+    /* (d) the queued path: a dispatch surfaces the same stamp an inline callback would */
+    {   RantTopic *qt = rant_node_topic(B, TS_CH_QUEUED);
+        uint32_t waiting = 0; uint64_t q_before;
         q_before = i_rant_plat_wall_us();
         rant_node_send(A, TS_CH_QUEUED, payload, sizeof payload);
-        r = 0;
-        for (t=0;t<800 && r!=1;t++){ rant_node_poll(A,0); r = rant_topic_take(qt, &m, 20); }
-        ST_CHECK(r==1 && ts_msgs[TS_CH_QUEUED]==0,
-                 "writets: queued message taken, no inline callback (r=%d cb=%lu)", r, ts_msgs[TS_CH_QUEUED]);
-        ST_CHECK(r==1 && m.written_us >= q_before && m.written_us <= i_rant_plat_wall_us(),
-                 "writets: taken message carries the stamp (%llu >= %llu)",
-                 (unsigned long long)m.written_us, (unsigned long long)q_before);
-        ST_CHECK(r==1 && m.data.len==sizeof payload,
-                 "writets: taken payload intact (%lu B)", (unsigned long)m.data.len);
+        for (t=0;t<800 && waiting==0;t++){ st_pump(A,B,2); rant_topic_queue_stats(qt,&waiting,NULL,NULL,NULL); }
+        ST_CHECK(waiting==1 && ts_msgs[TS_CH_QUEUED]==0,
+                 "writets: queued message parked, no inline callback (%u cb=%lu)", waiting, ts_msgs[TS_CH_QUEUED]);
+        (void)rant_queue_dispatch(ts_q, 0, 0);
+        ST_CHECK(ts_msgs[TS_CH_QUEUED]==1 && ts_sent[TS_CH_QUEUED] >= q_before
+                 && ts_sent[TS_CH_QUEUED] <= ts_recv_wall[TS_CH_QUEUED],
+                 "writets: a dispatched message carries the stamp (%llu >= %llu)",
+                 (unsigned long long)ts_sent[TS_CH_QUEUED], (unsigned long long)q_before);
+        ST_CHECK(ts_len[TS_CH_QUEUED]==sizeof payload,
+                 "writets: dispatched payload intact (%lu B)", (unsigned long)ts_len[TS_CH_QUEUED]);
     }
 
     /* (e) a fragmenting payload (the SHM path where compiled in): the stamp rides the
@@ -7822,10 +7822,8 @@ static void ts_checks(void){
     {   RantTopic *pt = rant_node_topic(A, TS_CH_PLAIN);
         RantTopic *ot = rant_node_topic(A, TS_CH_OFF);
         RantTopic *bt = rant_node_topic(A, TS_CH_BIG);
-        RantTopic *qt = rant_node_topic(B, TS_CH_QUEUED);
         const uint64_t want = 1234567890123456ull;   /* a wall clock well inside 51 bits */
         uint64_t b0 = 0, b1 = 0, b2 = 0;
-        RantMsg m; int r;
 
         /* unset: capture_us 0, and the sample is no larger than before */
         ts_msgs[TS_CH_PLAIN]=0; ts_capture[TS_CH_PLAIN]=1;
@@ -7879,16 +7877,18 @@ static void ts_checks(void){
                  "capture: a fragmenting message carries it (cap=%llu len=%lu)",
                  (unsigned long long)ts_capture[TS_CH_BIG], (unsigned long)ts_len[TS_CH_BIG]);
 
-        /* the queued path: take surfaces it exactly as an inline callback would */
-        memset(&m,0,sizeof m);
+        /* the queued path: a dispatch surfaces it exactly as an inline callback would */
+        ts_msgs[TS_CH_QUEUED]=0; ts_capture[TS_CH_QUEUED]=0;
         rant_topic_send(rant_node_topic(A, TS_CH_QUEUED),
                         rant_bytes(payload, sizeof payload),
                         &(RantSendOpts){ .capture_us = want });
-        r = 0;
-        for (t=0;t<800 && r!=1;t++){ rant_node_poll(A,0); r = rant_topic_take(qt, &m, 20); }
-        ST_CHECK(r==1 && m.capture_us==want,
-                 "capture: a taken message carries it (r=%d cap=%llu)",
-                 r, (unsigned long long)m.capture_us);
+        for (t=0;t<800 && ts_msgs[TS_CH_QUEUED]==0;t++){
+            rant_node_poll(A,0);
+            (void)rant_queue_dispatch(ts_q, 0, 20);
+        }
+        ST_CHECK(ts_msgs[TS_CH_QUEUED]==1 && ts_capture[TS_CH_QUEUED]==want,
+                 "capture: a dispatched message carries it (n=%lu cap=%llu)",
+                 ts_msgs[TS_CH_QUEUED], (unsigned long long)ts_capture[TS_CH_QUEUED]);
     }
     rant_node_close(B,1); rant_node_close(A,1);
 
@@ -8524,7 +8524,7 @@ static int selftest_main(void){
     interest_codec_checks();      /* 19b3. interest paging codec + the external-overlay flag */
     interest_external_checks();   /* 19b4. external interest: bootstrap plus paged fetch */
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
-    queue_checks();               /* 19d. consumer queues: take, dispatch, overwrite, park */
+    queue_checks();               /* 19d. queue rings: park, timed dispatch, overwrite, park */
     callback_queue_checks();      /* 19e. callback queues: explicit queue, order, refusals */
     callback_pattern_checks();    /* 19f. callback queues on functions, tasks and variables */
     patterns_checks();            /* 19e. functions: request, reply, defer, timeout, sync */
@@ -9357,7 +9357,7 @@ static int threadbench_main(void){
     return 0;
 }
 
-/* queuebench: the consumer queue cost against inline callbacks, one started pair on
+/* queuebench: the callback queue cost against inline callbacks, one started pair on
  * loopback per payload size and mode, flat out reliable (spec/testing.md). */
 static volatile unsigned long g_qb_recv;
 static void qb_on_message(const RantMsg *m){ (void)m; g_qb_recv++; }
@@ -9376,7 +9376,7 @@ static void qb_run(uint32_t size, int queued, int disable_shm){
     RantAllocator aw = rant_allocator_heap(0);
     RantAllocator ar = rant_allocator_heap(0);
     RantNodeOpts o; RantTopicOpts co;
-    RantNode *w, *r; RantTopic *cw, *cr;
+    RantNode *w, *r; RantTopic *cw, *cr; RantQueue *qq = NULL;
     i_RantThread th;
     uint64_t t0, t_end;
     unsigned long recv = 0;
@@ -9387,8 +9387,9 @@ static void qb_run(uint32_t size, int queued, int disable_shm){
     o.domain = 52; o.disable_shm = (uint8_t)disable_shm;
     o.net.multicast_interface = "127.0.0.1";
     w = rant_node_open(&aw, "qb-pub", NULL, NULL, &o);
-    r = rant_node_open(&ar, "qb-sub", queued ? NULL : qb_on_message, NULL, &o);
+    r = rant_node_open(&ar, "qb-sub", qb_on_message, NULL, &o);
     if (!w || !r){ fprintf(stderr, "queuebench: open failed\n"); exit(1); }
+    if (queued && !(qq = rant_node_create_queue(r))){ fprintf(stderr, "queuebench: queue\n"); exit(1); }
     memset(&co, 0, sizeof co);
     co.qos.reliability = RANT_RELIABLE;
     co.qos.keep_last = (uint16_t)(size >= 262144u ? 8 : 64);   /* shallow history when huge */
@@ -9402,6 +9403,7 @@ static void qb_run(uint32_t size, int queued, int disable_shm){
     {   uint32_t qb = 2u * co.qos.keep_last * size;
         if (qb < (4u << 20)) qb = 4u << 20;
         co.qos.queue_bytes = queued ? qb : 0;
+        co.queue = qq;
     }
     cr = rant_node_create_topic(r, "qb/t", RANT_SUB_ONLY, NULL, &co);
     if (!cw || !cr){ fprintf(stderr, "queuebench: topic create failed\n"); exit(1); }
@@ -9417,13 +9419,11 @@ static void qb_run(uint32_t size, int queued, int disable_shm){
     if (!i_rant_plat_thread_start(&th, qb_sender, cw)){ fprintf(stderr, "queuebench: thread\n"); exit(1); }
     t0 = i_rant_plat_now_us(); t_end = t0 + 2000000u;
     if (queued){
-        RantMsg m;
-        while (i_rant_plat_now_us() < t_end)
-            if (rant_topic_take(cr, &m, 5) == 1) recv++;
+        while (i_rant_plat_now_us() < t_end) (void)rant_queue_dispatch(qq, 0, 5);
     } else {
         while (i_rant_plat_now_us() < t_end) sw_sleep_ms(5);
-        recv = g_qb_recv;
     }
+    recv = g_qb_recv;
     wall = (double)(i_rant_plat_now_us() - t0) / 1e6;
     g_qb_stop = 1;
     i_rant_plat_thread_join(&th);
@@ -9441,7 +9441,7 @@ static int queuebench_main(void){
     static const uint32_t sizes[] = { 1024, 16384, 65536, 262144, 1048576 };
     unsigned k;
     setvbuf(stdout, NULL, _IONBF, 0);
-    printf("Rant consumer-queue throughput: inline callback (service thread) vs queued take\n"
+    printf("Rant callback queue throughput: inline callback (service thread) vs queue dispatch\n"
            "(flat-out reliable, keep_last 64, backpressure-paced = lossless goodput, loopback, 2s/run)\n");
 #ifdef RANT_SHM
     printf("\n== SHM same-host path ==\n");

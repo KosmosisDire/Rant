@@ -129,8 +129,8 @@ and k slots under a byte budget is the generalization if that ever matters. A wh
 missing message is still fetched through the 32 seqno window in serial pieces. The
 `nbits` field is already u16, so a variable length bitmap is the way to make that one
 round trip. Rejected: a seqno keyed fragment ring (a wrap forces a copy out), and
-assembling into the consumer queue (the transport is per lane and sans-IO, the queue is
-per topic and node owned).
+assembling into the queue ring (the transport is per lane and sans-IO, the ring is per
+handle and node owned).
 
 ## Round trip estimate
 

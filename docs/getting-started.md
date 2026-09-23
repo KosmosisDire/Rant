@@ -98,7 +98,7 @@ A `NO` flag always wins. An embedded target with its own sockets and clock defin
 | `RANT_RTO_MIN_US` | 2000 | floor of every timer derived from the round trip |
 | `RANT_MATCH_WAIT_MS` | 1000 | default first send match wait |
 | `RANT_TOPIC_NAME_MAX` | 64 | max topic name bytes |
-| `RANT_QUEUE_CAP` | 1 MB | default per topic consumer queue cap |
+| `RANT_QUEUE_CAP` | 1 MB | default ring cap of a topic on a callback queue |
 | `RANT_DISCOVERY_META_MAX` | 64 | default per peer announce blob capacity |
 | `RANT_DISCOVERY_PROTO_VERSION` | 5 | discovery protocol version |
 

@@ -171,17 +171,8 @@ RANT_API int        rant_node_set_event_queue(RantNode *n, RantQueue *q);
  * parked lines are dropped. RANT_ERR_STATE as above, RANT_ERR_NOSYS when logs are disabled. */
 RANT_API int        rant_node_set_log_queue(RantNode *n, RantQueue *q);
 
-/* Consumer queues: a topic becomes queued on its first take or dispatch, or from creation
- * with qos.queue_bytes. docs/node.md explains the rules. */
-/* Pops the next queued message. The views stay valid until the next take or dispatch.
- * timeout_ms 0 checks, positive waits, negative waits forever. 1 got one, 0 empty. */
-RANT_API int rant_topic_take(RantTopic *topic, RantMsg *out, int timeout_ms);
-/* Runs on_message on the calling thread for up to max_msgs queued messages (0 = all),
- * after waiting like take. Returns the count. The callbacks run without the node lock. */
-RANT_API int rant_topic_dispatch(RantTopic *topic, int max_msgs, int timeout_ms);
-/* dispatch across every already queued topic, oldest first per topic. */
-RANT_API int rant_node_dispatch(RantNode *n, int max_msgs, int timeout_ms);
-/* Messages waiting, ring bytes used and capacity, and messages dropped since open. */
+/* A queued topic's ring: messages waiting, bytes used and capacity, and messages dropped
+ * since open. All zero for an inline topic. */
 RANT_API void rant_topic_queue_stats(RantTopic *topic, uint32_t *msgs, uint32_t *bytes,
                                        uint32_t *capacity, uint32_t *dropped);
 /* Publishes to every matched subscriber. RANT_OK or a negative RantResult. */

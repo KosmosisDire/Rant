@@ -116,7 +116,7 @@ rant_test sweep --rates 20k --reliable --extra-ch 500            # 500 idle topi
 rant_test sweep --rates 20k --reliable --extra-ch 500 --spread # load across all of them
 rant_test node n0 11 50000 8        # a single node by hand (name domain hz duration)
 rant_test sendbench                 # UDP send cost microbench (Windows only)
-rant_test queuebench                # consumer queue take vs inline callback
+rant_test queuebench                # callback queue dispatch vs inline callback
 ```
 
 Run both `rant_test selftest` and `rant_test_noshm selftest`. The phases cover loss

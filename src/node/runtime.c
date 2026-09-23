@@ -20,7 +20,7 @@ struct RantNode;         /* patterns/core.c hosts the @rant/meta endpoint, open 
 void i_rant_patterns_meta_open(struct RantNode *n);
 #endif
 
-/* A consumer queue ring record: this header, the publisher name, then the payload at an
+/* A queue ring record: this header, the publisher name, then the payload at an
  * 8 aligned offset. Records never wrap, a short tail holds the RANT__QWRAP sentinel. */
 typedef struct {
     uint32_t rec_bytes;    /* the whole record, 8 aligned. First, the ring reads it at offset 0 */
@@ -36,8 +36,8 @@ typedef struct {
 #define RANT__QWRAP 0xFFFFFFFFu
 #define RANT__QALIGN(x) (((uint32_t)(x) + 7u) & ~7u)
 
-/* One topic's consumer queue: a byte ring filled by the poll thread and drained by take or
- * dispatch. Under the node lock. The ring and this struct are stable pool allocations. */
+/* One handle's ring on its callback queue, filled by the poll thread and drained by
+ * rant_queue_dispatch. Under the node lock. The ring and this struct are stable pool allocations. */
 typedef struct {
     uint8_t  *buf;
     uint32_t  cap;         /* current ring bytes, 8 aligned, grows on demand */
@@ -46,7 +46,7 @@ typedef struct {
     uint32_t  bytes;       /* queued record bytes, excludes wrap padding */
     uint32_t  count;       /* queued records, including one being viewed */
     uint32_t  dropped;     /* best effort records overwritten or refused since open */
-    uint8_t   viewing;     /* the record at tail is the consumer's live take view */
+    uint8_t   viewing;     /* the record at tail is being dispatched */
     uint8_t   busy;        /* inside dispatch's unlocked callback window, no reentry */
     uint8_t   reliable;    /* the full queue policy: park (reliable) or overwrite */
     uint8_t   parked;      /* transport lanes parked on this topic, retried as we drain */
@@ -64,7 +64,7 @@ struct RantQueue {
 
 struct RantTopic {
     RantNode *n; uint16_t index; const RantSchema *schema;     /* registered in the node */
-    i_RantMsgQueue *q;                    /* the consumer queue, NULL = inline callbacks */
+    i_RantMsgQueue *q;                    /* its ring on the callback queue, NULL = inline */
     RantQueue *queue;                     /* the callback queue the topic was created with, or NULL */
     i_RantSysMsgFn sys_on_message;        /* the patterns layer's routing, NULL = a normal topic */
     void    *sys_msg_user;
@@ -433,7 +433,7 @@ static void i_rant_node_split(RantTopic *h, RantBytes wire, RantBytes *hdr, Rant
     payload->data = wire.data + pfx; payload->len = wire.len - pfx;
 }
 
-/* the consumer queue ring */
+/* the queue ring */
 
 /* the oldest record with the wrap normalized into tail, NULL when empty */
 static const i_RantQRec *i_rant_q_peek(i_RantMsgQueue *q){
@@ -471,7 +471,7 @@ static int i_rant_q_fit(i_RantMsgQueue *q, uint32_t need, uint32_t *at){
 }
 
 /* Relinearizes into a bigger ring, doubling toward cap_limit. One over cap message still
- * fits. 0 = cannot grow now: at the cap, OOM, or a live take view pins the ring. */
+ * fits. 0 = cannot grow now: at the cap, OOM, or a record in dispatch pins the ring. */
 static int i_rant_q_grow(RantNode *n, i_RantMsgQueue *q, uint32_t need_total, uint32_t need_one){
     uint32_t target = q->cap ? q->cap * 2u : 4096u;
     uint8_t *nb;
@@ -582,8 +582,8 @@ static void i_rant_node_queue_event(RantNode *n, const i_RantQRec *rec, RantEven
     }
 }
 
-/* A queued RantMsg: every view points at stable memory, valid until the next take or
- * dispatch. The schema is re resolved now, since the delivery map may repoint. */
+/* A queued RantMsg: every view points into the record, valid for the dispatched callback.
+ * The schema is re resolved now, since the delivery map may repoint. */
 static void i_rant_node_queue_msg(RantNode *n, RantTopic *h, const i_RantQRec *rec, RantMsg *m){
     memset(m, 0, sizeof *m);
     m->node = n; m->user = n->user_data;
@@ -635,7 +635,7 @@ static void i_rant_node_queue_drop(RantNode *n, RantTopic *h){
     h->q = NULL;
 }
 
-/* Finishes an outstanding take view, then retries parked lanes into the freed space. Their
+/* Pops the record just dispatched, then retries parked lanes into the freed space. Their
  * acks need a TX pass, so kick. Lock held. */
 static void i_rant_node_queue_release(RantNode *n, RantTopic *h, i_RantMsgQueue *q){
     if (q->viewing){
@@ -666,7 +666,7 @@ static RantNode *i_rant_node_open_fail(RantEventFn on_event, void *user, RantErr
 
 RantEvent rant_last_error(RantNode *n){ return n ? n->last_error : g_last_error; }
 
-/* Builds a RantMsg and hands it to the app, inline or copied into the consumer queue.
+/* Builds a RantMsg and hands it to the app, inline or copied into its queue ring.
  * Returns 0 accepted, nonzero refused (a reliable queue at cap, the transport parks). */
 static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from, RantBytes data){
     RantMsg m;
@@ -1402,8 +1402,6 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
         memcpy(h->name, name, nl);
         h->name_len = (uint8_t)nl;
     }
-    if (def.qos.queue_bytes && !h->queue)   /* queued from creation, best effort on OOM (take retries) */
-        (void)i_rant_node_queue_ensure(n, h, &def.qos);
     if (h->schema || reuse)   /* advertise and gate with it. A reused slot must also clear
                                  the retired occupant's fingerprint when the new topic is untyped */
         i_rant_node_core_set_topic_schema(n->core, idx, h->schema);
@@ -2875,14 +2873,7 @@ int rant_node_settle(RantNode *n, int timeout_ms){
     return settled;
 }
 
-/* the consumer queue API, see spec/node.md */
-
-static int i_rant_node_any_queued(RantNode *n){
-    uint16_t i, hi = i_rant_node_topic_hi(n);
-    for (i = 0; i < hi; i++)
-        if (n->handles[i] && n->handles[i]->q && n->handles[i]->q->count) return 1;
-    return 0;
-}
+/* the callback queue API, see spec/node.md */
 
 /* records waiting on the handles created with the callback queue g, or on its event ring */
 static int i_rant_queue_any(RantNode *n, RantQueue *g){
@@ -2895,22 +2886,22 @@ static int i_rant_queue_any(RantNode *n, RantQueue *g){
     return 0;
 }
 
-/* the queue wait's predicate: data on q when one was given, else on the group g, else on
- * any queued topic. The structs are stable allocations, so the pointers survive the waits. */
-typedef struct { i_RantMsgQueue *q; RantQueue *g; uint64_t deadline; } i_RantQueueWait;
+/* the queue wait's predicate: a record parked on the group g. The structs are stable
+ * allocations, so the pointers survive the waits. */
+typedef struct { RantQueue *g; uint64_t deadline; } i_RantQueueWait;
 
 static int i_rant_node_queue_wait_done(RantNode *n, void *ctx, uint64_t now, uint64_t *deadline){
     i_RantQueueWait *c = (i_RantQueueWait*)ctx;
     (void)now;
     *deadline = c->deadline;
-    return c->q ? (c->q->count != 0) : c->g ? i_rant_queue_any(n, c->g) : i_rant_node_any_queued(n);
+    return i_rant_queue_any(n, c->g);
 }
 
-/* Waits until data is queued: on the service thread's progress when one runs, else by
+/* Waits until a record parks on g: on the service thread's progress when one runs, else by
  * driving the poll loop itself. Lock held on entry and exit, never from a callback. */
-static void i_rant_node_queue_wait(RantNode *n, i_RantMsgQueue *q, RantQueue *g, int timeout_ms){
+static void i_rant_node_queue_wait(RantNode *n, RantQueue *g, int timeout_ms){
     i_RantQueueWait c; i_RantWait w = { 0 };
-    c.q = q; c.g = g;
+    c.g = g;
     c.deadline = timeout_ms < 0 ? (uint64_t)-1
                                 : i_rant_plat_now_us() + (uint64_t)timeout_ms * 1000u;
     w.done = i_rant_node_queue_wait_done; w.ctx = &c;
@@ -2920,92 +2911,6 @@ static void i_rant_node_queue_wait(RantNode *n, i_RantMsgQueue *q, RantQueue *g,
     i_rant_node_wait_until(n, &w);
 }
 
-/* Dispatches up to max_msgs of the messages queued at entry, callbacks on the calling
- * thread and outside the lock when this thread owns it. A reentrant caller keeps the lock. */
-static int i_rant_topic_dispatch_locked(RantNode *n, RantTopic *h, int max_msgs, int acquired){
-    i_RantMsgQueue *q = h->q;
-    int done = 0; uint32_t todo;
-    if (!q || q->busy) return 0;
-    i_rant_node_queue_release(n, h, q);
-    todo = q->count;                    /* a snapshot: later arrivals wait for the next call */
-    if (max_msgs > 0 && todo > (uint32_t)max_msgs) todo = (uint32_t)max_msgs;
-    while (todo-- && q->count){
-        const i_RantQRec *rec = i_rant_q_peek(q);
-        RantMsg m;
-        i_rant_node_queue_msg(n, h, rec, &m);
-        q->viewing = 1;
-        if (n->user_on_message){
-            q->busy = 1;
-            {   i_RantCallbackScope cs;
-                i_rant_node_callback_begin(n, &cs, 0);
-                n->user_on_message(&m);
-                i_rant_node_callback_end(n, &cs, NULL);
-            }
-            q->busy = 0;
-        }
-        i_rant_node_queue_release(n, h, q);
-        done++;
-    }
-    (void)acquired;
-    return done;
-}
-
-int rant_topic_take(RantTopic *topic, RantMsg *out, int timeout_ms){
-    RantNode *n; i_RantMsgQueue *q; int acquired, got = 0;
-    if (!topic || !out) return RANT_ERR_NO_TOPIC;
-    n = topic->n;
-    acquired = i_rant_node_lock(n);
-    q = i_rant_node_queue_ensure(n, topic, NULL);
-    if (!q){ i_rant_node_unlock(n, acquired); return RANT_ERR_OOM; }
-    if (q->busy){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }
-    i_rant_node_queue_release(n, topic, q);        /* finish the previous view first */
-    if (!q->count && timeout_ms != 0 && acquired)
-        i_rant_node_queue_wait(n, q, NULL, timeout_ms);
-    {   const i_RantQRec *rec = i_rant_q_peek(q);
-        if (rec){
-            i_rant_node_queue_msg(n, topic, rec, out);
-            q->viewing = 1;                   /* the view lives until the next take or dispatch */
-            got = 1;
-        }
-    }
-    i_rant_node_unlock(n, acquired);
-    return got;
-}
-
-int rant_topic_dispatch(RantTopic *topic, int max_msgs, int timeout_ms){
-    RantNode *n; i_RantMsgQueue *q; int acquired, done;
-    if (!topic) return RANT_ERR_NO_TOPIC;
-    n = topic->n;
-    acquired = i_rant_node_lock(n);
-    q = i_rant_node_queue_ensure(n, topic, NULL);
-    if (!q){ i_rant_node_unlock(n, acquired); return RANT_ERR_OOM; }
-    if (q->busy){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }
-    i_rant_node_queue_release(n, topic, q);
-    if (!q->count && timeout_ms != 0 && acquired)
-        i_rant_node_queue_wait(n, q, NULL, timeout_ms);
-    done = i_rant_topic_dispatch_locked(n, topic, max_msgs, acquired);
-    i_rant_node_unlock(n, acquired);
-    return done;
-}
-
-int rant_node_dispatch(RantNode *n, int max_msgs, int timeout_ms){
-    int acquired, total = 0;
-    uint16_t i;
-    if (!n) return RANT_ERR_STATE;
-    acquired = i_rant_node_lock(n);
-    if (!i_rant_node_any_queued(n) && timeout_ms != 0 && acquired)
-        i_rant_node_queue_wait(n, NULL, NULL, timeout_ms);
-    for (i = 0; i < i_rant_node_topic_hi(n); i++){
-        RantTopic *h = n->handles[i];
-        if (!h || !h->q || !h->q->count) continue;
-        total += i_rant_topic_dispatch_locked(n, h, max_msgs > 0 ? max_msgs - total : 0, acquired);
-        if (max_msgs > 0 && total >= max_msgs) break;
-    }
-    i_rant_node_unlock(n, acquired);
-    return total;
-}
-
-/* the callback queue API, see spec/node.md */
 
 RantQueue *rant_node_create_queue(RantNode *n){
     RantQueue *q; int acquired;
@@ -3057,7 +2962,7 @@ int rant_queue_dispatch(RantQueue *g, int max_callbacks, int timeout_ms){
     if (!acquired){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* from an inline callback */
     if (g->busy){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* nested, or another thread */
     if (!i_rant_queue_any(n, g) && timeout_ms != 0 && acquired)
-        i_rant_node_queue_wait(n, NULL, g, timeout_ms);
+        i_rant_node_queue_wait(n, g, timeout_ms);
     cutoff = i_rant_plat_now_us();
     g->busy = 1; n->dispatching++;
     while (max_callbacks <= 0 || done < max_callbacks){

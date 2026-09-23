@@ -30,7 +30,7 @@ The schema is optional. With one, a peer whose schema cannot read yours is refus
 | `repair_delay_us` | how long a subscriber waits before asking again for a resend. 0 = measured round trip |
 | `backpressure_wait_us` | how long a send pauses for a slow subscriber before evicting unacked history. 0 = none |
 | `shm_max_bytes` | pin the topic to one shared memory size class |
-| `queue_bytes` | consumer queue cap. Setting it makes the topic queued from creation |
+| `queue_bytes` | the topic's ring cap on its callback queue, 0 = 1 MB. Unused without a queue |
 | `max_rate_hz` | subscriber side, best effort only. Cap delivery from each publisher to this rate |
 | `no_timestamp` | publisher side. Send without the `written_us` stamp |
 

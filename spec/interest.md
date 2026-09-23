@@ -128,7 +128,7 @@ that swallows detail responses to one port.
 ## Slot lifecycle: retire and reuse
 
 `rant_topic_retire` parks the slot (role INACTIVE plus a retired flag), releases every
-lane, frees the history ring, sample buffers, consumer queue, node schema copy and the
+lane, frees the history ring, sample buffers, queue ring, node schema copy and the
 handle. The slot keeps identity, name, kind, qos, generation and next seqno for the reuse
 compare, is announced as a hole run, and is invisible to identity lookups and detail
 answers. The node core keeps the schema hash as the binding fingerprint. The next create

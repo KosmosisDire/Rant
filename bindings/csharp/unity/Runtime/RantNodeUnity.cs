@@ -24,7 +24,7 @@ namespace Rant
         [SerializeField] private int maxTopics = 32;
         [Tooltip("Multihomed hosts (VPN adapters, WSL, docker bridges): this machine's LAN IP, so discovery uses the right interface. Empty = auto probe.")]
         [SerializeField] private string multicastInterface = "";
-        [Tooltip("Per topic consumer queue in bytes. The wire fills it off thread, the frame drains it.")]
+        [Tooltip("Per topic ring on the node's queue, in bytes. The wire fills it off thread, the frame drains it.")]
         [SerializeField] private int queueBytes = 1 << 20;
         [Tooltip("Most messages dispatched per frame across all topics, 0 = drain everything. A budget bounds the frame under a burst.")]
         [SerializeField] private int dispatchBudget = 0;

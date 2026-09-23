@@ -133,7 +133,7 @@ dispatch, and `RantNode.dispatching` counts busy queues and refuses close. A top
 with a queue allocates its ring at creation and the create fails with `OOM` when it cannot.
 A queue of another node fails the create with `STATE`. Queues are pool allocations freed by
 the reset at close, at most `RANT_QUEUES_MAX`. The rings, caps and park rules are the
-consumer queue's below.
+queue rings' below.
 
 Events park on one node ring (`RantNode.event_q`, allocated by `rant_node_set_event_queue`,
 `silent` so an eviction counts without emitting) as `I_RANT_REC_EVENT` records: the
@@ -142,21 +142,18 @@ NUL terminated bytes, since all three are views that die with a retire or a peer
 patterns layer's `sys_on_event` still runs inline at emit, state applies at receipt. The
 group walk treats the ring as a handle less member of the event queue.
 
-## Consumer queues
+## Queue rings
 
-A queued topic's messages are copied by the poll thread into a per topic byte ring
+A queued handle's messages are copied by the poll thread into a per handle byte ring
 (`i_RantMsgQueue`: a record header holding its size, the payload length, the two stamps and
 the publisher id and name length, then the copied sender name, then an 8 aligned payload.
 Records never wrap). The ring starts small and grows to `qos.queue_bytes`. An explicit
 value pre allocates the ring in full. One bigger message still fits.
 
-`take` returns a view valid until the topic's next take or dispatch. The viewed record
-pins the ring tail, so grow and eviction skip while viewing, and a held view degrades
-best effort to drop newest until the next take. `dispatch` runs `on_message` with the
-node lock released and a busy flag refusing nested take or dispatch on the same topic.
-`RantMsg.schema` is re resolved at take, since the delivery map can repoint. The sender
-name is copied into the record because discovery views die with the peer. One consumer
-thread per topic is documented, not enforced.
+The record being dispatched pins the ring tail, so grow and eviction skip while its
+callback runs, and best effort degrades to drop newest until it returns. `RantMsg.schema`
+is re resolved at dispatch, since the delivery map can repoint. The sender name is copied
+into the record because discovery views die with the peer.
 
 At the cap the policy is the reliability QoS. Best effort overwrites the oldest and fires
 `RANT_MSG_LOST`. Reliable PARKS delivery in the transport reader: `on_message` returns
@@ -170,8 +167,8 @@ sans-IO consumer of `i_RantMessageFn` must return 0.
 
 Size the queue at least `keep_last` times the message size, or the reader parks while
 the writer keeps bursting and heals only through the paced repair path (16.4 to 3.7 GB/s
-measured with a 4 MB queue against a 16 MB burst). A zero copy take (refcounted hold, ack
-on release) is the known escape for huge payloads, not built.
+measured with a 4 MB queue against a 16 MB burst). A zero copy hold (refcounted, ack on
+release) is the known escape for huge payloads, not built.
 
 ## Timestamps
 
@@ -190,7 +187,7 @@ message, or at enqueue for a queued topic.
 sender passed one. A microsecond wall clock needs 51 bits, so bit 63 of `written_us`
 carries the marker that announces it, and the strip masks that bit off before the value
 reaches `RantMsg`. The marker lives inside the sample rather than in the DATA submessage
-flags on purpose: repair, catch up replay, the SHM chunk and the consumer queue then
+flags on purpose: repair, catch up replay, the SHM chunk and the queue ring then
 carry it with no extra plumbing, exactly as the source stamp already does, and neither
 delivery callback grows an argument. A sample whose marker is set but which is too short
 to hold the slot is malformed and is passed through whole rather than read past.

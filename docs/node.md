@@ -43,7 +43,8 @@ whole API. The choice is made at creation and never changes.
   oldest first across the queue's topics, at most `max_callbacks` (0 = all). Timeout 0
   returns at once when empty, positive waits that long for the first record, negative
   waits forever. Without a service thread the wait drives the loop itself.
-- `rant_queue_stats(q, &waiting, &dropped)` counts records parked and dropped.
+- `rant_queue_stats(q, &waiting, &dropped)` counts records parked and dropped, and
+  `rant_topic_queue_stats` reads one topic's ring.
 - `rant_node_set_event_queue(n, q)` parks `on_event` too, on a node level ring capped by
   `RantNodeOpts.event_queue_bytes` (0 = 64 KB) that drops the oldest on overflow. NULL
   makes events inline again and drops what is parked. `rant_last_error` is current either
@@ -57,8 +58,16 @@ One thread drains a queue at a time. A concurrent dispatch, a dispatch from an i
 callback or from one of the queue's own callbacks returns `RANT_ERR_STATE`. Retiring a
 topic from its own running callback, or while it runs on another thread, is refused the
 same way, and from anywhere else it drops the unrun records. `rant_node_close` is refused
-while any queue is being dispatched. At the ring cap the reliability QoS decides, as for
-consumer queues below.
+while any queue is being dispatched.
+
+Each queued handle has its own ring. It starts small and grows to `qos.queue_bytes` (0 =
+`RANT_QUEUE_CAP`, 1 MB), and one bigger message still fits. At the cap the reliability QoS
+decides: best effort overwrites the oldest and fires `RANT_MSG_LOST`, reliable parks
+delivery so the publisher's send blocks on normal flow control, and dispatching unparks
+it. Size the ring to cover the writer's burst (at least `keep_last` times the message
+size), or a parked reader heals through the slow repair path. The extra copy costs about
+15% of peak goodput at small payloads and up to 35% at 1 MB. Measure with
+`rant_test queuebench`.
 
 ```c
 RantQueue *main_q = rant_node_create_queue(n);
@@ -71,35 +80,6 @@ while (running){
 }
 ```
 
-## Consumer queues
-
-By default callbacks run on whichever thread polls, so a heavy handler lags the whole
-node. A topic becomes queued on its first `rant_topic_take` or `rant_topic_dispatch`, or
-from creation with `qos.queue_bytes`. The poll thread then only copies its messages into a
-per topic ring and one consumer thread of your choice drains it. Different topics can go
-to different threads.
-
-- `rant_topic_take` pops a zero copy view valid until that topic's next take or dispatch.
-- `rant_topic_dispatch` runs `on_message` on the calling thread outside the node lock, so
-  those callbacks may use the whole API.
-- `rant_node_dispatch` drains every queued topic. Call it from a Unity `Update()` or a UI
-  frame.
-- `rant_topic_queue_stats` observes the queue.
-
-The ring starts small and grows to `qos.queue_bytes` (0 = `RANT_QUEUE_CAP`, 1 MB). One
-bigger message still fits. At the cap the reliability QoS decides: best effort overwrites
-the oldest and fires `RANT_MSG_LOST`, reliable parks delivery so the publisher's send
-blocks on normal flow control. Draining the queue unparks it. Size the queue to cover the
-writer's burst (at least `keep_last` times the message size), or a parked reader heals
-through the slow repair path.
-
-Timeouts on take and dispatch: 0 checks, positive waits that long, negative waits forever.
-They work under a service thread, with a manual poll cadence, single threaded and under
-`RANT_NO_THREADS`. From inside a callback they cannot wait.
-
-The queue's extra copy costs about 15% of peak goodput at small payloads and up to 35% at
-1 MB. Measure with `rant_test queuebench`.
-
 ## Timestamps
 
 Every `RantMsg` carries three clocks.
@@ -107,7 +87,7 @@ Every `RantMsg` carries three clocks.
 - `recv_us` is this node's monotonic clock when the poll received the message (at enqueue
   for a queued topic). Use it for rates and jitter.
 - `written_us` is the writer's wall clock in UTC microseconds when it wrote the message.
-  Repair, catch up replay, shared memory and the consumer queue all keep the original
+  Repair, catch up replay, shared memory and a callback queue all keep the original
   stamp. Compare it across hosts only as far as their clocks are synced. Never mix it with
   `recv_us`.
 - `capture_us` is when the data was true, which is not when it was sent. A camera driver

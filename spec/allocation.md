@@ -133,9 +133,9 @@ time `RANT_FRAG_SIZE` (not the runtime `net.fragment_size`), per topic repair st
 qos, and the lane record, which carries both sides even when one is used.
 
 Config only wins: drop a deep `keep_last` when `catch_up` is 0, set `RANT_FRAG_SIZE`
-smaller at compile time, set `qos.queue_bytes` to cap take rings, and call `take(0)`
-beside an explicit poll, since a timed take on an empty queue drives a full nested poll
-pass.
+smaller at compile time, set `qos.queue_bytes` to cap queue rings, and call
+`rant_queue_dispatch` with timeout 0 beside an explicit poll, since a timed dispatch on an
+empty queue drives a full nested poll pass.
 
 Not applied, no capability loss: a per topic history slab instead of a page per slot,
 lazily allocated repair stats, splitting the lane record per side, zero copy delivery of a

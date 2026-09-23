@@ -195,10 +195,9 @@ process base picked from the clock so concurrent runs never join each other.
   with the cancel flag set at receipt, a variable's replay parks, the owner applies a
   remote write at receipt and notifies at dispatch, the remote caches before its own
   dispatch, and a retire settles a parked reply CANCELLED and drops the records.
-- Consumer queues: the first take enables the queue and a timeout take drives the loop,
-  a best effort queue overwrites oldest at the cap, a reliable queue parks by withholding
-  acks so a slow take loop still receives everything in order, dispatch runs the callback
-  on the calling thread, and the condvar take path works beside service threads.
+- Queue rings: polling only parks, a timed dispatch drives the loop, a best effort ring
+  overwrites oldest at the cap, and a reliable ring parks by withholding acks so a slow
+  dispatch loop still receives everything in order.
 
 ### Patterns
 
@@ -286,7 +285,7 @@ process base picked from the clock so concurrent runs never join each other.
 - memscale: steady state must be alloc free and warm sends pay no allocation.
 - threadbench: keep_last 64 so the drain guard rather than ack flow control engages, and
   backpressure only ever engages flat out.
-- queuebench: inline callbacks against a 4 MB consumer queue. The queue must cover the
+- queuebench: inline callbacks against a 4 MB callback queue ring. The ring must cover the
   writer's in flight burst or the reader parks and the overrun heals through repair,
   which is a sizing bug, not steady state cost.
 
