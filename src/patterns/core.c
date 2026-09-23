@@ -729,6 +729,7 @@ static RantFunctionOpts i_rant_task_fn_opts(const RantTaskOpts *to){
     fo.keep_last = to->keep_last;
     fo.multi = to->multi;
     fo.queue = to->queue;
+    fo.reflect_from_mesh = to->reflect_from_mesh;
     return fo;
 }
 
