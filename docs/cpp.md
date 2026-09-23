@@ -85,8 +85,10 @@ valid for the node's life. It throws `rant::Error`, or without exceptions return
 handle with `last_error()` saying where. Every definition stays in scope for the node's
 later compiles, and `node.schema_from_wire(bytes)` registers a peer's wire. The typed
 codec of `RANT_SCHEMA` is built once per node and type. `MessageBuilder` sets fields by name or dotted path, grows for variable fields,
-and refuses an over cap value by flipping `ok()` to false rather than truncating. Reads go
-through `FieldView`, the surface shared by `MessageView`, `Request<rant::Bytes>` and
+and refuses an over cap value by flipping `ok()` to false rather than truncating.
+`set_array_count("pts", n)` sizes a variable array, and a struct array's members then set
+by path with one index per level, `pts[2].corners[1].x`. Reads go through `FieldView`,
+where `get_array_count` gives an array's live count, the surface shared by `MessageView`, `Request<rant::Bytes>` and
 `ResponseView<rant::Bytes>`, so a typed read looks the same everywhere. Every handler
 fires on the polling thread, and the views it receives are valid for the callback only.
 

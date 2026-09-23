@@ -649,6 +649,16 @@ public:
     }
     /* one element of a string array (a variable string array must be grown first with
        a set_array of empty slots, per the C API) */
+    /* Size a variable array to count elements, zero filled, so a struct array's members can
+     * then be set by path such as "pts[2].x". */
+    MessageBuilder& set_array_count(const char* field, uint32_t count) {
+        int i = detail::rant_schema_field_index(schema_, field);
+        detail::RantSchemaFieldInfo fi;
+        if (i < 0 || !detail::rant_schema_field_at(schema_, (uint16_t)i, &fi)) { ok_ = false; return *this; }
+        grow_for((size_t)count * fi.elem_size);
+        ok_ &= detail::rant_set_array_count(buf_.data(), buf_.size(), schema_, field, count) != 0;
+        return *this;
+    }
     MessageBuilder& set_string_at(const char* field, uint16_t index, std::string_view v) {
         grow_for(v.size() + 2);
         ok_ &= detail::rant_set_string_at(buf_.data(), buf_.size(), schema_, field, index, detail::rant_string(v.data(), v.size())) != 0;
@@ -714,6 +724,8 @@ public:
     float    get_f32  (const char* field) const { return detail::rant_get_f32    (d_, s_, field); }
     bool     get_bool (const char* field) const { return detail::rant_get_uint (d_, s_, field) != 0; }
     Bytes    get_array(const char* field) const { auto a = detail::rant_get_array(d_, s_, field); return { a.data, a.len }; }
+    /* an array's live element count, a fixed one's count, 0 when the field is no array */
+    uint32_t get_array_count(const char* field) const { return detail::rant_get_array_count(d_, s_, field); }
     /* a capped or variable string, an empty view on a mismatch */
     std::string_view get_string(const char* field) const { auto s = detail::rant_get_string(d_, s_, field); return { s.data, s.len }; }
     std::string_view get_string_at(const char* field, uint16_t index) const { auto s = detail::rant_get_string_at(d_, s_, field, index); return { s.data, s.len }; }

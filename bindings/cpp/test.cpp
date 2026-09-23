@@ -686,20 +686,22 @@ static bool nested_leg() {
                                      "Scene { extra: u64, seq: u32, outlines: Outline[], "
                                      "tags: string<8>[], note: string }");
         rant::MessageBuilder mbld(wide);
-        mbld.set_uint("extra", 99).set_uint("seq", 5);
-        std::vector<uint8_t> msg;
-        {   /* a variable array sized in the raw builder bytes, then filled by path */
-            rant::Bytes raw = mbld.bytes();
-            msg.assign(raw.data(), raw.data() + raw.size());
-            msg.resize(msg.size() + 64);
-            rant::detail::rant_set_array_count(msg.data(), msg.size(), wide.raw(), "outlines", 1);
-            rant::detail::rant_set_f32(msg.data(), msg.size(), wide.raw(), "outlines[0].corners[3].y", 8.0f);
-            msg.resize(rant::detail::rant_schema_msg_len(wide.raw(), msg.data(), msg.size()));
-        }
+        mbld.set_uint("extra", 99).set_uint("seq", 5)
+            .set_array_count("outlines", 2)
+            .set_f32("outlines[0].corners[3].y", 8.0f)
+            .set_uint("outlines[1].n", 6);
+        chk("nest: MessageBuilder sizes a variable struct array and fills it by path", mbld.ok());
+        rant::Bytes raw = mbld.bytes();
+        std::vector<uint8_t> msg(raw.data(), raw.data() + raw.size());
+        rant::detail::RantBytes wb; wb.data = msg.data(); wb.len = msg.size();
+        chk("nest: the builder's message reads back by path and count",
+            rant::detail::rant_get_array_count(wb, wide.raw(), "outlines") == 2
+            && rant::detail::rant_get_f32(wb, wide.raw(), "outlines[0].corners[3].y") == 8.0f);
         Scene rb;
         chk("nest: another layout decodes through its own offsets",
             c && rant::priv::decode(*c, rb, rant::Bytes(msg.data(), msg.size()), wide.raw())
-            && rb.seq == 5 && rb.outlines.size() == 1 && rb.outlines[0].corners[3].y == 8.0f);
+            && rb.seq == 5 && rb.outlines.size() == 2 && rb.outlines[0].corners[3].y == 8.0f
+            && rb.outlines[1].n == 6);
     }
     {   auto sc = rant::priv::schema_of<std::vector<Corner>>(a);
         std::string txt = sc ? sc->to_dsl() : std::string();
