@@ -82,6 +82,17 @@ construction of the name creates fresh. `match_count()` on any handle counts the
 counterparts, and `drain(timeout_ms)` on a publisher waits until every reader has acked,
 the flush before close.
 
+A subscriber made without a handler is pulled: `take(timeout_ms)` returns the oldest
+waiting message and `take_latest(timeout_ms)` the newest, dropping the older ones, as a
+`std::optional<T>`, or a `std::optional<MessageView>` valid until the next take for
+`rant::Bytes`. A pulled subscriber takes no `Qos::queue`, and `take` on one with a handler
+throws.
+
+```cpp
+rant::Subscriber<Pose> poses(node, "pose");     // no handler: pulled
+if (auto p = poses.take_latest()) draw(*p);
+```
+
 `Bytes` is a non owning view. It constructs from `std::string_view`, `std::string`, a C
 string or any contiguous range of byte sized elements, and converts to `string_view`,
 `string`, `vector` and `std::span` where available. Multi byte element types are rejected,

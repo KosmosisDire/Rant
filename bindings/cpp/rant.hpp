@@ -799,6 +799,7 @@ private:
     explicit MessageView(const detail::RantMsg* m) : FieldView(m->data, m->schema), msg_(m) {}
     const detail::RantMsg* msg_;
     friend class Node;
+    friend class Subscriber<Bytes>;
 };
 
 /* A peer, message loss or error notification. Everything that goes wrong arrives as
@@ -1928,6 +1929,17 @@ public:
               const Schema* schema = nullptr, const Qos& qos = {});
     /* The same, typed by the mesh (see reflect_from_mesh). */
     TopicCore(Node& node, std::string_view name, Role role, reflect_from_mesh_t, const Qos& qos = {});
+    /* A pulled subscribe side: no callbacks, messages wait for take(). */
+    static TopicCore pulled(Node& node, std::string_view name, const Schema* schema, const Qos& qos) {
+        return TopicCore(node, name, Role::SubOnly, schema, qos, false, true);
+    }
+    /* The oldest waiting message of a pulled topic, or with latest the newest. 1 got one,
+     * 0 none, negative the C refusal. The view lives until the next take. */
+    int take(detail::RantMsg* out, int timeout_ms, bool latest) {
+        if (!ch_) return static_cast<int>(SendStatus::NoTopic);
+        return latest ? detail::rant_topic_take_latest(ch_, out, timeout_ms)
+                      : detail::rant_topic_take(ch_, out, timeout_ms);
+    }
 
     bool valid() const noexcept { return ch_ != nullptr; }
     /* A reflect_from_mesh topic: re read the mesh and re type in place if what it took has
@@ -1978,7 +1990,8 @@ public:
     }
 
 private:
-    TopicCore(Node& node, std::string_view name, Role role, const Schema* schema, const Qos& qos, bool reflect);
+    TopicCore(Node& node, std::string_view name, Role role, const Schema* schema, const Qos& qos,
+              bool reflect, bool pull = false);
 
     detail::RantTopic* ch_ = nullptr;
     void* impl_ = nullptr;   /* the owning Node::Impl (Node is incomplete here), so
@@ -2594,7 +2607,7 @@ public:
 #endif
 
 private:
-    struct TopicRec { detail::RantTopic* ch; uint8_t bits; uint64_t schema_hash; detail::RantQueue* queue; };
+    struct TopicRec { detail::RantTopic* ch; uint8_t bits; uint64_t schema_hash; detail::RantQueue* queue; bool pull; };
 #ifndef RANT_NO_PATTERNS
     /* the local @rant/meta caller handle behind meta_request, invalid when meta is disabled */
     RemoteFunction<Bytes, Bytes> meta();
@@ -2814,7 +2827,7 @@ inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
                                   const Schema* schema, const Qos& qos) : TopicCore(node, name, role, schema, qos, false) {}
 
 inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
-                                  const Schema* schema, const Qos& qos, bool reflect) {
+                                  const Schema* schema, const Qos& qos, bool reflect, bool pull) {
     if (!node.valid()) { priv::raise_msg("rant topic create: node is not valid"); return; }
     Node::Impl* impl = node.impl_.get();
     std::lock_guard<std::mutex> g(impl->create_mu);
@@ -2828,7 +2841,7 @@ inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
                             " (retire() it to retype the name)");
             return;
         }
-        if (priv::to_c(qos.queue) != it->second.queue) {
+        if (priv::to_c(qos.queue) != it->second.queue || pull != it->second.pull) {
             priv::raise_msg("rant topic create: the name already exists with a different queue"
                             " (same name handles share one slot and its queue)");
             return;
@@ -2846,10 +2859,11 @@ inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
     co.qos = Node::to_c(qos);
     co.reflect_from_mesh = reflect ? 1 : 0;
     co.queue = priv::to_c(qos.queue);
+    co.pull = pull ? 1 : 0;
     ch_ = detail::rant_node_create_topic(impl->node, nm.c_str(),
               static_cast<detail::RantRole>(role), schema ? schema->raw() : nullptr, &co);
     if (!ch_) { priv::raise_last(impl->node, "rant topic create"); return; }
-    impl->topics.emplace(std::move(nm), Node::TopicRec{ ch_, priv::role_bits(role), sh, co.queue });
+    impl->topics.emplace(std::move(nm), Node::TopicRec{ ch_, priv::role_bits(role), sh, co.queue, pull });
 }
 
 /* Retire: on success the C handle is freed, the name cache entry and this topic's wrapper
@@ -3603,15 +3617,26 @@ private:
 };
 
 /* Subscriber<Bytes>: the raw subscribe side. The handler fires per message on the polling
- * thread with a MessageView that reads fields by name through the schema. */
+ * thread, or at dispatch() of its queue, with a MessageView that reads fields by name
+ * through the schema. Made without a handler it is pulled with take() and take_latest(). */
 template <> class Subscriber<Bytes> {
 public:
     Subscriber() = default;
     Subscriber(Node& n, std::string_view name, const Schema* schema,
                Node::MessageHandler on_message, const Qos& qos = {})
-        : t_(n, name, Role::SubOnly, schema, qos) {
+        : t_(on_message ? priv::TopicCore(n, name, Role::SubOnly, schema, qos)
+                        : priv::TopicCore::pulled(n, name, schema, qos)) {
         if (t_.valid() && on_message) add_handler(n, t_, std::move(on_message));
     }
+    /* A pulled subscriber: messages wait until take() or take_latest() reads them. */
+    Subscriber(Node& n, std::string_view name, const Schema* schema, const Qos& qos = {})
+        : t_(priv::TopicCore::pulled(n, name, schema, qos)) {}
+
+    /* The oldest waiting message of a pulled subscriber, or nullopt when none arrived within
+     * timeout_ms (0 = check, negative = forever). The view lives until the next take. */
+    std::optional<MessageView> take(int timeout_ms = 0)        { return pull(timeout_ms, false); }
+    /* The newest waiting message, dropping the older ones. As take(). */
+    std::optional<MessageView> take_latest(int timeout_ms = 0) { return pull(timeout_ms, true); }
 
     bool valid() const noexcept { return t_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
@@ -3622,6 +3647,13 @@ public:
     SendStatus retire()       { return t_.retire(); }
 
 private:
+    std::optional<MessageView> pull(int timeout_ms, bool latest) {
+        int r = t_.take(&msg_, timeout_ms, latest);
+        if (r == static_cast<int>(SendStatus::State))
+            priv::raise_msg("rant::Subscriber::take: this subscriber has a handler, take needs one made without");
+        if (r != 1) return std::nullopt;
+        return MessageView(&msg_);
+    }
     static void add_handler(Node& n, priv::TopicCore& t, Node::MessageHandler h) {
         Node::Impl* impl = n.impl_.get();
         std::lock_guard<std::mutex> g(impl->reg_mu);
@@ -3632,6 +3664,7 @@ private:
         slot = std::move(nv);
     }
     priv::TopicCore t_;
+    detail::RantMsg msg_{};   /* the last take, which the returned view points at */
     template <class A> friend class Subscriber;
 };
 
@@ -4181,18 +4214,40 @@ public:
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>>>
     Subscriber(Node& n, std::string_view name, H&& handler, const Qos& qos = {}) {
-        priv::TypeCodec* c = priv::type_codec<T>(n);
-        if (!priv::codec_ok(c)) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
-        Schema sc = c->schema();
-        core_ = Subscriber<Bytes>(n, name, &sc, adapt(std::forward<H>(handler), c), qos);
+        c_ = priv::type_codec<T>(n);
+        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
+        Schema sc = c_->schema();
+        core_ = Subscriber<Bytes>(n, name, &sc, adapt(std::forward<H>(handler), c_), qos);
+    }
+    /* A pulled subscriber: messages wait until take() or take_latest() reads them. */
+    Subscriber(Node& n, std::string_view name, const Qos& qos = {}) {
+        c_ = priv::type_codec<T>(n);
+        if (!priv::codec_ok(c_)) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
+        Schema sc = c_->schema();
+        core_ = Subscriber<Bytes>(n, name, &sc, qos);
     }
     bool valid() const noexcept { return core_.valid(); }
     explicit operator bool() const noexcept { return valid(); }
+
+    /* The oldest waiting message of a pulled subscriber, decoded, or nullopt when none
+     * arrived within timeout_ms (0 = check, negative = forever). */
+    std::optional<T> take(int timeout_ms = 0)        { return decoded(core_.take(timeout_ms)); }
+    /* The newest waiting message, dropping the older ones. As take(). */
+    std::optional<T> take_latest(int timeout_ms = 0) { return decoded(core_.take_latest(timeout_ms)); }
 
     int  match_count() const { return core_.match_count(); }
     SendStatus retire()      { return core_.retire(); }
 
 private:
+    std::optional<T> decoded(const std::optional<MessageView>& m) {
+        if (!m) return std::nullopt;
+        T v{};
+        if (!priv::decode(*c_, v, m->data(), m->raw_schema())) {
+            priv::raise_msg("rant::Subscriber::take: the message did not decode as T");
+            return std::nullopt;
+        }
+        return v;
+    }
     template <class H>
     static Node::MessageHandler adapt(H&& h, priv::TypeCodec* c) {
         return [f = std::forward<H>(h), c](const MessageView& m) mutable {
@@ -4205,6 +4260,7 @@ private:
         };
     }
     Subscriber<Bytes> core_;
+    priv::TypeCodec* c_ = nullptr;
 };
 
 }   /* namespace rant */

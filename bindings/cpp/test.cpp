@@ -1202,11 +1202,27 @@ static bool queue_leg() {
         drained([&] { return lines.size() >= 2 && lines.back() == "live"; }));
     chk("queue: events arrive at dispatch", drained([&] { return events.load() > 0; }));
     chk("queue: every callback ran on this thread", !stray.load());
-#if defined(__cpp_exceptions)
     bool refused = false;
+#if defined(__cpp_exceptions)
     try { rant::Publisher<Speed> other(b, "q/speed", rel); }
     catch (const rant::Error&) { refused = true; }
     chk("queue: a same name handle on another queue is refused", refused);
+#endif
+    /* pull: no handler, the app takes when it wants and nothing parks on a queue */
+    rant::Publisher<Speed> ppub(a, "q/pull", rel);
+    rant::Subscriber<Speed> pulled(b, "q/pull", rel);
+    chk("pull: matched", wait_for(4000, [&] { return ppub.match_count() > 0 && ppub.ready(); }));
+    for (int32_t v = 1; v <= 3; v++) ppub.send(Speed{ v });
+    auto first = pulled.take(2000);
+    chk("pull: take waits for the oldest", first && first->v == 1);
+    std::optional<Speed> newest;
+    wait_for(4000, [&] { auto l = pulled.take_latest(); if (l) newest = l; return newest && newest->v == 3; });
+    chk("pull: take_latest reaches the newest", newest && newest->v == 3);
+    chk("pull: nothing left after take_latest", !pulled.take());
+#if defined(__cpp_exceptions)
+    refused = false;
+    try { (void)sub.take(); } catch (const rant::Error&) { refused = true; }
+    chk("pull: take on a handler subscriber throws", refused);
 #endif
     b.set_event_queue(nullptr);
     b.set_log_queue(nullptr);
