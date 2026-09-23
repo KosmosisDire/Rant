@@ -1122,7 +1122,7 @@ static bool tasks_leg() {
         std::lock_guard<std::mutex> g(g_move_mu);
         g_move_pending = rant::PendingTask<MoveProgress, MoveRsp>();
     }
-    chk("task: retire mid-run", def_move.retire() == rant::SendStatus::Ok);
+    chk("task: retire mid-run", def_move.close() == rant::SendStatus::Ok);
     chk("task: retire resolves the caller Cancelled",
         wait_for(4000, [&] { return retired_done.load(); }, &b)
         && retired_status.load() == (int)rant::CallStatus::Cancelled);
@@ -1257,6 +1257,109 @@ static bool queue_leg() {
     try { (void)sub.take(); } catch (const rant::Error&) { refused = true; }
     chk("pull: take on a handler subscriber throws", refused);
 #endif
+    return g_failures == fails_at_entry;
+}
+
+/* handle lifetime: holds per side on a shared name, moves, the last close retiring the
+ * name, handles and deferred replies that outlive their node, a close refused in a callback */
+static bool lifetime_leg() {
+    int fails_at_entry = g_failures;
+    rant::NodeOptions opts;
+    opts.domain = 52;
+    opts.multicast_interface = "127.0.0.1";
+    opts.max_topics = 32;
+    rant::Node a("LA", opts);
+    rant::Node b("LB", opts);
+    chk("life: nodes constructed", a.valid() && b.valid());
+    if (!a.valid() || !b.valid()) return false;
+    rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
+
+    /* two publishers share a name: closing one leaves the other live */
+    auto p1 = a.publisher<Speed>("l/speed", rel);
+    auto p2 = a.publisher<Speed>("l/speed", rel);
+    std::atomic<int> first{ 0 }, second{ 0 };
+    std::atomic<int32_t> last{ 0 };
+    auto s1 = b.subscriber<Speed>("l/speed", [&](const Speed& s) { first++; last = s.v; }, rel);
+    auto s2 = b.subscriber<Speed>("l/speed", [&](const Speed&) { second++; }, rel);
+    chk("life: matched", wait_for(4000, [&] { return p2.match_count() > 0 && p2.ready(); }));
+    chk("life: closing one publisher succeeds", p1.close() == rant::SendStatus::Ok && !p1.valid());
+    chk("life: the other publisher still sends", p2.valid() && p2.send(Speed{ 1 }) == rant::SendStatus::Ok);
+    chk("life: both subscribers get it", wait_for(3000, [&] { return first.load() == 1 && second.load() == 1; }));
+
+    /* a closed subscriber's handler stops, the other keeps its own */
+    chk("life: closing one subscriber succeeds", s2.close() == rant::SendStatus::Ok);
+    p2.send(Speed{ 2 });
+    chk("life: the open subscriber still receives", wait_for(3000, [&] { return last.load() == 2; }));
+    chk("life: the closed one no longer fires", second.load() == 1);
+
+    /* moves carry the hold, the moved from handle is empty */
+    auto p3 = std::move(p2);
+    chk("life: a moved handle is empty", !p2.valid() && p3.valid());
+    chk("life: the moved to handle sends", p3.send(Speed{ 3 }) == rant::SendStatus::Ok);
+    chk("life: its message arrives", wait_for(3000, [&] { return last.load() == 3; }));
+
+    /* the last handle on a name retires it, so the name takes another schema */
+#if defined(__cpp_exceptions)
+    bool refused = false;
+    try { auto clash = a.publisher<Flat>("l/speed", rel); }
+    catch (const rant::Error&) { refused = true; }
+    chk("life: a live name refuses another schema", refused);
+#endif
+    p3.close();
+    auto retyped = a.publisher<Flat>("l/speed", rel);
+    chk("life: after the last close the name retypes", retyped.valid());
+    retyped.close();
+
+    /* a definition closed by scope frees its name for a successor */
+    {
+        auto def = a.function_definition<AddReq, AddRsp>("l/add",
+            [](const AddReq& r) { return AddRsp{ (int64_t)r.x + r.y }; });
+        chk("life: definition made", def.valid());
+    }
+    auto again = a.function_definition<AddReq, AddRsp>("l/add",
+        [](const AddReq& r) { return AddRsp{ (int64_t)r.x * r.y }; });
+    chk("life: the name is free after scope end", again.valid());
+
+    /* handles and a deferred reply that outlive their node answer NoTopic, never crash */
+    rant::NodeOptions copts = opts;
+    copts.threading = rant::Threading::Manual;
+    auto c = std::make_unique<rant::Node>("LC", copts);
+    auto orphan = c->publisher<Speed>("l/orphan");
+    auto orphan_var = c->variable_definition<float>("l/var", { 1.0f });
+    rant::Deferred<AddRsp> parked;
+    auto deferring = c->function_definition<AddReq, AddRsp>("l/defer",
+        [&](const AddReq&, rant::Request<AddRsp>& rq) { parked = rq.defer(); });
+    auto caller = a.remote_function<AddReq, AddRsp>("l/defer");
+    wait_for(4000, [&] { return caller.match_count() > 0; }, c.get());
+    (void)caller.call_async(AddReq{ 1, 2 }, [](const rant::ResponseView<AddRsp>&) {});
+    wait_for(3000, [&] { return parked.valid(); }, c.get());
+    chk("life: a deferred reply is parked", parked.valid());
+    c->close();
+    chk("life: a handle outliving its node is not valid", !orphan.valid());
+    chk("life: its send answers NoTopic", orphan.send(Speed{ 1 }) == rant::SendStatus::NoTopic);
+    chk("life: a variable outliving its node reads nothing", !orphan_var.get());
+    chk("life: a deferred reply outliving its node is not valid", !parked.valid()
+        && !parked.complete(AddRsp{ 3 }));
+    c.reset();
+    chk("life: its close answers Ok and it stays empty",
+        orphan.close() == rant::SendStatus::Ok && !orphan.valid());
+
+    /* a handle destroyed inside its own inline callback cannot retire: an error event says so */
+    rant::NodeOptions mopts = opts;
+    mopts.threading = rant::Threading::Manual;
+    rant::Node d("LD", mopts);
+    std::atomic<bool> state_seen{ false };
+    d.on_event([&](const rant::Event& e) {
+        if (e.error() == rant::ErrorKind::State && e.topic_name() == "l/self") state_seen = true;
+    });
+    auto self_pub = a.publisher<Speed>("l/self", rel);
+    std::optional<rant::Subscriber<Speed>> self_sub;
+    self_sub.emplace(d.subscriber<Speed>("l/self", [&](const Speed&) { self_sub.reset(); }, rel));
+    chk("life: self closing subscriber matched",
+        wait_for(4000, [&] { return self_pub.match_count() > 0 && self_pub.ready(); }, &d));
+    self_pub.send(Speed{ 4 });
+    chk("life: the refused close raises a State event",
+        wait_for(3000, [&] { return state_seen.load(); }, &d) && !self_sub);
     return g_failures == fails_at_entry;
 }
 
@@ -1564,6 +1667,10 @@ int main(int argc, char** argv) {
     std::printf("queue leg:\n");
     bool queue_ok = queue_leg();
     std::printf("%s\n", queue_ok ? "PASS: callback queues" : "FAIL: queue leg");
+
+    std::printf("lifetime leg:\n");
+    bool life_ok = lifetime_leg();
+    std::printf("%s\n", life_ok ? "PASS: handle lifetime" : "FAIL: lifetime leg");
 
     std::printf("factory leg:\n");
     bool factory_ok = factory_leg();

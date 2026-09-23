@@ -113,8 +113,12 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
 - Strings are `std::string_view`. `Bytes` is a contiguous range convertible to
   string_view, string and vector, with `std::span` where available. Field name parameters
   stay `const char*` on purpose.
-- `Topic` carries a `void* impl_` back pointer to `Node::Impl` because `Node` is incomplete
-  at the class. `retire()` erases the name cache entry.
+- The node's state is `priv::NodeImpl`, shared by the node and every handle through a
+  `shared_ptr`. The node closes the C node at `close()` or destruction whatever handles
+  remain, and a handle checks `impl->node` before touching its C pointer, so one that
+  outlives the node answers `NoTopic`. Handles are move only. A topic name keeps a hold
+  count per side, the role follows the live holds and the last close retires the topic.
+  Pattern handler boxes hold the state weakly, since the node owns them.
 - `defer()` on a task handler returns a movable thread safe `PendingTask`.
 
 ## C#

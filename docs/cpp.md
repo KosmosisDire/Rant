@@ -96,10 +96,10 @@ is the raw form: `node.publisher<rant::Bytes>(name, qos, schema)` sends a `Messa
 or any bytes, `node.subscriber<rant::Bytes>(name, handler, qos, schema)` delivers a
 `MessageView` that reads fields by name. An empty schema means untyped bytes. Only a
 `rant::Bytes` handle takes a schema, a typed one refuses it. A publisher and a subscriber
-of the same name share one topic slot with a widened role. A live same name topic with a
-different schema refuses, so `retire()` the old one first to retype a name. After a
-successful retire every handle sharing the slot is invalid and the next factory call for
-the name creates fresh. `match_count()` on any handle counts the matched
+of the same name share one topic slot, and its role follows the live handles. A live
+same name topic with a different schema refuses, so close every handle on a name to
+retype it: the last one retires the topic and the next factory call creates it fresh.
+`match_count()` on any handle counts the matched
 counterparts, and `drain(timeout_ms)` on a publisher waits until every reader has acked,
 the flush before close.
 
@@ -200,7 +200,7 @@ The handles are `FunctionDefinition<Req, Rsp>`, `RemoteFunction<Req, Rsp>`,
 `RemoteVariable<T>`, from `node.function_definition<Req, Rsp>(name, handler, options)`
 and the other factories. With `rant::Bytes` as every type argument the same handle is the
 raw form, and the factory takes the schemas after the options. A definition needs a
-handler. Every handle is thin and non owning: the entity lives in the node until close.
+handler.
 
 ```cpp
 auto add = node.function_definition<AddReq, AddRsp>("add",
@@ -244,9 +244,22 @@ A `rant::Bytes` handle made without a schema and with `reflect_from_mesh` set in
 options types itself from the mesh: a reader takes its provider's schema, a writer the
 widest every reader accepts. `refresh()` re types the handle in place when the mesh moved.
 
-Every handle has `retire()`. It is refused with `SendStatus::State` from a callback, and
-after success the handle is empty. Retiring a remote completes every outstanding call
-with `CallStatus::Cancelled`.
+## Handle lifetime
+
+Handles are move only and own their side of the entity. Scope end or `close()` releases
+it: a topic handle drops its side of the name and the last one retires the topic, and a
+pattern handle retires its function, task or variable, so the name is free for a
+successor. Closing a remote completes every outstanding call with `CallStatus::Cancelled`,
+and closing a task definition answers its live deferred calls Cancelled. A moved from
+handle is empty.
+
+`close()` from the handle's own inline callback is refused with `SendStatus::State` and
+the handle stays valid. A handle destroyed there cannot retire, so an Error event of kind
+`State` names it and the entity lives until the node closes.
+
+A handle, a `Deferred` or a `PendingTask` that outlives its node is safe: it is no longer
+`valid()`, its calls answer `NoTopic` or nothing, and its close does nothing. A `Queue`
+and a `Schema` are plain values valid only while their node lives.
 
 ## Logs, meta and reflection
 
