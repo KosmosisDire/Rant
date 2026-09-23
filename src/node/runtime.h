@@ -49,6 +49,8 @@ typedef struct {
                                     a zero reliability follow it. See docs/reflection.md */
     RantQueue *queue;              /* callbacks park here and run on rant_queue_dispatch. NULL =
                                     inline on the loop thread. Fixed for the topic's life */
+    uint8_t    pull;               /* 1 = no callbacks: messages wait in the topic's ring for
+                                    rant_topic_take. Refused together with a queue */
 } RantTopicOpts;
 
 typedef struct RantNode      RantNode;
@@ -171,8 +173,14 @@ RANT_API int        rant_node_set_event_queue(RantNode *n, RantQueue *q);
  * parked lines are dropped. RANT_ERR_STATE as above, RANT_ERR_NOSYS when logs are disabled. */
 RANT_API int        rant_node_set_log_queue(RantNode *n, RantQueue *q);
 
-/* A queued topic's ring: messages waiting, bytes used and capacity, and messages dropped
- * since open. All zero for an inline topic. */
+/* Pull topics (RantTopicOpts.pull). take pops the oldest waiting message, take_latest the
+ * newest after dropping the older ones. The views stay valid until the topic's next take.
+ * timeout_ms 0 checks, positive waits, negative waits forever, driving the loop when no
+ * service thread runs. 1 got one, 0 none, RANT_ERR_STATE on a topic created without pull. */
+RANT_API int rant_topic_take(RantTopic *topic, RantMsg *out, int timeout_ms);
+RANT_API int rant_topic_take_latest(RantTopic *topic, RantMsg *out, int timeout_ms);
+/* A queued or pull topic's ring: messages waiting, bytes used and capacity, and messages
+ * dropped since open. All zero for an inline topic. */
 RANT_API void rant_topic_queue_stats(RantTopic *topic, uint32_t *msgs, uint32_t *bytes,
                                        uint32_t *capacity, uint32_t *dropped);
 /* Publishes to every matched subscriber. RANT_OK or a negative RantResult. */

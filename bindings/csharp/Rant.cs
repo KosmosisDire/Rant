@@ -278,7 +278,7 @@ namespace Rant
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RantTopicOpts { public RantQos qos; public byte reflect_from_mesh; public IntPtr queue; }
+    internal struct RantTopicOpts { public RantQos qos; public byte reflect_from_mesh; public IntPtr queue; public byte pull; }
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct RantNodeNet

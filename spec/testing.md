@@ -198,6 +198,9 @@ process base picked from the clock so concurrent runs never join each other.
 - Queue rings: polling only parks, a timed dispatch drives the loop, a best effort ring
   overwrites oldest at the cap, and a reliable ring parks by withholding acks so a slow
   dispatch loop still receives everything in order.
+- Pull topics: polling only holds, take returns the oldest with its stamps and names,
+  take_latest returns the newest and drops the rest, a timed take drives the loop, and
+  take on a topic created without pull and pull with a queue are refused.
 
 ### Patterns
 

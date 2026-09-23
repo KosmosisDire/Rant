@@ -150,9 +150,12 @@ the publisher id and name length, then the copied sender name, then an 8 aligned
 Records never wrap). The ring starts small and grows to `qos.queue_bytes`. An explicit
 value pre allocates the ring in full. One bigger message still fits.
 
-The record being dispatched pins the ring tail, so grow and eviction skip while its
-callback runs, and best effort degrades to drop newest until it returns. `RantMsg.schema`
-is re resolved at dispatch, since the delivery map can repoint. The sender name is copied
+A pull topic (`RantTopic.pull`) has the same ring with no callback queue: `rant_topic_take`
+views the tail record until the next take, and `take_latest` pops all but the newest first,
+repeating while the freed space unparks a reliable lane. The record being dispatched or
+taken pins the ring tail, so grow and eviction skip while its callback runs or its view
+lives, and best effort degrades to drop newest until then. `RantMsg.schema` is re resolved
+at dispatch or take, since the delivery map can repoint. The sender name is copied
 into the record because discovery views die with the peer.
 
 At the cap the policy is the reliability QoS. Best effort overwrites the oldest and fires

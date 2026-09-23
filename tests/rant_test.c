@@ -4779,6 +4779,78 @@ static void queue_checks(void){
     rant_allocator_reset(&ba);
 }
 
+static unsigned long pl_inline;
+static void pl_on_message(const RantMsg *msg){ (void)msg; pl_inline++; }
+
+/* The pull phase: a pull topic never calls back, take pops the oldest, take_latest the
+ * newest after dropping the rest, and a topic created without pull refuses take. */
+static void pull_checks(void){
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0);
+    RantNodeOpts o; RantTopicOpts co;
+    RantNode *a, *b; RantTopic *pub = NULL, *pl = NULL, *plain = NULL;
+    RantMsg m; uint8_t payload[64]; int i, r, t;
+    uint32_t waiting = 0;
+    memset(&o, 0, sizeof o); memset(payload, 0, sizeof payload); memset(&m, 0, sizeof m);
+    o.domain = ST_DOMAIN+52; o.discovery.max_peers = 4; o.max_topics = 4;
+    o.net.multicast_interface = "127.0.0.1";
+    a = rant_node_open(&aa, "pl-a", NULL, NULL, &o);
+    b = rant_node_open(&ba, "pl-b", pl_on_message, NULL, &o);
+    memset(&co, 0, sizeof co);
+    co.qos.reliability = RANT_RELIABLE; co.qos.keep_last = 16; co.qos.heartbeat_us = 20000;
+    if (a) pub = rant_node_create_topic(a, "pl/x", RANT_PUB_ONLY, NULL, &co);
+    co.pull = 1;
+    if (b) pl = rant_node_create_topic(b, "pl/x", RANT_SUB_ONLY, NULL, &co);
+    co.pull = 0;
+    if (b) plain = rant_node_create_topic(b, "pl/plain", RANT_SUB_ONLY, NULL, &co);
+    ST_CHECK(a && b && pub && pl && plain, "pull: nodes and topics open");
+    if (!(a && b && pub && pl && plain)) goto done;
+    {   RantQueue *q = rant_node_create_queue(b);
+        co.pull = 1; co.queue = q;
+        ST_CHECK(q && !rant_node_create_topic(b, "pl/both", RANT_SUB_ONLY, NULL, &co)
+                 && rant_last_error(b).error == RANT_E_STATE, "pull: pull with a queue is refused");
+        co.pull = 0; co.queue = NULL; }
+    r = rant_topic_take(plain, &m, 0);
+    ST_CHECK(r == RANT_ERR_STATE, "pull: take on a topic created without pull is refused (%d)", r);
+    r = rant_topic_take(pl, &m, 0);
+    ST_CHECK(r == 0, "pull: an empty take returns 0 (%d)", r);
+    for (t=0;t<2500 && rant_topic_match_count(pub)<1;t++) st_pump(a,b,2);
+
+    for (i=0;i<5;i++){ put32(payload,(uint32_t)i); rant_topic_send(pub, rant_bytes(payload, 64), NULL); }
+    for (t=0;t<2500 && waiting<5;t++){ st_pump(a,b,2); rant_topic_queue_stats(pl,&waiting,NULL,NULL,NULL); }
+    ST_CHECK(waiting==5 && pl_inline==0, "pull: polling holds 5, no callback (%u, cb=%lu)", waiting, pl_inline);
+    r = rant_topic_take(pl, &m, 0);
+    ST_CHECK(r==1 && get32(m.data.data)==0 && m.data.len==64 && m.recv_us && m.written_us,
+             "pull: take returns the oldest with its stamps (r=%d v=%u)", r, r==1 ? get32(m.data.data) : 0);
+    ST_CHECK(m.topic_name.len==4 && !memcmp(m.topic_name.data,"pl/x",4)
+             && m.publisher_name.len==4 && !memcmp(m.publisher_name.data,"pl-a",4),
+             "pull: the taken msg carries the topic and sender names");
+    r = rant_topic_take_latest(pl, &m, 0);
+    rant_topic_queue_stats(pl,&waiting,NULL,NULL,NULL);
+    ST_CHECK(r==1 && get32(m.data.data)==4, "pull: take_latest returns the newest (v=%u)",
+             r==1 ? get32(m.data.data) : 0);
+    r = rant_topic_take(pl, &m, 0);
+    ST_CHECK(r==0, "pull: take_latest dropped the older ones (%d)", r);
+
+    /* a timed take drives b's own loop */
+    put32(payload, 9u); rant_topic_send(pub, rant_bytes(payload, 64), NULL);
+    r = 0;
+    for (t=0;t<200 && r!=1;t++){ rant_node_poll(a, 0); r = rant_topic_take(pl, &m, 20); }
+    ST_CHECK(r==1 && get32(m.data.data)==9 && pl_inline==0, "pull: a timed take pumps its own loop (r=%d)", r);
+
+    /* a burst read with take_latest while it arrives ends on the newest */
+    for (i=0;i<12;i++){ put32(payload,100u+(uint32_t)i); rant_topic_send(pub, rant_bytes(payload, 64), NULL); st_pump(a,b,1); }
+    {   uint32_t last = 0; uint64_t end = i_rant_plat_now_us()+5000000u;
+        while (last != 111u && i_rant_plat_now_us() < end){
+            st_pump(a,b,2);
+            if (rant_topic_take_latest(pl, &m, 0) == 1) last = get32(m.data.data);
+        }
+        ST_CHECK(last==111u, "pull: take_latest reaches the newest of a burst (%u)", last); }
+done:
+    if (a) rant_node_close(a, 1);
+    if (b) rant_node_close(b, 1);
+    rant_allocator_reset(&aa); rant_allocator_reset(&ba);
+}
+
 /* The callback queue phases (spec/testing.md): a pub only A and a sub only B whose topics
  * cq/x and cq/y share one queue while cq/in stays inline. */
 static RantNode  *cq_b;
@@ -8525,6 +8597,7 @@ static int selftest_main(void){
     interest_external_checks();   /* 19b4. external interest: bootstrap plus paged fetch */
     detail_live_checks();         /* 19c. 'uDTL' on the data socket: stateless reply to source */
     queue_checks();               /* 19d. queue rings: park, timed dispatch, overwrite, park */
+    pull_checks();                /* 19d2. pull topics: take, take_latest, refusals */
     callback_queue_checks();      /* 19e. callback queues: explicit queue, order, refusals */
     callback_pattern_checks();    /* 19f. callback queues on functions, tasks and variables */
     patterns_checks();            /* 19e. functions: request, reply, defer, timeout, sync */

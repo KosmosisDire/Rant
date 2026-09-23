@@ -69,6 +69,7 @@ class RantTopicOpts(Structure):
         ("qos", RantQos),
         ("reflect_from_mesh", c_uint8),
         ("queue", c_void_p),
+        ("pull", c_uint8),
     ]
 
 

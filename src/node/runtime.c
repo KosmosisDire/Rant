@@ -66,6 +66,7 @@ struct RantTopic {
     RantNode *n; uint16_t index; const RantSchema *schema;     /* registered in the node */
     i_RantMsgQueue *q;                    /* its ring on the callback queue, NULL = inline */
     RantQueue *queue;                     /* the callback queue the topic was created with, or NULL */
+    uint8_t   pull;                      /* created with pull: q waits for rant_topic_take */
     i_RantSysMsgFn sys_on_message;        /* the patterns layer's routing, NULL = a normal topic */
     void    *sys_msg_user;
     i_RantSysDispatchFn sys_on_dispatch;  /* the patterns layer's parked record handler */
@@ -582,7 +583,8 @@ static void i_rant_node_queue_event(RantNode *n, const i_RantQRec *rec, RantEven
     }
 }
 
-/* A queued RantMsg: every view points into the record, valid for the dispatched callback.
+/* A queued RantMsg: every view points into the record, valid for the dispatched callback
+ * or until the pull topic's next take.
  * The schema is re resolved now, since the delivery map may repoint. */
 static void i_rant_node_queue_msg(RantNode *n, RantTopic *h, const i_RantQRec *rec, RantMsg *m){
     memset(m, 0, sizeof *m);
@@ -635,7 +637,7 @@ static void i_rant_node_queue_drop(RantNode *n, RantTopic *h){
     h->q = NULL;
 }
 
-/* Pops the record just dispatched, then retries parked lanes into the freed space. Their
+/* Pops the record just dispatched or taken, then retries parked lanes into the freed space. Their
  * acks need a TX pass, so kick. Lock held. */
 static void i_rant_node_queue_release(RantNode *n, RantTopic *h, i_RantMsgQueue *q){
     if (q->viewing){
@@ -1338,6 +1340,17 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
                                       i_rant_role_pubs((uint8_t)role), &ms, &rel, &h->generation);
         if (!schema) schema = ms;
         if (!h->qos.reliability) h->qos.reliability = rel ? RANT_RELIABLE : RANT_BEST_EFFORT;
+    }
+    if (opts && opts->pull){
+        if (opts->queue || kind != RANT_KIND_TOPIC){    /* pull has no callbacks to park */
+            i_rant_node_create_fail(n, RANT_E_STATE, name, 0, 1);
+            i_rant_node_alloc(n, h, 0); i_rant_node_unlock(n, acquired); return NULL;
+        }
+        h->pull = 1;
+        if (!i_rant_node_queue_ensure(n, h, &h->qos)){
+            i_rant_node_create_fail(n, RANT_E_OOM, name, 4096, 1);
+            i_rant_node_alloc(n, h, 0); i_rant_node_unlock(n, acquired); return NULL;
+        }
     }
     if (opts && opts->queue){
         if (opts->queue->n != n){          /* another node's queue */
@@ -2886,22 +2899,22 @@ static int i_rant_queue_any(RantNode *n, RantQueue *g){
     return 0;
 }
 
-/* the queue wait's predicate: a record parked on the group g. The structs are stable
- * allocations, so the pointers survive the waits. */
-typedef struct { RantQueue *g; uint64_t deadline; } i_RantQueueWait;
+/* the queue wait's predicate: a record on the pull ring q when one was given, else parked on
+ * the group g. The structs are stable allocations, so the pointers survive the waits. */
+typedef struct { i_RantMsgQueue *q; RantQueue *g; uint64_t deadline; } i_RantQueueWait;
 
 static int i_rant_node_queue_wait_done(RantNode *n, void *ctx, uint64_t now, uint64_t *deadline){
     i_RantQueueWait *c = (i_RantQueueWait*)ctx;
     (void)now;
     *deadline = c->deadline;
-    return i_rant_queue_any(n, c->g);
+    return c->q ? c->q->count != 0 : i_rant_queue_any(n, c->g);
 }
 
-/* Waits until a record parks on g: on the service thread's progress when one runs, else by
- * driving the poll loop itself. Lock held on entry and exit, never from a callback. */
-static void i_rant_node_queue_wait(RantNode *n, RantQueue *g, int timeout_ms){
+/* Waits until a record lands on q or parks on g: on the service thread's progress when one
+ * runs, else by driving the poll loop itself. Lock held on entry and exit, never from a callback. */
+static void i_rant_node_queue_wait(RantNode *n, i_RantMsgQueue *q, RantQueue *g, int timeout_ms){
     i_RantQueueWait c; i_RantWait w = { 0 };
-    c.g = g;
+    c.q = q; c.g = g;
     c.deadline = timeout_ms < 0 ? (uint64_t)-1
                                 : i_rant_plat_now_us() + (uint64_t)timeout_ms * 1000u;
     w.done = i_rant_node_queue_wait_done; w.ctx = &c;
@@ -2962,7 +2975,7 @@ int rant_queue_dispatch(RantQueue *g, int max_callbacks, int timeout_ms){
     if (!acquired){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* from an inline callback */
     if (g->busy){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* nested, or another thread */
     if (!i_rant_queue_any(n, g) && timeout_ms != 0 && acquired)
-        i_rant_node_queue_wait(n, g, timeout_ms);
+        i_rant_node_queue_wait(n, NULL, g, timeout_ms);
     cutoff = i_rant_plat_now_us();
     g->busy = 1; n->dispatching++;
     while (max_callbacks <= 0 || done < max_callbacks){
@@ -3029,6 +3042,42 @@ int rant_node_set_event_queue(RantNode *n, RantQueue *q){
     n->event_queue = q;
     i_rant_node_unlock(n, acquired);
     return RANT_OK;
+}
+
+/* One take on a pull topic: the previous view goes first, then the oldest record, or with
+ * latest the newest after the older ones are dropped. Dropping frees ring space, which can
+ * unpark a reliable lane and deliver more, so it repeats until one record is left. */
+static int i_rant_topic_take(RantTopic *topic, RantMsg *out, int timeout_ms, int latest){
+    RantNode *n; i_RantMsgQueue *q; int acquired, got = 0;
+    const i_RantQRec *rec;
+    if (!topic || !out) return RANT_ERR_NO_TOPIC;
+    n = topic->n;
+    acquired = i_rant_node_lock(n);
+    q = topic->pull ? topic->q : NULL;
+    if (!q){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }
+    i_rant_node_queue_release(n, topic, q);
+    if (!q->count && timeout_ms != 0 && acquired)
+        i_rant_node_queue_wait(n, q, NULL, timeout_ms);
+    while (latest && q->count > 1){
+        while (q->count > 1) i_rant_q_pop(q);
+        i_rant_node_queue_release(n, topic, q);
+    }
+    rec = i_rant_q_peek(q);
+    if (rec){
+        i_rant_node_queue_msg(n, topic, rec, out);
+        q->viewing = 1;                   /* the view lives until the next take */
+        got = 1;
+    }
+    i_rant_node_unlock(n, acquired);
+    return got;
+}
+
+int rant_topic_take(RantTopic *topic, RantMsg *out, int timeout_ms){
+    return i_rant_topic_take(topic, out, timeout_ms, 0);
+}
+
+int rant_topic_take_latest(RantTopic *topic, RantMsg *out, int timeout_ms){
+    return i_rant_topic_take(topic, out, timeout_ms, 1);
 }
 
 int rant_node_set_log_queue(RantNode *n, RantQueue *q){

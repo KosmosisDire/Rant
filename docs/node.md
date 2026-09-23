@@ -80,6 +80,27 @@ while (running){
 }
 ```
 
+## Pull topics
+
+A subscriber that reads when it wants, such as a frame paced viewer, creates its topic
+with `RantTopicOpts.pull = 1`. It never calls back: messages wait in the topic's ring, sized
+and capped as above, until the app takes them.
+
+- `rant_topic_take(topic, &msg, timeout_ms)` returns the oldest waiting message.
+- `rant_topic_take_latest(topic, &msg, timeout_ms)` returns the newest and drops the older
+  ones.
+
+Both return 1 with a message, 0 with none, and `RANT_ERR_STATE` on a topic created without
+pull. The views stay valid until that topic's next take. Timeouts work as on
+`rant_queue_dispatch`. Pull with a `queue` is refused, since pull has no callbacks to park.
+
+```c
+RantTopic *img = rant_node_create_topic(n, "camera/image", RANT_SUB_ONLY, img_schema,
+                                        &(RantTopicOpts){ .pull = 1 });
+RantMsg m;
+if (rant_topic_take_latest(img, &m, 0) == 1) draw(m.data);
+```
+
 ## Timestamps
 
 Every `RantMsg` carries three clocks.
