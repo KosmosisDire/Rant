@@ -998,6 +998,23 @@ def tasks():
 
         check("caller count seen by the definition", work.match_count == 2)
 
+        # every handle reports the schemas it uses, a reflect remote what it adopted
+        def hash_of(s):
+            return s.hash if s is not None else None
+        req_h, prg_h = hash_of(work.request_schema), hash_of(work.progress_schema)
+        check("a definition reports its schemas",
+              req_h is not None and prg_h is not None and work.response_schema is not None)
+        check("a typed remote reports the same", hash_of(work_r.request_schema) == req_h)
+        work_r.close()   # one remote per name on a node
+        mesh_r = cli.remote_task("work", reflect_from_mesh=True)
+        deadline = time.time() + 8.0
+        while time.time() < deadline and mesh_r.request_schema is None:
+            mesh_r.refresh()
+            time.sleep(0.02)
+        check("a reflect remote reports the schemas it adopted",
+              req_h is not None and hash_of(mesh_r.request_schema) == req_h
+              and hash_of(mesh_r.progress_schema) == prg_h)
+
         try:
             srv.function_definition("nohandler", None, JobReq, JobRsp)
             refused = False

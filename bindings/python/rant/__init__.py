@@ -1638,6 +1638,15 @@ class Entity:
                    progress_schema_hash=e.progress_schema_hash, generation=e.generation)
 
 
+def _current_schema(ptr, local):
+    # the schema a handle uses now: its own, keeping its class, or the one it adopted
+    if not ptr:
+        return None
+    if local is not None and local._s == ptr:
+        return local
+    return Schema._own(ptr)
+
+
 def _own_schema(node, view):
     # the node's view is good only until the next poll, so it is registered in the node
     if not view:
@@ -2778,6 +2787,19 @@ class _Function:
         """Handles matched on the other side: callers on a definition, definitions on a remote."""
         return self._node._lib.rant_function_match_count(self._ptr())
 
+    @property
+    def request_schema(self):
+        """The request schema in use now, None when untyped. A reflect_from_mesh handle
+                reports what it adopted."""
+        p = self._ptr()
+        return _current_schema(p and self._node._lib.rant_function_request_schema(p), self._req_schema)
+
+    @property
+    def response_schema(self):
+        """The response schema in use now, as request_schema."""
+        p = self._ptr()
+        return _current_schema(p and self._node._lib.rant_function_response_schema(p), self._rsp_schema)
+
     def refresh(self):
         """A reflect_from_mesh handle: re type in place when the mesh moved. True when it was
                 re typed (docs/reflection.md)."""
@@ -2921,6 +2943,12 @@ class TaskDefinition(_Function):
         worker thread per call with the value, or the value and a TaskContext."""
     __slots__ = ("_prg_schema",)
 
+    @property
+    def progress_schema(self):
+        """The progress schema in use now, as request_schema."""
+        p = self._ptr()
+        return _current_schema(p and self._node._lib.rant_function_progress_schema(p), self._prg_schema)
+
     def __init__(self, node, name, handler, req_schema=None, prg_schema=None,
                  rsp_schema=None, **opts):
         self._node = node
@@ -2957,6 +2985,12 @@ class RemoteTask(_Function):
         always directed at one provider, and the timeout bounds only the first response
         (docs/tasks.md)."""
     __slots__ = ("_prg_schema",)
+
+    @property
+    def progress_schema(self):
+        """The progress schema in use now, as request_schema."""
+        p = self._ptr()
+        return _current_schema(p and self._node._lib.rant_function_progress_schema(p), self._prg_schema)
 
     def __init__(self, node, name, req_schema=None, prg_schema=None, rsp_schema=None,
                  *, progress_best_effort=False, progress_keep_last=0, timeout=0.0,
@@ -3073,7 +3107,10 @@ class Variable:
 
     @property
     def schema(self):
-        return self._schema
+        """The schema in use now, None when untyped. A reflect_from_mesh variable reports
+                what it adopted."""
+        p = self._ptr()
+        return _current_schema(p and self._node._lib.rant_variable_schema(p), self._schema)
 
     def _ptr(self):
         # NULL once the node is closed, so the C answers NO_TOPIC instead of touching freed memory
@@ -3245,7 +3282,10 @@ class Publisher:
 
     @property
     def schema(self):
-        return self._topic._schema
+        """The schema in use now, None when untyped. A reflect_from_mesh topic reports what
+                it adopted."""
+        p = self._topic._ptr()
+        return _current_schema(p and self._topic._node._lib.rant_topic_schema(p), self._topic._schema)
 
     def send(self, value, capture_us=0):
         """Publish one message to every matched subscriber: a typed value, a mapping, or
@@ -3323,7 +3363,10 @@ class Subscriber:
 
     @property
     def schema(self):
-        return self._topic._schema
+        """The schema in use now, None when untyped. A reflect_from_mesh topic reports what
+                it adopted."""
+        p = self._topic._ptr()
+        return _current_schema(p and self._topic._node._lib.rant_topic_schema(p), self._topic._schema)
 
     @property
     def counts(self):

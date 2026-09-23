@@ -150,7 +150,10 @@ and works as a context manager. `ready` on a publisher is true when a send would
 `match_count` counts matched subscribers, and `drain(timeout)` pumps until every reader
 has acked. A subscriber has no match count, since the C exposes no publisher count on the
 subscribing side. `reflect_from_mesh=True` lets a handle with no schema adopt the mesh's,
-and `refresh()` re types it in place when the mesh moved, as in docs/reflection.md.
+and `refresh()` re types it in place when the mesh moved, as in docs/reflection.md. Every
+handle reports `name` and the schema it uses now, the adopted one on a reflect handle:
+`schema` on a topic or a variable, `request_schema`, `response_schema` and, on a task,
+`progress_schema` on a function or task handle, None while untyped.
 
 ## Functions, tasks and variables
 
