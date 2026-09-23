@@ -226,4 +226,5 @@ null when untyped or not fetched, and `FetchDetails` on the node makes them arri
 schema it has never seen.
 
 `node.Log(level, text)` publishes a line at a `LogLevel`, and the `node.OnLog` event
-delivers every other node's lines at every level as a `RantLogLine`.
+delivers every other node's lines at every level as a `RantLogLine`, at `Dispatch()` under
+`Threading.Dispatch` like every other handler. It throws on a node opened with `DisableLogs`.

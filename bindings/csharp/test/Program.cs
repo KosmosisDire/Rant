@@ -1014,9 +1014,17 @@ static class Program
         while (DateTime.UtcNow < deadline && evtId == 0) { Drain(); Thread.Sleep(5); }
         Check("events ran on the drain thread", evtId == drainId);
 
+        int logId = 0; string logText = null;
+        cli.OnLog += l => { logId = Thread.CurrentThread.ManagedThreadId; logText = l.Text; };
+        srv.Log(LogLevel.Info, "dispatched line");
+        deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline && logText != "dispatched line") { Drain(); Thread.Sleep(5); }
+        Check("log line arrived", logText == "dispatched line");
+
         // nothing may have slipped onto a service thread
         Check("no callback ran off the drain thread",
-              evtId == drainId && fnId == drainId && changeId == drainId && doneId == drainId);
+              evtId == drainId && fnId == drainId && changeId == drainId && doneId == drainId
+              && logId == drainId);
 
         // a handle that outlives its node must refuse, never read the freed arena
         var stalePub = cli.Publisher<Level>("dstale");
@@ -1030,6 +1038,38 @@ static class Program
         Check("stale remote function is unmatched", matchedBefore && call.MatchCount == 0);
 
         Console.WriteLine(ok ? "dispatch: PASS\n" : "dispatch: FAIL\n");
+        return ok;
+    }
+
+    // OnLog on service threads: a line logged before the subscribe replays, a live one follows
+    static bool LogLeg()
+    {
+        Console.WriteLine("log leg: two nodes, domain 50, loopback");
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        using var a = new RantNode("lsrc", Local(50));
+        using var b = new RantNode("lsink", Local(50));
+        var lines = new System.Collections.Concurrent.ConcurrentQueue<RantLogLine>();
+        a.Log(LogLevel.Warn, "before");
+        b.OnLog += l => lines.Enqueue(l);
+        bool Has(string t, LogLevel lv) { foreach (var l in lines) if (l.Text == t && l.Level == lv && l.Node == "lsrc") return true; return false; }
+        var deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline && !Has("before", LogLevel.Warn)) Thread.Sleep(5);
+        Check("a line logged before the subscribe replays", Has("before", LogLevel.Warn));
+        a.Log(LogLevel.Error, "live");
+        deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline && !Has("live", LogLevel.Error)) Thread.Sleep(5);
+        Check("a live line arrives with its level and node",
+              Has("live", LogLevel.Error));
+
+        var o = Local(50); o.DisableLogs = true;
+        using var c = new RantNode("lnone", o);
+        bool threw = false;
+        try { c.OnLog += l => { }; } catch (RantException) { threw = true; }
+        Check("OnLog on a node without logs throws", threw);
+
+        Console.WriteLine(ok ? "log: PASS\n" : "log: FAIL\n");
         return ok;
     }
 
@@ -1253,6 +1293,7 @@ static class Program
         if (ok) ok = Patterns();
         if (ok) ok = Tasks();
         if (ok) ok = DispatchLeg();
+        if (ok) ok = LogLeg();
         if (ok) ok = ReflectLeg();
         if (ok) ok = DisposeLeg();
         Console.WriteLine(ok ? "ALL PASS" : "FAIL");

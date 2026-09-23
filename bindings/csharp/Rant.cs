@@ -649,6 +649,8 @@ namespace Rant
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_node_set_event_queue(IntPtr node, IntPtr q);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_node_set_log_queue(IntPtr node, IntPtr q);
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern void rant_topic_queue_stats(IntPtr ch, out uint msgs,
             out uint bytes, out uint capacity, out uint dropped);
         [DllImport(LIB, CallingConvention = CC)]
@@ -2294,7 +2296,12 @@ namespace Rant
             if (o.Threading == Threading.Dispatch)
             {
                 _queue = CreateQueue();
-                Native.rant_node_set_event_queue(h, _queue.Handle);
+                int qrc = Native.rant_node_set_event_queue(h, _queue.Handle);
+                if (qrc != 0)
+                {
+                    Close(false);
+                    throw new RantException((SendStatus)qrc, "event queue: " + (SendStatus)qrc);
+                }
             }
             if (o.Threading != Threading.Manual)
             {
@@ -2638,7 +2645,8 @@ namespace Rant
         private bool _logBound;
 
         /// <summary>Every other node's log lines at every level as a RantLogLine, on the
-        /// service or polling thread. Nothing arrives when logs are disabled on this node.</summary>
+        /// service or polling thread, or at Dispatch() under Threading.Dispatch. Throws
+        /// RantException when logs are disabled on this node.</summary>
         public event Action<RantLogLine> OnLog
         {
             add
@@ -2650,7 +2658,12 @@ namespace Rant
                     if (_logBound) return;
                     _logBound = true;
                 }
-                BindLog();
+                try { BindLog(); }
+                catch
+                {
+                    lock (_subLock) { _onLog -= value; _logBound = false; }
+                    throw;
+                }
             }
             remove { lock (_subLock) _onLog -= value; }
         }
@@ -2658,11 +2671,19 @@ namespace Rant
         // One subscription per level topic for the node's life, fanning into the event.
         private void BindLog()
         {
+            // the queue goes first, so the catch up replay parks rather than landing inline
+            if (_queue != null)
+            {
+                int qrc = Native.rant_node_set_log_queue(_handle, _queue.Handle);
+                if (qrc != 0) throw new RantException((SendStatus)qrc, "log queue: " + (SendStatus)qrc);
+            }
             foreach (LogLevel level in new[] { LogLevel.Error, LogLevel.Warn, LogLevel.Info })
             {
                 IntPtr ch = Native.rant_node_log_topic(_handle, (int)level);
-                if (ch == IntPtr.Zero) return;                                   // logs disabled
-                if (Native.rant_topic_set_role(ch, (int)Role.PubSub) != 0) return;
+                if (ch == IntPtr.Zero)
+                    throw new RantException(SendStatus.NoSys, "OnLog: logs are disabled on this node");
+                int rc = Native.rant_topic_set_role(ch, (int)Role.PubSub);
+                if (rc != 0) throw new RantException((SendStatus)rc, "OnLog subscribe: " + (SendStatus)rc);
                 LogLevel lv = level;
                 AddSubHandler(Native.rant_topic_index(ch), m =>
                 {
