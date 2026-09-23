@@ -42,12 +42,16 @@ handle carry `name`, and a typed handle carries `schema`.
 Every call is thread safe. The C service thread runs from construction and handlers fire
 on it one at a time. `threading=rant.Threading.MANUAL` leaves the loop to your own thread
 instead: call `poll()` from it and handlers fire there. A build without threads refuses
-the service thread with `rant.Error`, and MANUAL is the way in. From inside a handler,
+the service thread with `rant.Error`, and MANUAL is the way in.
+`threading=rant.Threading.DISPATCH` runs the service thread but parks every handler,
+response, log line and event on the node's queue until your thread calls `node.dispatch()`,
+the one liner for a frame paced app. `node.create_queue()` makes another `rant.Queue`,
+and a handle created with `queue=` set to it parks its callbacks there alone until
+`queue.dispatch()`. Same name topic handles must agree on the queue. From inside a handler,
 sends and read only queries are allowed, and poll, handle creation, close, drain and
 `settle` are refused with `SendStatus.STATE`, None or False.
 
-`settle()` blocks until discovery and matching converge. `dispatch()` on the node drains
-every queued topic on the calling thread. `close()` is refused from a handler and returns
+`settle()` blocks until discovery and matching converge. `close()` is refused from a handler and returns
 False. A node also closes at the end of a `with` block, when its last reference goes (a
 handle holds one) and at interpreter exit. A handle used after its node closed answers
 `NO_TOPIC`, None or False.
@@ -91,8 +95,8 @@ language is the same wire bytes and the same hash.
 
 The schema argument of every handle is a schema class, a bare type, a compiled `Schema` or
 DSL text, and None makes a raw handle whose payloads are bytes or str. The package ships
-type stubs, so a checker sees `node.publisher("pose", Pose).send` take a `Pose` and
-`node.subscriber("pose", Pose).take()` return `Pose | None`, and `rant.Publisher[Pose]` is
+type stubs, so a checker sees `node.publisher("pose", Pose).send` take a `Pose` and the
+handler of `node.subscriber("pose", Pose, handler)` take one, and `rant.Publisher[Pose]` is
 the annotation for one. The scalars are `int` and `float` aliases to a checker. A capped
 string, a fixed or variable array and a pinned enum width are spelled
 `Annotated[T, "<dsl field type>"]`, the Python type for the checker and the DSL for the
@@ -120,17 +124,14 @@ dataclasses and aliases: `rant.types.Transform`, `rant.types.Color`,
 handler=None, **options)` take the topic options of docs/topics.md as keywords:
 `reliable=True` for the reliable transport, `keep_last`, `catch_up`, `max_message_bytes`,
 `heartbeat`, `repair_delay`, `backpressure_wait`, `shm_max_bytes`, `queue_bytes`,
-`max_rate_hz`, `no_timestamp` and `reflect_from_mesh`.
+`max_rate_hz`, `no_timestamp`, `reflect_from_mesh` and `queue`.
 
 A subscriber's handler takes the decoded value, or the value and the `Message`, and runs on
 the polling thread. A `Message` is copied out, so it outlives the callback. `value` is the
 decoded object, None on a raw topic, and `data` the wire bytes. `recv_us` is the node's
 monotonic clock at receipt and `written_us` the writer's wall clock, 0 when the publisher
-opted out, as in docs/node.md. Without a handler, `take(timeout)` and
-`dispatch(max_msgs, timeout)` switch the topic to queued delivery: `take` returns the
-value, None when nothing arrived, and dispatch handlers run on the calling thread without
-the node lock. `queue_stats` on a subscriber and `counts` on either side are the queue and
-traffic counters.
+opted out, as in docs/node.md. `queue_stats` on a subscriber and `counts` on either side
+are the queue and traffic counters.
 
 Same name handles on one node share the topic slot: the node advertises the roles the live
 handles hold, `close()` on one leaves its siblings working, and the last close retires the
@@ -204,4 +205,5 @@ them arrive.
 
 `node.log(level, text)` publishes a line at a `LogLevel`, truncated at RANT_LOG_MAX, and
 `node.on_log(handler)` delivers every other node's lines at every level as a `LogLine`
-carrying its `level`.
+carrying its `level`, at `dispatch()` under DISPATCH. It raises `rant.Error` on a node
+opened with `disable_logs`.

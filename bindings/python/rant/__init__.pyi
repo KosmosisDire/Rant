@@ -1,7 +1,7 @@
 """The public surface of the rant package as the type checker sees it. The runtime is
 __init__.py, and docs/python.md explains the API. Every handle comes from a node method and
-is generic in its schema class, so node.publisher("pose", Pose) sends Pose and
-node.subscriber("pose", Pose).take() returns Pose or None."""
+is generic in its schema class, so node.publisher("pose", Pose) sends Pose and the handler of
+node.subscriber("pose", Pose, handler) takes Pose."""
 
 from enum import Enum, IntEnum, IntFlag
 from threading import Event as _ThreadEvent
@@ -39,6 +39,7 @@ _Payload: TypeAlias = bytes | bytearray | memoryview | str | Mapping[str, Any]
 class Threading(IntEnum):
     SERVICE_THREAD = 0
     MANUAL = 1
+    DISPATCH = 2
 
 class SendStatus(IntEnum):
     OK = 0
@@ -240,6 +241,13 @@ class QueueStats(NamedTuple):
     capacity: int
     dropped: int
 
+class Queue:
+    """A callback queue of a node, from node.create_queue(). Handles created with queue= set
+    to it park their callbacks until dispatch()."""
+    def dispatch(self, max_callbacks: int = 0, timeout: float | None = 0.0) -> int: ...
+    @property
+    def stats(self) -> tuple[int, int]: ...
+
 class LogLine:
     level: LogLevel
     node: str
@@ -393,35 +401,35 @@ class Node:
                   heartbeat: float = 0.0, repair_delay: float = 0.0,
                   backpressure_wait: float = 0.0, shm_max_bytes: int = 0, queue_bytes: int = 0,
                   max_rate_hz: int = 0, no_timestamp: bool = False,
-                  reflect_from_mesh: bool = False) -> Publisher[T]: ...
+                  reflect_from_mesh: bool = False, queue: Queue | None = None) -> Publisher[T]: ...
     @overload
     def publisher(self, name: str, schema: Schema | str, *, reliable: bool = False,
                   keep_last: int = 0, catch_up: int = 0, max_message_bytes: int = 0,
                   heartbeat: float = 0.0, repair_delay: float = 0.0,
                   backpressure_wait: float = 0.0, shm_max_bytes: int = 0, queue_bytes: int = 0,
                   max_rate_hz: int = 0, no_timestamp: bool = False,
-                  reflect_from_mesh: bool = False) -> Publisher[Any]: ...
+                  reflect_from_mesh: bool = False, queue: Queue | None = None) -> Publisher[Any]: ...
     @overload
     def publisher(self, name: str, schema: None = None, *, reliable: bool = False,
                   keep_last: int = 0, catch_up: int = 0, max_message_bytes: int = 0,
                   heartbeat: float = 0.0, repair_delay: float = 0.0,
                   backpressure_wait: float = 0.0, shm_max_bytes: int = 0, queue_bytes: int = 0,
                   max_rate_hz: int = 0, no_timestamp: bool = False,
-                  reflect_from_mesh: bool = False) -> Publisher[bytes]: ...
+                  reflect_from_mesh: bool = False, queue: Queue | None = None) -> Publisher[bytes]: ...
     @overload
     def subscriber(self, name: str, schema: type[T], handler: _MsgHandler[T] = None, *,
                    reliable: bool = False, keep_last: int = 0, catch_up: int = 0,
                    max_message_bytes: int = 0, heartbeat: float = 0.0, repair_delay: float = 0.0,
                    backpressure_wait: float = 0.0, shm_max_bytes: int = 0, queue_bytes: int = 0,
                    max_rate_hz: int = 0, no_timestamp: bool = False,
-                   reflect_from_mesh: bool = False) -> Subscriber[T]: ...
+                   reflect_from_mesh: bool = False, queue: Queue | None = None) -> Subscriber[T]: ...
     @overload
     def subscriber(self, name: str, schema: Schema | str, handler: _MsgHandler[Any] = None, *,
                    reliable: bool = False, keep_last: int = 0, catch_up: int = 0,
                    max_message_bytes: int = 0, heartbeat: float = 0.0, repair_delay: float = 0.0,
                    backpressure_wait: float = 0.0, shm_max_bytes: int = 0, queue_bytes: int = 0,
                    max_rate_hz: int = 0, no_timestamp: bool = False,
-                   reflect_from_mesh: bool = False) -> Subscriber[Any]: ...
+                   reflect_from_mesh: bool = False, queue: Queue | None = None) -> Subscriber[Any]: ...
     @overload
     def subscriber(self, name: str, schema: None = None,
                    handler: Callable[[bytes], object] | Callable[[bytes, Message[bytes]], object] | None = None, *,
@@ -429,20 +437,20 @@ class Node:
                    max_message_bytes: int = 0, heartbeat: float = 0.0, repair_delay: float = 0.0,
                    backpressure_wait: float = 0.0, shm_max_bytes: int = 0, queue_bytes: int = 0,
                    max_rate_hz: int = 0, no_timestamp: bool = False,
-                   reflect_from_mesh: bool = False) -> Subscriber[bytes]: ...
+                   reflect_from_mesh: bool = False, queue: Queue | None = None) -> Subscriber[bytes]: ...
 
     def function_definition(self, name: str, handler: _FnHandler[Req, Rsp],
                             req_schema: type[Req] | Schema | str | None = None,
                             rsp_schema: type[Rsp] | Schema | str | None = None, *,
                             backpressure_wait: float = 0.0, timeout: float = 0.0,
                             keep_last: int = 0, multi: bool = False,
-                            reflect_from_mesh: bool = False) -> FunctionDefinition[Req, Rsp]: ...
+                            reflect_from_mesh: bool = False, queue: Queue | None = None) -> FunctionDefinition[Req, Rsp]: ...
     def remote_function(self, name: str,
                         req_schema: type[Req] | Schema | str | None = None,
                         rsp_schema: type[Rsp] | Schema | str | None = None, *,
                         backpressure_wait: float = 0.0, timeout: float = 0.0,
                         keep_last: int = 0, multi: bool = False,
-                        reflect_from_mesh: bool = False) -> RemoteFunction[Req, Rsp]: ...
+                        reflect_from_mesh: bool = False, queue: Queue | None = None) -> RemoteFunction[Req, Rsp]: ...
     def task_definition(self, name: str, handler: _TaskHandler[Req, Prg, Rsp],
                         req_schema: type[Req] | Schema | str | None = None,
                         prg_schema: type[Prg] | Schema | str | None = None,
@@ -451,25 +459,26 @@ class Node:
                         no_cancel: bool = False, exclusive: bool = False, multi: bool = False,
                         timeout: float = 0.0, backpressure_wait: float = 0.0,
                         keep_last: int = 0,
-                        reflect_from_mesh: bool = False) -> TaskDefinition[Req, Prg, Rsp]: ...
+                        reflect_from_mesh: bool = False, queue: Queue | None = None) -> TaskDefinition[Req, Prg, Rsp]: ...
     def remote_task(self, name: str,
                     req_schema: type[Req] | Schema | str | None = None,
                     prg_schema: type[Prg] | Schema | str | None = None,
                     rsp_schema: type[Rsp] | Schema | str | None = None, *,
                     progress_best_effort: bool = False, progress_keep_last: int = 0,
                     timeout: float = 0.0, backpressure_wait: float = 0.0, keep_last: int = 0,
-                    reflect_from_mesh: bool = False) -> RemoteTask[Req, Prg, Rsp]: ...
+                    reflect_from_mesh: bool = False, queue: Queue | None = None) -> RemoteTask[Req, Prg, Rsp]: ...
     def variable_definition(self, name: str, schema: type[T] | Schema | str | None = None, *,
                             initial: T | _Payload | None = None, read_only: bool = False,
                             allow_force: bool = False, catch_up: int = 0, keep_last: int = 0,
                             backpressure_wait: float = 0.0,
-                            reflect_from_mesh: bool = False) -> VariableDefinition[T]: ...
+                            reflect_from_mesh: bool = False, queue: Queue | None = None) -> VariableDefinition[T]: ...
     def remote_variable(self, name: str, schema: type[T] | Schema | str | None = None, *,
                         catch_up: int = 0, keep_last: int = 0, backpressure_wait: float = 0.0,
-                        reflect_from_mesh: bool = False) -> RemoteVariable[T]: ...
+                        reflect_from_mesh: bool = False, queue: Queue | None = None) -> RemoteVariable[T]: ...
 
     def poll(self, timeout: float | None = 0.0) -> int: ...
-    def dispatch(self, max_msgs: int = 0, timeout: float | None = 0.0) -> int: ...
+    def dispatch(self, max_callbacks: int = 0, timeout: float | None = 0.0) -> int: ...
+    def create_queue(self) -> Queue: ...
     def settle(self, timeout: float | None = None) -> bool: ...
     def log(self, level: LogLevel, text: str | bytes) -> SendStatus: ...
     def on_log(self, handler: Callable[[LogLine], object] | None) -> Callable[[LogLine], object] | None: ...
@@ -498,14 +507,11 @@ class Publisher(Generic[T]):
 
 class Subscriber(Generic[T]):
     """The subscribing side of a topic, from node.subscriber. The handler takes the decoded T,
-    or T and the Message, and runs on the polling thread. Without one, take() and dispatch()
-    consume the queue."""
+    or T and the Message, and runs on the polling thread or at dispatch() of its queue."""
     @property
     def name(self) -> str: ...
     @property
     def schema(self) -> Schema | None: ...
-    def take(self, timeout: float | None = 0.0) -> T | None: ...
-    def dispatch(self, max_msgs: int = 0, timeout: float | None = 0.0) -> int: ...
     @property
     def counts(self) -> TopicCounts: ...
     @property

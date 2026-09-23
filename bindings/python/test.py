@@ -1007,6 +1007,119 @@ got = threading.Event()
 received = []
 
 
+def dispatch_leg():
+    """Threading.DISPATCH: every handler, response, log line and event runs on the thread
+        that calls dispatch(), and a queue of its own keeps a handle's callbacks apart."""
+    print("dispatch leg: two nodes, domain 55, loopback")
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    me = threading.get_ident()
+    seen = {}
+
+    def mark(what):
+        seen.setdefault(what, threading.get_ident())
+
+    srv = rant.Node("dsrv", on_event=lambda e: mark("event"), domain=55,
+                    multicast_interface=IFACE, max_topics=32, threading=rant.Threading.DISPATCH)
+    cli = rant.Node("dcli", on_event=lambda e: None, domain=55, multicast_interface=IFACE,
+                    max_topics=32, threading=rant.Threading.DISPATCH)
+
+    def drain():
+        srv.dispatch()
+        cli.dispatch()
+
+    def wait(cond, secs=8.0):
+        deadline = time.time() + secs
+        while time.time() < deadline and not cond():
+            drain()
+            time.sleep(0.005)
+        return cond()
+
+    def add(q):
+        mark("function")
+        return AddRsp(sum=q.a + q.b)
+    srv.function_definition("dadd", add, AddReq, AddRsp)
+    lvl_def = srv.variable_definition("dlevel", Level, initial=Level(value=1))
+    got = []
+    srv.subscriber("dtopic", Level, lambda v: (mark("subscriber"), got.append(v.value)))
+
+    add_r = cli.remote_function("dadd", AddReq, AddRsp)
+    lvl = cli.remote_variable("dlevel", Level)
+    pub = cli.publisher("dtopic", Level, reliable=True)
+    check("everything matched",
+          wait(lambda: add_r.match_count > 0 and lvl.match_count > 0 and pub.match_count > 0))
+
+    rsp = []
+    add_r.call_async(AddReq(a=2, b=3), lambda r: (mark("response"), rsp.append(r)))
+    check("the dispatched handler answered", wait(lambda: bool(rsp)) and rsp[0].value.sum == 5)
+
+    changes = []
+    lvl.on_change(lambda v: (mark("change"), changes.append(v.value)))
+    lvl_def.set(Level(value=9))
+    check("the variable change arrived", wait(lambda: 9 in changes))
+
+    pub.send(Level(value=4))
+    check("the subscriber got the message", wait(lambda: 4 in got))
+
+    lines = []
+    cli.on_log(lambda line: (mark("log"), lines.append(line.text)))
+    srv.log(rant.LogLevel.INFO, "dispatched line")
+    check("the log line arrived", wait(lambda: "dispatched line" in lines))
+    check("the event arrived", wait(lambda: "event" in seen))
+
+    stray = sorted(k for k, v in seen.items() if v != me)
+    check("every callback ran on the dispatch thread (%s)" % (", ".join(stray) or "all"),
+          not stray and len(seen) == 6)
+
+    # a queue of its own: the handler waits for that queue alone
+    q = srv.create_queue()
+    own = []
+    srv.subscriber("down", Level, lambda v: own.append(v.value), queue=q)
+    pub2 = cli.publisher("down", Level, reliable=True)
+    check("the second topic matched", wait(lambda: pub2.match_count > 0))
+    pub2.send(Level(value=7))
+    check("the queue holds it until its own dispatch",
+          wait(lambda: q.stats[0] == 1) and not own)
+    check("the queue's dispatch runs it", q.dispatch() == 1 and own == [7])
+    try:
+        srv.publisher("down", Level)
+        shared = True
+    except rant.Error:
+        shared = False
+    check("a same name handle on another queue is refused", not shared)
+    try:
+        cli.subscriber("x", Level, lambda v: None, queue=q)
+        foreign = True
+    except ValueError:
+        foreign = False
+    check("another node's queue is refused", not foreign)
+
+    plain = rant.Node("dplain", on_event=lambda e: None, domain=55, multicast_interface=IFACE)
+    try:
+        plain.dispatch()
+        raised = False
+    except rant.Error:
+        raised = True
+    check("dispatch() needs Threading.DISPATCH", raised)
+    quiet = rant.Node("dquiet", on_event=lambda e: None, domain=55, multicast_interface=IFACE,
+                      disable_logs=True)
+    try:
+        quiet.on_log(lambda line: None)
+        raised = False
+    except rant.Error:
+        raised = True
+    check("on_log on a node without logs raises", raised)
+    for n in (quiet, plain, cli, srv):
+        n.close()
+    print("dispatch: PASS\n" if ok else "dispatch: FAIL\n")
+    return ok
+
+
 def on_pose(pose, m):
     received.append(pose)
     print("recv: [%s] from %s -> %r" % (m.topic_name, m.publisher_name, pose))
@@ -1072,7 +1185,7 @@ def main():
     # A handle outliving its node answers NO_TOPIC instead of touching freed memory.
     if ok:
         ok = (pubch.send(sent) == rant.SendStatus.NO_TOPIC and pubch.match_count == 0
-              and subch.take() is None and pubch.name == "pose" and pub.name == "pub")
+              and subch.queue_stats.messages == 0 and pubch.name == "pose" and pub.name == "pub")
         print("PASS: handle after close" if ok else "FAIL: handle after close")
 
     if ok:
@@ -1089,6 +1202,8 @@ def main():
         ok = patterns()
     if ok:
         ok = tasks()
+    if ok:
+        ok = dispatch_leg()
     return 0 if ok else 1
 
 

@@ -188,7 +188,8 @@ platform serves every interpreter.
   argument are properties (`match_count`, `ready`, `forced`, `counts`, `stats`,
   `last_error`), actions are methods. Variables are methods only. Handlers are arity
   dispatched and single: a subscriber's in the factory, `on_change`, `on_write` and
-  `on_log` rebinding.
+  `on_log` rebinding. `Threading.DISPATCH` and `queue=` on every handle mirror C#'s
+  Dispatch and `Qos.Queue`, with `rant.Queue` from `node.create_queue()`.
 - Any annotated class is a schema, no decorator needed. Field types: `rant.u8` to
   `rant.f64`, `rant.string(cap)`, `rant.<t>[N]`, a nested class, plain int, float and
   bool, `str` (VSTR), `list[...]` (VARR), `dict` (MAP), or a bare `IntEnum`.

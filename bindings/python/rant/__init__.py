@@ -17,7 +17,7 @@ from . import _native as _c
 
 __all__ = [
     "Node", "Publisher", "Subscriber", "Message", "Event", "NodeStats", "TopicCounts",
-    "QueueStats", "Schema", "dsl", "types",
+    "Queue", "QueueStats", "Schema", "dsl", "types",
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "string", "enum",
     "Threading", "SendStatus", "CallStatus", "LogLevel", "MetaSection", "EventKind",
     "ErrorKind", "PeerLiveness", "EntityKind",
@@ -33,9 +33,11 @@ __all__ = [
 
 class Threading(_pyenum.IntEnum):
     """Who drives a node's loop: the C service thread, started at construction, or your own
-        thread calling poll()."""
+        thread calling poll(). DISPATCH runs the service thread and parks every callback on
+        the node's queue until your thread calls node.dispatch()."""
     SERVICE_THREAD = 0
     MANUAL = 1
+    DISPATCH = 2
 
 
 class SendStatus(_pyenum.IntEnum):
@@ -1545,7 +1547,7 @@ class TopicCounts(_typing.NamedTuple):
 
 
 class QueueStats(_typing.NamedTuple):
-    """A subscriber's consumer queue, all zeros when the topic is not queued."""
+    """A subscriber's ring on its queue, all zeros when the topic is not queued."""
     messages: int
     bytes: int
     capacity: int
@@ -1639,9 +1641,10 @@ def _own_schema(node, view):
     return Schema._own(h) if h else None
 
 
-def _topic_opts(reliable=False, keep_last=0, catch_up=0, max_message_bytes=0, heartbeat=0.0,
-                repair_delay=0.0, backpressure_wait=0.0, shm_max_bytes=0, queue_bytes=0,
-                max_rate_hz=0, no_timestamp=False, reflect_from_mesh=False):
+def _topic_opts(node, reliable=False, keep_last=0, catch_up=0, max_message_bytes=0,
+                heartbeat=0.0, repair_delay=0.0, backpressure_wait=0.0, shm_max_bytes=0,
+                queue_bytes=0, max_rate_hz=0, no_timestamp=False, reflect_from_mesh=False,
+                queue=None):
     """The topic keywords of docs/topics.md to the C RantTopicOpts, durations in seconds."""
     co = _c.RantTopicOpts()
     _c.memset(_c.byref(co), 0, _c.sizeof(co))
@@ -1657,17 +1660,19 @@ def _topic_opts(reliable=False, keep_last=0, catch_up=0, max_message_bytes=0, he
     co.qos.max_rate_hz = max_rate_hz
     co.qos.no_timestamp = 1 if no_timestamp else 0
     co.reflect_from_mesh = 1 if reflect_from_mesh else 0
+    co.queue = node._queue_handle(queue)
     return co
 
 
 class _TopicRec:
     """One native topic slot in the node's registry, held once per live handle and role."""
-    __slots__ = ("handle", "index", "schema_hash", "pubs", "subs")
+    __slots__ = ("handle", "index", "schema_hash", "queue", "pubs", "subs")
 
-    def __init__(self, handle, index, schema_hash):
+    def __init__(self, handle, index, schema_hash, queue):
         self.handle = handle
         self.index = index
         self.schema_hash = schema_hash
+        self.queue = queue
         self.pubs = 0
         self.subs = 0
 
@@ -1712,15 +1717,6 @@ class _Topic:
         del buf
         return _send_status(r)
 
-    def take(self, timeout):
-        m = _c.RantMsg()
-        if self._node._lib.rant_topic_take(self._ptr(), _c.byref(m), _ms(timeout)) != 1:
-            return None
-        return Message._from_c(m, self._node._topic_specs.get(m.topic_index))
-
-    def dispatch(self, max_msgs, timeout):
-        return self._node._lib.rant_topic_dispatch(self._ptr(), max_msgs, _ms(timeout))
-
     @property
     def counts(self):
         tm, tb, rm, rb = _c.c_uint64(), _c.c_uint64(), _c.c_uint64(), _c.c_uint64()
@@ -1749,6 +1745,33 @@ class _Topic:
         return True
 
 
+class Queue:
+    """A callback queue of a node, from node.create_queue(). A handle created with queue= set
+        to it parks its callbacks, and dispatch() runs them on the calling thread."""
+    __slots__ = ("_node", "_q")
+
+    def __init__(self, node, q):
+        self._node = node
+        self._q = q
+
+    def dispatch(self, max_callbacks=0, timeout=0.0):
+        """Run the callbacks parked at entry, oldest first, up to max_callbacks (0 = all),
+                waiting up to timeout seconds for the first, None = forever. Returns the
+                count run, or STATE from a callback or while another thread dispatches it."""
+        if not self._node._h:
+            return int(SendStatus.STATE)
+        return self._node._lib.rant_queue_dispatch(self._q, max_callbacks, _ms(timeout))
+
+    @property
+    def stats(self):
+        """(waiting, dropped): callbacks parked now, and dropped since open."""
+        if not self._node._h:
+            return (0, 0)
+        w, d = _c.c_uint32(), _c.c_uint32()
+        self._node._lib.rant_queue_stats(self._q, _c.byref(w), _c.byref(d))
+        return (w.value, d.value)
+
+
 class Node:
     """One participant on the mesh: Node(name, **options). Its publisher, subscriber,
     function, task and variable methods create the handles. The service thread runs from
@@ -1760,7 +1783,7 @@ class Node:
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_evt", "_on_log", "_log_bound",
                  "_topic_specs", "_topics_by_name", "_create_lock",
                  "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock", "_name",
-                 "_threading", "__weakref__")
+                 "_threading", "_queue", "_pump", "__weakref__")
 
     def __init__(self, name=None, *, on_event=None, domain=0,
                  multicast_interface=None, max_topics=0, match_wait=0.0, disable_shm=False,
@@ -1778,6 +1801,8 @@ class Node:
         self._lib = None
         self._name = name or None
         self._threading = Threading(threading)
+        self._queue = None
+        self._pump = False
         self._h = None
         self._id = None
         self._alloc = None
@@ -1841,9 +1866,17 @@ class Node:
             err = Event._from_c(lib.rant_last_error(None))
             raise Error("Node(...) failed: %s" % err, err)
         self._h = h
-        if self._threading == Threading.SERVICE_THREAD:
-            rc = lib.rant_node_start(h)
+        if self._threading == Threading.DISPATCH:
+            self._queue = self.create_queue()
+            rc = lib.rant_node_set_event_queue(h, self._queue._q)
             if rc != 0:
+                self.close(False)
+                raise Error("Node(...) event queue failed: %s" % _send_status(rc))
+        if self._threading != Threading.MANUAL:
+            rc = lib.rant_node_start(h)
+            if rc != 0 and self._threading == Threading.DISPATCH:
+                self._pump = True   # no threads in this build: dispatch() drives the loop
+            elif rc != 0:
                 self.close(False)
                 raise Error("Node(...) service thread start failed: %s (open with "
                             "threading=rant.Threading.MANUAL and poll() the node)"
@@ -1870,13 +1903,14 @@ class Node:
                 or DSL text, None for raw bytes. The keywords are the topic options of
                 docs/topics.md: reliable, keep_last, catch_up, max_message_bytes, heartbeat,
                 repair_delay, backpressure_wait, shm_max_bytes, queue_bytes, max_rate_hz,
-                no_timestamp and reflect_from_mesh, durations in seconds."""
+                no_timestamp and reflect_from_mesh, durations in seconds, and queue, the
+                Queue a subscriber's handler parks on."""
         return Publisher(self, name, schema, **qos)
 
     def subscriber(self, name, schema=None, handler=None, **qos):
         """The subscribing side of a topic. handler takes the decoded value, or the value and
-                the Message, and runs on the polling thread. Without one, take() and
-                dispatch() consume a queue. The keywords are publisher's."""
+                the Message, and runs on the polling thread, or at dispatch() of its queue.
+                The keywords are publisher's."""
         return Subscriber(self, name, schema, handler, **qos)
 
     def function_definition(self, name, handler, req_schema=None, rsp_schema=None, **opts):
@@ -1931,6 +1965,9 @@ class Node:
                 if sh and rec.schema_hash and sh != rec.schema_hash:
                     raise Error("topic %r already exists on this node with a different schema"
                                 % name)
+                if opts.queue != rec.queue:
+                    raise Error("topic %r already exists on this node with a different queue "
+                                "(same name handles share one slot and its queue)" % name)
                 bits = rec.bits | bit
                 if bits != rec.bits:
                     r = self._lib.rant_topic_set_role(rec.handle, _role_from_bits(bits))
@@ -1949,7 +1986,7 @@ class Node:
                 if not h:
                     err = self.last_error
                     raise Error("topic %r create failed: %s" % (name, err), err)
-                rec = _TopicRec(h, self._lib.rant_topic_index(h), sh)
+                rec = _TopicRec(h, self._lib.rant_topic_index(h), sh, opts.queue)
                 self._topic_specs[rec.index] = sch._spec if sch else None
                 self._topics_by_name[name] = rec
             rec.hold(bit)
@@ -1986,10 +2023,37 @@ class Node:
                 happens. Returns STATE under the service thread."""
         return self._lib.rant_node_poll(self._h, _ms(timeout))
 
-    def dispatch(self, max_msgs=0, timeout=0.0):
-        """Dispatch every queued topic on the calling thread, waiting up to timeout seconds for any
-                to hold data. The one liner for a frame paced consumer."""
-        return self._lib.rant_node_dispatch(self._h, max_msgs, _ms(timeout))
+    def dispatch(self, max_callbacks=0, timeout=0.0):
+        """Under Threading.DISPATCH: run every callback parked since the last call on the
+                calling thread, up to max_callbacks (0 = all), waiting up to timeout seconds
+                for the first. The one liner for a frame paced app. Raises for another
+                threading mode."""
+        if self._queue is None:
+            raise Error("dispatch() needs Threading.DISPATCH, this node is %s"
+                        % self._threading.name)
+        if self._pump and timeout == 0:
+            self._lib.rant_node_poll(self._h, 0)
+        return self._queue.dispatch(max_callbacks, timeout)
+
+    def create_queue(self):
+        """A callback queue of this node, for handles that want their callbacks on a thread of
+                their own: pass it as queue= when creating them. At most 8 per node, freed
+                with the node."""
+        q = self._lib.rant_node_create_queue(self._h)
+        if not q:
+            err = self.last_error
+            raise Error("create_queue() failed: %s" % err, err)
+        return Queue(self, q)
+
+    def _queue_handle(self, queue):
+        # the native queue a handle is created with: the named one, else the node's default
+        if queue is None:
+            return self._queue._q if self._queue is not None else None
+        if not isinstance(queue, Queue):
+            raise TypeError("queue must be a rant.Queue")
+        if queue._node is not self:
+            raise ValueError("the queue belongs to another node")
+        return queue._q
 
     def settle(self, timeout=None):
         """Block until discovery and matching settle, so everything sent now reaches everyone.
@@ -2006,21 +2070,30 @@ class Node:
 
     def on_log(self, handler):
         """Deliver every other node's log lines at every level to handler as a LogLine, on the
-                polling thread. A later call rebinds, None stops delivery. Returns handler, so
-                it works as a decorator. Nothing arrives when logs are disabled."""
-        self._on_log = handler
+                polling thread, or at dispatch() under Threading.DISPATCH. A later call
+                rebinds, None stops delivery. Returns handler, so it works as a decorator.
+                Raises Error when logs are disabled on this node."""
         if handler is not None and not self._log_bound:
-            self._log_bound = self._bind_log()
+            self._bind_log()
+            self._log_bound = True
+        self._on_log = handler
         return handler
 
     def _bind_log(self):
-        # one subscription per level topic for the node's life, fanning into the handler
+        # one subscription per level topic for the node's life, fanning into the handler. The
+        # queue goes first, so the catch up replay parks rather than landing inline
+        if self._queue is not None:
+            rc = self._lib.rant_node_set_log_queue(self._h, self._queue._q)
+            if rc != 0:
+                raise Error("on_log: log queue refused: %s" % _send_status(rc), self.last_error)
         for level in (LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO):
             h = self._lib.rant_node_log_topic(self._h, int(level))
-            if not h or self._lib.rant_topic_set_role(h, _ROLE_PUBSUB) != 0:
-                return False
+            if not h:
+                raise Error("on_log: logs are disabled on this node")
+            rc = self._lib.rant_topic_set_role(h, _ROLE_PUBSUB)
+            if rc != 0:
+                raise Error("on_log: subscribe refused: %s" % _send_status(rc), self.last_error)
             self._add_sub_handler(self._lib.rant_topic_index(h), self._log_line(level))
-        return True
 
     def _log_line(self, level):
         def deliver(m):
@@ -2610,8 +2683,8 @@ class _VarBox:
         self.schema = schema
 
 
-def _function_opts(backpressure_wait=0.0, timeout=0.0, keep_last=0, multi=False,
-                   reflect_from_mesh=False):
+def _function_opts(node, backpressure_wait=0.0, timeout=0.0, keep_last=0, multi=False,
+                   reflect_from_mesh=False, queue=None):
     co = _c.RantFunctionOpts()
     _c.memset(_c.byref(co), 0, _c.sizeof(co))
     co.backpressure_wait_us = _us(backpressure_wait)
@@ -2619,12 +2692,13 @@ def _function_opts(backpressure_wait=0.0, timeout=0.0, keep_last=0, multi=False,
     co.keep_last = keep_last
     co.multi = 1 if multi else 0
     co.reflect_from_mesh = 1 if reflect_from_mesh else 0
+    co.queue = node._queue_handle(queue)
     return co
 
 
-def _task_opts(progress_best_effort=False, progress_keep_last=0, no_cancel=False,
+def _task_opts(node, progress_best_effort=False, progress_keep_last=0, no_cancel=False,
                exclusive=False, multi=False, timeout=0.0, backpressure_wait=0.0, keep_last=0,
-               reflect_from_mesh=False):
+               reflect_from_mesh=False, queue=None):
     co = _c.RantTaskOpts()
     _c.memset(_c.byref(co), 0, _c.sizeof(co))
     co.progress_best_effort = 1 if progress_best_effort else 0
@@ -2636,6 +2710,7 @@ def _task_opts(progress_best_effort=False, progress_keep_last=0, no_cancel=False
     co.backpressure_wait_us = _us(backpressure_wait)
     co.keep_last = keep_last
     co.reflect_from_mesh = 1 if reflect_from_mesh else 0
+    co.queue = node._queue_handle(queue)
     return co
 
 
@@ -2692,7 +2767,7 @@ class FunctionDefinition(_Function):
         self._name = name
         self._req_schema = _as_schema(node, req_schema)
         self._rsp_schema = _as_schema(node, rsp_schema)
-        co = _function_opts(**opts)
+        co = _function_opts(node, **opts)
         box_id = 0
         box = None
         if handler is not None:
@@ -2725,7 +2800,7 @@ class RemoteFunction(_Function):
         self._name = name
         self._req_schema = _as_schema(node, req_schema)
         self._rsp_schema = _as_schema(node, rsp_schema)
-        co = _function_opts(**opts)
+        co = _function_opts(node, **opts)
         h = node._lib.rant_node_create_remote_function(
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
@@ -2810,7 +2885,7 @@ class TaskDefinition(_Function):
         self._req_schema = _as_schema(node, req_schema)
         self._prg_schema = _as_schema(node, prg_schema)
         self._rsp_schema = _as_schema(node, rsp_schema)
-        co = _task_opts(**opts)
+        co = _task_opts(node, **opts)
         box_id = 0
         box = None
         if handler is not None:
@@ -2846,16 +2921,16 @@ class RemoteTask(_Function):
 
     def __init__(self, node, name, req_schema=None, prg_schema=None, rsp_schema=None,
                  *, progress_best_effort=False, progress_keep_last=0, timeout=0.0,
-                 backpressure_wait=0.0, keep_last=0, reflect_from_mesh=False):
+                 backpressure_wait=0.0, keep_last=0, reflect_from_mesh=False, queue=None):
         self._node = node
         self._name = name
         self._req_schema = _as_schema(node, req_schema)
         self._prg_schema = _as_schema(node, prg_schema)
         self._rsp_schema = _as_schema(node, rsp_schema)
-        co = _task_opts(progress_best_effort=progress_best_effort,
+        co = _task_opts(node, progress_best_effort=progress_best_effort,
                         progress_keep_last=progress_keep_last, timeout=timeout,
                         backpressure_wait=backpressure_wait, keep_last=keep_last,
-                        reflect_from_mesh=reflect_from_mesh)
+                        reflect_from_mesh=reflect_from_mesh, queue=queue)
         h = node._lib.rant_node_create_remote_task(
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
@@ -3074,7 +3149,7 @@ class VariableDefinition(Variable):
 
     def __init__(self, node, name, schema=None, *, initial=None, read_only=False,
                  allow_force=False, catch_up=0, keep_last=0, backpressure_wait=0.0,
-                 reflect_from_mesh=False):
+                 reflect_from_mesh=False, queue=None):
         co = _c.RantVariableOpts()
         _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.access = 1 if read_only else 0
@@ -3083,6 +3158,7 @@ class VariableDefinition(Variable):
         co.keep_last = keep_last
         co.backpressure_wait_us = _us(backpressure_wait)
         co.reflect_from_mesh = 1 if reflect_from_mesh else 0
+        co.queue = node._queue_handle(queue)
         sch = _as_schema(node, schema)
         b, buf = _c_view(_payload_bytes(sch, initial) if initial is not None else b"")
         co.initial = b
@@ -3098,13 +3174,14 @@ class RemoteVariable(Variable):
     __slots__ = ()
 
     def __init__(self, node, name, schema=None, *, catch_up=0, keep_last=0,
-                 backpressure_wait=0.0, reflect_from_mesh=False):
+                 backpressure_wait=0.0, reflect_from_mesh=False, queue=None):
         co = _c.RantVariableOpts()
         _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.catch_up = catch_up
         co.keep_last = keep_last
         co.backpressure_wait_us = _us(backpressure_wait)
         co.reflect_from_mesh = 1 if reflect_from_mesh else 0
+        co.queue = node._queue_handle(queue)
         self._create(node, name, schema, co, True)
 
     __class_getitem__ = classmethod(_generic)
@@ -3116,7 +3193,7 @@ class Publisher:
     __slots__ = ("_topic",)
 
     def __init__(self, node, name, schema=None, **qos):
-        self._topic = _Topic(node, name, schema, _PUB_BIT, _topic_opts(**qos))
+        self._topic = _Topic(node, name, schema, _PUB_BIT, _topic_opts(node, **qos))
 
     __class_getitem__ = classmethod(_generic)
 
@@ -3175,11 +3252,11 @@ class Publisher:
 
 class Subscriber:
     """The subscribing side of a topic, from node.subscriber. The handler fires per message
-        on the polling thread, or take() and dispatch() consume from a queue."""
+        on the polling thread, or at dispatch() of its queue."""
     __slots__ = ("_topic", "_fn")
 
     def __init__(self, node, name, schema=None, handler=None, **qos):
-        self._topic = _Topic(node, name, schema, _SUB_BIT, _topic_opts(**qos))
+        self._topic = _Topic(node, name, schema, _SUB_BIT, _topic_opts(node, **qos))
         self._fn = None
         if handler is not None:
             if _arity(handler) == 1:
@@ -3199,21 +3276,6 @@ class Subscriber:
     def schema(self):
         return self._topic._schema
 
-    def take(self, timeout=0.0):
-        """Pop the next queued message: its decoded value on a typed topic, the whole Message
-                on a raw one, None when nothing arrived in time. The first take or dispatch
-                switches the topic to queued delivery (docs/node.md). timeout None = forever."""
-        m = self._topic.take(timeout)
-        if m is None or self._topic._schema is None:
-            return m
-        return m.value if m.value is not None else m.data
-
-    def dispatch(self, max_msgs=0, timeout=0.0):
-        """Drain the queue by running the handler on the calling thread, oldest first, up to
-                max_msgs (0 = all), waiting like take. Runs without the node lock. Returns the
-                number dispatched."""
-        return self._topic.dispatch(max_msgs, timeout)
-
     @property
     def counts(self):
         """The cumulative traffic on the topic as a TopicCounts."""
@@ -3221,7 +3283,7 @@ class Subscriber:
 
     @property
     def queue_stats(self):
-        """The consumer queue as a QueueStats, all zeros when not queued."""
+        """The subscriber's ring on its queue as a QueueStats, all zeros when not queued."""
         return self._topic.queue_stats
 
     def refresh(self):
