@@ -28,14 +28,13 @@ about a wrapper API, this file wins.
 - Construction failures throw or reject. Data path outcomes are statuses and events. A C++
   node has a constructor, not `open`, and it and every factory throw `rant::Error`.
   `-fno-exceptions` degrades to an empty handle, `valid()` and `node.last_error()`.
-- Node open takes `(name, on_message, on_event, opts)`. `on_message` is nullable, since
-  typed subscribers and pattern handles carry their own handlers. `on_event` is validated
-  non null by every wrapper so the first diagnostics are never missed. Setter methods
-  exist only for later rebinding. C# and Python are the exception: `new RantNode(name,
-  NodeOptions)` and `Node(name, **options)` have no node level message handler and
-  subscribers carry every one. C# events are the optional `OnEvent` C# event since
-  `LastError` records the last diagnostic either way, and Python's optional `on_event`
-  keyword prints to stderr when unset.
+- Node open takes a name and options only: `rant::Node(name, NodeOptions)`, `new
+  RantNode(name, NodeOptions)`, `Node(name, **options)`. There is no node level message
+  handler, subscribers carry every one. The service thread runs from open unless the
+  `threading` option is manual, and dispatch parks every callback on the node's queue
+  for `dispatch()`. The event handler is optional and attaches after open (`on_event(h)`,
+  the C# `OnEvent` event, Python's `on_event` keyword). With none set, errors print to
+  stderr, and the last error is recorded either way.
 - Handlers come in two forms: payload only, or payload plus message envelope. A
   subscriber takes its handler at creation in every binding, and a subscriber created
   without one is pulled: `take` and `latest` in Python, `TryTake` and `TryTakeLatest` in

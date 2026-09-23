@@ -129,6 +129,7 @@ static_assert((int)LogLevel::Info == detail::RANT_LOG_INFO, "log-level enum drif
 /* forward decls. Every handle is a template over the message type, and the type argument
  * rant::Bytes is the raw form that carries a DSL schema and reads through MessageView. */
 class Node;
+class Reflection;
 class MessageView;
 class Event;
 class Schema;
@@ -311,14 +312,22 @@ struct Qos {
     bool         reflect_from_mesh   = false;
 };
 
+/* Who runs the node loop and where callbacks fire, chosen at open. */
+enum class Threading {
+    ServiceThread = 0,   /* the service thread runs from construction, callbacks fire on it */
+    Manual        = 1,   /* your thread calls poll(), callbacks fire there */
+    Dispatch      = 2    /* the service thread runs, callbacks wait until node.dispatch() */
+};
+
 struct NodeOptions {
+    Threading                threading            = Threading::ServiceThread;
     uint16_t                 domain               = 0;   /* logical-network selector */
     uint16_t                 max_topics           = 8;   /* how many topics may be created */
     bool                     disable_shm          = false;
     bool                     fetch_details        = false;   /* fetch every peer topic's schema */
     int32_t                  match_wait_ms        = 0;   /* 0 = 1 s, negative = drop loudly */
     /* networking (all optional) */
-    /* built in observability, all on by default (Node::log, Node::on_log, Node::meta_request) */
+    /* built in observability, all on by default (Node::log, Node::on_log, Reflection::meta) */
     bool                     disable_logs         = false; /* strip the @rant/log/{error,warn,info}
                                                               topics (saves their history memory) */
     bool                     disable_meta         = false; /* do not host the @rant/meta endpoint */
@@ -2230,8 +2239,8 @@ struct AsyncBox {
 };
 }
 
-/* Section-mask bits for a @rant/meta request: OR them into Node::meta_request's
- * `sections` (0 = every section). */
+/* Section-mask bits for a @rant/meta request: OR them into the sections
+ * argument of Reflection::meta and meta_async, 0 = every section. */
 enum MetaSection : uint32_t {
     MetaNode   = 0x1u,   /* uptime, memory, backpressure, peer/topic counts, last error */
     MetaProc   = 0x2u,   /* per-process cpu/rss (absent where the platform can't measure) */
@@ -2347,14 +2356,12 @@ public:
     using MessageHandler = std::function<void(const MessageView&)>;
     using EventHandler   = std::function<void(const Event&)>;
 
-    /* Open a node. An empty name is auto generated. on_message may be empty, on_event is
-     * required. Throws rant::Error, or under -fno-exceptions check valid(). */
-    Node(std::string_view name, MessageHandler on_message,
-         EventHandler on_event, const NodeOptions& o = {}) {
-        if (!on_event) { priv::raise_msg("rant::Node: an on_event handler is required"); return; }
+    /* Open a node and join the mesh. An empty name is auto generated. The service thread
+     * runs from here unless o.threading is Manual, and on_event may attach after. Throws
+     * rant::Error, or under -fno-exceptions check valid(). */
+    explicit Node(std::string_view name = {}, const NodeOptions& o = {}) {
         std::unique_ptr<Impl> impl(new Impl());
-        impl->on_msg   = std::move(on_message);
-        impl->on_event = std::move(on_event);
+        impl->threading = o.threading;
         /* The node retains the net string/seed pointers, so own that storage. */
         impl->disc_group = o.discovery_group;
         impl->mcast_if   = o.multicast_interface;
@@ -2401,6 +2408,17 @@ public:
             &Node::on_msg_tramp, &Node::on_evt_tramp, &co);
         if (!n) { priv::raise_last(nullptr, "rant::Node open"); return; }
         impl->node = n;
+        if (o.threading == Threading::Dispatch) {
+            impl->queue = detail::rant_node_create_queue(n);
+            if (!impl->queue || detail::rant_node_set_event_queue(n, impl->queue) != 0) {
+                priv::raise_last(n, "rant::Node: the dispatch queue");
+                return;
+            }
+        }
+        if (o.threading != Threading::Manual && detail::rant_node_start(n) != 0) {
+            priv::raise_last(n, "rant::Node: the service thread");
+            return;
+        }
         impl_ = std::move(impl);
     }
 
@@ -2414,18 +2432,38 @@ public:
     ~Node() = default;   /* teardown lives in Impl::~Impl so a move assign tears down too. It stops
                             the service thread and closes with a BYE */
 
-    /* One loop tick: discovery, receive, timers and queued sends. Blocks up to timeout_ms in
-     * the socket wait, 0 = non blocking. Refused while start() runs. */
+    /* Stop the loop, leave the mesh with a bye and free the node. Every handle of this node
+     * is dead after. Close before the state its handlers capture goes out of scope. */
+    void close() { impl_.reset(); }
+
+    /* Who runs the loop, as opened. */
+    Threading threading() const { return valid() ? impl_->threading : Threading::Manual; }
+
+    /* Manual threading: one loop tick of discovery, receive, timers and queued sends, where
+     * callbacks fire. Blocks up to timeout_ms, 0 = non blocking. State on another threading. */
     int poll(int timeout_ms = 0) {
         if (!valid()) return (int)SendStatus::State;
         return detail::rant_node_poll(impl_->node, timeout_ms);
     }
 
-    /* Run the C service thread. Every call stays safe from any thread and a send wakes it. */
-    bool start() { return valid() && detail::rant_node_start(impl_->node) == 0; }
-    /* Stop and join the service thread. Idempotent, implied by teardown. */
-    void stop()  { if (valid()) detail::rant_node_stop(impl_->node); }
-    bool is_started() const { return valid() && detail::rant_node_is_started(impl_->node) == 1; }
+    /* Dispatch threading: run the parked callbacks on this thread, at most max_callbacks
+     * (0 = all), waiting up to timeout_ms for the first (negative = forever). The count run,
+     * or State on another threading. */
+    int dispatch(int max_callbacks = 0, int timeout_ms = 0) {
+        if (!valid() || !impl_->queue) return (int)SendStatus::State;
+        return detail::rant_queue_dispatch(impl_->queue, max_callbacks, timeout_ms);
+    }
+
+    /* Peer, loss and error events, where the node's callbacks run. Optional: with none set
+     * errors print to stderr, and last_error() records the last one either way. A later call
+     * replaces the handler and {} restores the default. */
+    void on_event(EventHandler h) {
+        if (!valid()) return;
+        std::shared_ptr<const EventHandler> p;
+        if (h) p = std::make_shared<const EventHandler>(std::move(h));
+        std::lock_guard<std::mutex> g(impl_->reg_mu);
+        impl_->on_event = std::move(p);
+    }
 
     /* Block until discovery and matching settle, so everything sent now reaches everyone on
      * the network. Call after creating the topics. timeout_ms < 0 = 3 announce intervals. */
@@ -2433,69 +2471,8 @@ public:
         return valid() && detail::rant_node_settle(impl_->node, timeout_ms) == 1;
     }
 
-    /* "Who is here": every discovered peer, a copied snapshot. */
-    std::vector<Peer> peers() const {
-        std::vector<Peer> out;
-        if (!valid()) return out;
-        LockGuard guard(impl_->node);
-        detail::RantIter it; std::memset(&it, 0, sizeof it);
-        detail::RantPeerInfo p;
-        while (detail::rant_node_peers_next(impl_->node, &it, &p)) {
-            Peer peer;
-            peer.id = p.id;
-            std::memcpy(peer.uuid.data(), p.uuid, 16);
-            if (p.name.data)    peer.name.assign(p.name.data, p.name.len);
-            if (p.address.data) peer.address.assign(p.address.data, p.address.len);
-            peer.active        = (p.liveness == detail::RANT_PEER_ACTIVE);
-            peer.last_heard_us = p.last_heard_us;
-            peer.epoch         = p.epoch;
-            peer.catching_up   = p.catching_up != 0;
-            peer.fragment_size = p.fragment_size;
-            peer.rtt_us        = p.rtt_us;
-            peer.rtt_jitter_us = p.rtt_jitter_us;
-            peer.rtt_min_us    = p.rtt_min_us;
-            peer.rtt_samples   = p.rtt_samples;
-            out.push_back(std::move(peer));
-        }
-        return out;
-    }
-
-    /* "What a node offers": the entities one node advertises, peer 0 for this one. An
-     * observer-grade call: it copies every schema. */
-    std::vector<Entity> entities(uint32_t peer = 0) const {
-        std::vector<Entity> out;
-        if (!valid()) return out;
-        LockGuard guard(impl_->node);
-        detail::RantIter it; std::memset(&it, 0, sizeof it);
-        detail::RantEntityInfo ei;
-        while (detail::rant_node_entities_next(impl_->node, peer, &it, &ei))
-            out.push_back(entity_from(impl_->node, ei));
-        return out;
-    }
-
-    /* The whole mesh folded: one entity per (kind, name) across every active peer and this
-     * node, schemas from the provider, conflict when the endpoints disagree. */
-    std::vector<Entity> mesh() const {
-        std::vector<Entity> out;
-        if (!valid()) return out;
-        LockGuard guard(impl_->node);
-        detail::RantIter it; std::memset(&it, 0, sizeof it);
-        detail::RantEntityInfo ei;
-        while (detail::rant_node_mesh_next(impl_->node, &it, &ei))
-            out.push_back(entity_from(impl_->node, ei));
-        return out;
-    }
-    std::optional<Entity> mesh_find(EntityKind kind, std::string_view name) const {
-        if (!valid()) return std::nullopt;
-        LockGuard guard(impl_->node);
-        detail::RantEntityInfo ei;
-        std::string nm(name);
-        if (!detail::rant_node_mesh_find(impl_->node, static_cast<detail::RantEntityKind>(kind),
-                                         nm.c_str(), &ei)) return std::nullopt;
-        return entity_from(impl_->node, ei);
-    }
-    /* Bumps on every reflected change anywhere in the mesh: re-walk iff it moved. */
-    uint32_t mesh_epoch() const { return valid() ? detail::rant_node_mesh_epoch(impl_->node) : 0; }
+    /* The mesh as this node sees it: peers, entities, the folded mesh and meta snapshots. */
+    Reflection reflection();
 
     /* This node's own counters: memory, the reliable send waits, and the sends that evicted
      * never sent history after the bounded wait (the send burst indicator). */
@@ -2573,46 +2550,61 @@ public:
         if (!q) { priv::raise_last(impl_->node, "rant::Node::create_queue"); return {}; }
         return Queue(q);
     }
-    /* Park on_event on q from now on, null = inline again, dropping what is parked. */
-    SendStatus set_event_queue(const Queue* q) {
-        if (!valid()) return SendStatus::State;
-        return static_cast<SendStatus>(detail::rant_node_set_event_queue(impl_->node, priv::to_c(q)));
-    }
-    /* Park the log lines on_log receives on q from now on, null = inline again, dropping
-     * what is parked. Set it before on_log so the catch up replay parks too. */
-    SendStatus set_log_queue(const Queue* q) {
-        if (!valid()) return SendStatus::State;
-        return static_cast<SendStatus>(detail::rant_node_set_log_queue(impl_->node, priv::to_c(q)));
-    }
-
-    /* Subscribe to a level's mesh wide log stream: every other node's lines, decoded to a
-     * LogLine, on the polling thread or at dispatch() of the log queue. Call it once per
-     * level from setup. false when disabled. */
-    bool on_log(LogLevel level, std::function<void(const LogLine&)> cb) {
-        if (!valid() || !cb) return false;
-        detail::RantTopic* ch = detail::rant_node_log_topic(
-            impl_->node, static_cast<detail::RantLogLevel>(level));
-        if (!ch) return false;
-        if (detail::rant_topic_set_role(ch, detail::RANT_PUBSUB) != 0) return false;
-        uint16_t idx = detail::rant_topic_index(ch);
-        MessageHandler h = [level, cb = std::move(cb)](const MessageView& m) {
-            LogLine ln;
-            ln.level   = level;
-            ln.node    = m.publisher_name();
-            ln.node_id = m.publisher_id();
-            ln.wall_us = m.get_uint("wallUs");
-            ln.mono_us = m.get_uint("monoUs");
-            ln.recv_us = m.recv_us();
-            ln.written_us = m.written_us();
-            ln.text    = m.get_string("text");
-            cb(ln);
-        };
-        std::lock_guard<std::mutex> g(impl_->reg_mu);   /* leaf lock: never call C while held */
-        auto& slot = impl_->sub_handlers[idx];
-        auto nv = slot ? std::make_shared<std::vector<MessageHandler>>(*slot)
-                       : std::make_shared<std::vector<MessageHandler>>();
-        nv->push_back(std::move(h));
-        slot = std::move(nv);
+    /* Every other node's log lines at every level, decoded to a LogLine, where the node's
+     * callbacks run. One handler: a later call replaces it and {} clears it. Throws, or
+     * returns false, when this node was opened with disable_logs. */
+    bool on_log(std::function<void(const LogLine&)> h) {
+        if (!valid()) return false;
+        std::shared_ptr<const LogHandler> p;
+        if (h) p = std::make_shared<const LogHandler>(std::move(h));
+        {
+            std::lock_guard<std::mutex> g(impl_->reg_mu);
+            impl_->on_log = std::move(p);
+        }
+        std::lock_guard<std::mutex> g(impl_->create_mu);
+        if (impl_->log_bound || !impl_->on_log) return true;
+        /* the queue first, so the catch up replay parks too */
+        if (impl_->queue && detail::rant_node_set_log_queue(impl_->node, impl_->queue) != 0) {
+            priv::raise_last(impl_->node, "rant::Node::on_log");
+            return false;
+        }
+        const LogLevel levels[] = { LogLevel::Error, LogLevel::Warn, LogLevel::Info };
+        for (LogLevel level : levels) {
+            detail::RantTopic* ch = detail::rant_node_log_topic(
+                impl_->node, static_cast<detail::RantLogLevel>(level));
+            if (!ch) { priv::raise_msg("rant::Node::on_log: logs are disabled on this node"); return false; }
+            if (detail::rant_topic_set_role(ch, detail::RANT_PUBSUB) != 0) {
+                priv::raise_last(impl_->node, "rant::Node::on_log");
+                return false;
+            }
+            Impl* impl = impl_.get();
+            MessageHandler mh = [impl, level](const MessageView& m) {
+                std::shared_ptr<const LogHandler> f;
+                {
+                    std::lock_guard<std::mutex> g2(impl->reg_mu);
+                    f = impl->on_log;
+                }
+                if (!f) return;
+                LogLine ln;
+                ln.level   = level;
+                ln.node    = m.publisher_name();
+                ln.node_id = m.publisher_id();
+                ln.wall_us = m.get_uint("wallUs");
+                ln.mono_us = m.get_uint("monoUs");
+                ln.recv_us = m.recv_us();
+                ln.written_us = m.written_us();
+                ln.text    = m.get_string("text");
+                (*f)(ln);
+            };
+            uint16_t idx = detail::rant_topic_index(ch);
+            std::lock_guard<std::mutex> g2(impl_->reg_mu);   /* leaf lock: never call C while held */
+            auto& slot = impl_->sub_handlers[idx];
+            auto nv = slot ? std::make_shared<std::vector<MessageHandler>>(*slot)
+                           : std::make_shared<std::vector<MessageHandler>>();
+            nv->push_back(std::move(mh));
+            slot = std::move(nv);
+        }
+        impl_->log_bound = true;
         return true;
     }
 
@@ -2654,23 +2646,20 @@ public:
     RemoteVariable<T> remote_variable(std::string_view name, const VariableOptions<T>& o = {},
         const Schema& schema = {});
 
-    /* Fetch a peer's snapshot: a directed @rant/meta call decoded into an owning MetaSnapshot.
-     * cb fires once on the polling thread. sections is a MetaSection mask, 0 = all. */
-    SendStatus meta_request(uint32_t peer, std::function<void(const MetaSnapshot&)> cb,
-                            uint32_t sections = 0);
 #endif
 
 private:
+    using LogHandler = std::function<void(const LogLine&)>;
     struct TopicRec { detail::RantTopic* ch; uint8_t bits; uint64_t schema_hash; detail::RantQueue* queue; bool pull; };
-#ifndef RANT_NO_PATTERNS
-    /* the local @rant/meta caller handle behind meta_request, invalid when meta is disabled */
-    RemoteFunction<Bytes, Bytes> meta();
-#endif
 
     struct Impl {
         detail::RantNode*          node = nullptr;
-        MessageHandler             on_msg;
-        EventHandler               on_event;
+        Threading                  threading = Threading::ServiceThread;
+        detail::RantQueue*         queue = nullptr;   /* the node queue under Dispatch */
+        /* read on the loop thread, swapped whole under reg_mu */
+        std::shared_ptr<const EventHandler> on_event;
+        std::shared_ptr<const LogHandler>   on_log;
+        bool                       log_bound = false;   /* the level topics hold our handler, under create_mu */
         std::string                disc_group;
         std::string                mcast_if;
         std::string                self_ip;
@@ -2691,6 +2680,9 @@ private:
          * codec compiles through the node, never inside a callback */
         std::mutex codec_mu;
         std::map<const void*, std::unique_ptr<priv::TypeCodec>> codecs;
+
+        /* a handle's queue: the named one, else the node queue under Dispatch, else inline */
+        detail::RantQueue* queue_for(const Queue* q) const { return q ? q->raw() : queue; }
 
         ~Impl() {
             if (node) detail::rant_node_close(node, /*send_bye=*/1);
@@ -2717,48 +2709,47 @@ private:
             auto it = impl->sub_handlers.find(m->topic_index);
             if (it != impl->sub_handlers.end()) hs = it->second;
         }
+        if (!hs) return;
         MessageView msg(m);
-        if (hs) {
-            for (const MessageHandler& h : *hs) {
+        for (const MessageHandler& h : *hs) {
 #if defined(__cpp_exceptions)
-                try { h(msg); } catch (...) { report_handler_exception(impl); }
+            try { h(msg); } catch (...) { report_handler_exception(impl); }
 #else
-                h(msg);
-#endif
-            }
-            return;
-        }
-        if (impl->on_msg) {
-#if defined(__cpp_exceptions)
-            try { impl->on_msg(msg); } catch (...) { report_handler_exception(impl); }
-#else
-            impl->on_msg(msg);
+            h(msg);
 #endif
         }
     }
     static void on_evt_tramp(const detail::RantEvent* e) {
         Impl* impl = static_cast<Impl*>(e->user);
-        if (impl && impl->on_event) {
-            Event ev(e);
-#if defined(__cpp_exceptions)
-            try { impl->on_event(ev); } catch (...) {}   /* never let a throw reach C */
-#else
-            impl->on_event(ev);
-#endif
+        if (impl) emit_event(impl, Event(e));
+    }
+    /* the app's handler, else the default that prints errors to stderr */
+    static void emit_event(Impl* impl, const Event& ev) {
+        std::shared_ptr<const EventHandler> h;
+        {
+            std::lock_guard<std::mutex> g(impl->reg_mu);
+            h = impl->on_event;
         }
+        if (!h) {
+            if (ev.is_error()) std::fprintf(stderr, "rant: %s\n", ev.to_string().c_str());
+            return;
+        }
+#if defined(__cpp_exceptions)
+        try { (*h)(ev); } catch (...) {}   /* never let a throw reach C */
+#else
+        (*h)(ev);
+#endif
     }
     /* an app handler threw: surface it as an EventKind::Error (kind ErrorKind::None)
      * rather than swallowing it silently or letting it unwind into the C poll */
     static void report_handler_exception(Impl* impl) {
 #if defined(__cpp_exceptions)
-        if (!impl->on_event) return;
         detail::RantEvent e;
         std::memset(&e, 0, sizeof e);
         e.kind = detail::RANT_ERROR;
         e.error = detail::RANT_E_NONE;
         e.user = impl;
-        Event ev(&e);
-        try { impl->on_event(ev); } catch (...) {}
+        emit_event(impl, Event(&e));
 #else
         (void)impl;
 #endif
@@ -2848,6 +2839,7 @@ private:
     }
 
     friend class priv::TopicCore;
+    friend class Reflection;
     template <class A> friend priv::TypeCodec* priv::type_codec(Node& n);
     template <class A, class B> friend class FunctionDefinition;
     template <class A, class B> friend class RemoteFunction;
@@ -2858,6 +2850,95 @@ private:
     template <class A> friend class Publisher;
     template <class A> friend class Subscriber;
 };
+
+/* The mesh as one node sees it, from node.reflection(). Every walk returns a copied
+ * snapshot that outlives the loop (docs/reflection.md). Valid while its node lives. */
+class Reflection {
+public:
+    /* Every discovered peer, dropped ones included, so check active. */
+    std::vector<Peer> peers() const {
+        std::vector<Peer> out;
+        if (!impl_ || !impl_->node) return out;
+        Node::LockGuard guard(impl_->node);
+        detail::RantIter it; std::memset(&it, 0, sizeof it);
+        detail::RantPeerInfo p;
+        while (detail::rant_node_peers_next(impl_->node, &it, &p)) {
+            Peer peer;
+            peer.id = p.id;
+            std::memcpy(peer.uuid.data(), p.uuid, 16);
+            if (p.name.data)    peer.name.assign(p.name.data, p.name.len);
+            if (p.address.data) peer.address.assign(p.address.data, p.address.len);
+            peer.active        = (p.liveness == detail::RANT_PEER_ACTIVE);
+            peer.last_heard_us = p.last_heard_us;
+            peer.epoch         = p.epoch;
+            peer.catching_up   = p.catching_up != 0;
+            peer.fragment_size = p.fragment_size;
+            peer.rtt_us        = p.rtt_us;
+            peer.rtt_jitter_us = p.rtt_jitter_us;
+            peer.rtt_min_us    = p.rtt_min_us;
+            peer.rtt_samples   = p.rtt_samples;
+            out.push_back(std::move(peer));
+        }
+        return out;
+    }
+    /* The entities one node advertises, peer 0 for this one. It copies every schema. */
+    std::vector<Entity> entities(uint32_t peer = 0) const {
+        std::vector<Entity> out;
+        if (!impl_ || !impl_->node) return out;
+        Node::LockGuard guard(impl_->node);
+        detail::RantIter it; std::memset(&it, 0, sizeof it);
+        detail::RantEntityInfo ei;
+        while (detail::rant_node_entities_next(impl_->node, peer, &it, &ei))
+            out.push_back(Node::entity_from(impl_->node, ei));
+        return out;
+    }
+    /* The whole mesh folded: one entity per kind and name across every active peer and this
+     * node, schemas from the provider, conflict when the endpoints disagree. */
+    std::vector<Entity> mesh() const {
+        std::vector<Entity> out;
+        if (!impl_ || !impl_->node) return out;
+        Node::LockGuard guard(impl_->node);
+        detail::RantIter it; std::memset(&it, 0, sizeof it);
+        detail::RantEntityInfo ei;
+        while (detail::rant_node_mesh_next(impl_->node, &it, &ei))
+            out.push_back(Node::entity_from(impl_->node, ei));
+        return out;
+    }
+    /* One folded entity by kind and name, or nullopt. */
+    std::optional<Entity> find(EntityKind kind, std::string_view name) const {
+        if (!impl_ || !impl_->node) return std::nullopt;
+        Node::LockGuard guard(impl_->node);
+        detail::RantEntityInfo ei;
+        std::string nm(name);
+        if (!detail::rant_node_mesh_find(impl_->node, static_cast<detail::RantEntityKind>(kind),
+                                         nm.c_str(), &ei)) return std::nullopt;
+        return Node::entity_from(impl_->node, ei);
+    }
+    /* Moves on every reflected change anywhere in the mesh: re walk only when it moved. */
+    uint32_t epoch() const {
+        return impl_ && impl_->node ? detail::rant_node_mesh_epoch(impl_->node) : 0;
+    }
+#ifndef RANT_NO_PATTERNS
+    /* A peer's snapshot through a directed @rant/meta call, blocking up to timeout_ms.
+     * sections is a MetaSection mask, 0 = all. valid is false when it did not answer. */
+    MetaSnapshot meta(uint32_t peer, uint32_t sections = 0, int timeout_ms = 1000);
+    /* The same, returning at once: cb fires once where the node's callbacks run. */
+    SendStatus meta_async(uint32_t peer, std::function<void(const MetaSnapshot&)> cb,
+                          uint32_t sections = 0);
+#endif
+
+private:
+    explicit Reflection(Node::Impl* impl) : impl_(impl) {}
+#ifndef RANT_NO_PATTERNS
+    /* the node's own @rant/meta caller handle, invalid when meta is disabled */
+    RemoteFunction<Bytes, Bytes> meta_fn();
+    static Bytes sections_req(uint32_t sections, uint8_t* buf);
+#endif
+    Node::Impl* impl_ = nullptr;
+    friend class Node;
+};
+
+inline Reflection Node::reflection() { return Reflection(impl_.get()); }
 
 /* Create, or share the same name slot with a widened role. A live same name topic with a
  * different schema refuses, since two modules disagreeing is a bug. retire() first. */
@@ -2881,6 +2962,7 @@ inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
     std::lock_guard<std::mutex> g(impl->create_mu);
     std::string nm(name);
     uint64_t sh = schema ? schema->hash() : 0;
+    detail::RantQueue* want_q = pull ? priv::to_c(qos.queue) : impl->queue_for(qos.queue);
     impl_ = impl;
     auto it = impl->topics.find(nm);
     if (it != impl->topics.end()) {
@@ -2889,7 +2971,7 @@ inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
                             " (retire() it to retype the name)");
             return;
         }
-        if (priv::to_c(qos.queue) != it->second.queue || pull != it->second.pull) {
+        if (want_q != it->second.queue || pull != it->second.pull) {
             priv::raise_msg("rant topic create: the name already exists with a different queue"
                             " (same name handles share one slot and its queue)");
             return;
@@ -2906,7 +2988,7 @@ inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
     std::memset(&co, 0, sizeof co);
     co.qos = Node::to_c(qos);
     co.reflect_from_mesh = qos.reflect_from_mesh ? 1 : 0;
-    co.queue = priv::to_c(qos.queue);
+    co.queue = want_q;
     co.pull = pull ? 1 : 0;
     ch_ = detail::rant_node_create_topic(impl->node, nm.c_str(),
               static_cast<detail::RantRole>(role), schema ? schema->raw() : nullptr, &co);
@@ -2965,7 +3047,7 @@ private:
         co.timeout_us           = o.timeout_us;
         co.keep_last            = o.keep_last;
         co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
-        co.queue                = priv::to_c(o.queue);
+        co.queue                = n.impl_->queue_for(o.queue);
         Box* box = new Box();
         box->h = std::move(handler);
         fn_ = detail::rant_node_create_function_definition(n.impl_->node, nm.c_str(),
@@ -3035,7 +3117,7 @@ private:
         co.timeout_us           = o.timeout_us;
         co.keep_last            = o.keep_last;
         co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
-        co.queue                = priv::to_c(o.queue);
+        co.queue                = n.impl_->queue_for(o.queue);
         fn_ = detail::rant_node_create_remote_function(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   rsp_schema ? rsp_schema->raw() : nullptr, &co);
@@ -3129,24 +3211,32 @@ private:
     Node::Impl*             impl_ = nullptr;
     template <class A, class B> friend class RemoteFunction;
     friend class Node;
+    friend class Reflection;
 };
 
-/* Node::meta / meta_request: out-of-line so RemoteFunction<Bytes, Bytes> is a complete type here. */
-inline RemoteFunction<Bytes, Bytes> Node::meta() {
-    if (!valid()) return RemoteFunction<Bytes, Bytes>();
-    return RemoteFunction<Bytes, Bytes>(detail::rant_node_meta_function(impl_->node), impl_.get());
+/* Reflection's meta calls: out of line so RemoteFunction<Bytes, Bytes> is complete here. */
+inline RemoteFunction<Bytes, Bytes> Reflection::meta_fn() {
+    if (!impl_ || !impl_->node) return RemoteFunction<Bytes, Bytes>();
+    return RemoteFunction<Bytes, Bytes>(detail::rant_node_meta_function(impl_->node), impl_);
 }
-inline SendStatus Node::meta_request(uint32_t peer,
-                                     std::function<void(const MetaSnapshot&)> cb, uint32_t sections) {
-    RemoteFunction<Bytes, Bytes> m = meta();
+inline Bytes Reflection::sections_req(uint32_t sections, uint8_t* buf) {
+    if (!sections) return Bytes();
+    buf[0] = (uint8_t)(sections);       buf[1] = (uint8_t)(sections >> 8);
+    buf[2] = (uint8_t)(sections >> 16); buf[3] = (uint8_t)(sections >> 24);
+    return Bytes(buf, 4);
+}
+inline MetaSnapshot Reflection::meta(uint32_t peer, uint32_t sections, int timeout_ms) {
+    RemoteFunction<Bytes, Bytes> m = meta_fn();
+    if (!m.valid()) return MetaSnapshot();
+    uint8_t buf[4];
+    return MetaSnapshot::decode(m.call(sections_req(sections, buf), timeout_ms, CallOptions{ peer }));
+}
+inline SendStatus Reflection::meta_async(uint32_t peer,
+                                         std::function<void(const MetaSnapshot&)> cb, uint32_t sections) {
+    RemoteFunction<Bytes, Bytes> m = meta_fn();
     if (!m.valid()) return SendStatus::NoTopic;
-    uint8_t buf[4]; Bytes req;   /* the mask lives on the stack: call_async commits it now */
-    if (sections) {
-        buf[0] = (uint8_t)(sections);       buf[1] = (uint8_t)(sections >> 8);
-        buf[2] = (uint8_t)(sections >> 16); buf[3] = (uint8_t)(sections >> 24);
-        req = Bytes(buf, 4);
-    }
-    return m.call_async(req, [cb = std::move(cb)](const ResponseView<Bytes>& r) {
+    uint8_t buf[4];   /* the mask lives on the stack: call_async commits it now */
+    return m.call_async(sections_req(sections, buf), [cb = std::move(cb)](const ResponseView<Bytes>& r) {
         cb(MetaSnapshot::decode(r));
     }, CallOptions{ peer });
 }
@@ -3188,7 +3278,7 @@ private:
         co.timeout_us           = o.timeout_us;
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
-        co.queue                = priv::to_c(o.queue);
+        co.queue                = n.impl_->queue_for(o.queue);
         Box* box = new Box();
         box->h = std::move(handler);
         fn_ = detail::rant_node_create_task_definition(n.impl_->node, nm.c_str(),
@@ -3293,7 +3383,7 @@ private:
         co.timeout_us           = o.timeout_us;
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.reflect_from_mesh    = o.reflect_from_mesh ? 1 : 0;
-        co.queue                = priv::to_c(o.queue);
+        co.queue                = n.impl_->queue_for(o.queue);
         fn_ = detail::rant_node_create_remote_task(n.impl_->node, nm.c_str(),
                   req_schema ? req_schema->raw() : nullptr,
                   prg_schema ? prg_schema->raw() : nullptr,
@@ -3550,7 +3640,7 @@ protected:
         co.keep_last   = o.keep_last;
         co.backpressure_wait_us = o.backpressure_wait_us;
         co.reflect_from_mesh = o.reflect_from_mesh ? 1 : 0;
-        co.queue = priv::to_c(o.queue);
+        co.queue = n.impl_->queue_for(o.queue);
         node_ = n.impl_->node;
         impl_ = n.impl_.get();
         var_ = definition

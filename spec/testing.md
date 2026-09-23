@@ -299,7 +299,9 @@ process base picked from the clock so concurrent runs never join each other.
 with the memcpy, loop and rebase codec paths plus entity reflection, leg 4 bare type roots
 and the cross language hashes, leg 5 the standard types including the video family, leg 6
 variable members as tail frames, and leg 7 tasks with defer, progress, cancel, no_cancel
-and a retire mid run. Leg 8 runs only as `rant_cpp_test bench`: the cost of each codec path
+and a retire mid run. The queue leg runs dispatch threading, a handle on its own queue and
+pulled subscribers, and the factory leg the node factories and their refusals,
+`reflect_from_mesh`, and the reflection walks and meta calls. Leg 8 runs only as `rant_cpp_test bench`: the cost of each codec path
 (memcpy, loop, tails, dynamic) alone and end to end on loopback, next to a C node pair on
 the same footing, so a wrapper change is measured against the C floor.
 `bindings/csharp/test` and `bindings/python/test.py` mirror the same ground, and the

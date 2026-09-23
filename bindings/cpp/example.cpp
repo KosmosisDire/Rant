@@ -51,8 +51,9 @@ int main(int argc, char** argv) {
 #if defined(__cpp_exceptions)
   try {
 #endif
-    rant::Node node(name ? name : std::string_view{}, {}, handle_event);
+    rant::Node node(name ? name : std::string_view{});   /* its service thread runs from here */
     if (!node.valid()) { std::fprintf(stderr, "node: %s\n", node.last_error().c_str()); return 1; }
+    node.on_event(handle_event);
 
     /* the node compiles and owns the schema */
     rant::Schema schema = node.schema(CHAT_SCHEMA);
@@ -62,7 +63,6 @@ int main(int argc, char** argv) {
     rant::Qos reliable{ rant::Reliability::Reliable };
     auto chat     = node.publisher<rant::Bytes>("chat", reliable, schema);
     auto incoming = node.subscriber<rant::Bytes>("chat", handle_message, reliable, schema);
-    node.start();   /* background poll thread. Sends and creates are thread safe now */
 
     std::printf("typed chat on topic 'chat'. type a line to publish; ctrl-d/z to quit.\n");
 

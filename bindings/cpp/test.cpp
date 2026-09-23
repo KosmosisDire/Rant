@@ -169,14 +169,19 @@ static bool patterns_leg() {
         };
     };
 
-    rant::Node a("PA", {}, on_evt("PA"), opts);
-    rant::Node b("PB", {}, on_evt("PB"), opts);
+    rant::NodeOptions manual = opts;
+    manual.threading = rant::Threading::Manual;   /* B is pumped from this thread */
+    rant::Node a("PA", opts);
+    rant::Node b("PB", manual);
+    a.on_event(on_evt("PA"));
+    b.on_event(on_evt("PB"));
     chk("patterns: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
 
     /* A runs on its service thread, B is pumped from this thread so the blocking
      * call and wait forms, which drive the caller's loop, are exercised */
-    chk("patterns: A started", a.start());
+    chk("patterns: A runs its service thread", a.threading() == rant::Threading::ServiceThread);
+    chk("patterns: B polls", b.threading() == rant::Threading::Manual);
 
     /* functions */
     auto def_add = a.function_definition<AddReq, AddRsp>("add",
@@ -333,7 +338,7 @@ static bool patterns_leg() {
         for (const auto& e : es) if (e.kind == k && e.name == nm) return &e;
         return nullptr;
     };
-    auto local = a.entities();
+    auto local = a.reflection().entities();
     chk("reflect: local function folded",  find(local, rant::EntityKind::Function, "add") != nullptr);
     chk("reflect: local variable folded",  find(local, rant::EntityKind::Variable, "speed") != nullptr);
     chk("reflect: local topic passes",     find(local, rant::EntityKind::Topic, "flat") != nullptr);
@@ -341,17 +346,17 @@ static bool patterns_leg() {
     chk("reflect: variable writable", var_ent && var_ent->writable);
 
     bool peer_seen = false, peer_fn = false;
-    for (const auto& p : b.peers()) {
+    for (const auto& p : b.reflection().peers()) {
         if (p.name != "PA") continue;
         peer_seen = true;
-        auto es = b.entities(p.id);
+        auto es = b.reflection().entities(p.id);
         const rant::Entity* e = find(es, rant::EntityKind::Function, "add");
         peer_fn = e && e->provides;
     }
     chk("reflect: peer PA visible", peer_seen);
     chk("reflect: peer function entity provides", peer_fn);
 
-    a.stop();
+    a.close();
     return g_failures == fails_at_entry;
 }
 
@@ -384,11 +389,14 @@ static bool stdtypes_leg() {
         if (e.is_error() && e.error() != rant::ErrorKind::SchemaMismatch)
             std::printf("event(std): %s\n", e.to_string().c_str());
     };
-    rant::Node a("std-a", [](const rant::MessageView&) {}, on_evt, opts);
-    rant::Node b("std-b", [](const rant::MessageView&) {}, on_evt, opts);
+    rant::NodeOptions manual = opts;
+    manual.threading = rant::Threading::Manual;   /* B is pumped by wait_for */
+    rant::Node a("std-a", opts);
+    rant::Node b("std-b", manual);
+    a.on_event(on_evt);
+    b.on_event(on_evt);
     chk("std: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
-    chk("std: A started", a.start());     /* A on its service thread, B pumped by wait_for */
 
     /* the mirrors ARE the wire, so the memcpy fast path stays available */
     chk("std: Transform is 88 bytes", sizeof(rant::types::Transform) == 88);
@@ -541,7 +549,7 @@ static bool stdtypes_leg() {
             && (u1.bytes[6] & 0xF0u) == 0x40u);
         chk("std: now() is Unix-epoch microseconds", rant::types::now().us > 1600000000000000LL);
     }
-    a.stop();
+    a.close();
     return g_failures == fails_at_entry;
 }
 
@@ -586,7 +594,8 @@ static bool nested_leg() {
     rant::NodeOptions opts;
     opts.domain = 47;
     opts.multicast_interface = "127.0.0.1";
-    rant::Node a("nest-a", {}, [](const rant::Event&) {}, opts);
+    opts.threading = rant::Threading::Manual;
+    rant::Node a("nest-a", opts);
     chk("nest: node constructed", a.valid());
     if (!a.valid()) return false;
 
@@ -681,7 +690,7 @@ static bool nested_leg() {
 
         /* a publisher's other layout: an extra field shifts every offset */
         rant::NodeOptions o2 = opts;
-        rant::Node w("nest-w", {}, [](const rant::Event&) {}, o2);
+        rant::Node w("nest-w", o2);
         rant::Schema wide = w.schema("Outline { corners: Float2[4], n: u8 }\n"
                                      "Scene { extra: u64, seq: u32, outlines: Outline[], "
                                      "tags: string<8>[], note: string }");
@@ -731,11 +740,14 @@ static bool value_root_leg() {
             if (e.is_error()) std::printf("event(%s): %s\n", tag, e.to_string().c_str());
         };
     };
-    rant::Node a("VA", {}, on_evt("VA"), opts);
-    rant::Node b("VB", {}, on_evt("VB"), opts);
+    rant::NodeOptions manual = opts;
+    manual.threading = rant::Threading::Manual;   /* B is pumped from this thread */
+    rant::Node a("VA", opts);
+    rant::Node b("VB", manual);
+    a.on_event(on_evt("VA"));
+    b.on_event(on_evt("VB"));
     chk("root: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
-    chk("root: A started", a.start());   /* A on its service thread, B pumped by wait_for */
 
     /* the canonical-hash pin: the typed codec and the DSL agree, and both agree with C */
     auto sb = rant::priv::schema_of<bool>(a);
@@ -808,7 +820,7 @@ static bool value_root_leg() {
         chk("root: dynamic round trip", wait_for(3000, [&] { return hits.load() == 1; }, &b));
         chk("root: dynamic value read through the empty path", seen == -7.5);
     }
-    a.stop();
+    a.close();
     return g_failures == fails_at_entry;
 }
 
@@ -847,11 +859,14 @@ static bool tails_leg() {
                 std::printf("event(%s): %s\n", tag, e.to_string().c_str());
         };
     };
-    rant::Node a("TA", {}, on_evt("TA"), opts);
-    rant::Node b("TB", {}, on_evt("TB"), opts);
+    rant::NodeOptions manual = opts;
+    manual.threading = rant::Threading::Manual;   /* B is pumped from this thread */
+    rant::Node a("TA", opts);
+    rant::Node b("TB", manual);
+    a.on_event(on_evt("TA"));
+    b.on_event(on_evt("TB"));
     chk("tails: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
-    chk("tails: A started", a.start());   /* A on its service thread, B pumped by wait_for */
     rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
 
     {   /* codec-level: spelling, roundtrip, and the bare-vector root pin */
@@ -925,7 +940,7 @@ static bool tails_leg() {
             wait_for(4000, [&] { return got.load() > 0; }, &b) && seen == wave);
     }
 
-    a.stop();
+    a.close();
     return g_failures == fails_at_entry;
 }
 
@@ -957,11 +972,14 @@ static bool tasks_leg() {
             if (e.is_error()) std::printf("event(%s): %s\n", tag, e.to_string().c_str());
         };
     };
-    rant::Node a("KA", {}, on_evt("KA"), opts);
-    rant::Node b("KB", {}, on_evt("KB"), opts);
+    rant::NodeOptions manual = opts;
+    manual.threading = rant::Threading::Manual;   /* B is pumped from this thread */
+    rant::Node a("KA", opts);
+    rant::Node b("KB", manual);
+    a.on_event(on_evt("KA"));
+    b.on_event(on_evt("KB"));
     chk("task: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
-    chk("task: A started", a.start());   /* A on its service thread, B pumped from here */
 
     /* the "move" handler parks every call for a thread the TEST owns */
     auto def_move = a.task_definition<MoveReq, MoveProgress, MoveRsp>("move",
@@ -1031,11 +1049,11 @@ static bool tasks_leg() {
         return nullptr;
     };
     chk("reflect: local task folded",
-        find(a.entities(), rant::EntityKind::Task, "move") != nullptr);
+        find(a.reflection().entities(), rant::EntityKind::Task, "move") != nullptr);
     bool peer_task = false, attrs_ok = false, no_cancel_ok = false, prg_schema_ok = false;
-    for (const auto& p : b.peers()) {
+    for (const auto& p : b.reflection().peers()) {
         if (p.name != "KA") continue;
-        auto es = b.entities(p.id);
+        auto es = b.reflection().entities(p.id);
         const rant::Entity* mv = find(es, rant::EntityKind::Task, "move");
         const rant::Entity* fx = find(es, rant::EntityKind::Task, "fixed");
         peer_task     = mv && fx && mv->provides;
@@ -1109,7 +1127,7 @@ static bool tasks_leg() {
         wait_for(4000, [&] { return retired_done.load(); }, &b)
         && retired_status.load() == (int)rant::CallStatus::Cancelled);
 
-    a.stop();
+    a.close();
     return g_failures == fails_at_entry;
 }
 
@@ -1142,45 +1160,46 @@ template <class Send, class Pump> static double us_per_round_trip(int n, Send&& 
     return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / n;
 }
 
-/* callback queues: a subscriber, an async response and log lines park on B's queue and run
- * only at its dispatch, on this thread, while both service threads run */
+/* dispatch threading: B's subscriber, async response, events and log lines park on its node
+ * queue and run only at b.dispatch() on this thread, and a handle on its own queue runs at
+ * that queue's dispatch, while both service threads run */
 static bool queue_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
     opts.domain = 50;
     opts.multicast_interface = "127.0.0.1";
     opts.max_topics = 32;
-    rant::Node a("QA", {}, [](const rant::Event&) {}, opts);
-    std::atomic<int> events{ 0 };
-    rant::Node b("QB", {}, [&](const rant::Event&) { events++; }, opts);
+    rant::Node a("QA", opts);
+    rant::NodeOptions dopts = opts;
+    dopts.threading = rant::Threading::Dispatch;
+    rant::Node b("QB", dopts);
     chk("queue: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
-    chk("queue: services start", a.start() && b.start());
-
-    rant::Queue q = b.create_queue();
-    chk("queue: created", q.valid());
-    chk("queue: events park on it", b.set_event_queue(&q) == rant::SendStatus::Ok);
-    chk("queue: log lines park on it", b.set_log_queue(&q) == rant::SendStatus::Ok);
+    chk("queue: B dispatches", b.threading() == rant::Threading::Dispatch);
+    chk("queue: poll is refused off Manual", b.poll(0) == (int)rant::SendStatus::State);
+    chk("queue: dispatch is refused off Dispatch", a.dispatch() == (int)rant::SendStatus::State);
+    std::atomic<int> events{ 0 };
     std::thread::id me = std::this_thread::get_id();
     std::atomic<bool> stray{ false };
     auto mark = [&] { if (std::this_thread::get_id() != me) stray = true; };
+    b.on_event([&](const rant::Event&) { mark(); events++; });
 
     std::vector<std::string> lines;
     a.log(rant::LogLevel::Warn, "before");
-    chk("queue: on_log binds", b.on_log(rant::LogLevel::Warn,
-        [&](const rant::LogLine& l) { mark(); lines.emplace_back(l.text); }));
+    chk("queue: on_log binds", b.on_log([&](const rant::LogLine& l) {
+        mark();
+        if (l.level == rant::LogLevel::Warn) lines.emplace_back(l.text);
+    }));
 
     rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
-    rant::Qos queued = rel; queued.queue = &q;
     std::vector<int32_t> got;
     auto pub = a.publisher<Speed>("q/speed", rel);
-    auto sub = b.subscriber<Speed>("q/speed", [&](const Speed& s) { mark(); got.push_back(s.v); }, queued);
+    auto sub = b.subscriber<Speed>("q/speed", [&](const Speed& s) { mark(); got.push_back(s.v); }, rel);
     auto def = a.function_definition<AddReq, AddRsp>("q/add",
         [](const AddReq& r) { return AddRsp{ (int64_t)r.x + r.y }; });
-    rant::FunctionOptions fo; fo.queue = &q;
-    auto rf = b.remote_function<AddReq, AddRsp>("q/add", fo);
+    auto rf = b.remote_function<AddReq, AddRsp>("q/add");
     auto drained = [&](const std::function<bool()>& pred) {
-        return wait_for(4000, [&] { q.dispatch(0, 0); return pred(); });
+        return wait_for(4000, [&] { b.dispatch(0, 0); return pred(); });
     };
     chk("queue: matched", drained([&] { return pub.match_count() > 0 && pub.ready()
                                              && rf.match_count() > 0; }));
@@ -1188,8 +1207,8 @@ static bool queue_leg() {
         drained([&] { return !lines.empty() && lines[0] == "before"; }));
 
     chk("queue: send", pub.send(Speed{ 5 }) == rant::SendStatus::Ok);
-    chk("queue: the message waits for dispatch",
-        wait_for(4000, [&] { return q.stats().waiting > 0; }) && got.empty());
+    wait_for(300, [] { return false; });
+    chk("queue: the message waits for dispatch", got.empty());
     chk("queue: dispatch runs it", drained([&] { return got.size() == 1 && got[0] == 5; }));
 
     int64_t sum = 0;
@@ -1201,14 +1220,28 @@ static bool queue_leg() {
     chk("queue: a live line arrives at dispatch",
         drained([&] { return lines.size() >= 2 && lines.back() == "live"; }));
     chk("queue: events arrive at dispatch", drained([&] { return events.load() > 0; }));
+
+    /* a handle on its own queue runs at that queue's dispatch, never at the node's */
+    rant::Queue q = b.create_queue();
+    chk("queue: created", q.valid());
+    rant::Qos own = rel; own.queue = &q;
+    std::vector<int32_t> extra;
+    auto xpub = a.publisher<Speed>("q/extra", rel);
+    auto xsub = b.subscriber<Speed>("q/extra", [&](const Speed& s) { mark(); extra.push_back(s.v); }, own);
+    chk("queue: own queue matched", wait_for(4000, [&] { return xpub.match_count() > 0 && xpub.ready(); }));
+    xpub.send(Speed{ 9 });
+    chk("queue: the node dispatch leaves it",
+        wait_for(4000, [&] { b.dispatch(0, 0); return q.stats().waiting > 0; }) && extra.empty());
+    chk("queue: its own dispatch runs it",
+        wait_for(4000, [&] { q.dispatch(0, 0); return extra.size() == 1 && extra[0] == 9; }));
     chk("queue: every callback ran on this thread", !stray.load());
     bool refused = false;
 #if defined(__cpp_exceptions)
-    try { auto other = b.publisher<Speed>("q/speed", rel); }
+    try { auto other = b.publisher<Speed>("q/extra", rel); }
     catch (const rant::Error&) { refused = true; }
     chk("queue: a same name handle on another queue is refused", refused);
 #endif
-    /* pull: no handler, the app takes when it wants and nothing parks on a queue */
+/* pull: no handler, the app takes when it wants and nothing parks on a queue */
     auto ppub = a.publisher<Speed>("q/pull", rel);
     auto pulled = b.subscriber<Speed>("q/pull", rel);
     chk("pull: matched", wait_for(4000, [&] { return ppub.match_count() > 0 && ppub.ready(); }));
@@ -1224,8 +1257,6 @@ static bool queue_leg() {
     try { (void)sub.take(); } catch (const rant::Error&) { refused = true; }
     chk("pull: take on a handler subscriber throws", refused);
 #endif
-    b.set_event_queue(nullptr);
-    b.set_log_queue(nullptr);
     return g_failures == fails_at_entry;
 }
 
@@ -1235,11 +1266,10 @@ static bool factory_leg() {
     rant::NodeOptions opts;
     opts.domain = 51;
     opts.multicast_interface = "127.0.0.1";
-    rant::Node a("FA", {}, [](const rant::Event&) {}, opts);
-    rant::Node b("FB", {}, [](const rant::Event&) {}, opts);
+    rant::Node a("FA", opts);
+    rant::Node b("FB", opts);
     chk("factory: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
-    chk("factory: services start", a.start() && b.start());
 
     rant::Qos mesh; mesh.reflect_from_mesh = true;
     std::atomic<int> hits{ 0 };
@@ -1252,6 +1282,22 @@ static bool factory_leg() {
     pub.send(Speed{ 7 });
     chk("factory: reflect_from_mesh subscriber reads by name",
         wait_for(3000, [&] { return hits.load() > 0; }) && seen.load() == 7);
+
+    /* reflection: find A among B's peers, then its meta snapshot both ways */
+    uint32_t a_id = 0;
+    wait_for(4000, [&] {
+        for (const auto& p : b.reflection().peers()) if (p.active && p.name == "FA") a_id = p.id;
+        return a_id != 0;
+    });
+    chk("reflection: B sees A", a_id != 0);
+    rant::MetaSnapshot snap = b.reflection().meta(a_id, rant::MetaNode, 2000);
+    chk("reflection: blocking meta answers", snap.valid && snap.node.name == "FA");
+    std::atomic<bool> async_named{ false };
+    chk("reflection: meta_async launches", b.reflection().meta_async(a_id,
+        [&](const rant::MetaSnapshot& s) { async_named = s.valid && s.node.name == "FA"; })
+        == rant::SendStatus::Ok);
+    chk("reflection: meta_async answers", wait_for(3000, [&] { return async_named.load(); }));
+    chk("reflection: epoch moved", b.reflection().epoch() != 0);
 
 #if defined(__cpp_exceptions)
     auto refuses = [](auto make) {
@@ -1268,6 +1314,12 @@ static bool factory_leg() {
                           rant::FunctionDefinition<rant::Bytes, rant::Bytes>::Handler{}); }));
     chk("factory: a subscriber refuses an empty handler",
         refuses([&] { (void)a.subscriber<rant::Bytes>("f/raw", rant::Node::MessageHandler{}); }));
+    rant::NodeOptions quiet = opts;
+    quiet.disable_logs = true;
+    quiet.threading = rant::Threading::Manual;
+    rant::Node nolog("FQ", quiet);
+    chk("factory: on_log refuses when logs are disabled",
+        refuses([&] { (void)nolog.on_log([](const rant::LogLine&) {}); }));
 #endif
     return g_failures == fails_at_entry;
 }
@@ -1285,7 +1337,8 @@ static bool bench_leg() {
     rant::NodeOptions copt;
     copt.domain = 49;
     copt.multicast_interface = "127.0.0.1";
-    rant::Node cn("bench-codec", {}, [](const rant::Event&) {}, copt);   /* holds the codecs */
+    copt.threading = rant::Threading::Manual;
+    rant::Node cn("bench-codec", copt);   /* holds the codecs */
     auto ps = rant::priv::schema_of<Padded>(cn);
     rant::priv::TypeCodec* cflat = rant::priv::type_codec<Flat>(cn);
     rant::priv::TypeCodec* cpad = rant::priv::type_codec<Padded>(cn);
@@ -1366,9 +1419,9 @@ static bool bench_leg() {
     rant::NodeOptions opts;
     opts.domain = 49;
     opts.multicast_interface = "127.0.0.1";
-    auto on_evt = [](const rant::Event& e) { if (e.is_error()) std::printf("event(bench): %s\n", e.to_string().c_str()); };
-    rant::Node a("BA", {}, on_evt, opts);
-    rant::Node b("BB", {}, on_evt, opts);
+    opts.threading = rant::Threading::Manual;   /* both pumped from the bench thread */
+    rant::Node a("BA", opts);
+    rant::Node b("BB", opts);
     if (!a.valid() || !b.valid()) { std::printf("bench: nodes failed\n"); return false; }
     auto pump = [&] { a.poll(0); b.poll(0); };
     auto matched = [&](auto& pub) { return wait_for(4000, [&] { pump(); return pub.match_count() > 0 && pub.ready(); }); };
@@ -1421,9 +1474,13 @@ int main(int argc, char** argv) {
         return [tag](const rant::Event& e) { std::printf("event(%s): %s\n", tag, e.to_string().c_str()); };
     };
 
-    rant::Node a("A", {}, on_evt("A"), opts);
-    rant::Node b("B", {}, on_evt("B"), opts);
+    rant::NodeOptions manual = opts;
+    manual.threading = rant::Threading::Manual;   /* both pumped from this thread first */
+    rant::Node a("A", manual);
+    rant::Node b("B", manual);
     if (!a.valid() || !b.valid()) { std::printf("FAIL: node construction\n"); return 1; }
+    a.on_event(on_evt("A"));
+    b.on_event(on_evt("B"));
 
     rant::Schema schema = a.schema(SCHEMA);
     if (!schema) { std::printf("FAIL: schema: %s\n", a.last_error().c_str()); return 1; }
@@ -1448,17 +1505,30 @@ int main(int argc, char** argv) {
     bool dyn_ok = verify_dynamic();
     std::printf("%s\n", dyn_ok ? "PASS: variable kinds crossed and decoded" : "FAIL: decoded value mismatch");
 
-    /* threaded mode: both nodes on their service threads, no poll() from us */
-    if (!a.start() || !b.start()) { std::printf("FAIL: start\n"); return 3; }
-    if (a.poll(0) != (int)rant::SendStatus::State) { std::printf("FAIL: poll not refused while started\n"); return 3; }
+    /* threaded mode: a fresh pair on its service threads, no poll() from us */
+    a.close();
+    b.close();
+    rant::Node ta("TA", opts);
+    rant::Node tb("TB", opts);
+    if (!ta.valid() || !tb.valid()) { std::printf("FAIL: threaded node construction\n"); return 3; }
+    ta.on_event(on_evt("TA"));
+    tb.on_event(on_evt("TB"));
+    if (ta.poll(0) != (int)rant::SendStatus::State) { std::printf("FAIL: poll not refused on the service thread\n"); return 3; }
+    rant::Schema tschema = ta.schema(SCHEMA);
+    auto tpub = ta.publisher<rant::Bytes>("t", { rant::Reliability::Reliable }, tschema);
+    auto tsub = tb.subscriber<rant::Bytes>("t", on_msg, { rant::Reliability::Reliable }, tschema);
     g.received = false;
-    if (!send_one(pub, schema, ++seq)) { std::printf("FAIL: threaded send\n"); return 3; }
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    while (!(tpub.match_count() > 0 && tpub.ready()) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    if (!send_one(tpub, tschema, ++seq)) { std::printf("FAIL: threaded send\n"); return 3; }
     deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (!g.received && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     if (!g.received || g.note != NOTE) { std::printf("FAIL: threaded delivery\n"); return 3; }
-    a.stop(); b.stop();
-    std::printf("PASS: threaded delivery via start() (evicted_unsent=%u)\n", a.stats().evicted_unsent);
+    std::printf("PASS: threaded delivery on the service thread (evicted_unsent=%u)\n", ta.stats().evicted_unsent);
+    ta.close();
+    tb.close();
 
     /* patterns + typed codec leg */
     std::printf("patterns leg:\n");
@@ -1498,14 +1568,6 @@ int main(int argc, char** argv) {
     std::printf("factory leg:\n");
     bool factory_ok = factory_leg();
     std::printf("%s\n", factory_ok ? "PASS: node factories" : "FAIL: factory leg");
-
-#if defined(__cpp_exceptions)
-    /* a failed constructor throws rant::Error (on_event is required) */
-    bool caught = false;
-    try { rant::Node bad("bad", {}, {}); }
-    catch (const rant::Error&) { caught = true; }
-    chk("ctor throws rant::Error without on_event", caught);
-#endif
 
     std::printf("%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 2;

@@ -31,20 +31,18 @@ clang++, clang-cl and MSVC.
 ## A node
 
 ```cpp
-rant::Node node("robot1", {},
-    [](const rant::Event& e){ std::fprintf(stderr, "%s\n", e.to_string().c_str()); },
-    { .domain = 7 });
+rant::Node node("robot1", { .domain = 7 });     // the service thread runs from here
+node.on_event([](const rant::Event& e){ std::fprintf(stderr, "%s\n", e.to_string().c_str()); });
 rant::Qos reliable{ rant::Reliability::Reliable };
 auto out = node.publisher<rant::Bytes>("chat", reliable);
 auto in  = node.subscriber<rant::Bytes>("chat",
     [](const rant::MessageView& m){ /* every delivery on chat */ }, reliable);
-node.start();
 out.send("hello");
 ```
 
-The node's message handler may be empty, since every subscriber and pattern handle carries
-its own. The event handler is required. Options are plain structs mirroring the C ones,
-and all zero means every default. `Qos::queue_bytes`, `Qos::max_rate_hz` and
+`on_event` is optional: with no handler set, error events print to stderr, and
+`last_error()` records the last error either way. A later call replaces the handler.
+Options are plain structs mirroring the C ones, and all zero means every default. `Qos::queue_bytes`, `Qos::max_rate_hz` and
 `Qos::no_timestamp` are the C fields of the same meaning.
 
 Every handle comes from a factory on the node named after it: `publisher`, `subscriber`,
@@ -56,17 +54,35 @@ of a socket fault and the formatted text as `what()`. With `-fno-exceptions` not
 throws: the object is not `valid()` and `node.last_error()` holds the text. Data path
 results are `SendStatus` and the status enums in both modes.
 
-`poll(timeout_ms)` runs one loop tick, or `start()` runs the C service thread and
-`stop()` joins it. `settle()` blocks until discovery and matching have converged, call it
-after creating the topics. From inside a handler, sends and read only queries are
-allowed, and poll, create, drain and stop are refused with `SendStatus::State`.
+`NodeOptions::threading` says who runs the loop and where every callback fires:
+subscriber and pattern handlers, `on_event`, `on_log`, progress and async responses.
 
-`create_queue()` returns a `Queue`, and a handle whose options name it (`Qos::queue`, or
-`queue` in the function, task and variable options) parks its callbacks until
-`queue.dispatch(max, timeout_ms)` runs them on the calling thread. `set_event_queue(&q)`
-parks the node's events there too and `set_log_queue(&q)` the lines `on_log` receives.
-Same name topic handles must agree on the queue. A `Queue` is non owning and lives as long
-as its node.
+- `Threading::ServiceThread`, the default: the C service thread runs from construction and
+  every callback fires on it.
+- `Threading::Manual`: your thread calls `poll(timeout_ms)` for one loop tick and callbacks
+  fire there. `poll` on another threading answers `SendStatus::State`.
+- `Threading::Dispatch`: the service thread runs, and every callback of a handle made
+  without a queue, every event and every log line waits on the node's queue until
+  `node.dispatch(max, timeout_ms)` runs them on the calling thread.
+
+```cpp
+rant::Node app("app", { .threading = rant::Threading::Dispatch });
+auto pose = app.subscriber<Pose>("robot/pose", on_pose);
+while (running) { app.dispatch(0, 16); draw(); }
+```
+
+`settle()` blocks until discovery and matching have converged, call it after creating the
+topics. From inside an inline handler, sends and read only queries are allowed, and poll,
+create, drain and close are refused with `SendStatus::State`. `close()` stops the loop,
+leaves with a bye and frees the node, as the destructor does. Close before the state your
+handlers capture goes out of scope.
+
+`create_queue()` returns a `Queue` for the case where handles need a thread of their own,
+such as a worker draining a slow provider while the UI thread drains the node queue. A
+handle whose options name it (`Qos::queue`, or `queue` in the function, task and variable
+options) parks its callbacks until `queue.dispatch(max, timeout_ms)` runs them on the
+calling thread. Same name topic handles must agree on the queue. A `Queue` is non owning
+and lives as long as its node.
 
 Memory is configured on `NodeOptions::memory`: a buffer plus size means static mode, where
 the node draws all its memory from the buffer, never grows, and turns the shared memory
@@ -235,17 +251,19 @@ with `CallStatus::Cancelled`.
 ## Logs, meta and reflection
 
 `Node::log(level, text)` publishes on a level's built in topic, with printf style
-overloads that truncate at `RANT_LOG_MAX`. `on_log(level, handler)` widens the node's own
-log handle and delivers every other node's lines at that level as a `LogLine`, whose views
-are valid for the callback only, inline or at the dispatch of the log queue. Call it once
-per level from setup, after `set_log_queue` so the catch up replay parks too.
+overloads that truncate at `RANT_LOG_MAX`. `on_log(handler)` delivers every other node's
+lines at every level as a `LogLine`, whose `level` says which, where the node's callbacks
+run. It holds one handler: a later call replaces it and `{}` clears it. It throws, or
+returns false, on a node opened with `disable_logs`.
 
-`meta_request(peer, handler, sections)` sends a directed `@rant/meta` call and decodes the
-reply into an owning `MetaSnapshot`: the node and proc scalars are pulled out and the whole
-body stays in `info` as a `MapDict`. `sections` is a mask of `MetaSection` bits, 0 for all.
-
-`peers()`, `entities(peer)` and `mesh()` return owned snapshots, as in docs/reflection.md.
-An `Entity` name is the hash placeholder until the peer's details arrive.
-`mesh_epoch()` bumps on every reflected change, so a UI re walks only when it moved.
+`node.reflection()` returns a `Reflection` that holds the walks of docs/reflection.md.
+`peers()`, `entities(peer)` and `mesh()` return owned snapshots and `find(kind, name)` one
+folded entity. An `Entity` name is the hash placeholder until the peer's details arrive.
+`epoch()` moves on every reflected change, so a UI re walks only when it moved.
+`meta(peer, sections, timeout_ms)` sends a directed `@rant/meta` call and decodes the reply
+into an owning `MetaSnapshot`: the node and proc scalars are pulled out and the whole body
+stays in `info` as a `MapDict`. `meta_async(peer, handler, sections)` is the same with the
+handler firing where the node's callbacks run. `sections` is a mask of `MetaSection` bits,
+0 for all.
 `stats()` is the node's own counters: memory, the reliable send waits and the sends that
 evicted never sent history.
