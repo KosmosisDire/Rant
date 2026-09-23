@@ -212,8 +212,11 @@ auto speed = node.variable_definition<float>("speed", { .initial = 1.5f });
 A function handler is either `Rsp(const Req&)`, where the return value is the reply, or
 `void(const Req&, Request<Rsp>&)`, which replies, fails or defers explicitly. Returning
 from the full form without replying acknowledges OK with an empty payload. A handler that
-throws answers `CallStatus::AppError` with the exception text and never unwinds into the
-C. `defer()` returns a movable single shot `Deferred<Rsp>` that completes from any thread.
+throws answers `CallStatus::AppError` with `e.what()` and never unwinds into the C. Any
+other callback that throws, a subscriber, an observer, a response or progress handler,
+prints the text to stderr and raises an Error event of kind `None`. A payload that does
+not decode into the handle's type raises an Error event of kind `SchemaMismatch` naming
+the topic, and the handler does not run. `defer()` returns a movable single shot `Deferred<Rsp>` that completes from any thread.
 Dropping it unanswered leaves the caller to its timeout.
 
 A task handler is `void(const Req&, TaskRequest<Prg, Rsp>&)`. It answers inline, or calls
@@ -225,11 +228,19 @@ handler with no reply, fail or defer answers AppError, since an instant empty OK
 operation would read as success. Complete or drop a `PendingTask` before retiring its
 definition.
 
-A blocking `call()` waits on the service thread's progress under `start()` and drives
-the node loop otherwise. From an inline callback it is refused with `SendStatus::State`, so use
-`call_async()` there. A
-`Response` owns its payload, and `message()` is the provider's text or the default
-status text on any non OK outcome. On a task, the timeout bounds only the wait for the
+A blocking `call()` waits on the service thread's progress, or drives a Manual node's
+loop. From an inline callback it would stall the loop it waits on, so it throws
+`rant::Error` there (without exceptions `send_status()` is `State`): use `call_async()` or
+put the handle on a queue. A `Response` owns its payload. `if (r)` tests for Ok,
+`message()` is the provider's text or the default status text on any non OK outcome, and
+`value()` is a `std::optional<Rsp>` holding the payload whenever one came back, so a
+cancelled task's partial result or an AppError's failure data reads too.
+
+```cpp
+auto r = fn.call(req);
+if (r) use(*r.value());
+else report(r.status(), r.message());
+``` On a task, the timeout bounds only the wait for the
 first response, `CallOptions::id_out` receives the call id at commit so another thread
 can `cancel()`, and `cancel()` answers `BadRole` when the provider declared no cancel
 and `State` when the call is not pending.

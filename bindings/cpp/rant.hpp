@@ -1989,22 +1989,34 @@ struct NodeImpl {
             return;
         }
 #if defined(__cpp_exceptions)
-        try { (*h)(ev); } catch (...) {}   /* never let a throw reach C */
+        /* the event handler is where a throw would be reported, so it prints instead */
+        try { (*h)(ev); }
+        catch (const std::exception& x) { std::fprintf(stderr, "rant: the event handler threw: %s\n", x.what()); }
+        catch (...) { std::fprintf(stderr, "rant: the event handler threw\n"); }
 #else
         (*h)(ev);
 #endif
     }
-    void emit_error(detail::RantErrorKind kind, const char* topic_name) {
+    void emit_error(detail::RantErrorKind kind, const char* topic_name, const char* detail = nullptr) {
         detail::RantEvent e;
         std::memset(&e, 0, sizeof e);
         e.kind = detail::RANT_ERROR;
         e.error = kind;
         e.topic_name = topic_name;
+        e.schema_detail = detail;
         e.user = this;
         emit(Event(&e));
     }
-    /* an app handler threw: an Error event of kind None, never an unwind into the C loop */
-    void report_throw() { emit_error(detail::RANT_E_NONE, nullptr); }
+    /* an app callback threw: the text on stderr and an Error event of kind None, never an
+     * unwind into the C loop */
+    void report_throw(const char* what) {
+        std::fprintf(stderr, "rant: a handler threw: %s\n", what);
+        emit_error(detail::RANT_E_NONE, nullptr);
+    }
+    /* a payload that did not decode into the handle's type: an Error event, never a silent drop */
+    void report_decode(const std::string& name, const char* what) {
+        emit_error(detail::RANT_E_SCHEMA_MISMATCH, name.empty() ? nullptr : name.c_str(), what);
+    }
     /* a handle destroyed inside its own inline callback: its entity stays until close */
     void report_close_refused(const std::string& name) {
         emit_error(detail::RANT_E_STATE, name.empty() ? nullptr : name.c_str());
@@ -2302,6 +2314,7 @@ public:
     Response() = default;
     CallStatus status()      const { return st_; }
     bool       ok()          const { return st_ == CallStatus::Ok; }
+    explicit operator bool() const { return ok(); }
     uint32_t   provider()    const { return provider_; }
     SendStatus send_status() const { return ss_; }
     uint64_t   written_us()     const { return written_; }   /* provider stamp, 0 = synthesized */
@@ -2367,6 +2380,7 @@ struct AsyncBox {
     std::mutex*                mu;     /* the node Impl's registry lock */
     std::unordered_set<void*>* live;   /* the node Impl's outstanding-box set */
     std::function<void(const ProgressView<Bytes>&)> on_progress;   /* task calls only */
+    NodeImpl*                  impl;   /* reports a callback's throw */
 };
 }
 
@@ -2463,6 +2477,47 @@ struct MetaSnapshot {
 };
 
 #endif /* !RANT_NO_PATTERNS */
+
+namespace priv {
+/* Run an app callback from a C trampoline: a throw is reported, never unwound into C. */
+template <class F> void guarded(NodeImpl* impl, F&& f) {
+#if defined(__cpp_exceptions)
+    try { f(); }
+    catch (const std::exception& e) { if (impl) impl->report_throw(e.what()); }
+    catch (...) { if (impl) impl->report_throw("an exception not derived from std::exception"); }
+#else
+    (void)impl;
+    f();
+#endif
+}
+/* A request handler's throw answers the call AppError with the exception text. A no-op
+ * if the handler already answered or deferred, one answer per call. */
+template <class F> void answered(detail::RantRequest* rq, F&& f) {
+#if defined(__cpp_exceptions)
+    try { f(); }
+    catch (const std::exception& e) { detail::rant_request_fail(rq, e.what(), detail::rant_bytes(nullptr, 0)); }
+    catch (...) {
+        detail::rant_request_fail(rq, "the handler threw an exception not derived from std::exception",
+                                  detail::rant_bytes(nullptr, 0));
+    }
+#else
+    (void)rq;
+    f();
+#endif
+}
+/* A payload that came back, decoded into T, empty when none did. A failure is reported. */
+template <class T>
+std::optional<T> decode_payload(TypeCodec& c, Bytes data, const detail::RantSchema* s,
+                                NodeImpl* impl, const std::string& name, const char* what) {
+    if (data.size() == 0) return std::nullopt;
+    T v{};
+    if (!decode(c, v, data, s)) {
+        if (impl) impl->report_decode(name, what);
+        return std::nullopt;
+    }
+    return v;
+}
+}   /* namespace priv */
 
 inline void priv::NodeImpl::shutdown() {
     if (!node) return;
@@ -2817,13 +2872,7 @@ private:
         }
         if (!hs) return;
         MessageView msg(m);
-        for (const priv::SubHandler& h : *hs) {
-#if defined(__cpp_exceptions)
-            try { h.fn(msg); } catch (...) { impl->report_throw(); }
-#else
-            h.fn(msg);
-#endif
-        }
+        for (const priv::SubHandler& h : *hs) priv::guarded(impl, [&] { h.fn(msg); });
     }
     static void on_evt_tramp(const detail::RantEvent* e) {
         Impl* impl = static_cast<Impl*>(e->user);
@@ -3232,12 +3281,7 @@ private:
     static void tramp(detail::RantRequest* rq, void* user) {
         Box* b = static_cast<Box*>(user);
         Request<Bytes> r(rq, b->fn.load(), b->impl.lock());
-#if defined(__cpp_exceptions)
-        try { b->h(r); }
-        catch (...) { detail::rant_request_fail(rq, "handler threw", detail::rant_bytes(nullptr, 0)); }
-#else
-        b->h(r);
-#endif
+        priv::answered(rq, [&] { b->h(r); });
     }
     detail::RantFunction* live() const noexcept { return impl_ && impl_->node ? fn_ : nullptr; }
     void move_from(FunctionDefinition& o) noexcept {
@@ -3313,6 +3357,8 @@ public:
             if (out.data.len) r.data_.assign(out.data.data, out.data.data + out.data.len);
         } else if (rc < 0) {
             r.ss_ = static_cast<SendStatus>(rc);   /* status() stays Timeout: not answered */
+            if (r.ss_ == SendStatus::State)
+                priv::raise_msg("rant: a blocking call from an inline callback, use call_async or put the handle on a queue");
         }
         if (rc >= 0 && out.message.len)   /* answered or timed out: copy the outcome text */
             r.message_.assign(out.message.data, out.message.len);
@@ -3324,7 +3370,7 @@ public:
                           const CallOptions& opts = {}) {
         if (!live()) return SendStatus::NoTopic;
         priv::AsyncBox* box = new priv::AsyncBox{ std::move(on_response),
-                                                  &impl_->reg_mu, &impl_->async_live, {} };
+                                                  &impl_->reg_mu, &impl_->async_live, {}, impl_.get() };
         {
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->async_live.insert(box);
@@ -3360,11 +3406,7 @@ private:
         }
         if (box->cb) {
             ResponseView<Bytes> rv(r);
-#if defined(__cpp_exceptions)
-            try { box->cb(rv); } catch (...) {}   /* never unwind into the C poll */
-#else
-            box->cb(rv);
-#endif
+            priv::guarded(box->impl, [&] { box->cb(rv); });
         }
         delete box;
     }
@@ -3488,7 +3530,7 @@ public:
     void on_cancel(std::function<void(uint64_t token)> h) {
         if (!live()) return;
         CancelBox* box = nullptr;
-        if (h) { box = new CancelBox(); box->h = std::move(h); }
+        if (h) { box = new CancelBox(); box->h = std::move(h); box->impl = impl_.get(); }
         detail::rant_function_on_cancel(fn_, box ? &TaskDefinition::cancel_tramp : nullptr, box);
         if (box) {   /* kept alive until node close, like every handler box */
             std::lock_guard<std::mutex> g(impl_->reg_mu);
@@ -3508,26 +3550,16 @@ private:
     };
     struct CancelBox : priv::HandlerBox {
         std::function<void(uint64_t)> h;
+        priv::NodeImpl* impl = nullptr;
     };
     static void tramp(detail::RantRequest* rq, void* user) {
         Box* b = static_cast<Box*>(user);
         TaskRequest<Bytes, Bytes> r(rq, b->fn.load(), b->impl.lock());
-#if defined(__cpp_exceptions)
-        try { b->h(r); }
-        catch (...) {   /* a no-op if the handler already deferred: one answer per call */
-            detail::rant_request_fail(rq, "handler threw", detail::rant_bytes(nullptr, 0));
-        }
-#else
-        b->h(r);
-#endif
+        priv::answered(rq, [&] { b->h(r); });
     }
     static void cancel_tramp(uint64_t token, void* user) {
         CancelBox* b = static_cast<CancelBox*>(user);
-#if defined(__cpp_exceptions)
-        try { b->h(token); } catch (...) {}   /* never unwind into the C poll */
-#else
-        b->h(token);
-#endif
+        priv::guarded(b->impl, [&] { b->h(token); });
     }
     detail::RantFunction* live() const noexcept { return impl_ && impl_->node ? fn_ : nullptr; }
     void move_from(TaskDefinition& o) noexcept {
@@ -3601,9 +3633,10 @@ public:
         std::memset(&out, 0, sizeof out);
         detail::RantCallOpts co; std::memset(&co, 0, sizeof co);
         co.provider = opts.provider; co.id_out = opts.id_out;
+        BlockingProgress bp{ &on_progress, impl_.get() };
         if (on_progress) {   /* fires only inside rant_function_call: the stack copy holds */
             co.on_progress   = &RemoteTask::blocking_progress_tramp;
-            co.progress_user = &on_progress;
+            co.progress_user = &bp;
         }
         int rc = detail::rant_function_call(fn_, priv::to_c(req), &out, timeout_ms, &co);
         if (rc == 1) {
@@ -3614,6 +3647,8 @@ public:
             if (out.data.len) r.data_.assign(out.data.data, out.data.data + out.data.len);
         } else if (rc < 0) {
             r.ss_ = static_cast<SendStatus>(rc);   /* status() stays Timeout: not answered */
+            if (r.ss_ == SendStatus::State)
+                priv::raise_msg("rant: a blocking call from an inline callback, use call_async or put the handle on a queue");
         }
         if (rc >= 0 && out.message.len)   /* answered or timed out: copy the outcome text */
             r.message_.assign(out.message.data, out.message.len);
@@ -3628,7 +3663,7 @@ public:
         if (!live()) return tc;
         priv::AsyncBox* box = new priv::AsyncBox{ std::move(on_response),
                                                   &impl_->reg_mu, &impl_->async_live,
-                                                  std::move(on_progress) };
+                                                  std::move(on_progress), impl_.get() };
         {
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->async_live.insert(box);
@@ -3667,23 +3702,17 @@ public:
     SendStatus close() { return priv::close_function(fn_, impl_, owned_); }
 
 private:
+    /* a blocking call's progress handler, on the caller's stack for the call */
+    struct BlockingProgress { ProgressHandler* h; priv::NodeImpl* impl; };
     static void blocking_progress_tramp(const detail::RantProgress* p) {
-        ProgressHandler* h = static_cast<ProgressHandler*>(p->user);
+        BlockingProgress* b = static_cast<BlockingProgress*>(p->user);
         ProgressView<Bytes> pv(p);
-#if defined(__cpp_exceptions)
-        try { (*h)(pv); } catch (...) {}   /* never unwind into the C poll */
-#else
-        (*h)(pv);
-#endif
+        priv::guarded(b->impl, [&] { (*b->h)(pv); });
     }
     static void async_progress_tramp(const detail::RantProgress* p) {
         priv::AsyncBox* box = static_cast<priv::AsyncBox*>(p->user);
         ProgressView<Bytes> pv(p);
-#if defined(__cpp_exceptions)
-        try { box->on_progress(pv); } catch (...) {}
-#else
-        box->on_progress(pv);
-#endif
+        priv::guarded(box->impl, [&] { box->on_progress(pv); });
     }
     static void async_response_tramp(const detail::RantResponse* r) {
         priv::AsyncBox* box = static_cast<priv::AsyncBox*>(r->user);
@@ -3693,11 +3722,7 @@ private:
         }
         if (box->cb) {
             ResponseView<Bytes> rv(r);
-#if defined(__cpp_exceptions)
-            try { box->cb(rv); } catch (...) {}   /* never unwind into the C poll */
-#else
-            box->cb(rv);
-#endif
+            priv::guarded(box->impl, [&] { box->cb(rv); });
         }
         delete box;
     }
@@ -3821,11 +3846,7 @@ protected:
     static void utramp(const detail::RantVariableUpdate* u, void* user) {
         UBox* b = static_cast<UBox*>(user);
         VariableUpdate up(u);
-#if defined(__cpp_exceptions)
-        try { b->h(up); } catch (...) { b->impl->report_throw(); }
-#else
-        b->h(up);
-#endif
+        priv::guarded(b->impl, [&] { b->h(up); });
     }
     void observe(std::function<void(const VariableUpdate&)> h, bool change) {
         if (!live()) return;
@@ -4019,50 +4040,52 @@ private:
     priv::TypeCodec* rsp_ = nullptr;
 };
 
-/* Response<Rsp>: the owning typed call outcome. value() is meaningful when ok(). */
+/* Response<Rsp>: the owning typed call outcome. if (r) tests for Ok, and value() holds the
+ * payload whenever one came back, so a cancelled task's partial result reads too. */
 template <class Rsp> class Response {
 public:
     Response() = default;
     CallStatus status()      const { return st_; }
     bool       ok()          const { return st_ == CallStatus::Ok; }
+    explicit operator bool() const { return ok(); }
     uint32_t   provider()    const { return provider_; }
     SendStatus send_status() const { return ss_; }
     uint64_t   written_us()     const { return written_; }
     /* human-readable outcome text (owned): see Response<Bytes>::message */
     std::string_view message() const { return message_; }
-    const Rsp& value()       const { return v_; }
-    const Rsp& operator*()   const { return v_; }
-    const Rsp* operator->()  const { return &v_; }
+    /* The decoded payload: the reply on Ok, a partial result or failure data otherwise.
+     * Empty when none came back, or when it did not decode, which an error event reports. */
+    const std::optional<Rsp>& value() const { return v_; }
 private:
     CallStatus  st_ = CallStatus::Timeout;
     SendStatus  ss_ = SendStatus::Ok;
     uint32_t    provider_ = 0;
     uint64_t    written_ = 0;
     std::string message_;
-    Rsp         v_{};
+    std::optional<Rsp> v_;
     template <class A, class B> friend class RemoteFunction;
     template <class A, class B, class C> friend class RemoteTask;
 };
 
-/* The typed async outcome, valid for the callback. */
+/* The typed async outcome, valid for the callback. As Response. */
 template <class Rsp> class ResponseView {
 public:
     CallStatus status()     const { return st_; }
     bool       ok()         const { return st_ == CallStatus::Ok; }
+    explicit operator bool() const { return ok(); }
     uint32_t   provider()   const { return provider_; }
     uint64_t   written_us()    const { return written_; }
     /* human-readable outcome text (a view, callback lifetime): see ResponseView<Bytes>::message */
     std::string_view message() const { return message_; }
-    const Rsp& value()      const { return v_; }
-    const Rsp& operator*()  const { return v_; }
-    const Rsp* operator->() const { return &v_; }
+    /* The decoded payload whenever one came back, as Response::value. */
+    const std::optional<Rsp>& value() const { return v_; }
 private:
     ResponseView() = default;
     CallStatus       st_ = CallStatus::Timeout;
     uint32_t         provider_ = 0;
     uint64_t         written_ = 0;
     std::string_view message_;
-    Rsp              v_{};
+    std::optional<Rsp> v_;
     template <class A, class B> friend class RemoteFunction;
     template <class A, class B, class C> friend class RemoteTask;
 };
@@ -4132,18 +4155,20 @@ public:
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
         r.message_.assign(ur.message());   /* own it: ur dies with this frame */
-        if (ur.ok()) (void)priv::decode(*cr_, r.v_, ur.data(), ur.raw_schema());
+        r.v_ = priv::decode_payload<Rsp>(*cr_, ur.data(), ur.raw_schema(), core_.impl_.get(),
+                                         core_.name_, "a response did not decode into Rsp");
         return r;
     }
     SendStatus call_async(const Req& req, std::function<void(const ResponseView<Rsp>&)> cb,
                           const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
         return core_.call_async(priv::encode(*cq_, req, s),
-            [cb = std::move(cb), cr = cr_](const ResponseView<Bytes>& uv) {
+            [cb = std::move(cb), cr = cr_, impl = core_.impl_.get(), nm = core_.name_](const ResponseView<Bytes>& uv) {
                 ResponseView<Rsp> tv;
                 tv.st_ = uv.status(); tv.provider_ = uv.provider(); tv.written_ = uv.written_us();
                 tv.message_ = uv.message();
-                if (uv.ok()) (void)priv::decode(*cr, tv.v_, uv.data(), uv.raw_schema());
+                tv.v_ = priv::decode_payload<Rsp>(*cr, uv.data(), uv.raw_schema(), impl, nm,
+                                                  "a response did not decode into Rsp");
                 cb(tv);
             }, opts);
     }
@@ -4299,13 +4324,14 @@ public:
     Response<Rsp> call(const Req& req, ProgressHandler on_progress = {},
                        int timeout_ms = -1, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        Response<Bytes> ur = core_.call(priv::encode(*cq_, req, s), adapt_progress(std::move(on_progress), cp_),
+        Response<Bytes> ur = core_.call(priv::encode(*cq_, req, s), adapt_progress(std::move(on_progress)),
                                    timeout_ms, opts);
         Response<Rsp> r;
         r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
         r.message_.assign(ur.message());   /* own it: ur dies with this frame */
-        if (ur.ok()) (void)priv::decode(*cr_, r.v_, ur.data(), ur.raw_schema());
+        r.v_ = priv::decode_payload<Rsp>(*cr_, ur.data(), ur.raw_schema(), core_.impl_.get(),
+                                         core_.name_, "a response did not decode into Rsp");
         return r;
     }
     /* Async form (see RemoteTask<Bytes, Bytes, Bytes>::call_async): returns the send status + call id. */
@@ -4313,13 +4339,14 @@ public:
                         std::function<void(const ResponseView<Rsp>&)> on_response,
                         const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
-        return core_.call_async(priv::encode(*cq_, req, s), adapt_progress(std::move(on_progress), cp_),
-            [cb = std::move(on_response), cr = cr_](const ResponseView<Bytes>& uv) {
+        return core_.call_async(priv::encode(*cq_, req, s), adapt_progress(std::move(on_progress)),
+            [cb = std::move(on_response), cr = cr_, impl = core_.impl_.get(), nm = core_.name_](const ResponseView<Bytes>& uv) {
                 if (!cb) return;
                 ResponseView<Rsp> tv;
                 tv.st_ = uv.status(); tv.provider_ = uv.provider(); tv.written_ = uv.written_us();
                 tv.message_ = uv.message();
-                if (uv.ok()) (void)priv::decode(*cr, tv.v_, uv.data(), uv.raw_schema());
+                tv.v_ = priv::decode_payload<Rsp>(*cr, uv.data(), uv.raw_schema(), impl, nm,
+                                                  "a response did not decode into Rsp");
                 cb(tv);
             }, opts);
     }
@@ -4339,15 +4366,18 @@ private:
         core_ = RemoteTask<Bytes, Bytes, Bytes>(n, name, &rq, &pg, &rs, o);
     }
     friend class Node;
-    static RemoteTask<Bytes, Bytes, Bytes>::ProgressHandler adapt_progress(ProgressHandler h,
-                                                                           priv::TypeCodec* cp) {
+    RemoteTask<Bytes, Bytes, Bytes>::ProgressHandler adapt_progress(ProgressHandler h) {
         if (!h) return {};
-        return [f = std::move(h), cp](const ProgressView<Bytes>& up) mutable {
+        return [f = std::move(h), cp = cp_, impl = core_.impl_.get(), nm = core_.name_]
+               (const ProgressView<Bytes>& up) mutable {
             ProgressView<Prg> tp;
             tp.call_id_ = up.call_id(); tp.provider_ = up.provider();
             tp.written_ = up.written_us(); tp.recv_ = up.recv_us();
             tp.has_ = up.has_value();
-            if (tp.has_ && !priv::decode(*cp, tp.v_, up.data(), up.raw_schema())) return;
+            if (tp.has_ && !priv::decode(*cp, tp.v_, up.data(), up.raw_schema())) {
+                if (impl) impl->report_decode(nm, "a progress update did not decode into Prg");
+                return;
+            }
             f(tp);
         };
     }
@@ -4368,12 +4398,11 @@ public:
     std::optional<T> get() const {
         auto b = core_.get();
         if (!b) return std::nullopt;
-        T v{};
-        if (!priv::decode(*c_, v, Bytes(b->data(), b->size()), nullptr)) return std::nullopt;
-        return v;
+        return priv::decode_payload<T>(*c_, Bytes(b->data(), b->size()), nullptr, core_.impl_.get(),
+                                       core_.name_, "the variable's value did not decode into T");
     }
-    SendStatus set(const T& v)   { std::vector<uint8_t> s; return core_.set(priv::encode(*c_, v, s)); }
-    SendStatus force(const T& v) { std::vector<uint8_t> s; return core_.force(priv::encode(*c_, v, s)); }
+    SendStatus set(const T& v)   { thread_local std::vector<uint8_t> s; return core_.set(priv::encode(*c_, v, s)); }
+    SendStatus force(const T& v) { thread_local std::vector<uint8_t> s; return core_.force(priv::encode(*c_, v, s)); }
     SendStatus unforce()         { return core_.unforce(); }
     bool forced()          const { return core_.forced(); }
     int  match_count()     const { return core_.match_count(); }
@@ -4383,11 +4412,11 @@ public:
     template <class H, class = std::enable_if_t<
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
-    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h), c_)); }
+    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h))); }
     template <class H, class = std::enable_if_t<
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
-    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h), c_)); }
+    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h))); }
     void on_change(std::nullptr_t) { core_.on_change({}); }
     void on_write (std::nullptr_t) { core_.on_write({}); }
     SendStatus close() { return core_.close(); }
@@ -4407,10 +4436,14 @@ private:
     }
     friend class Node;
     template <class H>
-    static std::function<void(const VariableUpdate&)> adapt(H&& h, priv::TypeCodec* c) {
-        return [f = std::forward<H>(h), c](const VariableUpdate& u) mutable {
+    std::function<void(const VariableUpdate&)> adapt(H&& h) {
+        return [f = std::forward<H>(h), c = c_, impl = core_.impl_.get(), nm = core_.name_]
+               (const VariableUpdate& u) mutable {
             T v{};
-            if (!priv::decode(*c, v, u.value(), u.raw_schema())) return;
+            if (!priv::decode(*c, v, u.value(), u.raw_schema())) {
+                if (impl) impl->report_decode(nm, "a variable update did not decode into T");
+                return;
+            }
             if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>)
                 f(v, u);
             else
@@ -4431,14 +4464,13 @@ public:
     std::optional<T> get() const {
         auto b = core_.get();
         if (!b) return std::nullopt;
-        T v{};
-        if (!priv::decode(*c_, v, Bytes(b->data(), b->size()), nullptr)) return std::nullopt;
-        return v;
+        return priv::decode_payload<T>(*c_, Bytes(b->data(), b->size()), nullptr, core_.impl_.get(),
+                                       core_.name_, "the variable's value did not decode into T");
     }
     /* Block (driving the node loop) until a value exists or timeout_ms elapses. */
     bool wait(int timeout_ms)    { return core_.wait(timeout_ms); }
-    SendStatus set(const T& v)   { std::vector<uint8_t> s; return core_.set(priv::encode(*c_, v, s)); }
-    SendStatus force(const T& v) { std::vector<uint8_t> s; return core_.force(priv::encode(*c_, v, s)); }
+    SendStatus set(const T& v)   { thread_local std::vector<uint8_t> s; return core_.set(priv::encode(*c_, v, s)); }
+    SendStatus force(const T& v) { thread_local std::vector<uint8_t> s; return core_.force(priv::encode(*c_, v, s)); }
     SendStatus unforce()         { return core_.unforce(); }
     bool forced()          const { return core_.forced(); }
     int  match_count()     const { return core_.match_count(); }
@@ -4448,11 +4480,11 @@ public:
     template <class H, class = std::enable_if_t<
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
-    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h), c_)); }
+    void on_change(H&& h) { core_.on_change(adapt(std::forward<H>(h))); }
     template <class H, class = std::enable_if_t<
         std::is_invocable_v<std::decay_t<H>&, const T&> ||
         std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>>>
-    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h), c_)); }
+    void on_write(H&& h)  { core_.on_write(adapt(std::forward<H>(h))); }
     void on_change(std::nullptr_t) { core_.on_change({}); }
     void on_write (std::nullptr_t) { core_.on_write({}); }
     SendStatus close() { return core_.close(); }
@@ -4469,10 +4501,14 @@ private:
     }
     friend class Node;
     template <class H>
-    static std::function<void(const VariableUpdate&)> adapt(H&& h, priv::TypeCodec* c) {
-        return [f = std::forward<H>(h), c](const VariableUpdate& u) mutable {
+    std::function<void(const VariableUpdate&)> adapt(H&& h) {
+        return [f = std::forward<H>(h), c = c_, impl = core_.impl_.get(), nm = core_.name_]
+               (const VariableUpdate& u) mutable {
             T v{};
-            if (!priv::decode(*c, v, u.value(), u.raw_schema())) return;
+            if (!priv::decode(*c, v, u.value(), u.raw_schema())) {
+                if (impl) impl->report_decode(nm, "a variable update did not decode into T");
+                return;
+            }
             if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const VariableUpdate&>)
                 f(v, u);
             else
@@ -4493,7 +4529,7 @@ public:
     explicit operator bool() const noexcept { return valid(); }
 
     SendStatus send(const T& v, types::Timestamp capture = {}) {
-        std::vector<uint8_t> s;
+        thread_local std::vector<uint8_t> s;   /* reused: only the non memcpy path fills it */
         return core_.send(priv::encode(*c_, v, s), capture);
     }
     int  match_count()   const { return core_.match_count(); }
@@ -4536,7 +4572,8 @@ private:
         c_ = priv::type_codec<T>(n);
         if (!priv::codec_ok(c_)) { priv::raise_msg("rant::Subscriber: RANT_SCHEMA compile failed"); return; }
         Schema sc = c_->schema();
-        core_ = Subscriber<Bytes>(n, name, &sc, adapt(std::forward<H>(handler), c_), qos);
+        core_ = Subscriber<Bytes>(n, name, &sc,
+                                  adapt(std::forward<H>(handler), c_, n.impl_.get(), std::string(name)), qos);
     }
     /* A pulled subscriber: messages wait until take() or take_latest() reads them. */
     Subscriber(Node& n, std::string_view name, const Qos& qos) {
@@ -4556,10 +4593,13 @@ private:
         return v;
     }
     template <class H>
-    static Node::MessageHandler adapt(H&& h, priv::TypeCodec* c) {
-        return [f = std::forward<H>(h), c](const MessageView& m) mutable {
+    static Node::MessageHandler adapt(H&& h, priv::TypeCodec* c, priv::NodeImpl* impl, std::string nm) {
+        return [f = std::forward<H>(h), c, impl, nm = std::move(nm)](const MessageView& m) mutable {
             T v{};
-            if (!priv::decode(*c, v, m.data(), m.raw_schema())) return;
+            if (!priv::decode(*c, v, m.data(), m.raw_schema())) {
+                impl->report_decode(nm, "a message did not decode into the subscriber's type");
+                return;
+            }
             if constexpr (std::is_invocable_v<std::decay_t<H>&, const T&, const MessageView&>)
                 f(v, m);
             else

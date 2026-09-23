@@ -214,11 +214,11 @@ static bool patterns_leg() {
     /* blocking round trip (memcpy-path structs both ways) */
     auto r1 = rf_add.call(AddReq{ 20, 22 }, 3000);
     chk("patterns: blocking call Ok 20+22=42",
-        r1.ok() && r1->sum == 42 && r1.provider() != 0);
+        r1.ok() && r1.value()->sum == 42 && r1.provider() != 0);
 
     /* full-form handler replying */
     auto r2 = rf_chk.call(AddReq{ 6, 7 }, 3000);
-    chk("patterns: full-form reply 6*7=42", r2.ok() && r2->sum == 42);
+    chk("patterns: full-form reply 6*7=42", r2.ok() && r2.value()->sum == 42);
 
     /* full form handler failing: AppError */
     auto r3 = rf_chk.call(AddReq{ -1, 0 }, 3000);
@@ -233,14 +233,14 @@ static bool patterns_leg() {
     });
     auto r4 = rf_defer.call(AddReq{ 5, 6 }, 4000);
     completer.join();
-    chk("patterns: deferred completion delivers 11", r4.ok() && r4->sum == 11);
+    chk("patterns: deferred completion delivers 11", r4.ok() && r4.value()->sum == 11);
 
     /* async form */
     std::atomic<int64_t> async_sum{ 0 };
     std::atomic<bool>    async_done{ false };
     auto st = rf_add.call_async(AddReq{ 1, 2 },
         [&](const rant::ResponseView<AddRsp>& rv) {
-            if (rv.ok()) async_sum = rv->sum;
+            if (rv.ok()) async_sum = rv.value()->sum;
             async_done = true;
         });
     chk("patterns: call_async accepted", st == rant::SendStatus::Ok);
@@ -1031,7 +1031,7 @@ static bool tasks_leg() {
             updates.emplace_back(p.has_value(), p.has_value() ? p.value().remaining : 0.0);
         }, 8000);
     worker.join();
-    chk("task: blocking call ends Ok", r1.ok() && r1->final_position == 5.0 && r1.provider() != 0);
+    chk("task: blocking call ends Ok", r1.ok() && r1.value()->final_position == 5.0 && r1.provider() != 0);
     chk("task: completion message carried", r1.message() == "arrived");
     chk("task: RUNNING ack first (no value)", updates.size() >= 1 && !updates[0].first);
     chk("task: typed progress in order", updates.size() == 4
@@ -1213,7 +1213,7 @@ static bool queue_leg() {
 
     int64_t sum = 0;
     chk("queue: async call accepted", rf.call_async(AddReq{ 2, 3 },
-        [&](const rant::ResponseView<AddRsp>& rv) { mark(); if (rv.ok()) sum = rv->sum; })
+        [&](const rant::ResponseView<AddRsp>& rv) { mark(); if (rv.ok()) sum = rv.value()->sum; })
         == rant::SendStatus::Ok);
     chk("queue: the response arrives at dispatch", drained([&] { return sum == 5; }));
     a.log(rant::LogLevel::Warn, "live");
@@ -1360,6 +1360,82 @@ static bool lifetime_leg() {
     self_pub.send(Speed{ 4 });
     chk("life: the refused close raises a State event",
         wait_for(3000, [&] { return state_seen.load(); }, &d) && !self_sub);
+    return g_failures == fails_at_entry;
+}
+
+/* loud failures: a handler's throw text reaches the caller, a cancelled task's partial result
+ * reads, a blocking call inside an inline callback throws */
+static bool failure_leg() {
+    int fails_at_entry = g_failures;
+    rant::NodeOptions opts;
+    opts.domain = 53;
+    opts.multicast_interface = "127.0.0.1";
+    opts.max_topics = 32;
+    rant::Node a("XA", opts);
+    rant::Node b("XB", opts);
+    chk("fail: nodes constructed", a.valid() && b.valid());
+    if (!a.valid() || !b.valid()) return false;
+
+#if defined(__cpp_exceptions)
+    auto boom = a.function_definition<AddReq, AddRsp>("x/boom",
+        [](const AddReq&) -> AddRsp { throw std::runtime_error("the answer is not ready"); });
+    auto boom_r = b.remote_function<AddReq, AddRsp>("x/boom");
+    chk("fail: matched", wait_for(4000, [&] { return boom_r.match_count() > 0; }));
+    auto r = boom_r.call(AddReq{ 1, 2 }, 3000);
+    chk("fail: a throwing handler answers AppError", !r && r.status() == rant::CallStatus::AppError);
+    chk("fail: with the exception text", r.message() == "the answer is not ready");
+    chk("fail: and no value", !r.value());
+#endif
+
+    /* a task honoring a cancel with a partial result: the value reads though not Ok */
+    rant::PendingTask<MoveProgress, MoveRsp> parked;
+    std::mutex parked_mu;
+    auto slow = a.task_definition<MoveReq, MoveProgress, MoveRsp>("x/slow",
+        [&](const MoveReq&, rant::TaskRequest<MoveProgress, MoveRsp>& rq) {
+            std::lock_guard<std::mutex> g(parked_mu);
+            parked = rq.defer();
+        });
+    auto slow_r = b.remote_task<MoveReq, MoveProgress, MoveRsp>("x/slow");
+    chk("fail: task matched", wait_for(4000, [&] { return slow_r.match_count() > 0; }));
+    uint32_t call_id = 0;
+    std::atomic<bool> done{ false };
+    std::optional<MoveRsp> partial;
+    rant::CallStatus final_status = rant::CallStatus::Ok;
+    rant::CallOptions co; co.id_out = &call_id;
+    (void)slow_r.call_async(MoveReq{ 9.0 }, {}, [&](const rant::ResponseView<MoveRsp>& rv) {
+        final_status = rv.status();
+        partial = rv.value();
+        done = true;
+    }, co);
+    chk("fail: the task parked", wait_for(3000, [&] { std::lock_guard<std::mutex> g(parked_mu); return parked.valid(); }));
+    slow_r.cancel(call_id);
+    chk("fail: the cancel arrived", wait_for(3000, [&] { std::lock_guard<std::mutex> g(parked_mu); return parked.cancelled(); }));
+    {
+        std::lock_guard<std::mutex> g(parked_mu);
+        parked.complete_cancelled("stopped halfway", MoveRsp{ 4.5 });
+    }
+    chk("fail: the caller got Cancelled", wait_for(3000, [&] { return done.load(); })
+        && final_status == rant::CallStatus::Cancelled);
+    chk("fail: with the partial result", partial && partial->final_position == 4.5);
+
+    rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
+#if defined(__cpp_exceptions)
+    /* a blocking call from the loop thread would stall the loop it waits on */
+    auto add = a.function_definition<AddReq, AddRsp>("x/add",
+        [](const AddReq& q) { return AddRsp{ (int64_t)q.x + q.y }; });
+    auto add_r = b.remote_function<AddReq, AddRsp>("x/add");
+    chk("fail: add matched", wait_for(4000, [&] { return add_r.match_count() > 0; }));
+    std::atomic<int> threw{ 0 };
+    auto ping = a.publisher<Speed>("x/ping", rel);
+    auto trigger = b.subscriber<Speed>("x/ping", [&](const Speed&) {
+        try { (void)add_r.call(AddReq{ 1, 1 }, 500); threw = 1; }
+        catch (const rant::Error&) { threw = 2; }
+    }, rel);
+    chk("fail: ping matched", wait_for(4000, [&] { return ping.match_count() > 0 && ping.ready(); }));
+    ping.send(Speed{ 1 });
+    chk("fail: a blocking call inside an inline callback throws",
+        wait_for(3000, [&] { return threw.load() != 0; }) && threw.load() == 2);
+#endif
     return g_failures == fails_at_entry;
 }
 
@@ -1671,6 +1747,10 @@ int main(int argc, char** argv) {
     std::printf("lifetime leg:\n");
     bool life_ok = lifetime_leg();
     std::printf("%s\n", life_ok ? "PASS: handle lifetime" : "FAIL: lifetime leg");
+
+    std::printf("failure leg:\n");
+    bool fail_ok = failure_leg();
+    std::printf("%s\n", fail_ok ? "PASS: loud failures" : "FAIL: failure leg");
 
     std::printf("factory leg:\n");
     bool factory_ok = factory_leg();
