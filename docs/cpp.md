@@ -88,8 +88,9 @@ codec of `RANT_SCHEMA` is built once per node and type. `MessageBuilder` sets fi
 and refuses an over cap value by flipping `ok()` to false rather than truncating.
 `set_array_count("pts", n)` sizes a variable array, and a struct array's members then set
 by path with one index per level, `pts[2].corners[1].x`. Reads go through `FieldView`,
-where `get_array_count` gives an array's live count, the surface shared by `MessageView`, `Request<rant::Bytes>` and
-`ResponseView<rant::Bytes>`, so a typed read looks the same everywhere. Every handler
+the surface shared by `MessageView`, `Request<rant::Bytes>` and `ResponseView<rant::Bytes>`,
+so a typed read looks the same everywhere, and its `get_array_count` gives an array's live
+count. Every handler
 fires on the polling thread, and the views it receives are valid for the callback only.
 
 A map field is written with `MapWriter` and read with `MapReader`, thin layers over the C
