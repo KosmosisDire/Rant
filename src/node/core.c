@@ -719,7 +719,7 @@ static const i_RantKindRow *i_rant_kind_row(uint8_t kind){
 }
 
 static int i_rant_reflect_hidden(const char *name, size_t len){
-    return len >= 8 && memcmp(name, "@rant/", 8) == 0;
+    return len >= 6 && memcmp(name, "@rant/", 6) == 0;
 }
 static int i_rant_reflect_hidden_hash(uint32_t h){
     static const char *const nm[] = { "@rant/log/error", "@rant/log/warn", "@rant/log/info",
