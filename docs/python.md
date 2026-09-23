@@ -183,9 +183,13 @@ a cooperative cancel. Closing a definition answers every live call CANCELLED, an
 completing after that is refused silently.
 
 A blocking `call()` waits on the service thread's progress, drives the loop of a MANUAL
-node, and is refused from a callback. It never raises on a failed call:
-inspect `status`, and reading `value` raises `CallError` when the call did not complete
-OK. `call_async()` returns the launch status, or on a task the call id for `cancel()`, and
+node, and is refused from a callback. It never raises on a failed call: inspect `status`.
+`value` reads whatever payload came back, a partial result or failure data too, and
+`has_value` says whether one did. `value` raises `CallError` only when the call did not
+complete OK and nothing came back, or when the payload did not decode. A message, variable
+update or progress update that does not decode raises an ERROR event of kind
+SCHEMA_MISMATCH naming the topic, and the handler does not run. `take()` and a variable's
+`get()` raise `SchemaError` instead. `call_async()` returns the launch status, or on a task the call id for `cancel()`, and
 fires `on_response` exactly once from the polling thread. An `on_progress` handler takes
 the value, None for the RUNNING ack, or the value and a `Progress`.
 

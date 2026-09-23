@@ -1460,7 +1460,7 @@ class Message:
         object, None on a raw topic, and data the wire bytes. recv_us and written_us are
         explained in docs/node.md."""
     __slots__ = ("publisher_id", "publisher_name", "topic_name",
-                 "data", "recv_us", "written_us", "capture_us", "value")
+                 "data", "recv_us", "written_us", "capture_us", "value", "_undecoded")
 
     @classmethod
     def _from_c(cls, m, spec):
@@ -1473,11 +1473,12 @@ class Message:
         self.capture_us = m.capture_us
         self.data = _c.string_at(m.data.data, m.data.len) if m.data.data and m.data.len else b""
         self.value = None
+        self._undecoded = False
         if m.schema:
             try:
                 self.value = _from_decoded(spec, _decode(_c.load(), m.schema, self.data))
             except Exception:
-                _traceback.print_exc()
+                self._undecoded = True   # reported by whoever delivers it, never handed on
         return self
 
     __class_getitem__ = classmethod(_generic)
@@ -1909,6 +1910,19 @@ class Node:
         # the default on_event: no error goes unseen when the caller registered no handler
         if e.is_error:
             print("rant[%s]: %s" % (self._name or "node", e), file=_sys.stderr)
+
+    def _report_decode(self, topic_name, detail):
+        # a payload that did not decode into the handle's type: an ERROR event of kind
+        # SCHEMA_MISMATCH naming the topic, never a silent drop
+        e = _c.RantEvent()
+        e.kind = int(EventKind.ERROR)
+        e.error = int(ErrorKind.SCHEMA_MISMATCH)
+        e.topic_name = (topic_name or "").encode("utf-8")
+        e.schema_detail = detail.encode("utf-8")
+        try:
+            (self._on_evt or self._print_event)(Event._from_c(e))
+        except Exception:
+            _traceback.print_exc()
 
     def on_event(self, handler):
         """Deliver every peer, loss and error event to handler, where the node's callbacks
@@ -2454,7 +2468,7 @@ class Response:
         self.written_us = o.written_us
         self.data = _c.string_at(o.data.data, o.data.len) if o.data.data and o.data.len else b""
         self.message = _dstr(o.message)
-        if self.status == CallStatus.OK:
+        if self.data or self.status == CallStatus.OK:
             # decode NOW: the wire-schema view dies with the C callback/call
             self._value, self._decoded = _decode_payload(o.schema, rsp_schema, self.data)
         return self
@@ -2464,10 +2478,18 @@ class Response:
         return self.status == CallStatus.OK
 
     @property
+    def has_value(self):
+        """True when a payload came back, whatever the status: the reply on OK, a partial
+                result or failure data otherwise."""
+        return bool(self.data)
+
+    @property
     def value(self):
-        """The decoded reply, a typed instance or dict, raw bytes for an untyped pair. Raises
-                CallError when the call did not complete OK."""
-        if not self.ok:
+        """The decoded payload, a typed instance or dict, raw bytes for an untyped pair: the
+                reply on OK, and on another status the partial result or failure data that
+                came back. Raises CallError when not OK with nothing back, or when the payload
+                did not decode."""
+        if not self.ok and not self.data:
             name = self.status.name if isinstance(self.status, CallStatus) else self.status
             tail = "" if not self.message else " (%s)" % self.message
             tail += "" if self.send_status == SendStatus.OK else " (send %s)" % self.send_status
@@ -2495,7 +2517,7 @@ class Progress:
             self.call_id, self.provider, self.value)
 
 
-def _progress_cb(on_progress, prg_schema):
+def _progress_cb(on_progress, prg_schema, node, name):
     """A per call ctypes progress trampoline that decodes and arity dispatches. The object
         must stay alive until the call's terminal outcome."""
     arity = _arity(on_progress)
@@ -2510,7 +2532,8 @@ def _progress_cb(on_progress, prg_schema):
             else:
                 val, ok = _decode_payload(p.schema, prg_schema, data)
                 if not ok:
-                    val = data
+                    node._report_decode(name, "a progress update did not decode into its type")
+                    return
             if arity == 1:
                 on_progress(val)
             else:
@@ -2697,12 +2720,14 @@ class VariableUpdate:
 
 
 class _VarBox:
-    __slots__ = ("handler", "arity", "schema")
+    __slots__ = ("handler", "arity", "schema", "node", "name")
 
-    def __init__(self, handler, schema):
+    def __init__(self, handler, schema, node, name):
         self.handler = handler
         self.arity = _arity(handler)
         self.schema = schema
+        self.node = node
+        self.name = name
 
 
 def _function_opts(node, backpressure_wait=0.0, timeout=0.0, keep_last=0, multi=False,
@@ -2969,7 +2994,7 @@ class RemoteTask(_Function):
         keep_cb = None
         if on_progress is not None:
             # fires only inside rant_function_call, so the local ref holds it
-            keep_cb = _progress_cb(on_progress, self._prg_schema)
+            keep_cb = _progress_cb(on_progress, self._prg_schema, self._node, self._name)
             co.on_progress = keep_cb
         rc = self._node._lib.rant_function_call(self._ptr(), b, _c.byref(out), _ms(timeout),
                                                 _c.cast(_c.byref(co), _c.c_void_p))
@@ -2998,7 +3023,7 @@ class RemoteTask(_Function):
         co.provider = int(provider)
         co.id_out = _c.pointer(call_id)
         if on_progress is not None:
-            box.progress_cb = _progress_cb(on_progress, self._prg_schema)
+            box.progress_cb = _progress_cb(on_progress, self._prg_schema, self._node, self._name)
             co.on_progress = box.progress_cb
         rc = self._node._lib.rant_function_call_async(self._ptr(), b, _on_response,
                                                       _c.c_void_p(box_id),
@@ -3071,7 +3096,9 @@ class Variable:
         if self._schema is None:
             return data
         val, ok = _decode_payload(None, self._schema, data)
-        return val if ok else data
+        if not ok:
+            raise SchemaError("variable %r: the value did not decode into its type" % self._name)
+        return val
 
     def set(self, value):
         """Set the value: apply and publish, or send over the set channel. NO_TOPIC = no owner
@@ -3127,7 +3154,7 @@ class Variable:
         if handler is None:
             reg(self._ptr(), _c.NULL_VAR_FN, None)
             return None
-        box_id = _pbox_add(_VarBox(handler, self._schema))
+        box_id = _pbox_add(_VarBox(handler, self._schema, self._node, self._name))
         self._node._register_box(box_id)
         reg(self._ptr(), _on_var_update, _c.c_void_p(box_id))
         return handler
@@ -3319,6 +3346,8 @@ class Subscriber:
         m = self._topic.take(timeout, latest)
         if m is None:
             return None
+        if m._undecoded:
+            raise SchemaError("%s: the message did not decode into the subscriber's type" % m.topic_name)
         return m.value if m.value is not None else m.data
 
     @property
@@ -3379,6 +3408,9 @@ def _on_message(msg_ptr):
         handlers = node._sub_handlers.get(m.topic_index)
         if handlers:
             msg = Message._from_c(m, node._topic_specs.get(m.topic_index))
+            if msg._undecoded:
+                node._report_decode(msg.topic_name, "a message did not decode into the subscriber's type")
+                return
             for fn in list(handlers):
                 fn(msg)
     except Exception:
@@ -3469,7 +3501,8 @@ def _on_var_update(upd_ptr, user):
         data = _c.string_at(u.value.data, u.value.len) if u.value.data and u.value.len else b""
         val, ok = _decode_payload(u.schema, box.schema, data)
         if not ok:
-            val = data
+            box.node._report_decode(box.name, "a variable update did not decode into its type")
+            return
         if box.arity == 1:
             box.handler(val)
         else:

@@ -964,7 +964,8 @@ def tasks():
         check("terminal CANCELLED with the handler's message",
               gdone.wait(5.0) and grsps[0].status == rant.CallStatus.CANCELLED
               and grsps[0].message == "stopped")
-        check("a cancelled task carries its partial result", bool(grsps) and len(grsps[0].data) > 0)
+        check("a cancelled task carries its partial result",
+              bool(grsps) and grsps[0].has_value and grsps[0].value.total == 5)
         check("progress carries the call id and provider",
               bool(ginfo) and all(c == gid and p != 0 for _, c, p in ginfo))
 
@@ -1010,6 +1011,14 @@ def tasks():
         late = rant.Node("tlate", domain=46, multicast_interface=IFACE)
         check("on_event set after open receives events", ups.wait(5.0))
         late.close()
+
+        # a payload that does not decode is an event naming the topic, never a silent drop
+        errs = []
+        cli.on_event(lambda e: errs.append(e) if e.is_error else None)
+        cli._report_decode("t/undecodable", "a message did not decode")  # pyright: ignore[reportAttributeAccessIssue]
+        check("a decode failure is a SCHEMA_MISMATCH event naming the topic",
+              bool(errs) and errs[0].error == rant.ErrorKind.SCHEMA_MISMATCH
+              and errs[0].topic_name == "t/undecodable")
     finally:
         srv.close()
         cli.close()

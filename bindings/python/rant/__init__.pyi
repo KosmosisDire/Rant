@@ -551,7 +551,8 @@ class Deferred(Generic[Rsp]):
     def fail(self, message: str | None = None, rsp: Rsp | _Payload | None = None) -> bool: ...
 
 class Response(Generic[Rsp]):
-    """A call's outcome. status and data never raise, value raises CallError unless ok."""
+    """A call's outcome. status and data never raise. value reads whatever payload came back,
+    a partial result too, and raises CallError when not ok with nothing back."""
     status: CallStatus
     send_status: SendStatus
     provider: int
@@ -560,6 +561,8 @@ class Response(Generic[Rsp]):
     message: str
     @property
     def ok(self) -> bool: ...
+    @property
+    def has_value(self) -> bool: ...
     @property
     def value(self) -> Rsp: ...
 
