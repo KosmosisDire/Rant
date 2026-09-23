@@ -14,10 +14,16 @@ about a wrapper API, this file wins.
 - Match queries are `match_count` and `MatchCount` on every handle, the count of the
   other side. A C# or Python subscriber has none yet since the C exposes no publisher
   count on the subscribing side. C keeps its generic primitives.
-- A call outcome is a value, never a fault, and reading `.Value` off OK throws. JS
-  `call()` rejects only on connection loss. C# is the exception: `Call` and `CallAsync`
-  return the response itself and throw `CallException` off OK, and `TryCall` and
-  `TryCallAsync` are the value forms.
+- A call outcome is a value, never a fault. Its value reads whatever payload came back,
+  whatever the status, so a cancelled task's partial result and an AppError's failure data
+  are readable: C++ `value()` is a `std::optional`, and C# `Value` and Python `.value`
+  throw only when the call did not end OK and nothing came back. JS `call()` rejects only
+  on connection loss. C# is the exception: `Call` and `CallAsync` return the response
+  itself and throw `CallException` off OK, and `TryCall` and `TryCallAsync` are the value
+  forms.
+- A payload that does not decode into a handle's type raises an Error event of kind
+  SchemaMismatch naming the topic in every binding, and the handler does not run. A pull
+  or a variable read of one throws.
 - Variable reads are local and status free. Writes return a status. C# `Value` has a
   setter that throws on a non OK status. A remote set round trips through the definition.
   The cache is authoritative only, never an optimistic echo.
@@ -34,8 +40,7 @@ about a wrapper API, this file wins.
   `threading` option is manual, and dispatch parks every callback on the node's queue
   for `dispatch()`. The event handler is optional and attaches after open (`on_event(h)`,
   the C# `OnEvent` event, Python's `on_event` keyword or `node.on_event(h)`). With none
-  set, errors print to
-  stderr, and the last error is recorded either way.
+  set, errors print to stderr, and the last error is recorded either way.
 - Handlers come in two forms: payload only, or payload plus message envelope. A
   subscriber takes its handler at creation in every binding, and a subscriber created
   without one is pulled: `take` and `latest` in Python, `TryTake` and `TryTakeLatest` in
@@ -64,7 +69,7 @@ about a wrapper API, this file wins.
   point is reachable from every binding the moment it is declared. Bindings format log
   text in their own runtime and call `rant_node_log_text`, never the variadic
   `rant_node_log` over FFI.
-- A thrown handler in C#, Python or JS answers APP_ERROR with the exception text.
+- A thrown handler in C++, C#, Python or JS answers APP_ERROR with the exception text.
 - Every wait is a probe plus an event plus a bounded block. No blocking only APIs.
 
 Deferred, confirmed: a C reflection macro (`serialize/reflect.h` over C11 `_Generic`),
