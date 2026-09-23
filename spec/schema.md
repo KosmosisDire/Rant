@@ -77,8 +77,9 @@ defined. So a type reflected from a class called `Color` must match the standard
 or take another name. Aliases wrap any type but a struct, so `Uuid = u8[16]` is a named
 alias, not a wrapper struct.
 
-Array elements must be fixed all the way down, with one level of struct array nesting so
-`arr_parent` stays unique. A variable member inside a nested struct declares nested but
+Array elements must be fixed all the way down, so every element has one size. A fixed
+struct array may sit inside another's element to any depth, and only the outermost array
+of a chain can be variable. A variable member inside a nested struct declares nested but
 stores flat: it claims a top level tail frame in depth first declaration order.
 
 ## Reader model
@@ -200,11 +201,14 @@ enforces names itself too: the reader keeps the first broken rule in `i_Rd.why`,
 ## The flat table
 
 The compiled schema flattens every field at every depth into one depth first table. A
-struct array flattens its element once, as an element 0 template under the array field:
-its members' offsets are element 0's (message absolute for a fixed array, frame relative
-for a variable one) and `arr_parent` names the array, so element i sits at that offset
-plus i times the element size. The name based accessors spell the index in the path and
-the index based ones take it as an argument. A field's type encoding is kept as a wire
+struct array flattens its element once, as an element 0 template under the array field,
+and a nested one flattens inside that template. A member's offset is for element 0 of
+every enclosing array, message absolute when the outermost is fixed and relative to its
+element when it is variable. `arr_parent` names the nearest enclosing struct array and
+`arr_depth` counts them, so a member takes one index per level: its address is the offset
+plus each index times that array's element size, plus the frame start under a variable
+outermost array. The name based accessors spell the indices in the path
+(`shapes[1].corners[2].x`) and the index based ones take them as a list, outermost first. A field's type encoding is kept as a wire
 offset and length, so two fields have the same type exactly when the bytes agree.
 
 The compiled block is the wire bytes, an 8 aligned handle and the field table. Statements

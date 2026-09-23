@@ -10,8 +10,8 @@
 #include "../common/hash.h"
 #include <string.h>
 
-/* One field of the flat table. Offsets are message absolute, except members of a
- * variable struct array, which are relative to their element. */
+/* One field of the flat table. Offsets are message absolute for element 0 of every
+ * enclosing array, except under a variable struct array, relative to its element. */
 typedef struct {
     RantString name;        /* a view into the wire bytes */
     RantString type_name; /* the field type's NAMED tag, or {NULL,0} */
@@ -24,7 +24,8 @@ typedef struct {
     uint16_t     count;     /* ARR element count, or ENUM variant count, else 0 */
     uint16_t     depth;     /* 0 = top level */
     uint16_t     parent;    /* flat index of the enclosing struct or array, 0xFFFF = root */
-    uint16_t     arr_parent;/* flat index of the enclosing struct array, 0xFFFF = none */
+    uint16_t     arr_parent;/* flat index of the nearest enclosing struct array, 0xFFFF = none */
+    uint16_t     arr_depth; /* the struct arrays around this field, one index each */
     uint16_t     str_cap;   /* STR fields and STR elements, else 0 */
     uint16_t     var_ord;   /* variable kinds: the ordinal of this field's tail frame */
     uint8_t      kind;
@@ -89,8 +90,10 @@ int i_rant_enum_backing_ok(uint8_t backing);
 int64_t i_rant_enum_read_val(uint8_t backing, const uint8_t *p);
 void i_rant_enum_write_val(uint8_t backing, uint8_t *p, int64_t v);
 int i_rant_enum_val_fits(uint8_t backing, int64_t v);
+/* elems gets one index per enclosing struct array, outermost first, 0 where the path
+ * gave none, and *n_elems their count. Either may be NULL. */
 const i_Field *i_rant_schema_field_by_path(const RantSchema *s, const char *path,
-                                           uint32_t *index);
+                                           uint32_t *elems, uint16_t *n_elems);
 
 /* why a text was refused and the character it was refused at, or the text's end */
 typedef struct { const char *why; const char *at; } i_RantSchemaErr;

@@ -51,7 +51,7 @@ about a wrapper API, this file wins.
   async factory methods. The schema is a positional argument, never inside an opts object.
   A null schema means raw or payload less.
 - A reflected field table mirrors the C `RantSchemaFieldInfo` exactly, everywhere,
-  including `type_name`, `elem_name`, `elem_size` and `arr_parent`. A dropped `type_name`
+  including `type_name`, `elem_name`, `elem_size`, `arr_parent` and `arr_depth`. A dropped `type_name`
   turns `color: Color` into an anonymous struct and every named reader then refuses the
   sender. Only `rant_schema_print` spells DSL text.
 - A public feature lands in every binding. Nothing lists the exports: a declaration

@@ -2567,7 +2567,6 @@ static void schema_dsl_checks(void){
     }
     {   /* a shape rule the wire check enforces says which rule, never out of memory */
         static const struct { const char *text, *why; } rules[] = {
-            { "D { c: { x: f32 }[4] } D[]", "a struct array cannot sit inside another array's element" },
             { "Pose { v: { y: u8[] }[2] }",   "a variable array cannot sit inside an array element" },
             { "Pose { v: { s: string }[2] }", "a variable string or a map cannot sit inside an array element" },
         };
@@ -3323,11 +3322,74 @@ static void schema_v8_checks(void){
             ST_CHECK(rant_schema_validate(s, b), "schema-v8: the struct-array message validates");
             {   RantValue v; int ok;
                 memset(&v, 0, sizeof v); v.kind = RANT_F32; v.v.f = 4.5;
-                ok = rant_set_value_at(m, sizeof m, s, (uint16_t)xi, 1, &v)
-                     && rant_get_value_at(b, s, (uint16_t)xi, 1, &v) && v.v.f == 4.5
+                uint32_t one = 1;
+                ok = rant_set_value_at(m, sizeof m, s, (uint16_t)xi, &one, 1, &v)
+                     && rant_get_value_at(b, s, (uint16_t)xi, &one, 1, &v) && v.v.f == 4.5
+                     && !rant_get_value_at(b, s, (uint16_t)xi, NULL, 0, &v)
                      && rant_array_count_at(b, s, 0) == 3;
                 ST_CHECK(ok, "schema-v8: reflection get/set_value_at index an element");
             }
+        }
+        sv_free(s);
+    }
+
+    /* ---- a struct array inside a struct array's element, one index per level ---- */
+    {   RantSchema *s = sv("T { rows: { cells: { v: i32 }[3], n: u8 }[2] }");
+        RantSchemaFieldInfo fi; uint8_t m[128]; RantBytes b; int vi;
+        ST_CHECK(s != NULL, "schema-nest: a fixed struct array nests in a fixed one");
+        if (s){
+            vi = rant_schema_field_index(s, "rows.cells.v");
+            ST_CHECK(vi > 0 && rant_schema_field_at(s, (uint16_t)vi, &fi) && fi.arr_depth == 2
+                     && rant_schema_field_index(s, "rows[1].cells[2].v") == vi,
+                     "schema-nest: the inner member takes two indices (%u)", fi.arr_depth);
+            rant_schema_message_default(s, m, sizeof m);
+            ST_CHECK(rant_set_int(m, sizeof m, s, "rows[1].cells[2].v", 42)
+                     && rant_set_int(m, sizeof m, s, "rows[0].cells[1].v", -3)
+                     && rant_set_uint(m, sizeof m, s, "rows[1].n", 9)
+                     && !rant_set_int(m, sizeof m, s, "rows[2].cells[0].v", 1)
+                     && !rant_set_int(m, sizeof m, s, "rows[0].cells[3].v", 1),
+                     "schema-nest: writes land by path, out of range at either level refuses");
+            b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+            ST_CHECK(rant_get_int(b, s, "rows[1].cells[2].v") == 42
+                     && rant_get_int(b, s, "rows[0].cells[1].v") == -3
+                     && rant_get_int(b, s, "rows[0].cells[2].v") == 0
+                     && rant_get_int(b, s, "rows[1].cells[1].v") == 0
+                     && rant_get_uint(b, s, "rows[1].n") == 9,
+                     "schema-nest: each element reads back on its own");
+            {   uint32_t at[2] = { 1, 2 }; RantValue v;
+                ST_CHECK(rant_get_value_at(b, s, (uint16_t)vi, at, 2, &v) && v.v.i == 42
+                         && !rant_get_value_at(b, s, (uint16_t)vi, at, 1, &v),
+                         "schema-nest: get_value_at takes one index per level, exactly");
+                at[0] = 0; at[1] = 0; memset(&v, 0, sizeof v); v.kind = RANT_I32; v.v.i = 5;
+                ST_CHECK(rant_set_value_at(m, sizeof m, s, (uint16_t)vi, at, 2, &v)
+                         && rant_get_int(b, s, "rows[0].cells[0].v") == 5,
+                         "schema-nest: set_value_at lands where the path reads");
+            }
+        }
+        sv_free(s);
+    }
+    {   RantSchema *s = sv("Shape { corners: { x: f32, y: f32 }[4], id: u16 }\n"
+                           "S { tag: u8, shapes: Shape[], note: string }");
+        uint8_t m[512]; RantBytes b;
+        ST_CHECK(s != NULL, "schema-nest: a fixed struct array nests in a variable one");
+        if (s){
+            rant_schema_message_default(s, m, sizeof m);
+            ST_CHECK(rant_set_array_count(m, sizeof m, s, "shapes", 3)
+                     && rant_set_f32(m, sizeof m, s, "shapes[2].corners[3].y", 7.5f)
+                     && rant_set_f32(m, sizeof m, s, "shapes[0].corners[1].x", 1.25f)
+                     && rant_set_uint(m, sizeof m, s, "shapes[1].id", 11)
+                     && rant_set_string(m, sizeof m, s, "note", rant_cstr("after"))
+                     && !rant_set_f32(m, sizeof m, s, "shapes[3].corners[0].x", 1.0f),
+                     "schema-nest: the outer array grows, then its elements' arrays take writes");
+            b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+            ST_CHECK(rant_get_f32(b, s, "shapes[2].corners[3].y") == 7.5f
+                     && rant_get_f32(b, s, "shapes[0].corners[1].x") == 1.25f
+                     && rant_get_f32(b, s, "shapes[2].corners[1].x") == 0.0f
+                     && rant_get_uint(b, s, "shapes[1].id") == 11
+                     && rant_get_array_count(b, s, "shapes") == 3
+                     && rant_get_array_count(b, s, "shapes[1].corners") == 4
+                     && rant_schema_validate(s, b),
+                     "schema-nest: the nested elements read back inside the frame");
         }
         sv_free(s);
     }
@@ -3391,13 +3453,13 @@ static void schema_v8_checks(void){
         sv_free(rb); sv_free(pub); sv_free(sub);
     }
 
-    /* ---- refusals: an array element's size must be static, and stay one level deep ---- */
+    /* ---- refusals: an array element's size must be static ---- */
     {   static const char *bad[] = {
             "A { p: { n: string }[4] }",        /* a variable member inside an element   */
             "A { p: Image[2] }",                /* a standard type that has one          */
             "A { p: f32[2][3] }",               /* an array of arrays                    */
             "A { p: Uuid[2] }",                 /* a named alias that IS an array        */
-            "A { p: { q: { r: f32 }[2] }[2] }", /* a struct array inside an element      */
+            "A { p: { q: { r: f32 }[] }[2] }",  /* a variable struct array in an element */
             "A { m: enum<u8> { X }[2] }",       /* enum elements would hide the backing  */
             "Float3 { x: f32 }\nA { p: Float3 }",    /* a reserved name, a wrong shape   */
             "Transform { x: f32 }",             /* likewise as the last statement        */

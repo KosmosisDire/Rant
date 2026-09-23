@@ -44,7 +44,7 @@ RANT_API uint32_t rant_schema_scalar_size(RantSchemaTypeKind kind);
 typedef struct RantSchema RantSchema;
 
 /* One field of the flat depth first table. A struct array flattens its element once as
- * an element 0 template under the array field. See spec/schema.md. */
+ * an element 0 template under the array field, nested ones too. See spec/schema.md. */
 typedef struct {
     RantString name;        /* the field's own name, a view into the wire */
     RantString type_name; /* the field type's name, {NULL,0} when anonymous */
@@ -54,7 +54,8 @@ typedef struct {
     uint16_t     count;     /* ARR element count, or ENUM variant count, else 0 */
     uint16_t     depth;     /* 0 = top level, n = a member of the struct n levels up */
     uint16_t     str_cap;   /* string capacity for STR fields and STR elements, else 0 */
-    uint16_t     arr_parent;/* flat index of the enclosing struct array, or 0xFFFF */
+    uint16_t     arr_parent;/* flat index of the nearest enclosing struct array, or 0xFFFF */
+    uint16_t     arr_depth; /* the struct arrays around the field, the indices an access takes */
     uint32_t     offset;    /* absolute byte offset, 0 for variable kinds */
     uint32_t     size;      /* byte size, 0 for variable kinds */
     uint32_t     elem_size; /* ARR and VARR: bytes of one element, else 0 */
@@ -169,11 +170,12 @@ typedef struct {
 } RantValue;
 RANT_API int rant_get_value(RantBytes msg, const RantSchema *s, uint16_t field, RantValue *out);
 RANT_API int rant_set_value(void *buf, size_t cap, const RantSchema *s, uint16_t field, const RantValue *val);
-/* The same under a struct array, elem selects the element. Ignored for other fields. */
-RANT_API int rant_get_value_at(RantBytes msg, const RantSchema *s, uint16_t field, uint32_t elem,
-                               RantValue *out);
-RANT_API int rant_set_value_at(void *buf, size_t cap, const RantSchema *s, uint16_t field, uint32_t elem,
-                               const RantValue *val);
+/* The same under struct arrays: elems holds one index per enclosing struct array,
+ * outermost first, and n_elems must equal the field's arr_depth. */
+RANT_API int rant_get_value_at(RantBytes msg, const RantSchema *s, uint16_t field,
+                               const uint32_t *elems, uint16_t n_elems, RantValue *out);
+RANT_API int rant_set_value_at(void *buf, size_t cap, const RantSchema *s, uint16_t field,
+                               const uint32_t *elems, uint16_t n_elems, const RantValue *val);
 /* The live count of the struct array at flat index field, 0 if it is not an array. */
 RANT_API uint32_t rant_array_count_at(RantBytes msg, const RantSchema *s, uint16_t field);
 

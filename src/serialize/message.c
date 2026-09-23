@@ -66,28 +66,32 @@ int rant_schema_validate(const RantSchema *s, RantBytes msg){
     return total != 0 && total == msg.len;
 }
 
-/* Where field f's bytes sit in msg for array element index, bounds checked. A fixed
- * struct array strides from element 0, a variable one strides inside the array's frame. */
+/* Where field f's bytes sit in msg, bounds checked. elems holds one index per enclosing
+ * struct array, outermost first. Each strides by its element size, and only the outermost
+ * can be variable, since an element has one size, so its frame is the base. */
 static int i_rant_field_addr(const RantSchema *s, RantBytes msg, const i_Field *f,
-                             uint32_t index, size_t *out_off){
-    size_t off;
+                             const uint32_t *elems, uint16_t n_elems, size_t *out_off){
+    uint64_t off = f->offset;
+    const i_Field *a = f;
+    uint16_t k = n_elems;
+    if (n_elems != f->arr_depth || (n_elems && !elems)) return 0;
     if (i_rant_kind_var(f->kind)){ *out_off = 0; return 1; }     /* frames locate themselves */
-    if (f->arr_parent == I_RANT_NO_PARENT){
-        off = f->offset;
-    } else {
-        const i_Field *a = &s->fields[f->arr_parent];
-        if (a->elem_size == 0) return 0;
-        if (a->kind == RANT_ARR){
-            if (index >= a->count) return 0;
-            off = (size_t)f->offset + (size_t)index * a->elem_size;
+    while (a->arr_parent != I_RANT_NO_PARENT){
+        const i_Field *p = &s->fields[a->arr_parent];
+        uint32_t idx = elems[--k];
+        if (p->elem_size == 0) return 0;
+        if (p->kind == RANT_ARR){
+            if (idx >= p->count) return 0;
         } else {
-            RantBytes fr = i_rant_schema_frame(s, msg, a->var_ord);
-            if (!fr.data || (uint64_t)index * a->elem_size + a->elem_size > fr.len) return 0;
-            off = (size_t)(fr.data - msg.data) + (size_t)index * a->elem_size + f->offset;
+            RantBytes fr = i_rant_schema_frame(s, msg, p->var_ord);
+            if (!fr.data || ((uint64_t)idx + 1u) * p->elem_size > fr.len) return 0;
+            off += (uint64_t)(fr.data - msg.data);
         }
+        off += (uint64_t)idx * p->elem_size;
+        a = p;
     }
     if (off + f->size > msg.len) return 0;
-    *out_off = off;
+    *out_off = (size_t)off;
     return 1;
 }
 
@@ -95,9 +99,9 @@ static int i_rant_field_addr(const RantSchema *s, RantBytes msg, const i_Field *
  * the message is too short. */
 static const i_Field *i_rant_schema_read_lookup(const RantSchema *s, RantBytes msg,
                                                 const char *field, size_t *off){
-    uint32_t index = 0;
-    const i_Field *f = i_rant_schema_field_by_path(s, field, &index);
-    if (!f || !i_rant_field_addr(s, msg, f, index, off)) return NULL;
+    uint32_t elems[RANT_SCHEMA_MAX_DEPTH]; uint16_t n = 0;
+    const i_Field *f = i_rant_schema_field_by_path(s, field, elems, &n);
+    if (!f || !i_rant_field_addr(s, msg, f, elems, n, off)) return NULL;
     return f;
 }
 
@@ -231,14 +235,14 @@ RantString rant_get_enum(RantBytes msg, const RantSchema *s, const char *field){
                              i_rant_enum_read_val(f->elem, msg.data + off));
 }
 
-int rant_get_value_at(RantBytes msg, const RantSchema *s, uint16_t field, uint32_t elem,
-                      RantValue *out){
+int rant_get_value_at(RantBytes msg, const RantSchema *s, uint16_t field,
+                      const uint32_t *elems, uint16_t n_elems, RantValue *out){
     const i_Field *f; const uint8_t *p; size_t off;
     if (!out) return 0;
     memset(out, 0, sizeof *out);
     if (!s || field >= s->nfields) return 0;
     f = &s->fields[field];
-    if (!i_rant_field_addr(s, msg, f, elem, &off)) return 0;
+    if (!i_rant_field_addr(s, msg, f, elems, n_elems, &off)) return 0;
     p = msg.data + off;
     out->kind = f->kind; out->elem = f->elem; out->count = f->count; out->str_cap = f->str_cap;
     switch (f->kind){
@@ -282,7 +286,7 @@ int rant_get_value_at(RantBytes msg, const RantSchema *s, uint16_t field, uint32
 }
 
 int rant_get_value(RantBytes msg, const RantSchema *s, uint16_t field, RantValue *out){
-    return rant_get_value_at(msg, s, field, 0, out);
+    return rant_get_value_at(msg, s, field, NULL, 0, out);
 }
 
 /* writing a message */
@@ -446,12 +450,12 @@ int rant_set_enum(void *buf, size_t cap, const RantSchema *s, const char *field,
     return 1;
 }
 
-int rant_set_value_at(void *buf, size_t cap, const RantSchema *s, uint16_t field, uint32_t elem,
-                      const RantValue *val){
+int rant_set_value_at(void *buf, size_t cap, const RantSchema *s, uint16_t field,
+                      const uint32_t *elems, uint16_t n_elems, const RantValue *val){
     const i_Field *f; uint8_t *p; size_t off;
     if (!buf || !val || !s || field >= s->nfields) return 0;
     f = &s->fields[field];
-    if (!i_rant_field_addr(s, rant_bytes(buf, cap), f, elem, &off)) return 0;
+    if (!i_rant_field_addr(s, rant_bytes(buf, cap), f, elems, n_elems, &off)) return 0;
     p = (uint8_t *)buf + off;
     switch (f->kind){
         case RANT_U8: case RANT_U16: case RANT_U32: case RANT_U64: case RANT_BOOL:
@@ -488,5 +492,5 @@ int rant_set_value_at(void *buf, size_t cap, const RantSchema *s, uint16_t field
 }
 
 int rant_set_value(void *buf, size_t cap, const RantSchema *s, uint16_t field, const RantValue *val){
-    return rant_set_value_at(buf, cap, s, field, 0, val);
+    return rant_set_value_at(buf, cap, s, field, NULL, 0, val);
 }

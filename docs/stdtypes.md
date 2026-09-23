@@ -278,8 +278,9 @@ Two rules bound this, both about keeping an array element's stride static:
 - An array ELEMENT must be fixed all the way down. `Image[4]` is refused (Image has a
   variable member), as is an array of arrays, which is why `Uuid[2]` is refused too, a
   `Uuid` being itself a `u8[16]`. Wrap it in a struct if you need one.
-- Only one level of struct element array nests, so an element that is itself a struct
-  array is refused. Scalar and string arrays inside an element are fine.
+- Inside an element everything has a fixed size, so a struct array nests in another's
+  element only as a fixed one: `{ corners: Float2[4] }[]` works, `{ pts: Float2[] }[]`
+  is refused. The outermost array may be variable.
 
 Variable members may otherwise sit at any struct depth. Declaration nests, storage does
 not: a `string` declared three levels down still claims a flat frame in the message tail,
@@ -289,15 +290,17 @@ Members of a struct array are addressed with an index in the path:
 
 ```c
 rant_set_f32(msg, cap, s, "corners[2].x", 1.5f);
+rant_set_f32(msg, cap, s, "shapes[1].corners[2].x", 0.5f);   /* one index per level */
 float z = rant_get_f32(msg, s, "points[0].z");
 uint32_t n = rant_get_array_count(msg, s, "points");
 rant_set_array_count(msg, cap, s, "points", 64);   /* grow a variable one first */
 ```
 
 Reflection reaches the same values by flat index with `rant_get_value_at` and
-`rant_set_value_at`, taking the element index as an argument. The flat field table holds
-one element 0 template per array, and `RantSchemaFieldInfo.arr_parent` points a member
-back at the array it belongs to.
+`rant_set_value_at`, taking one index per enclosing struct array, outermost first. The
+flat field table holds one element 0 template per array, `RantSchemaFieldInfo.arr_parent`
+points a member back at the nearest array it belongs to, and `arr_depth` says how many
+indices it takes.
 
 ## Wire format
 

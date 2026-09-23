@@ -66,7 +66,7 @@ static uint32_t i_rant_rd_refuse(i_Rd *r, const char *why){
 }
 
 /* Where a type sits relative to an array. DIRECT is an element type, so not itself an
- * array. INSIDE is anywhere within one, so no variable kinds and no further struct arrays. */
+ * array. INSIDE is anywhere within one, so no variable kinds: every element has one size. */
 #define I_T_ELEM_DIRECT 1u
 #define I_T_ELEM_INSIDE 2u
 
@@ -90,8 +90,6 @@ static uint32_t i_rant_rd_type_size(i_Rd *r, uint32_t *fields, uint32_t *nvar,
             if (r->fail) return 0;
             ek = i_rant_peek_kind(r);
             if (ek == 0xFFu){ r->fail = 1; return 0; }
-            if ((fl & I_T_ELEM_INSIDE) && ek == RANT_STRUCT)
-                return i_rant_rd_refuse(r, "a struct array cannot sit inside another array's element");
             es = i_rant_rd_type_size(r, fields, nvar, (uint16_t)(depth + 1),
                                      I_T_ELEM_DIRECT | I_T_ELEM_INSIDE);
             if (r->fail) return 0;
@@ -378,6 +376,8 @@ static RantSchema *i_rant_schema_compile(uint8_t *buf, size_t wire_len, size_t c
                 f->arr_parent = (p->kind == RANT_ARR || p->kind == RANT_VARR)
                               ? f->parent : p->arr_parent;
             }
+            f->arr_depth = f->arr_parent == I_RANT_NO_PARENT ? 0u
+                         : (uint16_t)(s->fields[f->arr_parent].arr_depth + 1u);
             if (i_rant_kind_var(f->kind)){
                 f->offset = 0;                   /* a frame has no static offset */
                 f->var_ord = ord++;
@@ -435,6 +435,7 @@ int rant_schema_field_at(const RantSchema *s, uint16_t i, RantSchemaFieldInfo *o
         out->kind = f->kind; out->elem = f->elem;
         out->count = f->count; out->depth = f->depth;
         out->str_cap = f->str_cap; out->arr_parent = f->arr_parent;
+        out->arr_depth = f->arr_depth;
         out->offset = f->offset; out->size = f->size;
         out->elem_size = f->elem_size;
     }
@@ -442,12 +443,15 @@ int rant_schema_field_at(const RantSchema *s, uint16_t i, RantSchemaFieldInfo *o
 }
 
 /* Matches a dotted path against a field: the last segment is its own name, the earlier
- * ones its ancestors. A segment may carry [N] on an array field, which *index gets. */
+ * ones its ancestors. A segment may carry [N] on an array field. Each enclosing struct
+ * array's index lands in elems, outermost first, 0 where none was given. */
 static int i_rant_schema_path_match(const RantSchema *s, const i_Field *f, const char *path,
-                                    size_t path_len, uint32_t *index){
+                                    size_t path_len, uint32_t *elems){
     const char *end = path + path_len;
-    uint32_t found = 0;
+    const i_Field *target = f;
+    uint16_t k = f->arr_depth;
     for (;;){
+        uint32_t found = 0;
         const char *seg = end, *nend;
         while (seg > path && seg[-1] != '.') seg--;
         nend = end;
@@ -470,10 +474,10 @@ static int i_rant_schema_path_match(const RantSchema *s, const i_Field *f, const
         }
         if (f->name.len != (size_t)(nend - seg) ||
             (f->name.len && memcmp(f->name.data, seg, f->name.len) != 0)) return 0;
+        if (f != target && (f->kind == RANT_ARR || f->kind == RANT_VARR) && k)
+            elems[--k] = found;                            /* an enclosing struct array */
         if (f->parent == I_RANT_NO_PARENT){                  /* root: all segments consumed */
-            if (seg != path) return 0;
-            if (index) *index = found;
-            return 1;
+            return seg == path;
         }
         if (seg == path) return 0;                         /* segments ran out early */
         end = seg - 1;                                     /* past the dot */
@@ -514,18 +518,23 @@ static int i_rant_path_normalize(const char *path, char *out, size_t cap, size_t
 }
 
 const i_Field *i_rant_schema_field_by_path(const RantSchema *s, const char *path,
-                                           uint32_t *index){
-    uint16_t i; size_t n; char wire[512];
-    if (index) *index = 0;
+                                           uint32_t *elems, uint16_t *n_elems){
+    uint16_t i; size_t n; char wire[512]; uint32_t got[RANT_SCHEMA_MAX_DEPTH];
+    if (n_elems) *n_elems = 0;
     if (!s || !path) return NULL;
     if (!i_rant_path_normalize(path, wire, sizeof wire, &n)) return NULL;
-    for (i = 0; i < s->nfields; i++)
-        if (i_rant_schema_path_match(s, &s->fields[i], wire, n, index)) return &s->fields[i];
+    for (i = 0; i < s->nfields; i++){
+        const i_Field *f = &s->fields[i];
+        if (!i_rant_schema_path_match(s, f, wire, n, got)) continue;
+        if (elems) memcpy(elems, got, (size_t)f->arr_depth * sizeof *got);
+        if (n_elems) *n_elems = f->arr_depth;
+        return f;
+    }
     return NULL;
 }
 
 int rant_schema_field_index(const RantSchema *s, const char *path){
-    const i_Field *f = i_rant_schema_field_by_path(s, path, NULL);
+    const i_Field *f = i_rant_schema_field_by_path(s, path, NULL, NULL);
     return f ? (int)(f - s->fields) : -1;
 }
 
