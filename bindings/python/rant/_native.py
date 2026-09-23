@@ -513,6 +513,7 @@ def bind(lib):
     F("rant_schema_field_at", [c_void_p, c_uint16, POINTER(RantSchemaFieldInfo)], c_int)
     F("rant_schema_field_index", [c_void_p, c_char_p], c_int)
     F("rant_field_name", [c_char_p, c_char_p, c_size_t], c_size_t)
+    F("rant_type_name", [c_char_p, c_char_p, c_size_t], c_size_t)
     F("rant_schema_enum_count", [c_void_p, c_uint16], c_uint16)
     F("rant_schema_enum_variant", [c_void_p, c_uint16, c_uint16, POINTER(c_int64),
                                    POINTER(RantStringView)], c_int)

@@ -294,6 +294,12 @@ class Code:
 
 
 @dataclass
+class Outline:
+    corners: Annotated[list[rant.types.Float2], "Float2[4]"] = field(default_factory=list)
+    marks:   Annotated[list[Velocity], "Velocity[2]"] = field(default_factory=list)
+
+
+@dataclass
 class Detections:
     stamp: rant.u64 = 0
     codes: list[Code] = field(default_factory=list)
@@ -353,6 +359,19 @@ def struct_arrays():
     root = rant.dsl(list[Code])
     check("a struct array root defines its element above it",
           root.startswith("Velocity\n{") and root.endswith("\nCode[]\n"))
+    ol = node.schema(Outline)
+    check("Annotated text names a fixed struct array",
+          "corners: Float2[4]" in rant.dsl(Outline) and "marks: Velocity[2]" in rant.dsl(Outline))
+    got = ol.decode(ol.encode(Outline(corners=[rant.types.Float2(1.0, 2.0)],
+                                      marks=[Velocity(3.0, 4.0)])))
+    check("a fixed struct array fills and zero pads",
+          len(got.corners) == 4 and got.corners[0].y == 2.0 and got.corners[3].x == 0.0
+          and isinstance(got.marks[1], Velocity) and got.marks[0].dx == 3.0)
+    try:
+        rant.dsl(type("Bad", (), {"__annotations__": {"a": Annotated[list[Velocity], "Code[2]"]}}))
+        check("a struct name that is not the list's class is refused", False)
+    except rant.SchemaError:
+        check("a struct name that is not the list's class is refused", True)
     bare = node.schema(list[Code])
     check("a struct array is a bare root too",
           bare.decode(bare.encode([Code("A", 1.0)]))[0].type == "A")

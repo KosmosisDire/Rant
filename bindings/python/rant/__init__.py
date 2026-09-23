@@ -301,7 +301,7 @@ class _String:
 
 class _Array:
     def __init__(self, elem, count):
-        self.elem = elem     # a _Type or a _String
+        self.elem = elem     # a _Type, a _String, or a schema class for a struct array
         self.count = count
 
     def __repr__(self):
@@ -418,10 +418,12 @@ class _Spec:
         self.attrs = {f.wire: f.name for f in fields}   # the attribute a wire name reads
 
 
-def _wire_name(name):
-    """The wire spelling of a member name, the library's rule (docs/stdtypes.md)."""
+def _wire_name(name, as_type=False):
+    """The wire spelling of a member name, or of a type name with as_type, the library's
+    rule (docs/stdtypes.md)."""
     buf = _c.ctypes.create_string_buffer(256)
-    n = _c.load().rant_field_name(name.encode("utf-8"), buf, 256)
+    lib = _c.load()
+    n = (lib.rant_type_name if as_type else lib.rant_field_name)(name.encode("utf-8"), buf, 256)
     if not n:
         raise SchemaError("rant schema: no wire name can be made from %r" % name)
     return buf.raw[:n].decode("utf-8")
@@ -451,11 +453,40 @@ def _marker_from_dsl(text):
     m = _DSL_FIELD.match(text.replace(" ", ""))
     if not m:
         raise SchemaError("rant schema: %r is not a DSL field type (u8..f64, bool, "
-                          "string<N>, or one of those followed by [N] or [])" % text)
+                          "string<N>, a struct's name, or one of those followed by [N] "
+                          "or [])" % text)
     base = _String(int(m.group(2))) if m.group(2) else _Type(_KIND_OF[m.group(1)], m.group(1))
     if m.group(3) is None:
         return base
     return _Array(base, int(m.group(4))) if m.group(4) else list[base]
+
+
+_DSL_NAMED = _re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\[(\d*)\])?$")
+
+
+def _struct_marker(base, text):
+    """The marker for DSL text naming a struct, alone or as an array: `Float2[4]` over a
+    list[Float2] is a fixed array of 4. None when the text names no struct."""
+    m = _DSL_NAMED.match(text.replace(" ", ""))
+    if not m or _DSL_FIELD.match(text.replace(" ", "")):
+        return None
+    origin = getattr(base, "__origin__", None)
+    args = getattr(base, "__args__", ())
+    cls = args[0] if origin in (list, tuple) and args else base
+    if not (isinstance(cls, type) and getattr(cls, "__annotations__", None)
+            and not issubclass(cls, _pyenum.Enum)):
+        raise SchemaError("rant schema: %r names a struct, so the Python type must be that "
+                          "class or a list of it (got %r)" % (text, base))
+    if _wire_name(m.group(1), True) != _wire_name(_spec_of(cls).name, True):
+        raise SchemaError("rant schema: %r names %s but the Python type holds %s"
+                          % (text, m.group(1), cls.__name__))
+    if m.group(2) is None:
+        if cls is not base:
+            raise SchemaError("rant schema: %r is one struct but the Python type is a list" % text)
+        return cls
+    if cls is base:
+        raise SchemaError("rant schema: %r is an array, so the Python type must be a list" % text)
+    return _Array(cls, int(m.group(3))) if m.group(3) else list[cls]
 
 
 def _resolve(ann, g):
@@ -467,7 +498,7 @@ def _resolve(ann, g):
         dsl_text = next((m for m in ann.__metadata__ if isinstance(m, str)), None)
         if dsl_text is None:
             return base
-        marker = _marker_from_dsl(dsl_text)
+        marker = _struct_marker(base, dsl_text) or _marker_from_dsl(dsl_text)
         if isinstance(base, type) and issubclass(base, _pyenum.Enum) and isinstance(marker, _Type):
             return _Enum(base, marker)
         return marker
@@ -508,6 +539,9 @@ def _field_spec(name, ann, g):
     if isinstance(ann, _String):
         return _FieldSpec(name, _STR, str_cap=ann.cap)
     if isinstance(ann, _Array):
+        if isinstance(ann.elem, type):          # a fixed array of structs
+            return _FieldSpec(name, _ARR, elem=_STRUCT, count=ann.count, nested=_spec_of(ann.elem),
+                              elem_name=getattr(ann.elem, "__rant_std__", None))
         if isinstance(ann.elem, _String):
             return _FieldSpec(name, _ARR, elem=_STR, count=ann.count, str_cap=ann.elem.cap)
         return _FieldSpec(name, _ARR, elem=ann.elem.kind, count=ann.count, token=ann.elem.token)

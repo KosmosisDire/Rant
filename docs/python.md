@@ -96,7 +96,9 @@ the annotation for one. The scalars are `int` and `float` aliases to a checker. 
 string, a fixed or variable array and a pinned enum width are spelled
 `Annotated[T, "<dsl field type>"]`, the Python type for the checker and the DSL for the
 wire: `Annotated[str, "string<16>"]`, `Annotated[bytes, "u8[4]"]`,
-`Annotated[list[float], "f32[]"]`, `Annotated[Mode, "u8"]`. In a value position the same
+`Annotated[list[float], "f32[]"]`, `Annotated[Mode, "u8"]`. The text may name a struct
+over a list of that class, so `Annotated[list[Float2], "Float2[4]"]` is a fixed array of
+four `Float2`, which a plain `list[Float2]` cannot say. In a value position the same
 DSL text does it: `node.schema("u8[4]")`.
 
 `node.schema(text)`, `node.schema(cls)` and `node.schema(bare_type)` compile explicitly,
