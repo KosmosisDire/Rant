@@ -174,7 +174,12 @@ class CallError(Error):
 
 class CancelledError(Exception):
     """Raise from a task handler to complete the call CallStatus.CANCELLED (the
-    cooperative honor of a cancel). The exception text becomes Response.message."""
+    cooperative honor of a cancel). The text becomes Response.message, and partial, when
+    given, is the partial result the caller reads."""
+
+    def __init__(self, message="", partial=None):
+        super().__init__(message)
+        self.partial = partial
 
 
 # The value dataclasses.
@@ -1901,8 +1906,16 @@ class Node:
         return self._threading
 
     def _print_event(self, e):
-        # the default on_event: nothing goes unseen when the caller registered no handler
-        print("rant[%s]: %s" % (self._name or "node", e), file=_sys.stderr)
+        # the default on_event: no error goes unseen when the caller registered no handler
+        if e.is_error:
+            print("rant[%s]: %s" % (self._name or "node", e), file=_sys.stderr)
+
+    def on_event(self, handler):
+        """Deliver every peer, loss and error event to handler, where the node's callbacks
+                run. A later call rebinds, and None restores the default, which prints
+                errors to stderr. Returns handler, so it works as a decorator."""
+        self._on_evt = handler
+        return handler
 
     # ---- handles ----
 
@@ -2637,7 +2650,7 @@ class _TaskBox:
         try:
             rsp = self.handler(val) if self.arity == 1 else self.handler(val, ctx)
         except CancelledError as e:
-            status, message, rsp = CallStatus.CANCELLED, str(e) or None, None
+            status, message, rsp = CallStatus.CANCELLED, str(e) or None, e.partial
         except Exception as e:
             _traceback.print_exc()
             status, message, rsp = CallStatus.APP_ERROR, str(e) or "handler threw", None
@@ -2776,26 +2789,23 @@ class FunctionDefinition(_Function):
         self._name = name
         self._req_schema = _as_schema(node, req_schema)
         self._rsp_schema = _as_schema(node, rsp_schema)
+        if handler is None:
+            raise ValueError("function_definition(%r): a definition needs a handler" % name)
         co = _function_opts(node, **opts)
-        box_id = 0
-        box = None
-        if handler is not None:
-            box = _FnBox(handler, self._req_schema, self._rsp_schema)
-            box_id = _pbox_add(box)
+        box = _FnBox(handler, self._req_schema, self._rsp_schema)
+        box_id = _pbox_add(box)
         h = node._lib.rant_node_create_function_definition(
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
             self._rsp_schema._s if self._rsp_schema else None,
-            _on_request if box else _c.NULL_REQ_FN, _c.c_void_p(box_id), _c.byref(co))
+            _on_request, _c.c_void_p(box_id), _c.byref(co))
         if not h:
-            if box:
-                _pbox_pop(box_id)
+            _pbox_pop(box_id)
             err = node.last_error
             raise Error("function_definition(%r) failed: %s" % (name, err), err)
         self._fn = h
-        if box:
-            box.fn = h
-            node._register_box(box_id)
+        box.fn = h
+        node._register_box(box_id)
 
     __class_getitem__ = classmethod(_generic)
 
@@ -2883,8 +2893,7 @@ class RemoteFunction(_Function):
 
 class TaskDefinition(_Function):
     """The implementation side of a task, from node.task_definition. The handler runs on a
-        worker thread per call with the value, or the value and a TaskContext. None answers
-        NO_HANDLER."""
+        worker thread per call with the value, or the value and a TaskContext."""
     __slots__ = ("_prg_schema",)
 
     def __init__(self, node, name, handler, req_schema=None, prg_schema=None,
@@ -2894,30 +2903,26 @@ class TaskDefinition(_Function):
         self._req_schema = _as_schema(node, req_schema)
         self._prg_schema = _as_schema(node, prg_schema)
         self._rsp_schema = _as_schema(node, rsp_schema)
+        if handler is None:
+            raise ValueError("task_definition(%r): a definition needs a handler" % name)
         co = _task_opts(node, **opts)
-        box_id = 0
-        box = None
-        if handler is not None:
-            box = _TaskBox(handler, self._req_schema, self._prg_schema,
-                           self._rsp_schema)
-            box_id = _pbox_add(box)
+        box = _TaskBox(handler, self._req_schema, self._prg_schema, self._rsp_schema)
+        box_id = _pbox_add(box)
         h = node._lib.rant_node_create_task_definition(
             node._h, name.encode("utf-8"),
             self._req_schema._s if self._req_schema else None,
             self._prg_schema._s if self._prg_schema else None,
             self._rsp_schema._s if self._rsp_schema else None,
-            _on_request if box else _c.NULL_REQ_FN, _c.c_void_p(box_id), _c.byref(co))
+            _on_request, _c.c_void_p(box_id), _c.byref(co))
         if not h:
-            if box:
-                _pbox_pop(box_id)
+            _pbox_pop(box_id)
             err = node.last_error
             raise Error("task_definition(%r) failed: %s" % (name, err), err)
         self._fn = h
-        if box:
-            box.fn = h
-            node._register_box(box_id)
-            # the one C cancel slot: fans out to the per call cancel Events
-            node._lib.rant_function_on_cancel(h, _on_task_cancel, _c.c_void_p(box_id))
+        box.fn = h
+        node._register_box(box_id)
+        # the one C cancel slot: fans out to the per call cancel Events
+        node._lib.rant_function_on_cancel(h, _on_task_cancel, _c.c_void_p(box_id))
 
     __class_getitem__ = classmethod(_generic)
 
@@ -2953,9 +2958,10 @@ class RemoteTask(_Function):
     __class_getitem__ = classmethod(_generic)
 
     def call(self, req=None, on_progress=None, timeout=None, provider=0):
-        """Blocking call: waits for the terminal outcome, with on_progress on this thread, on
-                the service thread's progress, or driving a MANUAL node's loop. Refused from a
-                callback. Never raises."""
+        """Blocking call: waits for the terminal outcome on the service thread's progress,
+                or driving a MANUAL node's loop. on_progress fires where the node's callbacks
+                run, so on this thread only under MANUAL. Refused from a callback. Never
+                raises."""
         b, buf = _c_view(_payload_bytes(self._req_schema, req))
         out = _c.RantResponse()
         co = _c.RantCallOpts()

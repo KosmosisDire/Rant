@@ -33,7 +33,8 @@ about a wrapper API, this file wins.
   handler, subscribers carry every one. The service thread runs from open unless the
   `threading` option is manual, and dispatch parks every callback on the node's queue
   for `dispatch()`. The event handler is optional and attaches after open (`on_event(h)`,
-  the C# `OnEvent` event, Python's `on_event` keyword). With none set, errors print to
+  the C# `OnEvent` event, Python's `on_event` keyword or `node.on_event(h)`). With none
+  set, errors print to
   stderr, and the last error is recorded either way.
 - Handlers come in two forms: payload only, or payload plus message envelope. A
   subscriber takes its handler at creation in every binding, and a subscriber created

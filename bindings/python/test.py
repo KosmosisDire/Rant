@@ -908,7 +908,7 @@ def tasks():
             task.progress(JobPrg(done=0))
             if not task.cancel_event.wait(8.0) or not task.cancelled:
                 return JobRsp(total=-1)   # cancel never arrived: a visible failure
-            raise rant.CancelledError("stopped")
+            raise rant.CancelledError("stopped", partial=JobRsp(total=5))
         srv.task_definition("grind", _grind, JobReq, JobPrg, JobRsp)
 
         # rigid: declares no_cancel, completes regardless with the one argument form
@@ -964,6 +964,7 @@ def tasks():
         check("terminal CANCELLED with the handler's message",
               gdone.wait(5.0) and grsps[0].status == rant.CallStatus.CANCELLED
               and grsps[0].message == "stopped")
+        check("a cancelled task carries its partial result", bool(grsps) and len(grsps[0].data) > 0)
         check("progress carries the call id and provider",
               bool(ginfo) and all(c == gid and p != 0 for _, c, p in ginfo))
 
@@ -995,6 +996,20 @@ def tasks():
               bprog == [None, 1, 2] and all(bthread))
 
         check("caller count seen by the definition", work.match_count == 2)
+
+        try:
+            srv.function_definition("nohandler", None, JobReq, JobRsp)
+            refused = False
+        except ValueError:
+            refused = True
+        check("a definition without a handler is refused", refused)
+
+        # on_event rebinds after open: a node joining shows up at the new handler
+        ups = threading.Event()
+        cli.on_event(lambda e: ups.set() if e.kind == rant.EventKind.PEER_UP else None)
+        late = rant.Node("tlate", domain=46, multicast_interface=IFACE)
+        check("on_event set after open receives events", ups.wait(5.0))
+        late.close()
     finally:
         srv.close()
         cli.close()

@@ -29,7 +29,8 @@ node.subscriber("pose", Pose, lambda p: print(p))
 docs/getting-started.md's as keywords: `domain`, `multicast_interface`, `max_topics`,
 `match_wait`, `fetch_details`, the discovery options of docs/discovery.md (`seed_peers` as
 "ip" or "ip:port" strings, `unicast_only`, `self_ip` with `advertise_port`) and the rest.
-`on_event` receives every peer, loss and error event, and prints them to stderr when None.
+`on_event` receives every peer, loss and error event, and `node.on_event(handler)` sets or
+replaces it after open. With none set, error events print to stderr.
 Every duration option is float seconds, 0 = the default, and every timeout is float
 seconds, None = forever or the default. Timestamps stay integer microseconds.
 
@@ -170,11 +171,13 @@ Handlers are arity dispatched. A one argument function handler returns the reply
 acknowledged OK, and raising answers APP_ERROR with the exception text. The two argument
 form receives a `Request` and replies, fails or defers explicitly. A `Request` is valid
 only while the handler runs, and its verbs raise RuntimeError after. `defer()` returns a
-`Deferred` completed once from any thread. A None handler answers NO_HANDLER.
+`Deferred` completed once from any thread. A definition without a handler raises
+ValueError.
 
 A task handler runs on a dedicated daemon thread per call and receives the request value,
 or the value and a `TaskContext`. Returning completes OK with the return value, raising
-`rant.CancelledError` completes CANCELLED, and any other exception completes APP_ERROR.
+`rant.CancelledError(message, partial)` completes CANCELLED with an optional partial result,
+and any other exception completes APP_ERROR.
 `progress(x)` on the context streams updates and `cancelled` or the `cancel_event` observe
 a cooperative cancel. Closing a definition answers every live call CANCELLED, and a worker
 completing after that is refused silently.
