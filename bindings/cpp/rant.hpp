@@ -1199,6 +1199,12 @@ struct string_tail {
     }
 };
 
+inline std::string strip_namespaces(const char* type_name) {
+    std::string n(type_name);
+    size_t p = n.rfind(':');
+    return p == std::string::npos ? n : n.substr(p + 1);
+}
+
 struct SchemaBuilder {
     std::string       dsl;
     std::vector<Leaf> leaves;
@@ -1209,6 +1215,9 @@ struct SchemaBuilder {
     bool              value_root = false;   /* the schema IS one bare type: no name, no braces */
     int               quiet = 0;            /* > 0: emit leaves only (inside a NAMED type,
                                                whose spelling is just its name) */
+    std::string       defs;                 /* nested struct definitions, before the root */
+    std::unordered_set<const void*> defined;   /* the types already in defs */
+    SchemaBuilder*    root = nullptr;       /* a definition's builder writes defs here */
 
     void put(const char* s)        { if (!quiet) dsl += s; }
     void put(const std::string& s) { if (!quiet) dsl += s; }
@@ -1303,6 +1312,8 @@ struct SchemaBuilder {
         tails.push_back(std::move(t));
     }
     template <class U> void add(const char* name, size_t off);
+    template <class U> void define();
+    template <class U> void members(const char* name, size_t off);
 };
 
 struct SchemaVisit {
@@ -1350,21 +1361,12 @@ template <class U> void SchemaBuilder::add(const char* name, size_t off) {
         base   = saved_base;
         prefix = std::move(saved_prefix);
     } else if constexpr (is_reflected<U>::value) {
-        /* nested reflected struct: inline its fields one level deeper */
-        if (!first) dsl += ", ";
-        first = false;
-        dsl += name;
-        dsl += ": { ";
-        uint32_t    saved_base   = base;
-        std::string saved_prefix = prefix;
-        base   = base + (uint32_t)off;
-        prefix = prefix + name + ".";
-        first  = true;
-        reflect<U>::visit(SchemaVisit{ this });
-        dsl += " }";
-        base   = saved_base;
-        prefix = std::move(saved_prefix);
-        first  = false;
+        /* a nested struct spells as its name, defined once above the root as C# and
+           Python do, and still contributes its leaves one level deeper */
+        sep(name);
+        put(strip_namespaces(reflect<U>::type_name));
+        define<U>();
+        members<U>(name, off);
     } else if constexpr (is_std_vector<U>::value) {
         add_vector<typename is_std_vector<U>::elem>(name, off);
     } else if constexpr (is_var_string<U>::value) {
@@ -1375,6 +1377,34 @@ template <class U> void SchemaBuilder::add(const char* name, size_t off) {
             "rant::String<N>, fixed arrays, std::vector<scalar>, std::string, or a "
             "nested RANT_SCHEMA struct)");
     }
+}
+
+template <class U> struct type_key { static constexpr char id = 0; };
+
+/* U's definition in the root's defs, once per type and after the types it uses */
+template <class U> void SchemaBuilder::define() {
+    SchemaBuilder& top = root ? *root : *this;
+    if (!top.defined.insert(&type_key<U>::id).second) return;
+    SchemaBuilder d;
+    d.root = &top;
+    d.dsl  = strip_namespaces(reflect<U>::type_name);
+    d.dsl += " { ";
+    reflect<U>::visit(SchemaVisit{ &d });
+    d.dsl += " }\n";
+    top.defs += d.dsl;
+}
+
+/* U's leaves under name, one level deeper, without spelling anything */
+template <class U> void SchemaBuilder::members(const char* name, size_t off) {
+    uint32_t    saved_base   = base;
+    std::string saved_prefix = prefix;
+    base   = base + (uint32_t)off;
+    prefix = prefix + name + ".";
+    ++quiet;
+    reflect<U>::visit(SchemaVisit{ this });
+    --quiet;
+    base   = saved_base;
+    prefix = std::move(saved_prefix);
 }
 
 /* resolve every leaf's wire offset by dotted path in a compiled schema, verifying the kinds.
@@ -1503,12 +1533,6 @@ struct TypeCodec {
     }
 };
 
-inline std::string strip_namespaces(const char* type_name) {
-    std::string n(type_name);
-    size_t p = n.rfind(':');
-    return p == std::string::npos ? n : n.substr(p + 1);
-}
-
 template <class T> TypeCodec* build_codec(detail::RantNode* node) {
     static_assert(std_type<T>::name != nullptr || is_reflected<T>::value || is_value_type<T>(),
                   "type has no RANT_SCHEMA(T, fields...) declaration and is not a bare wire type");
@@ -1533,6 +1557,7 @@ template <class T> TypeCodec* build_codec(detail::RantNode* node) {
     }
     c->leaves = std::move(b.leaves);
     c->tails  = std::move(b.tails);
+    b.dsl = b.defs + b.dsl;                     /* nested definitions come first */
     c->raw = detail::rant_node_schema(node, b.dsl.c_str());
     if (!c->raw) return c;
     c->hash        = detail::rant_schema_hash(c->raw);

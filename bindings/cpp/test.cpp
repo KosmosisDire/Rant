@@ -551,6 +551,50 @@ static bool stdtypes_leg() {
 static const uint64_t HASH_BOOL   = 0xee90234f61d2520bULL;
 static const uint64_t HASH_F32ARR = 0x314844e3386a1fc4ULL;
 
+/* nested structs spell by name, as C# and Python do */
+struct Corner { float x, y; };
+RANT_SCHEMA(Corner, x, y);
+struct Shape { Corner origin; rant::types::Float2 at; uint8_t id; };
+RANT_SCHEMA(Shape, origin, at, id);
+
+/* encode then decode through the node's typed codec, no network */
+template <class T> static bool round_trip(rant::Node& n, const T& in, T& out) {
+    rant::priv::TypeCodec* c = rant::priv::type_codec<T>(n);
+    if (!rant::priv::codec_ok(c)) return false;
+    std::vector<uint8_t> scratch;
+    rant::Bytes by = rant::priv::encode(*c, in, scratch);
+    if (by.size() == 0) return false;
+    std::vector<uint8_t> copy(by.data(), by.data() + by.size());
+    return rant::priv::decode(*c, out, rant::Bytes(copy.data(), copy.size()), nullptr);
+}
+
+static bool nested_leg() {
+    int fails_at_entry = g_failures;
+    rant::NodeOptions opts;
+    opts.domain = 47;
+    opts.multicast_interface = "127.0.0.1";
+    rant::Node a("nest-a", {}, [](const rant::Event&) {}, opts);
+    chk("nest: node constructed", a.valid());
+    if (!a.valid()) return false;
+
+    {   auto sc = rant::priv::schema_of<Shape>(a);
+        std::string txt = sc ? sc->to_dsl() : std::string();
+        chk("nest: a nested struct spells by name, defined once above",
+            txt.find("origin: Corner") != std::string::npos
+            && txt.find("Corner {") != std::string::npos && txt.find("at: Float2") != std::string::npos);
+        rant::Schema same = a.schema("Corner { x: f32, y: f32 }\n"
+                                     "Shape { origin: Corner, at: Float2, id: u8 }");
+        chk("nest: the same text from C# or Python is the same schema",
+            sc && same && sc->hash() == same.hash());
+        Shape in{}, out{};
+        in.origin = { 1.5f, -2.0f }; in.at = { 3.0f, 4.0f }; in.id = 7;
+        chk("nest: a nested struct round trips",
+            round_trip(a, in, out) && out.origin.x == 1.5f && out.origin.y == -2.0f
+            && out.at.y == 4.0f && out.id == 7);
+    }
+    return g_failures == fails_at_entry;
+}
+
 static bool value_root_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
@@ -1169,6 +1213,11 @@ int main(int argc, char** argv) {
     std::printf("value-root leg:\n");
     bool root_ok = value_root_leg();
     std::printf("%s\n", root_ok ? "PASS: bare-type roots" : "FAIL: value-root leg");
+
+    /* nested structs and struct arrays */
+    std::printf("nested leg:\n");
+    bool nest_ok = nested_leg();
+    std::printf("%s\n", nest_ok ? "PASS: nested structs" : "FAIL: nested leg");
 
     /* the standard type library */
     std::printf("stdtypes leg:\n");

@@ -107,7 +107,10 @@ pub.send({ 1.0, 2.0, {} });
 `RANT_SCHEMA(T, fields...)` goes at global scope after the struct, listing up to 64
 members in wire order. The wire name is the type name with namespace qualifiers stripped,
 and a member's wire name is its own name in the wire spelling, camelCase (docs/stdtypes.md),
-so `frame_id` is `frameId` on the wire and in the DSL the codec prints.
+so `frame_id` is `frameId` on the wire and in the DSL the codec prints. A nested
+reflected struct spells as its type name, defined once above the root, so
+`Shape { Corner origin; }` sends `Corner { ... }` then `Shape { origin: Corner }`, the
+same text and hash C# and Python send.
 On first use the codec synthesizes the DSL, compiles it through the C compiler, and builds
 a flat copy table. A padding free struct on a little endian host encodes and decodes with
 one memcpy, anything else runs a per field loop. A delivery whose schema hash differs from
