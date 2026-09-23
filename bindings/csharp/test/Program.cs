@@ -800,6 +800,31 @@ static class Program
                 s.Encode(new Dictionary<string, object> { { "battery", 87 } }));
             Check("round-trip map", back.Count == 1 && Convert.ToInt64(back["battery"]) == 87);
         }
+        // a struct array root defines its element above it and is spelled by name
+        {
+            var s = node.Schema(typeof(Corner[]));
+            Check("a struct array root defines its element once",
+                  s.Dsl.Contains("Corner {") && s.Dsl.TrimEnd().EndsWith("Corner[]") && s.Name == "");
+            var text = node.Schema("Corner { x: f32, y: f32 }\nCorner[]");
+            Check("the reflected root is the spelled out root", text.Handle == s.Handle);
+            var corners = new[] { new Corner { X = 1, Y = 2 }, new Corner { X = 3, Y = 4 } };
+            var back = (Corner[])s.Decode(s.Encode(corners));
+            Check("a struct array root round trips", back.Length == 2 && back[0].Y == 2 && back[1].X == 3);
+            var untyped = node.Schema("Corner[]");
+            var list = untyped.Decode(s.Encode(corners)) as List<Dictionary<string, object>>;
+            Check("with no type it decodes as a list of dictionaries",
+                  list != null && list.Count == 2 && Convert.ToDouble(list[1]["x"]) == 3);
+            var fromDicts = (Corner[])s.Decode(s.Encode(new List<object>
+                { new Dictionary<string, object> { { "X", 5 }, { "y", 6 } } }));
+            Check("a list of dictionaries encodes a struct array root",
+                  fromDicts.Length == 1 && fromDicts[0].X == 5 && fromDicts[0].Y == 6);
+            var fixed4 = node.Schema("Corner[4]");
+            var fl = fixed4.Decode(fixed4.Encode(corners)) as List<Dictionary<string, object>>;
+            Check("an array fills a fixed struct array root and zero pads it",
+                  fl != null && fl.Count == 4 && Convert.ToDouble(fl[1]["x"]) == 3 && Convert.ToDouble(fl[3]["x"]) == 0);
+            var empty = (Corner[])s.Decode(s.Encode(new Corner[0]));
+            Check("an empty struct array root is empty", empty.Length == 0);
+        }
         Console.WriteLine(ok ? "bare-type roots: PASS\n" : "bare-type roots: FAIL\n");
         return ok;
     }
@@ -822,31 +847,38 @@ static class Program
             var subFlag = b.Subscriber<bool>("flag", qos: qos);
             var pubNote = a.Publisher<string>("note", qos);
             var subNote = b.Subscriber<string>("note", qos: qos);
-            bool gotFlag = false, gotNote = false;
+            var pubPts = a.Publisher<Corner[]>("pts", qos);
+            var subPts = b.Subscriber<Corner[]>("pts", qos: qos);
+            bool gotFlag = false, gotNote = false, gotPts = false;
             subFlag.OnMessage += (f, m) => { if (f) gotFlag = true; };
             subNote.OnMessage += (str, m) => { if (str == "a bare unbounded string") gotNote = true; };
+            subPts.OnMessage += (pts, m) => { if (pts.Length == 2 && pts[1].Y == 8) gotPts = true; };
             var vd = a.VariableDefinition<double>("gain", 1.25);
             var rv = b.RemoteVariable<double>("gain");
             var deadline = DateTime.UtcNow.AddSeconds(8);
             while (DateTime.UtcNow < deadline && (pubFlag.MatchCount == 0
-                   || pubNote.MatchCount == 0 || !rv.TryGet(out double _)))
+                   || pubNote.MatchCount == 0 || pubPts.MatchCount == 0 || !rv.TryGet(out double _)))
             {
                 a.Poll(1);
                 b.Poll(1);
             }
-            Check("bare topics matched", pubFlag.MatchCount == 1 && pubNote.MatchCount == 1);
+            Check("bare topics matched", pubFlag.MatchCount == 1 && pubNote.MatchCount == 1
+                  && pubPts.MatchCount == 1);
             Check("bare variable replicated the initial",
                   rv.TryGet(out double gain0) && gain0 == 1.25);
             Check("bool send", pubFlag.Send(true) == SendStatus.Ok);
             Check("string send", pubNote.Send("a bare unbounded string") == SendStatus.Ok);
+            Check("struct array send", pubPts.Send(new[] { new Corner { X = 5, Y = 6 },
+                                                           new Corner { X = 7, Y = 8 } }) == SendStatus.Ok);
             deadline = DateTime.UtcNow.AddSeconds(5);
-            while (DateTime.UtcNow < deadline && !(gotFlag && gotNote))
+            while (DateTime.UtcNow < deadline && !(gotFlag && gotNote && gotPts))
             {
                 a.Poll(1);
                 b.Poll(1);
             }
             Check("bool received as a plain value", gotFlag);
             Check("string received as a plain value", gotNote);
+            Check("struct array received as a typed array", gotPts);
             Check("bare variable set accepted", rv.Set(2.5) == SendStatus.Ok);
             deadline = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < deadline && !(vd.TryGet(out double g) && g == 2.5))

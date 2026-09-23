@@ -83,8 +83,9 @@ source gives them as a list of dictionaries.
 
 A bare type used as a handle's type is the whole schema: `Publisher<bool>`,
 `Subscriber<float[]>`, `VariableDefinition<string>`, `Publisher<Dictionary<string, object>>`
-or an enum. Such a root is anonymous,
-so it is the same bytes and hash in every language. A `Dictionary<string, object>` also
+or an enum. Such a root is anonymous, so it is the same bytes and hash in every language.
+A struct array root such as `Publisher<Corner[]>` defines its element above it, as a
+member's does, and without a type it decodes as a list of dictionaries. A `Dictionary<string, object>` also
 encodes against any compiled schema by field name, nested structs as nested dictionaries.
 
 A tuple such as `(double, double)` has no name of its own, and a struct root needs one, so

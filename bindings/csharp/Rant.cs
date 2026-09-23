@@ -4140,10 +4140,11 @@ namespace Rant
             else if (t.IsArray)
             {
                 Type et = t.GetElementType();
-                if (et == null || !ScalarKind.TryGetValue(et, out k))
-                    throw new SchemaException("bare array schema " + t
-                        + " element must be a scalar (a capped-string array needs DSL text)");
-                plan.Kind = VARR; plan.Elem = k;
+                if (et != null && ScalarKind.TryGetValue(et, out k)) { plan.Kind = VARR; plan.Elem = k; }
+                else if (et != null && !IsMapType(et) && StructLike(et))
+                { plan.Kind = VARR; plan.Elem = STRUCT; plan.Nested = et; }
+                else throw new SchemaException("bare array schema " + t
+                    + " element must be a scalar or a struct (a capped-string array needs DSL text)");
             }
             else if (IsMapType(t)) plan.Kind = MAP;
             else if (t.IsEnum)
@@ -4285,7 +4286,12 @@ namespace Rant
         internal static string TypeDsl(Type t, string namelessAs)
         {
             var spec = Spec(t);
-            if (spec.Name == null) return TypeToken(spec.Fields[0]) + "\n";   // a bare type
+            if (spec.Name == null)   // a bare type, after the definition of a struct element
+            {
+                var bare = new StringBuilder();
+                Hoist(spec, bare, new HashSet<Type>());
+                return bare.Append(TypeToken(spec.Fields[0])).Append('\n').ToString();
+            }
             string name = spec.Name.Length != 0 ? spec.Name : namelessAs;
             if (name == null)
                 throw new SchemaException(t + " has no wire name: use it as a handle's type, which"
@@ -4305,7 +4311,7 @@ namespace Rant
                 if (f.Nested == null || f.TypeName != null || !done.Add(f.Nested)) continue;
                 var inner = Spec(f.Nested);
                 if (inner.Name.Length == 0)
-                    throw new SchemaException(f.Nested + " under " + f.Field.Name
+                    throw new SchemaException(f.Nested + " under " + (f.Field != null ? f.Field.Name : "the root")
                         + " has no wire name: a nested type is a struct or class, not a tuple");
                 Hoist(inner, sb, done);
                 Define(sb, inner.Name, inner);
@@ -4372,11 +4378,12 @@ namespace Rant
             finally { Marshal.FreeHGlobal(buf); }
         }
 
-        // True when a compiled schema is a BARE TYPE: an unnamed root of one anonymous field,
-        // so its message is a single value (encode takes it, decode returns it).
+        // True when a compiled schema is a BARE TYPE: an unnamed root whose first field is
+        // anonymous, so its message is a single value (encode takes it, decode returns it). A
+        // struct array root is followed by its element's members.
         internal static bool IsValueRoot(IntPtr s)
         {
-            if (s == IntPtr.Zero || Native.rant_schema_field_count(s) != 1) return false;
+            if (s == IntPtr.Zero || Native.rant_schema_field_count(s) == 0) return false;
             if ((ulong)Native.rant_schema_name(s).len != 0) return false;
             RantSchemaFieldInfo info;
             if (Native.rant_schema_field_at(s, 0, out info) == 0) return false;
@@ -4401,7 +4408,15 @@ namespace Rant
         {
             var ops = new List<SetOp>();
             long varBytes = 0;
-            if (IsValueRoot(s))
+            if (IsValueRoot(s) && RootIsStructArray(s))
+            {
+                Type et = value.GetType().GetElementType();
+                if (et != null && !IsMapType(et) && StructLike(et))
+                    Collect(s, Spec(value.GetType()), value, "", ops, ref varBytes);
+                else
+                    CollectFromDict(s, new Dictionary<string, object> { { "", value } }, ops, ref varBytes);
+            }
+            else if (IsValueRoot(s))
                 CollectRootValue(s, value, ops, ref varBytes);   // the bare root value
             else if (value is System.Collections.IDictionary dict)
                 CollectFromDict(s, dict, ops, ref varBytes);
@@ -4427,6 +4442,12 @@ namespace Rant
             finally { gh.Free(); }
         }
 
+        private static bool RootIsStructArray(IntPtr s)
+        {
+            RantSchemaFieldInfo info;
+            return Native.rant_schema_field_at(s, 0, out info) != 0 && IsStructArray(info.kind, info.elem);
+        }
+
         // a bare type root: one op on the empty path, the schema's single anonymous field
         private static void CollectRootValue(IntPtr s, object value, List<SetOp> ops, ref long varBytes)
         {
@@ -4444,7 +4465,7 @@ namespace Rant
         {
             foreach (var fp in spec.Fields)
             {
-                object val = fp.Field.Get(obj);
+                object val = fp.Field != null ? fp.Field.Get(obj) : obj;   // no member: a bare root
                 if (val == null) continue;   // keep the zeroed default from message_default
                 string path = prefix + fp.WireName;
                 if (fp.Kind == STRUCT) { Collect(s, Spec(fp.Nested), val, path + ".", ops, ref varBytes); continue; }
@@ -4453,7 +4474,7 @@ namespace Rant
                     var items = val as System.Collections.IList;
                     if (items == null)
                         throw new SchemaException(path + " is an array of structs and expects an array or list, got " + val.GetType().Name);
-                    int count = SizeElems(s, path, fp.Kind, fp.Count, items.Count, ops, ref varBytes);
+                    int count = SizeElems(s, path, items.Count, ops, ref varBytes);
                     for (int i = 0; i < count; i++)
                         if (items[i] != null) Collect(s, Spec(fp.Nested), items[i], path + "[" + i + "].", ops, ref varBytes);
                     continue;
@@ -4465,16 +4486,15 @@ namespace Rant
             }
         }
 
-        // The element count a struct array at path takes, at most the fixed count. A variable
-        // one gets a sizing op ahead of its members, since its frame must exist before they are set.
-        private static int SizeElems(IntPtr s, string path, byte kind, int fixedCount, int given,
-                                     List<SetOp> ops, ref long varBytes)
+        // The element count a struct array at path takes, at most the compiled fixed count. A
+        // variable one gets a sizing op ahead of its members, since its frame must exist first.
+        private static int SizeElems(IntPtr s, string path, int given, List<SetOp> ops, ref long varBytes)
         {
-            if (kind != VARR) return Math.Min(given, fixedCount);
             int fi = Native.rant_schema_field_index(s, CStr(path));
             RantSchemaFieldInfo info;
             if (fi < 0 || Native.rant_schema_field_at(s, (ushort)fi, out info) == 0)
-                throw new SchemaException("no field " + path + " in the schema");
+                throw new SchemaException("no field " + (path.Length != 0 ? path : "at the root") + " in the schema");
+            if (info.kind != VARR) return Math.Min(given, (int)info.count);
             ops.Add(new SetOp { Cpath = CStr(path), Path = path, Kind = VARR, Elem = STRUCT, Count = given });
             varBytes += (long)given * info.elem_size;
             return given;
@@ -4534,7 +4554,7 @@ namespace Rant
                         var items = val as System.Collections.IList;
                         if (items == null)
                             throw new SchemaException(path + " is an array of structs and expects a list of dictionaries, got " + val.GetType().Name);
-                        int count = SizeElems(s, path, info.kind, info.count, items.Count, ops, ref varBytes);
+                        int count = SizeElems(s, path, items.Count, ops, ref varBytes);
                         for (int e = 0; e < count; e++)
                             if (items[e] is System.Collections.IDictionary ed)
                                 CollectMembers(s, infos, i + 1, end, info.depth + 1, path + "[" + e + "].", ed, ops, ref varBytes);
@@ -5040,6 +5060,8 @@ namespace Rant
             {
                 object rv;
                 dict.TryGetValue("", out rv);
+                var root = spec.Fields[0];
+                if (rv != null && IsStructArray(root.Kind, root.Elem)) return ToArray(root.Nested, rv);
                 return RootValue(t, rv);
             }
             var vals = new object[spec.Fields.Count];
