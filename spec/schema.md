@@ -193,7 +193,9 @@ and a bare reference as the last statement (`Uuid`, `Pose`) gives the same root,
 definition taken by name hashes like its struct written out. A type on its own ends the
 text. `Name = { ... }` and `A = W` for a name `W` are refused at the type, since a struct
 has one spelling and a name never wraps a name. The parser keeps the first refusal as a
-reason and a position, and the node prints both in `schema_detail`.
+reason and a position, and the node prints both in `schema_detail`. A rule the wire check
+enforces names itself too: the reader keeps the first broken rule in `i_Rd.why`, and
+`i_rant_schema_wire_why` hands it to the compiler.
 
 ## The flat table
 

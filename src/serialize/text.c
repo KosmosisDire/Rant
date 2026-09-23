@@ -853,7 +853,7 @@ RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, i_Ra
         if (!rtype || !rtlen) i_rant_dsl_fail(&d, d.p, "the text is empty");
     }
     if (!d.err){
-        size_t wlen = 2u + rnlen + rtlen;
+        size_t wlen = 2u + rnlen + rtlen; const char *why = NULL;
         uint8_t *w = (uint8_t *)defs->arena.alloc(defs->arena.user, NULL, wlen);
         if (w){
             w[0] = (uint8_t)RANT_SCHEMA_WIRE_VERSION;
@@ -861,9 +861,10 @@ RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, i_Ra
             if (rnlen) memcpy(w + 2, rname, rnlen);
             memcpy(w + 2 + rnlen, rtype, rtlen);
             s = i_rant_registry_parse(defs, w, wlen);
+            if (!s) why = i_rant_schema_wire_why(w, wlen);   /* a broken rule, not memory */
             defs->arena.alloc(defs->arena.user, w, 0);
         }
-        if (!s) i_rant_dsl_fail(&d, d.p, i_rant_builder_why(-1));
+        if (!s) i_rant_dsl_fail(&d, why ? text : d.p, why ? why : i_rant_builder_why(-1));
     }
     if (root.buf) defs->arena.alloc(defs->arena.user, root.buf, 0);
     if (!s){

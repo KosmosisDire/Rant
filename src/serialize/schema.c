@@ -58,6 +58,13 @@ static uint8_t i_rant_peek_kind(const i_Rd *r){
     }
 }
 
+/* Fails the read with the first rule broken. Returns 0 for the caller to return. */
+static uint32_t i_rant_rd_refuse(i_Rd *r, const char *why){
+    if (!r->fail) r->why = why;
+    r->fail = 1;
+    return 0;
+}
+
 /* Where a type sits relative to an array. DIRECT is an element type, so not itself an
  * array. INSIDE is anywhere within one, so no variable kinds and no further struct arrays. */
 #define I_T_ELEM_DIRECT 1u
@@ -78,25 +85,30 @@ static uint32_t i_rant_rd_type_size(i_Rd *r, uint32_t *fields, uint32_t *nvar,
             return 2u + (uint32_t)i_rant_rd_u16(r);                /* [u16 len][cap bytes] */
         case RANT_ARR: {
             uint16_t count; uint8_t ek; uint64_t es;
-            if (fl & I_T_ELEM_DIRECT){ r->fail = 1; return 0; }  /* no array of arrays */
+            if (fl & I_T_ELEM_DIRECT) return i_rant_rd_refuse(r, "an array element cannot be an array");
             count = i_rant_rd_u16(r);
             if (r->fail) return 0;
             ek = i_rant_peek_kind(r);
             if (ek == 0xFFu){ r->fail = 1; return 0; }
-            if ((fl & I_T_ELEM_INSIDE) && ek == RANT_STRUCT){ r->fail = 1; return 0; }
+            if ((fl & I_T_ELEM_INSIDE) && ek == RANT_STRUCT)
+                return i_rant_rd_refuse(r, "a struct array cannot sit inside another array's element");
             es = i_rant_rd_type_size(r, fields, nvar, (uint16_t)(depth + 1),
                                      I_T_ELEM_DIRECT | I_T_ELEM_INSIDE);
-            if (r->fail || es == 0){ r->fail = 1; return 0; }    /* elements must be fixed */
-            if ((uint64_t)count * es > 0xFFFFFFFFu){ r->fail = 1; return 0; }
+            if (r->fail) return 0;
+            if (es == 0) return i_rant_rd_refuse(r, "an array element must have a fixed size");
+            if ((uint64_t)count * es > 0xFFFFFFFFu) return i_rant_rd_refuse(r, "an array is too large");
             return (uint32_t)((uint64_t)count * es);
         }
         case RANT_ENUM: {
             uint8_t backing; uint16_t n; uint32_t bs, i;
-            if (fl & I_T_ELEM_DIRECT){ r->fail = 1; return 0; }  /* the element kind is ambiguous */
+            if (fl & I_T_ELEM_DIRECT)       /* the element kind is ambiguous */
+                return i_rant_rd_refuse(r, "an enum cannot be an array element, wrap it in a struct");
             backing = i_rant_rd_u8(r);
             n = i_rant_rd_u16(r);
             bs = rant_schema_scalar_size((RantSchemaTypeKind)backing);
-            if (r->fail || bs == 0 || !i_rant_enum_backing_ok(backing)){ r->fail = 1; return 0; }
+            if (r->fail) return 0;
+            if (bs == 0 || !i_rant_enum_backing_ok(backing))
+                return i_rant_rd_refuse(r, "an enum is backed by an integer");
             for (i = 0; i < n && !r->fail; i++){                  /* skip the option table */
                 i_rant_rd_skip(r, bs);
                 i_rant_rd_skip(r, i_rant_rd_u8(r));
@@ -105,22 +117,23 @@ static uint32_t i_rant_rd_type_size(i_Rd *r, uint32_t *fields, uint32_t *nvar,
             return bs;   /* on the wire: just the backing scalar */
         }
         case RANT_VSTR: case RANT_MAP:
-            if (fl){ r->fail = 1; return 0; }                    /* never inside an array element */
+            if (fl) return i_rant_rd_refuse(r, "a variable string or a map cannot sit inside an array element");
             if (nvar) (*nvar)++;
             return 0;
         case RANT_VARR: {
             uint64_t es;
-            if (fl){ r->fail = 1; return 0; }
+            if (fl) return i_rant_rd_refuse(r, "a variable array cannot sit inside an array element");
             if (i_rant_peek_kind(r) == 0xFFu){ r->fail = 1; return 0; }
             es = i_rant_rd_type_size(r, fields, nvar, (uint16_t)(depth + 1),
                                      I_T_ELEM_DIRECT | I_T_ELEM_INSIDE);
-            if (r->fail || es == 0){ r->fail = 1; return 0; }
+            if (r->fail) return 0;
+            if (es == 0) return i_rant_rd_refuse(r, "an array element must have a fixed size");
             if (nvar) (*nvar)++;
             return 0;
         }
         case RANT_STRUCT: {
             uint8_t nf; uint64_t sum = 0; uint16_t i;
-            if (depth >= RANT_SCHEMA_MAX_DEPTH){ r->fail = 1; return 0; }
+            if (depth >= RANT_SCHEMA_MAX_DEPTH) return i_rant_rd_refuse(r, "structs nest too deep");
             nf = i_rant_rd_u8(r);
             for (i = 0; i < nf && !r->fail; i++){
                 uint8_t fnl = i_rant_rd_u8(r);
@@ -129,7 +142,7 @@ static uint32_t i_rant_rd_type_size(i_Rd *r, uint32_t *fields, uint32_t *nvar,
                 sum += i_rant_rd_type_size(r, fields, nvar, (uint16_t)(depth + 1),
                                            fl & I_T_ELEM_INSIDE);
             }
-            if (sum > 0xFFFFFFFFu){ r->fail = 1; return 0; }
+            if (sum > 0xFFFFFFFFu) return i_rant_rd_refuse(r, "a struct is too large");
             return (uint32_t)sum;
         }
         case RANT_NAMED: {
@@ -137,10 +150,11 @@ static uint32_t i_rant_rd_type_size(i_Rd *r, uint32_t *fields, uint32_t *nvar,
             if (r->fail || nl == 0){ r->fail = 1; return 0; }    /* a name is required */
             i_rant_rd_skip(r, nl);
             if (r->fail) return 0;
-            if (r->pos < r->n && r->w[r->pos] == RANT_NAMED){ r->fail = 1; return 0; }
+            if (r->pos < r->n && r->w[r->pos] == RANT_NAMED)
+                return i_rant_rd_refuse(r, "a name cannot stand for another name");
             return i_rant_rd_type_size(r, fields, nvar, depth, fl);
         }
-        default: r->fail = 1; return 0;                          /* unknown kind: reject */
+        default: return i_rant_rd_refuse(r, "an unknown type kind");
     }
 }
 
@@ -154,14 +168,14 @@ static size_t i_rant_schema_handle_off(const uint8_t *buf, size_t wire_len){
 /* Counts every field of the root into *n and its variable fields into *nvar. 0 on
  * malformed wire. A bare or alias root is 1 plus whatever its type flattens to. */
 static int i_rant_schema_wire_fields(const void *wire, size_t wire_len,
-                                     uint32_t *n, uint32_t *nvar){
+                                     uint32_t *n, uint32_t *nvar, const char **why){
     i_Rd r; uint8_t ver, rl;
-    *n = 0; *nvar = 0;
-    r.w = (const uint8_t *)wire; r.n = wire_len; r.pos = 0; r.fail = 0;
+    *n = 0; *nvar = 0; *why = "the wire is malformed";
+    r.w = (const uint8_t *)wire; r.n = wire_len; r.pos = 0; r.fail = 0; r.why = NULL;
     ver = i_rant_rd_u8(&r); if (r.fail || ver != RANT_SCHEMA_WIRE_VERSION) return 0;
     rl = i_rant_rd_u8(&r); i_rant_rd_skip(&r, rl);
     if (r.fail || (size_t)r.pos >= r.n) return 0;
-    if (r.w[r.pos] == RANT_NAMED) return 0;            /* a root's name rides the header */
+    if (r.w[r.pos] == RANT_NAMED){ *why = "a root's name rides the header"; return 0; }
     if (r.w[r.pos] == RANT_STRUCT){
         i_rant_rd_type_size(&r, n, nvar, 0, 0);
     } else {
@@ -169,7 +183,16 @@ static int i_rant_schema_wire_fields(const void *wire, size_t wire_len,
         i_rant_rd_type_size(&r, &sub, nvar, 0, 0);     /* depth 0: a variable root is allowed */
         *n = 1u + sub;                                 /* the root is the first field */
     }
-    return r.fail ? 0 : 1;
+    if (r.fail){ if (r.why) *why = r.why; return 0; }
+    *why = NULL;
+    return 1;
+}
+
+const char *i_rant_schema_wire_why(const void *wire, size_t wire_len){
+    uint32_t n, nvar; const char *why;
+    if (!wire || !wire_len) return "the wire is empty";
+    if (!i_rant_schema_wire_fields(wire, wire_len, &n, &nvar, &why)) return why;
+    return n > 0xFFFFu ? "a schema has at most 65535 fields" : NULL;
 }
 
 /* flattening a wire type into the field table */
@@ -310,11 +333,11 @@ static uint32_t i_rant_emit_type(uint8_t *buf, size_t wl, i_Rd *r, RantSchema *s
 static RantSchema *i_rant_schema_compile(uint8_t *buf, size_t wire_len, size_t cap){
     i_Rd r; uint8_t ver, root_kind, root_namelen;
     const char *root_name; size_t hoff, need; RantSchema *s;
-    uint32_t total, nvar; uint16_t emitted = 0;
+    uint32_t total, nvar; uint16_t emitted = 0; const char *why;
 
-    if (!i_rant_schema_wire_fields(buf, wire_len, &total, &nvar) || total > 0xFFFFu) return NULL;
+    if (!i_rant_schema_wire_fields(buf, wire_len, &total, &nvar, &why) || total > 0xFFFFu) return NULL;
 
-    r.w = buf; r.n = wire_len; r.pos = 0; r.fail = 0;
+    r.w = buf; r.n = wire_len; r.pos = 0; r.fail = 0; r.why = NULL;
     ver = i_rant_rd_u8(&r);
     if (r.fail || ver != RANT_SCHEMA_WIRE_VERSION) return NULL;
     root_namelen = i_rant_rd_u8(&r);
@@ -367,8 +390,8 @@ static RantSchema *i_rant_schema_compile(uint8_t *buf, size_t wire_len, size_t c
 /* bytes a compiled schema needs for wire: the copy, the alignment pad, the handle and
    the field table. 0 if the wire is malformed. */
 static size_t i_rant_schema_compiled_size(const void *wire, size_t wire_len){
-    uint32_t total, nvar;
-    if (!i_rant_schema_wire_fields(wire, wire_len, &total, &nvar) || total > 0xFFFFu) return 0;
+    uint32_t total, nvar; const char *why;
+    if (!i_rant_schema_wire_fields(wire, wire_len, &total, &nvar, &why) || total > 0xFFFFu) return 0;
     return wire_len + 7u + sizeof(RantSchema) + (size_t)(total ? total - 1u : 0u) * sizeof(i_Field);
 }
 

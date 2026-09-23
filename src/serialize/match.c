@@ -89,8 +89,8 @@ static int i_rant_type_cmp(i_Rd *ra, i_Rd *rb, uint16_t depth){
 static int i_rant_field_cmp(const RantSchema *sa, const i_Field *a,
                             const RantSchema *sb, const i_Field *b){
     i_Rd ra, rb;
-    ra.w = sa->wire.data; ra.n = sa->wire.len; ra.pos = a->type_off; ra.fail = 0;
-    rb.w = sb->wire.data; rb.n = sb->wire.len; rb.pos = b->type_off; rb.fail = 0;
+    ra.w = sa->wire.data; ra.n = sa->wire.len; ra.pos = a->type_off; ra.fail = 0; ra.why = NULL;
+    rb.w = sb->wire.data; rb.n = sb->wire.len; rb.pos = b->type_off; rb.fail = 0; rb.why = NULL;
     return i_rant_type_cmp(&ra, &rb, 0);
 }
 

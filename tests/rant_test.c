@@ -2565,6 +2565,20 @@ static void schema_dsl_checks(void){
         }
         ST_CHECK(ok, "schema-dsl: malformed text rejected with a reason and a position");
     }
+    {   /* a shape rule the wire check enforces says which rule, never out of memory */
+        static const struct { const char *text, *why; } rules[] = {
+            { "D { c: { x: f32 }[4] } D[]", "a struct array cannot sit inside another array's element" },
+            { "Pose { v: { y: u8[] }[2] }",   "a variable array cannot sit inside an array element" },
+            { "Pose { v: { s: string }[2] }", "a variable string or a map cannot sit inside an array element" },
+        };
+        unsigned i, ok = 1;
+        for (i = 0; i < sizeof rules / sizeof rules[0]; i++){
+            i_RantSchemaErr ep = { NULL, NULL };
+            RantSchema *s = tcompile(&ma, rules[i].text, &ep);
+            if (s || !ep.why || strcmp(ep.why, rules[i].why) != 0) ok = 0;
+        }
+        ST_CHECK(ok, "schema-dsl: a broken shape rule is named in the refusal");
+    }
     {   RantSchema *anon = tcompile(&ma, "{ x: f64 }", NULL);
         ST_CHECK(anon && rant_schema_name(anon).len == 0 && rant_schema_field_index(anon, "x") == 0,
                  "schema-dsl: a struct body on its own is an anonymous struct");

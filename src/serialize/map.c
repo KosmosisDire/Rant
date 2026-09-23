@@ -58,7 +58,7 @@ uint16_t rant_map_array_count(RantBytes arr){ return rant_map_count(arr); }
 int rant_map_at(RantBytes map, uint16_t index, RantString *key, RantValue *out){
     i_Rd r; uint16_t n, i;
     if (!map.data || map.len < 2) return 0;
-    r.w = map.data; r.n = map.len; r.pos = 0; r.fail = 0;
+    r.w = map.data; r.n = map.len; r.pos = 0; r.fail = 0; r.why = NULL;
     n = i_rant_rd_u16(&r);
     if (index >= n) return 0;
     for (i = 0; i <= index; i++){
@@ -80,7 +80,7 @@ int rant_map_get(RantBytes map, const char *key, RantValue *out){
     i_Rd r; uint16_t n, i; size_t want;
     if (!map.data || map.len < 2 || !key) return 0;
     want = strlen(key);
-    r.w = map.data; r.n = map.len; r.pos = 0; r.fail = 0;
+    r.w = map.data; r.n = map.len; r.pos = 0; r.fail = 0; r.why = NULL;
     n = i_rant_rd_u16(&r);
     for (i = 0; i < n; i++){
         uint8_t kl = i_rant_rd_u8(&r);
@@ -97,7 +97,7 @@ int rant_map_get(RantBytes map, const char *key, RantValue *out){
 int rant_map_array_at(RantBytes arr, uint16_t index, RantValue *out){
     i_Rd r; uint16_t n, i;
     if (!arr.data || arr.len < 2) return 0;
-    r.w = arr.data; r.n = arr.len; r.pos = 0; r.fail = 0;
+    r.w = arr.data; r.n = arr.len; r.pos = 0; r.fail = 0; r.why = NULL;
     n = i_rant_rd_u16(&r);
     if (index >= n) return 0;
     for (i = 0; i < index; i++)
@@ -109,7 +109,7 @@ int rant_map_valid(RantBytes map){
     i_Rd r; uint16_t n, i;
     if (map.len == 0) return 1;                         /* an empty body is an empty map */
     if (!map.data || map.len < 2) return 0;
-    r.w = map.data; r.n = map.len; r.pos = 0; r.fail = 0;
+    r.w = map.data; r.n = map.len; r.pos = 0; r.fail = 0; r.why = NULL;
     n = i_rant_rd_u16(&r);
     for (i = 0; i < n; i++){
         uint8_t kl = i_rant_rd_u8(&r);

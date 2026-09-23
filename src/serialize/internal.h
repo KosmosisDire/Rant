@@ -49,7 +49,8 @@ static inline int i_rant_kind_var(uint8_t k){
 }
 
 /* the bounds checked reader over possibly hostile wire bytes */
-typedef struct { const uint8_t *w; size_t n, pos; int fail; } i_Rd;
+/* why is the first rule a wire broke, NULL when it merely ran short */
+typedef struct { const uint8_t *w; size_t n, pos; int fail; const char *why; } i_Rd;
 static inline uint8_t  i_rant_rd_u8 (i_Rd *r){ if (r->pos + 1 > r->n){ r->fail = 1; return 0; } return r->w[r->pos++]; }
 static inline uint16_t i_rant_rd_u16(i_Rd *r){ uint16_t v; if (r->pos + 2 > r->n){ r->fail = 1; return 0; } v = i_rant_le_r16(r->w + r->pos); r->pos += 2; return v; }
 static inline void     i_rant_rd_skip(i_Rd *r, size_t k){ if (r->pos + k > r->n){ r->fail = 1; r->pos = r->n; return; } r->pos += k; }
@@ -81,6 +82,8 @@ typedef struct {
 /* Compiles received wire, bounds checked. NULL on an overrun or a version mismatch. The
  * bytes are copied in. Free it with the same hook. */
 RantSchema *i_rant_schema_parse(const void *wire, size_t wire_len, RantAllocFn alloc, void *user);
+/* why a wire is refused, NULL when it is sound */
+const char *i_rant_schema_wire_why(const void *wire, size_t wire_len);
 void i_rant_schema_free(RantSchema *s, RantAllocFn alloc, void *user);
 int i_rant_enum_backing_ok(uint8_t backing);
 int64_t i_rant_enum_read_val(uint8_t backing, const uint8_t *p);
