@@ -99,23 +99,55 @@ struct. C++ is immune because it embeds the real header.
 `dist/rant.hpp` is the one file a consumer needs. Regenerate after any edit. Verified on
 MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtti`.
 
-- Surface: `Node`, `Topic`, `Publisher<T>`, `Subscriber<T>`, `FunctionDefinition<Req,Rsp>`,
-  `RemoteFunction<Req,Rsp>`, `TaskDefinition`, `RemoteTask`, `VariableDefinition<T>`,
-  `RemoteVariable<T>`, `Schema`, `MessageBuilder`, `MessageView`, `Message`, `Response`,
-  `ResponseView`, `Event`, `Peer`, `Entity`, `Bytes`, `Qos`, `NodeOptions`, `Queue`,
-  `MapWriter`, `MapReader`. Every typed handle has an untyped `<void>` twin for the bridge and explorer.
+- Surface: `Node`, `Reflection`, `Publisher<T>`, `Subscriber<T>`,
+  `FunctionDefinition<Req, Rsp>`, `RemoteFunction<Req, Rsp>`,
+  `TaskDefinition<Req, Prg, Rsp>`, `RemoteTask<Req, Prg, Rsp>`, `VariableDefinition<T>`,
+  `RemoteVariable<T>`, `Request`, `Deferred`, `TaskRequest`, `PendingTask`, `Response`,
+  `ResponseView`, `ProgressView`, `Schema`, `MessageBuilder`, `MessageView`, `FieldView`,
+  `MapWriter`, `MapReader`, `Event`, `Peer`, `Entity`, `LogLine`, `MetaSnapshot`, `Bytes`,
+  `Qos`, `NodeOptions`, `Queue`, `Error`. `rant::Bytes` as every type argument is the raw
+  form, an explicit specialization the typed templates build on. There is no separate
+  untyped tier.
+- Every handle comes from a node factory named after it, as in C# and Python:
+  `node.publisher<T>(name, qos, schema)`, `subscriber<T>(name, handler, qos, schema)` or
+  without a handler for the pulled form, `function_definition`, `remote_function`,
+  `task_definition`, `remote_task`, `variable_definition` and `remote_variable`. Only the
+  `rant::Bytes` form takes schemas or `reflect_from_mesh`. A failed factory throws
+  `rant::Error`, or without exceptions returns an invalid handle with `last_error()` set.
+- `NodeOptions::threading` is `ServiceThread`, `Manual` or `Dispatch`. Dispatch creates
+  one queue at open, hands it to every handle made without one and to the events and
+  logs, and `node.dispatch()` drains it. `create_queue()` gives a handle a thread of its
+  own through its options. A blocking call from an inline callback throws, since it
+  would stall the loop it waits on.
+- Durations are `std::chrono`: timeouts are `milliseconds` with `rant::forever` as the
+  wait with no end, and `std::optional` where leaving one out takes the default. Option
+  fields are `microseconds` without a unit in their names. Timestamps stay integer
+  microseconds.
 - `RANT_SCHEMA(T, fields...)` synthesizes DSL text and compiles it through
   `rant_node_schema`, once per node and type, so the C compiler stays the single source of
-  wire truth. It builds
-  a flat codec table and uses memcpy only when the type is trivially copyable, little
-  endian and padding free. The decode cache is keyed per incoming schema pointer, not per
-  hash, because a rebased schema keeps our hash with the publisher's offsets.
+  wire truth. It builds a flat codec table and uses memcpy only when the type is
+  trivially copyable, little endian and padding free. The decode cache is keyed per
+  incoming schema pointer, not per hash, because a rebased schema keeps our hash with the
+  publisher's offsets.
+- Encoding is strict. `priv::encode` returns `std::optional<Bytes>` into a thread local
+  scratch buffer, empty when the value does not fit, such as an over long `String<N>`.
+  A send or set then answers `SendStatus::Schema` and a reply answers AppError, never a
+  cut or empty message.
 - Tail members: `std::vector<scalar>` and `std::string` struct members ride their tail
   frame through the C accessors by dotted path. Bare `std::vector<E>` roots work, and so
   do fixed and variable arrays of structs and of `String<N>`. Still refused at compile
   time: `vector<bool>`, maps, pointers.
 - `rant::std_type<T>` names a user type the way the standard roster is named. `RANT_ENUM`
   registers an `enum class`. Unregistered enums ship as their backing integer.
+- Callbacks never unwind into C. `priv::guarded` wraps every app callback run from a C
+  trampoline and turns a throw into stderr text plus an Error event of kind `None`.
+  `priv::answered` wraps a function or task handler and turns a throw into an AppError
+  reply with `e.what()`. A payload that does not decode raises a `SchemaMismatch` event.
+  `Response<T>::value()` is `std::optional`, present whenever a payload came back.
+- Every handle reports `name()` and its current schemas: `schema()` on topics and
+  variables, `request_schema()`, `response_schema()` and `progress_schema()` on functions
+  and tasks, read from the C getters, so a `reflect_from_mesh` handle reports what it
+  adopted. Raw handles have `refresh()` to retype in place.
 - With `RANT_IMPLEMENTATION` the C header embeds at global scope. Otherwise declarations
   embed inside `namespace rant::detail`. A `.cpp` anchor must spell
   `#define RANT_IMPLEMENTATION` itself, since the auto define is guarded by
@@ -129,10 +161,14 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
 - The node's state is `priv::NodeImpl`, shared by the node and every handle through a
   `shared_ptr`. The node closes the C node at `close()` or destruction whatever handles
   remain, and a handle checks `impl->node` before touching its C pointer, so one that
-  outlives the node answers `NoTopic`. Handles are move only. A topic name keeps a hold
-  count per side, the role follows the live holds and the last close retires the topic.
-  Pattern handler boxes hold the state weakly, since the node owns them.
+  outlives the node answers `NoTopic`. Handles are move only and `close()` or scope end
+  retires them. A topic name keeps a hold count per side, the role follows the live
+  holds and the last close retires the topic. A close refused inside the handle's own
+  callback raises a `State` event. Pattern handler boxes hold the state weakly, since the
+  node owns them.
 - `defer()` on a task handler returns a movable thread safe `PendingTask`.
+- Every public declaration carries a comment that stands alone as clangd hover text, with
+  no pointers into docs.
 
 ## C#
 

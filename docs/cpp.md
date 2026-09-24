@@ -1,317 +1,212 @@
 # C++
 
-`dist/rant.hpp` is a header only C++17 wrapper over the C library, and the one file a
-consumer needs: the C single header is embedded inside it. The semantics are the C ones,
-so docs/node.md, docs/topics.md, docs/patterns.md and docs/tasks.md apply. This page says
-what is different in C++.
+`dist/rant.hpp` is a header only C++17 wrapper over the C library, and the only file you
+need. It works the same as C, so docs/node.md, docs/topics.md, docs/patterns.md and
+docs/tasks.md apply. This page covers what is different in C++. Your editor shows a
+comment on every public name when you hover it.
 
-## The implementation anchor
+## Setup
 
-Exactly one translation unit defines `RANT_IMPLEMENTATION` before the include. That unit
-emits the C implementation at global scope with C linkage. It may be a `.cpp` file, so a
-pure C++ project needs no C compiler, or a `.c` file, and a `.c` file that includes the
-header with nothing defined is treated as the anchor. Every other translation unit gets
-the C declarations inside `rant::detail` and nothing at global scope.
+One source file builds the library:
 
 ```cpp
 #define RANT_IMPLEMENTATION
 #include "rant.hpp"
 ```
 
-`dist/rant.cpp` is exactly that, generated, so a project compiles it instead of writing one.
+`dist/rant.cpp` is that file, ready to compile:
 
 ```sh
-g++ -std=c++17 -Idist bindings/cpp/example.cpp dist/rant.cpp -o example -lrt -lpthread
-g++ -std=c++17 -Idist bindings/cpp/example.cpp dist/rant.cpp -o example.exe -lws2_32 -lbcrypt -lwinmm
+g++ -std=c++17 -Idist app.cpp dist/rant.cpp -o app -lrt -lpthread                        # Linux
+g++ -std=c++17 -Idist app.cpp dist/rant.cpp -o app.exe -lws2_32 -liphlpapi -lbcrypt -lwinmm   # Windows
 ```
 
-The header is clean under `-fno-exceptions -fno-rtti` and is verified on MinGW g++,
-clang++, clang-cl and MSVC.
+It builds with g++, clang++, clang-cl and MSVC, and with `-fno-exceptions -fno-rtti`.
 
-## A node
+## Node
 
 ```cpp
-rant::Node node("robot1", { .domain = 7 });     // the service thread runs from here
-node.on_event([](const rant::Event& e){ std::fprintf(stderr, "%s\n", e.to_string().c_str()); });
-rant::Qos reliable{ rant::Reliability::Reliable };
-auto out = node.publisher<rant::Bytes>("chat", reliable);
-auto in  = node.subscriber<rant::Bytes>("chat",
-    [](const rant::MessageView& m){ /* every delivery on chat */ }, reliable);
-out.send("hello");
+rant::Node node("robot", { .domain = 7 });
 ```
 
-`on_event` is optional: with no handler set, error events print to stderr, and
-`last_error()` records the last error either way. A later call replaces the handler.
-Options are plain structs mirroring the C ones, and all zero means every default. `Qos::queue_bytes`, `Qos::max_rate_hz` and
-`Qos::no_timestamp` are the C fields of the same meaning.
+- The name and the options are both optional. Options left at zero use the defaults.
+- `on_event(handler)` gets peer, loss and error events. With no handler, errors print
+  to stderr.
+- `settle()` waits until discovery is done. Call it after creating your handles.
+- `close()` or the destructor shuts the node down.
 
-Every time is a `std::chrono` duration. Timeout parameters take milliseconds, so `2s`,
-`500ms` and `std::chrono::milliseconds(n)` all pass, and a plain integer does not compile.
-`rant::forever` is the wait with no end where one is allowed. A call's timeout and
-`settle()`'s are optional, and leaving them out takes the default. Option fields drop the
-unit from their names and take any duration: `Qos::heartbeat`, `repair_delay` and
-`backpressure_wait`, `NodeOptions::match_wait`, `announce_interval` and `peer_timeout`, and
-`timeout` and `backpressure_wait` in the pattern options. Timestamps stay integer
-microseconds, as `recv_us()` and `written_us()` return them.
+Durations are `std::chrono`: write `500ms` or `2s`. `rant::forever` waits with no end.
 
-```cpp
-rant::FunctionOptions o;
-o.timeout = 500ms;
-auto fn = node.remote_function<AddReq, AddRsp>("add", o);
-auto r  = fn.call(req, 2s);
-```
+### Threading
 
-Every handle comes from a factory on the node named after it: `publisher`, `subscriber`,
-`function_definition`, `remote_function`, `task_definition`, `remote_task`,
-`variable_definition` and `remote_variable`. A default constructed handle is empty.
+`NodeOptions::threading` picks where callbacks run.
 
-Every failed factory or constructor throws `rant::Error`, which carries the error kind, the OS errno
-of a socket fault and the formatted text as `what()`. With `-fno-exceptions` nothing
-throws: the object is not `valid()` and `node.last_error()` holds the text. Data path
-results are `SendStatus` and the status enums in both modes.
-
-`NodeOptions::threading` says who runs the loop and where every callback fires:
-subscriber and pattern handlers, `on_event`, `on_log`, progress and async responses.
-
-- `Threading::ServiceThread`, the default: the C service thread runs from construction and
-  every callback fires on it.
-- `Threading::Manual`: your thread calls `poll(timeout)` for one loop tick and callbacks
-  fire there. `poll` on another threading answers `SendStatus::State`.
-- `Threading::Dispatch`: the service thread runs, and every callback of a handle made
-  without a queue, every event and every log line waits on the node's queue until
-  `node.dispatch(max, timeout)` runs them on the calling thread.
+| Mode | Callbacks run |
+|---|---|
+| `ServiceThread` (default) | on the node's own thread |
+| `Manual` | inside your `node.poll()` |
+| `Dispatch` | inside your `node.dispatch()`, for a game or UI loop |
 
 ```cpp
 rant::Node app("app", { .threading = rant::Threading::Dispatch });
-auto pose = app.subscriber<Pose>("robot/pose", on_pose);
-while (running) { app.dispatch(0, 16ms); draw(); }
+while (running) { app.dispatch(); draw(); }
 ```
 
-`settle()` blocks until discovery and matching have converged, call it after creating the
-topics. From inside an inline handler, sends and read only queries are allowed, and poll,
-create, drain and close are refused with `SendStatus::State`. `close()` stops the loop,
-leaves with a bye and frees the node, as the destructor does. Close before the state your
-handlers capture goes out of scope.
+To run one handle's callbacks on a thread of your own, pass it a queue from
+`node.create_queue()` and call `queue.dispatch()` on that thread.
 
-`create_queue()` returns a `Queue` for the case where handles need a thread of their own,
-such as a worker draining a slow provider while the UI thread drains the node queue. A
-handle whose options name it (`Qos::queue`, or `queue` in the function, task and variable
-options) parks its callbacks until `queue.dispatch(max, timeout)` runs them on the
-calling thread. Same name topic handles must agree on the queue. A `Queue` is non owning
-and lives as long as its node.
+### Errors
 
-Memory is configured on `NodeOptions::memory`: a buffer plus size means static mode, where
-the node draws all its memory from the buffer, never grows, and turns the shared memory
-path off. The node's schemas live in that buffer too, so a static node is heap free end
-to end.
+- A failed node or handle creation throws `rant::Error`. Without exceptions, the object
+  is not `valid()` and `node.last_error()` says why.
+- Sends and sets never throw. They return a `SendStatus`.
+- A callback that throws never breaks the node. The error goes to stderr and
+  `on_event`. A function or task handler that throws answers the caller `AppError`.
 
-## Topics and messages
-
-Every handle is a template over its message type, and `rant::Bytes` as the type argument
-is the raw form: `node.publisher<rant::Bytes>(name, qos, schema)` sends a `MessageBuilder`
-or any bytes, `node.subscriber<rant::Bytes>(name, handler, qos, schema)` delivers a
-`MessageView` that reads fields by name. An empty schema means untyped bytes. Only a
-`rant::Bytes` handle takes a schema, a typed one refuses it. A publisher and a subscriber
-of the same name share one topic slot, and its role follows the live handles. A live
-same name topic with a different schema refuses, so close every handle on a name to
-retype it: the last one retires the topic and the next factory call creates it fresh.
-`match_count()` on any handle counts the matched
-counterparts, and `drain(timeout)` on a publisher waits until every reader has acked,
-the flush before close.
-
-A subscriber made without a handler is pulled: `take(timeout)` returns the oldest
-waiting message and `take_latest(timeout)` the newest, dropping the older ones, as a
-`std::optional<T>`, or a `std::optional<MessageView>` valid until the next take for
-`rant::Bytes`. A pulled subscriber takes no `Qos::queue`, and `take` on one with a handler
-throws.
-
-```cpp
-auto poses = node.subscriber<Pose>("pose");     // no handler: pulled
-if (auto p = poses.take_latest()) draw(*p);
-```
-
-`Bytes` is a non owning view. It constructs from `std::string_view`, `std::string`, a C
-string or any contiguous range of byte sized elements, and converts to `string_view`,
-`string`, `vector` and `std::span` where available. Multi byte element types are rejected,
-pass their raw bytes with `Bytes(ptr, len)`.
-
-`node.schema(text)` compiles in the node's registry and returns a `Schema`, a handle
-valid for the node's life. It throws `rant::Error`, or without exceptions returns an empty
-handle with `last_error()` saying where. Every definition stays in scope for the node's
-later compiles, and `node.schema_from_wire(bytes)` registers a peer's wire. The typed
-codec of `RANT_SCHEMA` is built once per node and type. `MessageBuilder` sets fields by name or dotted path, grows for variable fields,
-and refuses an over cap value by flipping `ok()` to false rather than truncating.
-`set_array_count("pts", n)` sizes a variable array, and a struct array's members then set
-by path with one index per level, `pts[2].corners[1].x`. Reads go through `FieldView`,
-the surface shared by `MessageView`, `Request<rant::Bytes>` and `ResponseView<rant::Bytes>`,
-so a typed read looks the same everywhere, and its `get_array_count` gives an array's live
-count. Every handler
-fires on the polling thread, and the views it receives are valid for the callback only.
-
-A map field is written with `MapWriter` and read with `MapReader`, thin layers over the C
-map codec. `MapReader::to_map()` decodes the whole tree into an owning `MapDict` of
-`MapItem` that outlives the handler. Numeric getters coerce between integer and double
-kinds, and a type mismatch yields the zero value rather than throwing.
-
-## Typed messages
+## Types
 
 ```cpp
 struct Pose { double x, y; rant::String<16> frame; };
 RANT_SCHEMA(Pose, x, y, frame);
+```
+
+`RANT_SCHEMA` goes after the struct at global scope and lists its members in order. C#
+and Python see the same type. Member names go on the wire in camelCase, so `frame_id` is
+`frameId`.
+
+Supported members:
+
+- numbers and `bool`
+- `rant::String<N>` (a string of at most N bytes) and `std::string`
+- `T[N]`, `std::array<T, N>` and `std::vector<T>`
+- other `RANT_SCHEMA` structs
+- `enum class`, named with `RANT_ENUM(E, values...)`
+
+Not supported: pointers, maps, `std::vector<bool>` and `std::vector<std::string>`.
+
+A plain type works without `RANT_SCHEMA`: `Publisher<float>`, `Subscriber<std::string>`.
+
+A value that does not fit its type, such as a `String<N>` longer than N, is refused, never
+cut short.
+
+The standard types of docs/stdtypes.md are in `rant::types`: `rant::types::Transform`,
+`rant::types::Color` and the rest.
+
+### Raw messages
+
+Use `rant::Bytes` as the type to work with schemas at run time:
+
+```cpp
+rant::Schema s = node.schema("Chat { seq: u32, text: string }");
+auto pub = node.publisher<rant::Bytes>("chat", {}, s);
+rant::MessageBuilder m(s);
+m.set_uint("seq", 1).set_string("text", "hi");
+pub.send(m);
+```
+
+A received `MessageView` reads fields by name, such as `get_uint("seq")`. It is valid
+inside the callback only.
+
+## Topics
+
+```cpp
 auto pub = node.publisher<Pose>("pose");
-pub.send({ 1.0, 2.0, {} });
+auto sub = node.subscriber<Pose>("pose", [](const Pose& p) { /* ... */ });
+pub.send({ 1, 2, {} });
 ```
 
-`RANT_SCHEMA(T, fields...)` goes at global scope after the struct, listing up to 64
-members in wire order. The wire name is the type name with namespace qualifiers stripped,
-and a member's wire name is its own name in the wire spelling, camelCase (docs/stdtypes.md),
-so `frame_id` is `frameId` on the wire and in the DSL the codec prints. A nested
-reflected struct spells as its type name, defined once above the root, so
-`Shape { Corner origin; }` sends `Corner { ... }` then `Shape { origin: Corner }`, the
-same text and hash C# and Python send.
-On first use the codec synthesizes the DSL, compiles it through the C compiler, and builds
-a flat copy table. A padding free struct on a little endian host encodes and decodes with
-one memcpy, anything else runs a per field loop. A delivery whose schema hash differs from
-ours rebuilds the offsets from the incoming schema and caches them per schema pointer.
-
-Wire types are the sized integers, float, double, bool, `T[N]` and `std::array<U, N>` of
-those or of structs, `rant::String<N>` for a capped string, nested reflected structs, and
-the variable members `std::vector` of scalars, of structs or of `rant::String<N>`, and
-`std::string`. A fixed struct array spells `corners: Float2[4]` and may sit inside
-another's element to any depth. A `std::vector<Outline>` spells `Outline[]`, and its
-element must be fixed all the way down. Each of these also works as a handle's whole type.
-A variable member rides the message tail as a length framed section, so a type with one
-encodes into scratch and its decode allocates into the member. Refused at compile time:
-pointers, maps, `std::vector<bool>` and `std::vector<std::string>`. Those shapes use the
-dynamic `Schema` and `MessageBuilder` API.
-
-Any wire type used directly as a handle's type is a bare schema with no `RANT_SCHEMA`:
-`Publisher<bool>`, `RemoteVariable<float>`, `Subscriber<std::string>` or
-`Publisher<std::vector<float>>`. A bare type is anonymous, so it is the same bytes and
-the same hash from every language.
-
-`RANT_ENUM(E, options...)` registers an `enum class` so a member ships as a named
-`enum<uN>` with the enumerators as options. An unregistered enum ships as its backing
-integer and matches an `enum<uN>` by width only.
-
-`rant::String<N>` is the capped string slot. `assign()` refuses an over capacity value and
-`view()` clamps a hostile length. Encoding is strict: a value that does not fit its schema,
-such as a `String<N>` whose `len` was written past N, is refused rather than cut or sent
-empty. A write answers `SendStatus::Schema`, a reply or a completion answers the caller
-AppError, and a call answers with `send_status()` `Schema`.
-
-## Standard types
-
-The roster in docs/stdtypes.md is mirrored in the `rant::types` namespace:
-`rant::types::Timestamp`, `rant::types::Transform`, `rant::types::Color`,
-`rant::types::Uuid` and the rest, with their helpers such as `rotate` and
-`color_from_hex`. The namespace keeps `Color` or `Quaternion` from clashing with an engine
-type under `using namespace rant;`. Each fixed mirror is standard layout and identical to
-the wire, so the memcpy path applies. `Image` and `VideoFrame` carry a
-`std::vector<uint8_t>` data member, so they take the tail path, and they nest as a member
-but never as an array element. `rant::types::now()` and `rant::types::new_uuid()` are the
-two values that need the platform.
-
-## Functions, tasks and variables
-
-The handles are `FunctionDefinition<Req, Rsp>`, `RemoteFunction<Req, Rsp>`,
-`TaskDefinition<Req, Prg, Rsp>`, `RemoteTask<Req, Prg, Rsp>`, `VariableDefinition<T>` and
-`RemoteVariable<T>`, from `node.function_definition<Req, Rsp>(name, handler, options)`
-and the other factories. With `rant::Bytes` as every type argument the same handle is the
-raw form, and the factory takes the schemas after the options. A definition needs a
-handler.
+A subscriber with no handler is pulled: you read messages when you want them.
 
 ```cpp
-auto add = node.function_definition<AddReq, AddRsp>("add",
-    [](const AddReq& r) { return AddRsp{ r.x + r.y }; });
-auto fn  = node.remote_function<AddReq, AddRsp>("add");
+auto sub = node.subscriber<Pose>("pose");
+if (auto p = sub.take_latest()) draw(*p);
+```
+
+- `take()` returns the oldest waiting message, `take_latest()` the newest.
+- `match_count()` counts the matched peers.
+- `drain()` on a publisher waits until every reader has the messages.
+- `Qos` sets reliability, history depth and rate: `{ rant::Reliability::Reliable }`.
+
+## Functions
+
+```cpp
+auto add = node.function_definition<AddReq, int>("add",
+    [](const AddReq& r) { return r.a + r.b; });
+
+auto fn = node.remote_function<AddReq, int>("add");
+auto r = fn.call({ 1, 2 });
+if (r) std::printf("%d\n", *r.value());
+else   std::printf("%s\n", r.message().data());
+```
+
+- `if (r)` is true when the call succeeded. `r.status()` says what happened.
+- `r.value()` holds the answer when one came back, even on failure.
+- `call()` blocks. From inside a callback it throws, so use `call_async()` there.
+- To answer later, take `Request<Rsp>&` as a second handler argument and call
+  `defer()`. The returned `Deferred` answers from any thread.
+
+## Tasks
+
+A task is a function that reports progress and can be cancelled.
+
+```cpp
+auto job = node.task_definition<Goal, float, Result>("move",
+    [](const Goal& g, rant::TaskRequest<float, Result>& t) {
+        t.start();
+        auto p = t.defer();   // finish on another thread
+        worker(std::move(p));
+    });
+
+auto move = node.remote_task<Goal, float, Result>("move");
+auto r = move.call(goal, [](const rant::ProgressView<float>& p) { /* *p is the progress */ });
+```
+
+- A `PendingTask` sends `progress()`, then one of `complete()`, `fail()` or
+  `complete_cancelled()`.
+- `cancelled()` tells the worker the caller asked to cancel.
+- `CallOptions::id_out` gives the call id so another thread can `cancel()` it.
+
+## Variables
+
+```cpp
 auto speed = node.variable_definition<float>("speed", { .initial = 1.5f });
+
+auto remote = node.remote_variable<float>("speed");
+remote.on_change([](float v) { /* ... */ });
+remote.set(2.0f);
 ```
 
-A function handler is either `Rsp(const Req&)`, where the return value is the reply, or
-`void(const Req&, Request<Rsp>&)`, which replies, fails or defers explicitly. Returning
-from the full form without replying acknowledges OK with an empty payload. A handler that
-throws answers `CallStatus::AppError` with `e.what()` and never unwinds into the C. Any
-other callback that throws, a subscriber, an observer, a response or progress handler,
-prints the text to stderr and raises an Error event of kind `None`. A payload that does
-not decode into the handle's type raises an Error event of kind `SchemaMismatch` naming
-the topic, and the handler does not run. `defer()` returns a movable single shot `Deferred<Rsp>` that completes from any thread.
-Dropping it unanswered leaves the caller to its timeout.
+- `on_change` fires once with the current value, then on every change.
+- `on_write` fires on every write, even one with the same value.
+- `wait()` blocks until a value exists.
 
-A task handler is `void(const Req&, TaskRequest<Prg, Rsp>&)`. It answers inline, or calls
-`start()` and `defer()` and returns. `defer()` yields a movable `PendingTask` whose verbs
-are thread safe: `progress()` any number of times, then exactly one of `complete()`,
-`fail()` or `complete_cancelled()`, after which the handle is empty and a stale verb gets
-`SendStatus::State`. `cancelled()` polls the caller's request. Returning from a task
-handler with no reply, fail or defer answers AppError, since an instant empty OK on a long
-operation would read as success. Complete or drop a `PendingTask` before retiring its
-definition.
+## Names and schemas
 
-A blocking `call()` waits on the service thread's progress, or drives a Manual node's
-loop. From an inline callback it would stall the loop it waits on, so it throws
-`rant::Error` there (without exceptions `send_status()` is `State`): use `call_async()` or
-put the handle on a queue. A `Response` owns its payload. `if (r)` tests for Ok,
-`message()` is the provider's text or the default status text on any non OK outcome, and
-`value()` is a `std::optional<Rsp>` holding the payload whenever one came back, so a
-cancelled task's partial result or an AppError's failure data reads too.
+- Every handle has `name()`.
+- `schema()` on topics and variables, and `request_schema()`, `response_schema()` and
+  `progress_schema()` on functions and tasks, give the schema in use.
+- A `rant::Bytes` handle with `reflect_from_mesh` set takes its schema from the peers.
+  `refresh()` updates it when they change.
+
+## Lifetime
+
+- Handles are move only. Scope end or `close()` releases the name.
+- Closing a remote cancels its open calls.
+- A handle cannot close itself from inside its own callback.
+- A handle that outlives its node is safe. Its calls just fail.
+
+## Reflection and logs
 
 ```cpp
-auto r = fn.call(req);
-if (r) use(*r.value());
-else report(r.status(), r.message());
-``` On a task, the timeout bounds only the wait for the
-first response, `CallOptions::id_out` receives the call id at commit so another thread
-can `cancel()`, and `cancel()` answers `BadRole` when the provider declared no cancel
-and `State` when the call is not pending.
+node.log(rant::LogLevel::Info, "started");
+node.on_log([](const rant::LogLine& l) { /* ... */ });
 
-A variable's `on_change` handler replays the current value at registration and then fires
-on every state change. `on_write` fires on every applied write, identical bytes or not.
-Both run inline on the thread that applied the write, or at `dispatch()` of the handle's
-queue. `RemoteVariable::wait()` blocks,
-driving the loop, until a value exists.
+auto r = node.reflection();
+for (auto& p : r.peers()) std::printf("%s\n", p.name.c_str());
+```
 
-A `rant::Bytes` handle made without a schema and with `reflect_from_mesh` set in its
-options types itself from the mesh: a reader takes its provider's schema, a writer the
-widest every reader accepts. `refresh()` re types the handle in place when the mesh moved.
-
-Every handle reports `name()` and the schema it uses now, which for a `reflect_from_mesh`
-handle is the one it adopted: `schema()` on a topic or a variable, `request_schema()`,
-`response_schema()` and, on a task, `progress_schema()` on a function or task handle. Each
-is an empty `Schema` while the handle is untyped.
-
-## Handle lifetime
-
-Handles are move only and own their side of the entity. Scope end or `close()` releases
-it: a topic handle drops its side of the name and the last one retires the topic, and a
-pattern handle retires its function, task or variable, so the name is free for a
-successor. Closing a remote completes every outstanding call with `CallStatus::Cancelled`,
-and closing a task definition answers its live deferred calls Cancelled. A moved from
-handle is empty.
-
-`close()` from the handle's own inline callback is refused with `SendStatus::State` and
-the handle stays valid. A handle destroyed there cannot retire, so an Error event of kind
-`State` names it and the entity lives until the node closes.
-
-A handle, a `Deferred` or a `PendingTask` that outlives its node is safe: it is no longer
-`valid()`, its calls answer `NoTopic` or nothing, and its close does nothing. A `Queue`
-and a `Schema` are plain values valid only while their node lives.
-
-## Logs, meta and reflection
-
-`Node::log(level, text)` publishes on a level's built in topic, with printf style
-overloads that truncate at `RANT_LOG_MAX`. `on_log(handler)` delivers every other node's
-lines at every level as a `LogLine`, whose `level` says which, where the node's callbacks
-run. It holds one handler: a later call replaces it and `{}` clears it. It throws, or
-returns false, on a node opened with `disable_logs`.
-
-`node.reflection()` returns a `Reflection` that holds the walks of docs/reflection.md.
-`peers()`, `entities(peer)` and `mesh()` return owned snapshots and `find(kind, name)` one
-folded entity. An `Entity` name is the hash placeholder until the peer's details arrive.
-`epoch()` moves on every reflected change, so a UI re walks only when it moved.
-`meta(peer, sections, timeout)` sends a directed `@rant/meta` call and decodes the reply
-into an owning `MetaSnapshot`: the node and proc scalars are pulled out and the whole body
-stays in `info` as a `MapDict`. `meta_async(peer, handler, sections)` is the same with the
-handler firing where the node's callbacks run. `sections` is a mask of `MetaSection` bits,
-0 for all.
-`stats()` is the node's own counters: memory, the reliable send waits and the sends that
-evicted never sent history.
+- `on_log` receives every other node's log lines.
+- `reflection()` lists peers, their entities and the whole mesh. `epoch()` changes when
+  anything does.
+- `meta(peer)` asks a peer for its details.
+- `node.stats()` shows memory use and send counters.
