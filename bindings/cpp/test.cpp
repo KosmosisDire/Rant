@@ -582,6 +582,11 @@ struct Scene {
     std::string note;
 };
 RANT_SCHEMA(Scene, seq, outlines, tags, note);
+/* a base class makes a type not standard layout on every compiler, as MSVC Debug
+ * containers do to any struct holding one */
+struct Stamped { uint32_t seq = 0; };
+struct Reading : Stamped { float value = 0.f; std::string unit; };
+RANT_SCHEMA(Reading, seq, value, unit);
 
 /* encode then decode through the node's typed codec, no network */
 template <class T> static bool round_trip(rant::Node& n, const T& in, T& out) {
@@ -692,6 +697,10 @@ static bool nested_leg() {
         back.outlines.resize(5);
         chk("nest: an empty variable struct array decodes empty",
             round_trip(a, none, back) && back.outlines.empty() && back.tags.empty());
+        Reading rin, rout;
+        rin.seq = 5; rin.value = 2.5f; rin.unit = "bar";
+        chk("nest: a type that is not standard layout round trips",
+            round_trip(a, rin, rout) && rout.seq == 5 && rout.value == 2.5f && rout.unit == "bar");
 
         /* a publisher's other layout: an extra field shifts every offset */
         rant::NodeOptions o2 = opts;

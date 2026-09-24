@@ -1138,12 +1138,24 @@ inline Uuid      new_uuid() { Uuid u; detail::rant_uuid_new((detail::RantUuid*)&
 
 }   /* namespace types */
 
+/* offsetof on a type that is not standard layout, such as one holding an MSVC Debug
+ * container: every supported compiler computes it, and gcc and clang would warn. */
+#if defined(__GNUC__) || defined(__clang__)
+#define RANT_OFFSETOF_BEGIN _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Winvalid-offsetof\"")
+#define RANT_OFFSETOF_END   _Pragma("GCC diagnostic pop")
+#else
+#define RANT_OFFSETOF_BEGIN
+#define RANT_OFFSETOF_END
+#endif
+
 /* Give a struct-shaped type a wire name: reflect its members, then name it. */
 #define RANT_STD_STRUCT(T, ...) \
     template <> struct rant::reflect<rant::types::T> { \
         using is_rant_schema = void; \
         static constexpr const char* type_name = #T; \
-        template <class V> static void visit(V&& v) { RANT_STD_MEMBERS_##T(v) } \
+        template <class V> static void visit(V&& v) { \
+            RANT_OFFSETOF_BEGIN RANT_STD_MEMBERS_##T(v) RANT_OFFSETOF_END \
+        } \
     }; \
     template <> struct rant::std_type<rant::types::T> { \
         static constexpr const char* name = #T; using repr = void; }
@@ -5217,11 +5229,11 @@ RemoteVariable<T> Node::remote_variable(std::string_view name, const VariableOpt
 #define RANT_SCHEMA(T, ...) \
     template <> struct rant::reflect<T> { \
         using is_rant_schema = void; \
-        static_assert(std::is_standard_layout<T>::value, \
-                      "RANT_SCHEMA: type must be standard-layout"); \
+        static_assert(!std::is_polymorphic<T>::value, \
+                      "RANT_SCHEMA: type must have no virtual functions"); \
         static constexpr const char* type_name = #T; \
         template <class V> static void visit(V&& rant_v) { \
-            RANT_PP_FOR_EACH(RANT_SCHEMA_FIELD, T, __VA_ARGS__) \
+            RANT_OFFSETOF_BEGIN RANT_PP_FOR_EACH(RANT_SCHEMA_FIELD, T, __VA_ARGS__) RANT_OFFSETOF_END \
         } \
     }
 
