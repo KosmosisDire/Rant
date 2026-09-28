@@ -227,9 +227,23 @@ if(RANT_IS_TOP_LEVEL AND TARGET rant_shared)
   set(Python3_FIND_REGISTRY LAST)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
-    add_custom_target(python_wheel
+    set(RANT_WHEEL_COMMANDS
       COMMAND "${Python3_EXECUTABLE}" -m pip wheel "${CMAKE_CURRENT_SOURCE_DIR}" --no-deps
-              -w "${CMAKE_CURRENT_SOURCE_DIR}/dist" VERBATIM)
+              -w "${CMAKE_CURRENT_SOURCE_DIR}/dist")
+    # Off Linux the manylinux wheel builds in Docker as the release does. cibuildwheel takes
+    # an sdist, else it copies the whole checkout, build/ included, into the container.
+    find_program(UV_EXECUTABLE uv)
+    find_program(DOCKER_EXECUTABLE docker)
+    if(NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND UV_EXECUTABLE AND DOCKER_EXECUTABLE)
+      set(RANT_SDIST_DIR "${CMAKE_CURRENT_BINARY_DIR}/sdist")
+      list(APPEND RANT_WHEEL_COMMANDS
+        COMMAND "${UV_EXECUTABLE}" build --sdist "${CMAKE_CURRENT_SOURCE_DIR}" -o "${RANT_SDIST_DIR}"
+        # The same cibuildwheel version release.yml pins.
+        COMMAND "${UV_EXECUTABLE}" tool run cibuildwheel==4.2.1
+                "${RANT_SDIST_DIR}/rant_middleware-${RANT_VERSION}.tar.gz"
+                --platform linux --archs x86_64 --output-dir "${CMAKE_CURRENT_SOURCE_DIR}/dist")
+    endif()
+    add_custom_target(python_wheel ${RANT_WHEEL_COMMANDS} VERBATIM)
     add_dependencies(packages python_wheel)
     # A local build keeps the released version number, so only a forced reinstall takes it.
     add_custom_target(python_install
