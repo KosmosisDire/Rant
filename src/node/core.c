@@ -718,18 +718,6 @@ static const i_RantKindRow *i_rant_kind_row(uint8_t kind){
     return kind < 8 ? &i_rant_kind_rows[kind] : &i_rant_kind_rows[0];
 }
 
-static int i_rant_reflect_hidden(const char *name, size_t len){
-    return len >= 6 && memcmp(name, "@rant/", 6) == 0;
-}
-static int i_rant_reflect_hidden_hash(uint32_t h){
-    static const char *const nm[] = { "@rant/log/error", "@rant/log/warn", "@rant/log/info",
-                                      "@rant/meta@req", "@rant/meta@rsp" };
-    size_t i;
-    for (i = 0; i < sizeof nm / sizeof nm[0]; i++)
-        if (h == (uint32_t)i_rant_topic_id(nm[i])) return 1;
-    return 0;
-}
-
 typedef struct { uint32_t hash; uint16_t index; } i_RantHashPair;
 
 static void *i_rant_node_core_scratch(i_RantNodeCore *c, uint32_t bytes){
@@ -817,11 +805,9 @@ static void i_rant_reflect_fold(i_RantNodeCore *c, i_RantReflect *r){
         i_RantPeerEntity *e;
         const char *nm; size_t nl;
         uint16_t slot, p;
-        if (!ch->present || ch->kind >= 8 || i_rant_reflect_hidden_hash(ch->hash)) continue;
+        if (!ch->present || ch->kind >= 8) continue;
         row = i_rant_kind_row(ch->kind);
         if (!row->primary) continue;
-        if (ch->name_off != I_RANT_NAME_NONE
-            && i_rant_reflect_hidden(r->names + ch->name_off, ch->name_len)) continue;
         e = i_rant_reflect_entity_new(c, r);
         if (!e) return;
         slot = (uint16_t)(r->n_ent - 1u);
@@ -863,9 +849,7 @@ static void i_rant_reflect_fold(i_RantNodeCore *c, i_RantReflect *r){
         const i_RantKindRow *row;
         i_RantPeerEntity *e;
         uint16_t slot;
-        if (!ch->present || ch->entity != I_RANT_NONE16 || i_rant_reflect_hidden_hash(ch->hash)) continue;
-        if (ch->name_off != I_RANT_NAME_NONE
-            && i_rant_reflect_hidden(r->names + ch->name_off, ch->name_len)) continue;
+        if (!ch->present || ch->entity != I_RANT_NONE16) continue;
         row = i_rant_kind_row(ch->kind);
         e = i_rant_reflect_entity_new(c, r);
         if (!e) return;

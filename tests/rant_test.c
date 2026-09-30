@@ -723,6 +723,18 @@ static uint16_t st_domain_base = 33;
 static int st_fail = 0;
 /* the discovery peer table behind a node, for raw announce checks. The public walk is
    rant_node_peers_next */
+/* A builtin under @rant/, which the walks list beside the app's entities. Unfetched, it
+   is a placeholder known only by its primary channel's hash. */
+static int st_builtin(const RantEntityInfo *e){
+    static const char *const primary[] = { "@rant/log/error", "@rant/log/warn", "@rant/log/info",
+                                           "@rant/meta@req" };
+    size_t i;
+    if (e->name.len) return e->name.len >= 6 && memcmp(e->name.data, "@rant/", 6) == 0;
+    for (i = 0; i < sizeof primary / sizeof primary[0]; i++)
+        if (e->hash == (uint32_t)i_rant_topic_id(primary[i])) return 1;
+    return 0;
+}
+
 static const i_RantDiscoveryPeerView *st_peers(RantNode *n, uint16_t *count){
     return i_rant_discovery_peers(n->discovery, count);
 }
@@ -5723,6 +5735,7 @@ static void patterns_checks(void){
         int fns=0,vars=0,tops=0,ats=0,inc=0,temp_rw=0,rovar_ro=0,temp_forceable=0,rovar_forceable=0; size_t k;
         memset(&eit,0,sizeof eit);
         while (rant_node_entities_next(C, pid, &eit, &ei)){
+            if (st_builtin(&ei)) continue;
             switch (ei.kind){
             case RANT_ENTITY_FUNCTION: fns++; break;
             case RANT_ENTITY_VARIABLE:
@@ -5744,6 +5757,7 @@ static void patterns_checks(void){
       { RantIter eit; RantEntityInfo ei; int fns=0,vars=0,tops=0,temp_forceable=0;
         memset(&eit,0,sizeof eit);
         while (rant_node_entities_next(P, RANT_SELF, &eit, &ei)){
+            if (st_builtin(&ei)) continue;
             switch (ei.kind){
             case RANT_ENTITY_FUNCTION: fns++; break;
             case RANT_ENTITY_VARIABLE:
@@ -6537,6 +6551,7 @@ static void taskx_checks(void){
           tasks=others=ats=inc=0; have_mix=have_sel=have_noc=have_file=0;
           memset(&it,0,sizeof it);
           while (rant_node_entities_next(C1, pid, &it, &ei)){
+              if (st_builtin(&ei)) continue;
               if (ei.kind==RANT_ENTITY_TASK) tasks++; else others++;
               inc += ei.incomplete;
               for (k=0;k<ei.name.len;k++) if (ei.name.data[k]=='@') ats++;
@@ -6945,7 +6960,7 @@ static void reflect_dropped_checks(void){
           if (!(ps && pc)) continue;
           pid = ps[0].id;
           memset(&eit,0,sizeof eit);
-          while (rant_node_entities_next(B, pid, &eit, &ei)) ents++;
+          while (rant_node_entities_next(B, pid, &eit, &ei)) ents += !st_builtin(&ei);
       }
       ST_CHECK(ents == 1, "ghost: live peer enumerates its entity (%d)", ents); }
 
@@ -6959,7 +6974,7 @@ static void reflect_dropped_checks(void){
       ST_CHECK(dropped, "ghost: peer is DROPPED yet still listed (by design)"); }
     { RantIter eit; RantEntityInfo ei; int ents = 0, mesh = 0;
       memset(&eit,0,sizeof eit);
-      while (rant_node_entities_next(B, pid, &eit, &ei)) ents++;
+      while (rant_node_entities_next(B, pid, &eit, &ei)) ents += !st_builtin(&ei);
       ST_CHECK(ents == 1, "ghost: the per-node walk serves the dropped peer's last view (%d)", ents);
       memset(&eit,0,sizeof eit);
       while (rant_node_mesh_next(B, &eit, &ei))
@@ -8171,7 +8186,7 @@ static void interest_external_checks(void){
             RantIter eit; RantEntityInfo ei;
             memset(&eit,0,sizeof eit);
             while (rant_node_entities_next(S, pid, &eit, &ei))
-                ents++;   /* the @rant/ builtins are hidden from the walk */
+                ents += !st_builtin(&ei);
             ST_CHECK(ents==IX_TOPICS, "interest: reflection enumerates all %d external entities (%d)",
                      IX_TOPICS, ents);
         }
@@ -8322,17 +8337,23 @@ static void metalog_checks(void){
                    "metalog: snapshot uptime present");
       }
 
-      /* the builtins are hidden from reflection too: A's walks see only mirror-src,
-         B hosts nothing visible at all */
-      { RantIter eit; RantEntityInfo ei; int la=0, lb=0, pa=0;
+      /* the builtins are listed like any entity: A's walks see mirror-src beside them, B
+         hosts only builtins, and B's walk of A carries A's meta function */
+      { RantIter eit; RantEntityInfo ei; int la=0, lb=0, pa=0, ba=0, bb=0, meta=0;
         memset(&eit,0,sizeof eit);
-        while (rant_node_entities_next(A, RANT_SELF, &eit, &ei)) la++;
+        while (rant_node_entities_next(A, RANT_SELF, &eit, &ei)){ if (st_builtin(&ei)) ba++; else la++; }
         memset(&eit,0,sizeof eit);
-        while (rant_node_entities_next(B, RANT_SELF, &eit, &ei)) lb++;
+        while (rant_node_entities_next(B, RANT_SELF, &eit, &ei)){ if (st_builtin(&ei)) bb++; else lb++; }
         memset(&eit,0,sizeof eit);
-        while (rant_node_entities_next(B, idA, &eit, &ei)) pa++;
+        while (rant_node_entities_next(B, idA, &eit, &ei)){
+            if (!st_builtin(&ei)) pa++;
+            else if (ei.kind==RANT_ENTITY_FUNCTION && ei.name.len==10
+                     && !memcmp(ei.name.data,"@rant/meta",10) && ei.provides && !ei.incomplete) meta++;
+        }
         ST_CHECK(la==1 && lb==0 && pa==1,
-                 "metalog: entity walks hide the builtins (A=%d B=%d peerA=%d)", la, lb, pa); }
+                 "metalog: entity walks list the app's own (A=%d B=%d peerA=%d)", la, lb, pa);
+        ST_CHECK(ba>=4 && bb>=4 && meta==1,
+                 "metalog: entity walks list the builtins (A=%d B=%d peerA meta=%d)", ba, bb, meta); }
 
       /* the hidden namespace is reserved: a leading '@' is refused in every constructor */
       { RantVariable *ev = rant_node_create_variable_definition(A, "@rant/evil", NULL, NULL);
