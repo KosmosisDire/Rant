@@ -23,7 +23,7 @@ struct Sensor
     public Dictionary<string, object> Extras;  // self-describing map
 }
 
-struct Odom
+struct Reading
 {
     public ulong Stamp;
     public double X;
@@ -100,7 +100,7 @@ static class Program
             Threading = threading, FetchDetails = fetchDetails,
         };
     static RantMessage Received;
-    static Odom ReceivedPose;
+    static Reading ReceivedPose;
 
     // Encode and decode round trip of the variable kinds, no networking.
     static bool RoundTrip()
@@ -1311,16 +1311,16 @@ static class Program
 
         var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
         // the handler gets the value and the envelope: the stamps are checked below
-        sub.Subscriber<Odom>("pose", (p, m) =>
+        sub.Subscriber<Reading>("pose", (p, m) =>
         {
             Received = m;
             ReceivedPose = p;
             Console.WriteLine($"recv: [{m.TopicName}] from {m.PublisherName} -> {p}");
             Got.Set();
         }, qos);
-        var pubch = pub.Publisher<Odom>("pose", qos);
+        var pubch = pub.Publisher<Reading>("pose", qos);
 
-        var sent = new Odom
+        var sent = new Reading
         {
             Stamp = 7,
             X = 1.5,
@@ -1359,8 +1359,8 @@ static class Program
                                   + $" written={Received.WrittenUs} recv={Received.RecvUs}");
             }
             if (ok) Console.WriteLine("PASS");
-            var s = pub.Schema(typeof(Odom));
-            Console.WriteLine("Odom DSL (for C interop):\n" + s.Dsl);
+            var s = pub.Schema(typeof(Reading));
+            Console.WriteLine("Reading DSL (for C interop):\n" + s.Dsl);
             if (!s.Dsl.Contains("vel: Velocity")) { ok = false; Console.WriteLine("FAIL: the nested type is not named"); }
         }
         else
@@ -1373,7 +1373,7 @@ static class Program
         {
             try
             {
-                pubch.Send(new Odom { Frame = "way-too-long-for-sixteen-bytes" });
+                pubch.Send(new Reading { Frame = "way-too-long-for-sixteen-bytes" });
                 Console.WriteLine("FAIL: over-cap string did not throw");
                 ok = false;
             }
@@ -1389,8 +1389,8 @@ static class Program
         {
             var subT = new RantNode("sub", Local(42));
             var pubT = new RantNode("pub", Local(42));
-            subT.Subscriber<Odom>("pose", p => { ReceivedPose = p; Got.Set(); }, qos);
-            var pubchT = pubT.Publisher<Odom>("pose", qos);
+            subT.Subscriber<Reading>("pose", p => { ReceivedPose = p; Got.Set(); }, qos);
+            var pubchT = pubT.Publisher<Reading>("pose", qos);
             if (pubT.Poll(0) != (int)SendStatus.State) { Console.WriteLine("FAIL: Poll not refused under the service thread"); ok = false; }
             else
             {

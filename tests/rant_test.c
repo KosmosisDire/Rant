@@ -2259,7 +2259,7 @@ static void schema_print_roundtrip(RantAllocator *ma, RantSchema *s, const char 
 static void schema_dsl_checks(void){
     RantAllocator ma = rant_allocator_heap(0);
     static const char POSE[] =
-        "Odom\n"
+        "Reading\n"
         "{\n"
         "    stamp:    u64,\n"
         "    x:        f64,\n"
@@ -2272,9 +2272,9 @@ static void schema_dsl_checks(void){
     txt = tcompile(&ma, POSE, NULL);
     ST_CHECK(txt != NULL, "schema-dsl: compiles");
     /* pinned: the wire of a nested struct plus a fixed array must never drift */
-    ST_CHECK(txt && rant_schema_hash(txt) == 0x4f7bda001c3dc797ULL,
-             "schema-dsl: Odom canonical hash %016llx", (unsigned long long)(txt ? rant_schema_hash(txt) : 0));
-    schema_print_roundtrip(&ma, txt, "Odom (nested struct + array)");
+    ST_CHECK(txt && rant_schema_hash(txt) == 0x213591e8dc0bd9f5ULL,
+             "schema-dsl: Reading canonical hash %016llx", (unsigned long long)(txt ? rant_schema_hash(txt) : 0));
+    schema_print_roundtrip(&ma, txt, "Reading (nested struct + array)");
     if (txt){
         RantSchemaFieldInfo fi;
         ST_CHECK(rant_schema_size(txt) == 8+8+8+16+1+8, "schema-dsl: size %u", rant_schema_size(txt));
@@ -2550,24 +2550,24 @@ static void schema_dsl_checks(void){
     }
     {   /* errors: NULL + err points into the text at the offending spot */
         static const char *bad[] = {
-            "Odom { x: f65 }",              /* unknown type */
-            "Odom { x f64 }",               /* missing ':' */
-            "Odom { x: f64 ",               /* missing '}' */
-            "Odom { x: u8[0] }",            /* zero count */
-            "Odom { x: u8[70000] }",        /* count > u16 */
-            "Odom { x: f64 } y",            /* trailing garbage */
-            "Odom = { x: f64 }",            /* a struct is defined as Name { }, never Name = { } */
-            "Odom { x: f64 }[2]",           /* a definition takes no array suffix */
-            "Odom { x: string[] }",   /* ragged: an array of unbounded strings is a map's job */
-            "Odom { x: string[4] }",        /* a fixed string array needs its <cap> */
-            "Odom { x: string<0> }",        /* zero cap */
-            "Odom { x: string<12 }",        /* missing '>' */
-            "Odom { v: { y: u8[] }[2] }",   /* variable field inside an array element */
-            "Odom { m: map[3] }",           /* a map has no element form */
-            "Odom { m: enum<u8> { A=300 } }",  /* value out of the backing range */
-            "Odom { m: enum<f32> { A=0 } }",   /* non-integer backing */
-            "Odom { m: enum<u8> A=0 }",        /* missing '{' */
-            "Odom { m: enum { A } }"           /* missing <backing> */
+            "Reading { x: f65 }",              /* unknown type */
+            "Reading { x f64 }",               /* missing ':' */
+            "Reading { x: f64 ",               /* missing '}' */
+            "Reading { x: u8[0] }",            /* zero count */
+            "Reading { x: u8[70000] }",        /* count > u16 */
+            "Reading { x: f64 } y",            /* trailing garbage */
+            "Reading = { x: f64 }",            /* a struct is defined as Name { }, never Name = { } */
+            "Reading { x: f64 }[2]",           /* a definition takes no array suffix */
+            "Reading { x: string[] }",   /* ragged: an array of unbounded strings is a map's job */
+            "Reading { x: string[4] }",        /* a fixed string array needs its <cap> */
+            "Reading { x: string<0> }",        /* zero cap */
+            "Reading { x: string<12 }",        /* missing '>' */
+            "Reading { v: { y: u8[] }[2] }",   /* variable field inside an array element */
+            "Reading { m: map[3] }",           /* a map has no element form */
+            "Reading { m: enum<u8> { A=300 } }",  /* value out of the backing range */
+            "Reading { m: enum<f32> { A=0 } }",   /* non-integer backing */
+            "Reading { m: enum<u8> A=0 }",        /* missing '{' */
+            "Reading { m: enum { A } }"           /* missing <backing> */
         };
         unsigned i, ok = 1;
         for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
@@ -2579,8 +2579,8 @@ static void schema_dsl_checks(void){
     }
     {   /* a shape rule the wire check enforces says which rule, never out of memory */
         static const struct { const char *text, *why; } rules[] = {
-            { "Odom { v: { y: u8[] }[2] }",   "a variable array cannot sit inside an array element" },
-            { "Odom { v: { s: string }[2] }", "a variable string or a map cannot sit inside an array element" },
+            { "Reading { v: { y: u8[] }[2] }",   "a variable array cannot sit inside an array element" },
+            { "Reading { v: { s: string }[2] }", "a variable string or a map cannot sit inside an array element" },
         };
         unsigned i, ok = 1;
         for (i = 0; i < sizeof rules / sizeof rules[0]; i++){
@@ -2673,7 +2673,7 @@ static void schema_advert_checks(void){
     int t, pose_ok=0, raw_ok=0;
     const i_RantDiscoveryPeerView *peers; uint16_t n_peers=0;
 
-    sch = tcompile(&ma, "Odom { x: f64, y: f64, tags: u8[16] }", NULL);
+    sch = tcompile(&ma, "Reading { x: f64, y: f64, tags: u8[16] }", NULL);
     ST_CHECK(sch!=NULL, "announce: schema compiles");
     if (!sch) return;
 
@@ -2702,11 +2702,11 @@ static void schema_advert_checks(void){
                  && strstr(rant_last_error(P).schema_detail, "expected } at the end") != NULL,
                  "announce: a truncated text is refused at the end (%s)",
                  rant_last_error(P).schema_detail ? rant_last_error(P).schema_detail : "null");
-        ST_CHECK(rant_node_schema(P, "Odom { p: Nope }") == NULL && rant_last_error(P).schema_detail
+        ST_CHECK(rant_node_schema(P, "Reading { p: Nope }") == NULL && rant_last_error(P).schema_detail
                  && strstr(rant_last_error(P).schema_detail, "unknown type near: Nope") != NULL,
                  "announce: an unknown type is named (%s)",
                  rant_last_error(P).schema_detail ? rant_last_error(P).schema_detail : "null");
-        ST_CHECK(rant_node_schema(P, "Odom { x: f64 }") != NULL && rant_node_schema(P, "Odom") != NULL,
+        ST_CHECK(rant_node_schema(P, "Reading { x: f64 }") != NULL && rant_node_schema(P, "Reading") != NULL,
                  "announce: a definition made on the node names the next compile");
     }
     i_rant_schema_free(sch, rant_allocator_alloc, &ma);       /* the node registered its own: freed NOW */
@@ -2777,11 +2777,11 @@ static void schema_bind_checks(void){
     RantNodeOpts po, so; RantNode *P=NULL, *S=NULL;
     RantTopic *pc, *pc_bad; RantTopicOpts co; RantAddr seed;
     RantSchema *W, *R, *WB, *RB; int t;
-    /* writer: the full Odom. reader: a reordered subset of it */
+    /* writer: the full Reading. reader: a reordered subset of it */
     W  = tcompile(&ma,
-             "Odom { stamp: u64, x: f64, y: f64, tag: u8 }", NULL);      /* 25 B */
+             "Reading { stamp: u64, x: f64, y: f64, tag: u8 }", NULL);      /* 25 B */
     R  = tcompile(&ma,
-             "Odom { y: f64, stamp: u64 }", NULL);
+             "Reading { y: f64, stamp: u64 }", NULL);
     WB = tcompile(&ma, "Bad { v: u64 }", NULL);
     RB = tcompile(&ma, "Bad { v: f64 }", NULL);
     ST_CHECK(W && R && WB && RB, "schema-bind: schemas compile");
@@ -2810,7 +2810,7 @@ static void schema_bind_checks(void){
     ST_CHECK(rant_topic_match_count(pc_bad)==0, "schema-bind: kind-conflict reader refused");
     ST_CHECK(sb_mismatch_n>=1, "schema-bind: refusal surfaced (%lu RANT_E_SCHEMA_MISMATCH)", sb_mismatch_n);
 
-    {   /* publish one Odom packed in the writer's layout. The reader decodes through the
+    {   /* publish one Reading packed in the writer's layout. The reader decodes through the
            rebased schema with its own indices */
         uint8_t buf[25]; uint64_t bits; double x=1.5, y=-2.25;
         i_rant_le_w64(buf, 0x1122334455667788ULL);                /* stamp @0 */
@@ -3893,7 +3893,7 @@ static void detail_codec_checks(void){
     uint8_t req[256], resp[1024], out2[1024];
     size_t rl, need, len;
 
-    S = tcompile(&ma, "Odom { stamp: u64, x: f64 }", NULL);
+    S = tcompile(&ma, "Reading { stamp: u64, x: f64 }", NULL);
     memset(ch,0,sizeof ch);
     ch[0].name="dt/typed"; ch[1].name="dt/raw";
     ch[2].name="dt/off"; ch[2].role=RANT_INACTIVE;
@@ -3996,7 +3996,7 @@ static void detail_paging_checks(void){
     char names[DP_N][RANT_TOPIC_NAME_MAX + 1];
     int done[DP_N], i, rounds, resolved, max_page = 0;
 
-    S = tcompile(&ma, "Odom { stamp: u64, x: f64, y: f64 }", NULL);
+    S = tcompile(&ma, "Reading { stamp: u64, x: f64, y: f64 }", NULL);
     memset(&tc, 0, sizeof tc);
     tc.topics = NULL; tc.n_topics = DP_N; tc.max_peers = 2; tc.allocator = rant_allocator_alloc; tc.user = &ma;
     { size_t need = i_rant_transport_required_memory(&tc);         /* dynamic reserve mode */
@@ -4092,7 +4092,7 @@ static void detail_live_checks(void){
     uint16_t dom = ST_DOMAIN+10;
     int t;
 
-    W = tcompile(&ma, "Odom { stamp: u64, x: f64 }", NULL);
+    W = tcompile(&ma, "Reading { stamp: u64, x: f64 }", NULL);
     memset(&co,0,sizeof co); co.qos.keep_last=2;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
     memset(&po,0,sizeof po); po.domain=dom; po.discovery.max_peers=4;
