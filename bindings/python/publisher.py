@@ -40,8 +40,8 @@ def main():
             while seq < due:
                 angle = seq * 0.01
                 ch.send(Tick(seq=seq, when=rant.types.now(), value=math.sin(angle),
-                             at=rant.types.Transform(translation=rant.types.Double3(math.cos(angle),
-                                                                       math.sin(angle), 0.0))))
+                             at=rant.types.Transform(rant.types.Pose(rant.types.Double3(
+                                 math.cos(angle), math.sin(angle), 0.0)))))
                 seq += 1
             node.poll(0)                                   # non-blocking: flush the burst + service RX
             if now - last_report >= 1.0:

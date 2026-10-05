@@ -582,7 +582,8 @@ def _build_spec(cls):
     mod = _sys.modules.get(cls.__module__)
     g = getattr(mod, "__dict__", {})
     anns = getattr(cls, "__annotations__", {})
-    if not anns:
+    # only a declared name says empty on purpose, else no fields is a mapping mistake
+    if not anns and not (getattr(cls, "__rant_std__", None) or getattr(cls, "__rant_name__", None)):
         raise SchemaError("rant schema: %s has no annotated fields to map" % cls.__name__)
     name = getattr(cls, "__rant_name__", None) or cls.__name__
     fields = [_field_spec(n, a, g) for n, a in anns.items()]

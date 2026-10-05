@@ -93,27 +93,22 @@ class Color:
     a: u8 = 255
 
 
-@_std("Rect")
-class Rect:
-    x: f32 = 0.0
-    y: f32 = 0.0
-    w: f32 = 0.0
-    h: f32 = 0.0
+@_std("Pose")
+class Pose:
+    position: Double3 = _dataclasses.field(default_factory=Double3)
+    orientation: Quaternion = _dataclasses.field(default_factory=Quaternion)
 
 
-@_std("RectI")
-class RectI:
-    x: i32 = 0
-    y: i32 = 0
-    w: i32 = 0
-    h: i32 = 0
+@_std("Pose2D")
+class Pose2D:
+    position: Double2 = _dataclasses.field(default_factory=Double2)
+    angle: f64 = 0.0    # radians, from +x toward +y
 
 
-# Meters and radians. parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
+# parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
 @_std("Transform")
 class Transform:
-    translation: Double3 = _dataclasses.field(default_factory=Double3)
-    rotation: Quaternion = _dataclasses.field(default_factory=Quaternion)
+    pose: Pose = _dataclasses.field(default_factory=Pose)
     parent: string(30) = ""
 
 
@@ -123,11 +118,101 @@ class Twist:
     angular: Double3 = _dataclasses.field(default_factory=Double3)   # rad/s
 
 
+@_std("Wrench")
+class Wrench:
+    force: Double3 = _dataclasses.field(default_factory=Double3)     # N
+    torque: Double3 = _dataclasses.field(default_factory=Double3)    # N m about the frame origin
+
+
 @_std("GeoPoint")
 class GeoPoint:
     lat: f64 = 0.0      # degrees
     lon: f64 = 0.0      # degrees
     alt: f64 = 0.0      # meters
+
+
+# The shapes, in the units of their frame.
+
+@_std("AlignedBox")
+class AlignedBox:
+    min: Double3 = _dataclasses.field(default_factory=Double3)       # min <= max on every axis
+    max: Double3 = _dataclasses.field(default_factory=Double3)
+
+
+@_std("AlignedBox2D")
+class AlignedBox2D:
+    min: Double2 = _dataclasses.field(default_factory=Double2)
+    max: Double2 = _dataclasses.field(default_factory=Double2)
+
+
+@_std("OrientedBox")
+class OrientedBox:
+    pose: Pose = _dataclasses.field(default_factory=Pose)
+    size: Double3 = _dataclasses.field(default_factory=Double3)      # full edge lengths
+
+
+@_std("OrientedBox2D")
+class OrientedBox2D:
+    pose: Pose2D = _dataclasses.field(default_factory=Pose2D)
+    size: Double2 = _dataclasses.field(default_factory=Double2)
+
+
+@_std("Plane")
+class Plane:
+    position: Double3 = _dataclasses.field(default_factory=Double3)  # any point on the plane
+    normal: Double3 = _dataclasses.field(default_factory=Double3)    # unit length
+
+
+@_std("Segment")
+class Segment:
+    a: Double3 = _dataclasses.field(default_factory=Double3)
+    b: Double3 = _dataclasses.field(default_factory=Double3)
+
+
+@_std("Sphere")
+class Sphere:
+    center: Double3 = _dataclasses.field(default_factory=Double3)
+    radius: f64 = 0.0
+
+
+@_std("Capsule")
+class Capsule:
+    axis: Segment = _dataclasses.field(default_factory=Segment)
+    radius: f64 = 0.0
+
+
+@_std("Cylinder")
+class Cylinder:
+    axis: Segment = _dataclasses.field(default_factory=Segment)      # the cap centers
+    radius: f64 = 0.0
+
+
+@_std("Cone")
+class Cone:
+    base: Double3 = _dataclasses.field(default_factory=Double3)
+    tip: Double3 = _dataclasses.field(default_factory=Double3)
+    radius: f64 = 0.0                                                 # at the base
+
+
+@_std("Polygon")
+class Polygon:
+    points: list[Double3] = _dataclasses.field(default_factory=list)  # closed, planar
+
+
+@_std("Circle")
+class Circle:
+    center: Double2 = _dataclasses.field(default_factory=Double2)
+    radius: f64 = 0.0
+
+
+@_std("Polygon2D")
+class Polygon2D:
+    points: list[Double2] = _dataclasses.field(default_factory=list)  # closed
+
+
+@_std("Empty")
+class Empty:
+    pass
 
 
 # The video family. Each member value IS the wire value, so the names and numbers

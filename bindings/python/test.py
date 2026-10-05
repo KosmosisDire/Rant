@@ -27,7 +27,7 @@ class Velocity:
 
 
 @dataclass
-class Pose:
+class Reading:
     stamp: rant.u64 = 0
     x:     rant.f64 = 0.0
     y:     rant.f64 = 0.0
@@ -166,8 +166,8 @@ def std_types():
     # the reverse, and Transform/Twist are distinct names never mistaken for each other.
     # Two shapes of W, so each goes on its own node
     named = a.schema("W { at: Transform }")
-    bare = b.schema("W { at: { translation: { x: f64, y: f64, z: f64 },"
-                    "         rotation: { x: f64, y: f64, z: f64, w: f64 },"
+    bare = b.schema("W { at: { pose: { position: { x: f64, y: f64, z: f64 },"
+                    "                  orientation: { x: f64, y: f64, z: f64, w: f64 } },"
                     "         parent: string<30> } }")
     check("an anonymous field of the same shape reads a Transform field",
           bare.can_read(named) and not named.can_read(bare))
@@ -186,15 +186,34 @@ def std_types():
     check("its message is the sum of the wire shapes (88+8+4+16+12)",
           len(sch.encode(Track())) == 128)
 
-    t = Track(at=rant.types.Transform(translation=rant.types.Double3(4.5, -1.25, 9.0)),
+    t = Track(at=rant.types.Transform(rant.types.Pose(position=rant.types.Double3(4.5, -1.25, 9.0))),
               when=rant.types.now(), tag=rant.types.Color(0x11, 0x22, 0x33, 0xFF),
               id=bytes(range(16)), velocity=rant.types.Float3(1.0, 2.0, 3.0))
     back = sch.decode(sch.encode(t))
     check("a Track round-trips whole",
-          back.at.translation.x == 4.5 and back.at.rotation.w == 1.0
+          back.at.pose.position.x == 4.5 and back.at.pose.orientation.w == 1.0
           and back.when == t.when and back.tag.r == 0x11 and back.tag.a == 0xFF
           and bytes(back.id) == bytes(range(16)) and back.velocity.z == 3.0)
     check("types.now is Unix-epoch microseconds", rant.types.now() > 1600000000000000)
+
+    # the shapes: each mirror is its canonical type and size, Capsule and Cylinder never
+    # cross wire, and a variable Polygon2D and an Empty round-trip
+    T = rant.types
+    for cls, size in ((T.Pose, 56), (T.Pose2D, 24), (T.Wrench, 48), (T.AlignedBox, 48),
+                      (T.AlignedBox2D, 32), (T.OrientedBox, 80), (T.OrientedBox2D, 40),
+                      (T.Plane, 48), (T.Segment, 48), (T.Sphere, 32), (T.Capsule, 56),
+                      (T.Cylinder, 56), (T.Cone, 56), (T.Circle, 24), (T.Empty, 0)):
+        s = a.schema(cls)
+        check("%s mirror is the canonical type, %d bytes" % (cls.__name__, size),
+              s.hash == a.schema(cls.__name__).hash and len(s.encode(cls())) == size)
+    check("Capsule and Cylinder never cross wire",
+          not a.schema("Capsule").can_read(a.schema("Cylinder")))
+    poly = a.schema(T.Polygon2D)
+    pb = poly.decode(poly.encode(T.Polygon2D([T.Double2(0, 0), T.Double2(1, 0), T.Double2(1, 2)])))
+    check("a Polygon2D round-trips whole", len(pb.points) == 3 and pb.points[2].y == 2)
+    empty = a.schema(T.Empty)
+    check("an Empty encodes to zero bytes and decodes back",
+          len(empty.encode(T.Empty())) == 0 and isinstance(empty.decode(b""), T.Empty))
     a.close()
     b.close()
     return ok
@@ -578,7 +597,7 @@ def handles():
         p = a.publisher("shared", Velocity, reliable=True)
         s = a.subscriber("shared", Velocity, lambda t: None, reliable=True)
         try:
-            a.publisher("shared", Pose)
+            a.publisher("shared", Reading)
             check("a different schema on a live name is refused", False)
         except rant.Error:
             check("a different schema on a live name is refused", True)
@@ -598,7 +617,7 @@ def handles():
         check("counts show the send", p.counts.tx_msgs >= 1)
         check("the last handle closes", p.close())
         check("a closed handle answers NO_TOPIC", p.send(Velocity()) == rant.SendStatus.NO_TOPIC)
-        p2 = a.publisher("shared", Pose)
+        p2 = a.publisher("shared", Reading)
         check("the name carries another schema after the last close", p2.name == "shared")
 
         # reflection: the peer, this node's entities, the folded mesh and one lookup
@@ -613,7 +632,7 @@ def handles():
         check("find folds the topic", found is not None and found.kind == rant.EntityKind.TOPIC)
         check("the folded schema is an owned copy",
               found is not None and found.schema is not None
-              and found.schema.hash == a.schema(Pose).hash)
+              and found.schema.hash == a.schema(Reading).hash)
         check("mesh lists what find found",
               any(e.name == "shared" for e in a.reflection.mesh()))
         check("epoch is a counter", isinstance(a.reflection.epoch, int))
@@ -624,7 +643,7 @@ def handles():
         check("on_log binds and returns the handler", a.on_log(handler) is handler)
         st = a.stats
         check("stats is one snapshot", st.mem_in_use > 0 and st.alloc_calls > 0)
-        # the Pose publisher against HB's Velocity subscriber is the mismatch it records, once
+        # the Reading publisher against HB's Velocity subscriber is the mismatch it records, once
         # HB's interest has come back
         deadline = time.time() + 5.0
         while time.time() < deadline and a.last_error.error == rant.ErrorKind.NONE:
@@ -1211,10 +1230,10 @@ def main():
     pub = rant.Node("pub", on_event=on_event("pub"),
                     domain=DOMAIN, multicast_interface=IFACE, threading=rant.Threading.MANUAL)
 
-    subch = sub.subscriber("pose", Pose, on_pose, reliable=True, keep_last=8)
-    pubch = pub.publisher("pose", Pose, reliable=True, keep_last=8)
+    subch = sub.subscriber("pose", Reading, on_pose, reliable=True, keep_last=8)
+    pubch = pub.publisher("pose", Reading, reliable=True, keep_last=8)
 
-    sent = Pose(stamp=7, x=1.5, y=-2.5, uuid=b"\x01\x02\x03\x04",
+    sent = Reading(stamp=7, x=1.5, y=-2.5, uuid=b"\x01\x02\x03\x04",
                 frame="map", tags=["fast", "ok"], vel=Velocity(dx=0.5, dy=0.25))
 
     # MANUAL: drive both nodes by polling them in the loop.
@@ -1227,19 +1246,19 @@ def main():
     ok = got.is_set()
     if ok:
         r = received[0]
-        ok = (isinstance(r, Pose) and r.stamp == 7 and abs(r.x - 1.5) < 1e-9
+        ok = (isinstance(r, Reading) and r.stamp == 7 and abs(r.x - 1.5) < 1e-9
               and abs(r.y + 2.5) < 1e-9 and bytes(r.uuid) == b"\x01\x02\x03\x04"
               and r.frame == "map" and list(r.tags) == ["fast", "ok"]
               and abs(r.vel.dx - 0.5) < 1e-6 and abs(r.vel.dy - 0.25) < 1e-6)
         print("PASS" if ok else "FAIL: decoded value mismatch: %r" % (r,))
-        print("Pose DSL (for C interop):\n" + rant.dsl(Pose))
+        print("Reading DSL (for C interop):\n" + rant.dsl(Reading))
     else:
         print("FAIL: no message delivered within timeout")
 
     # An over-cap string must raise, never silently truncate.
     if ok:
         try:
-            pubch.send(Pose(frame="way-too-long-for-sixteen-bytes"))
+            pubch.send(Reading(frame="way-too-long-for-sixteen-bytes"))
             print("FAIL: over-cap string did not raise")
             ok = False
         except rant.SchemaError:

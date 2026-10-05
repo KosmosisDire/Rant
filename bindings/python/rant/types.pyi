@@ -47,6 +47,16 @@ class VideoStreamKind(IntEnum):
     Other = 15
 
 @dataclass
+class AlignedBox:
+    min: Double3 = ...
+    max: Double3 = ...
+
+@dataclass
+class AlignedBox2D:
+    min: Double2 = ...
+    max: Double2 = ...
+
+@dataclass
 class CameraIntrinsics:
     width: int = 0
     height: int = 0
@@ -58,11 +68,32 @@ class CameraIntrinsics:
     coeffs: list[float] = ...
 
 @dataclass
+class Capsule:
+    axis: Segment = ...
+    radius: float = 0.0
+
+@dataclass
+class Circle:
+    center: Double2 = ...
+    radius: float = 0.0
+
+@dataclass
 class Color:
     r: int = 0
     g: int = 0
     b: int = 0
     a: int = 255
+
+@dataclass
+class Cone:
+    base: Double3 = ...
+    tip: Double3 = ...
+    radius: float = 0.0
+
+@dataclass
+class Cylinder:
+    axis: Segment = ...
+    radius: float = 0.0
 
 @dataclass
 class Double2:
@@ -81,6 +112,9 @@ class Double4:
     y: float = 0.0
     z: float = 0.0
     w: float = 0.0
+
+@dataclass
+class Empty: ...
 
 @dataclass
 class ExternalVideoStream:
@@ -152,6 +186,39 @@ class JointState:
     effort: list[float] = ...
 
 @dataclass
+class OrientedBox:
+    pose: Pose = ...
+    size: Double3 = ...
+
+@dataclass
+class OrientedBox2D:
+    pose: Pose2D = ...
+    size: Double2 = ...
+
+@dataclass
+class Plane:
+    position: Double3 = ...
+    normal: Double3 = ...
+
+@dataclass
+class Polygon:
+    points: list[Double3] = ...
+
+@dataclass
+class Polygon2D:
+    points: list[Double2] = ...
+
+@dataclass
+class Pose:
+    position: Double3 = ...
+    orientation: Quaternion = ...
+
+@dataclass
+class Pose2D:
+    position: Double2 = ...
+    angle: float = 0.0
+
+@dataclass
 class Quaternion:
     x: float = 0.0
     y: float = 0.0
@@ -159,23 +226,18 @@ class Quaternion:
     w: float = 1.0
 
 @dataclass
-class Rect:
-    x: float = 0.0
-    y: float = 0.0
-    w: float = 0.0
-    h: float = 0.0
+class Segment:
+    a: Double3 = ...
+    b: Double3 = ...
 
 @dataclass
-class RectI:
-    x: int = 0
-    y: int = 0
-    w: int = 0
-    h: int = 0
+class Sphere:
+    center: Double3 = ...
+    radius: float = 0.0
 
 @dataclass
 class Transform:
-    translation: Double3 = ...
-    rotation: Quaternion = ...
+    pose: Pose = ...
     parent: str = ''
 
 @dataclass
@@ -191,5 +253,10 @@ class VideoFrame:
     keyframe: bool = False
     pts: Timestamp = 0
     data: bytes = b''
+
+@dataclass
+class Wrench:
+    force: Double3 = ...
+    torque: Double3 = ...
 
 def now() -> int: ...
