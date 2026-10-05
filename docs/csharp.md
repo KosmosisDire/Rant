@@ -11,17 +11,17 @@ package ships them as `Rant.xml`, so an editor shows them as tooltips.
 using Rant;
 using Rant.Types;
 
-public record Pose(double X, double Y, [property: RantString(16)] string Frame);
+public record Conveyor(double Speed, bool Running, [property: RantString(16)] string Part);
 
 var robot = new RantNode("robot", new NodeOptions { Domain = 7 });
-var pub = robot.Publisher<Pose>("pose", new Qos { Reliability = Reliability.Reliable });
+var pub = robot.Publisher<Conveyor>("line1/conveyor", new Qos { Reliability = Reliability.Reliable });
 robot.FunctionDefinition<(double, double), double>("add", r => r.Item1 + r.Item2);
 
 var viewer = new RantNode("viewer", new NodeOptions { Domain = 7 });   // usually another process
 viewer.OnEvent += e => Console.Error.WriteLine(e);
-viewer.Subscriber<Pose>("pose", p => Console.WriteLine(p.X));
+viewer.Subscriber<Conveyor>("line1/conveyor", c => Console.WriteLine(c.Speed));
 double sum = viewer.RemoteFunction<(double, double), double>("add").Call((2, 3));
-pub.Send(new Pose(1, 2, "map"));
+pub.Send(new Conveyor(0.5, true, "bracket"));
 ```
 
 ## A node
@@ -144,10 +144,10 @@ C ones of docs/topics.md under C# names, and a `Us` suffix means microseconds.
 
 ```csharp
 var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
-var sub = node.Subscriber<Pose>("pose", (pose, msg) => Console.WriteLine($"{pose.X} from {msg.PublisherName}"), qos);
+var sub = node.Subscriber<Conveyor>("line1/conveyor", (c, msg) => Console.WriteLine($"{c.Speed} from {msg.PublisherName}"), qos);
 
-var frames = node.Subscriber<Pose>("pose");        // no handler: pulled
-if (frames.TryTakeLatest(out Pose newest)) Draw(newest);
+var belt = node.Subscriber<Conveyor>("line1/conveyor");   // no handler: pulled
+if (belt.TryTakeLatest(out Conveyor newest)) Show(newest);
 ```
 
 A subscriber's handler is given at creation and takes the value alone, or the value and the

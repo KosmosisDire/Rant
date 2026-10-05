@@ -57,23 +57,23 @@ dotnet add package Rant
 ```csharp
 using Rant;
 
-public struct Motion { public float Dx; public float Dy; }
-public struct Pose  {
-    public ulong Stamp; public double X; public double Y;
-    [RantArray(4)] public byte[] Uuid;
-    [RantString(16)] public string Frame;
-    public Motion Vel;
+public struct Fault { public ushort Code; [RantString(32)] public string Text; }
+public struct Conveyor {
+    public double Speed; public bool Running;
+    [RantString(16)] public string Part;
+    [RantArray(4)] public bool[] Zones;   // occupancy of each zone
+    public Fault LastFault;
 }
 
 var robot = new RantNode("robot", new NodeOptions { Domain = 7 });  // the service thread runs from here
-var pub = robot.Publisher<Pose>("pose", new Qos { Reliability = Reliability.Reliable });
+var pub = robot.Publisher<Conveyor>("line1/conveyor", new Qos { Reliability = Reliability.Reliable });
 
 // usually another process
 var viewer = new RantNode("viewer", new NodeOptions { Domain = 7 });
 viewer.OnEvent += e => Console.Error.WriteLine(e);                   // the diagnostics, optional
-viewer.Subscriber<Pose>("pose", p => Console.WriteLine(p.X));
+viewer.Subscriber<Conveyor>("line1/conveyor", c => Console.WriteLine(c.Speed));
 
-pub.Send(new Pose { Stamp = 1, X = 1, Frame = "map" });   // thread-safe from any thread
+pub.Send(new Conveyor { Speed = 0.5, Running = true, Part = "bracket" });   // thread-safe from any thread
 // (or Threading = Threading.Manual in the options and drive node.Poll(1) in your own loop)
 ```
 
@@ -97,5 +97,5 @@ Any struct, class or record is a message type: its public fields and auto proper
 become the schema in the order written, each named on the wire in camelCase, so `FrameId`
 is `frameId` in every language. `[RantArray(n)]` fixes an array's length and
 `[RantString(cap)]` caps a string, and without them both are variable.
-`node.Schema(typeof(Pose)).Dsl` prints the DSL for pasting into a C or C++ node.
+`node.Schema(typeof(Conveyor)).Dsl` prints the DSL for pasting into a C or C++ node.
 docs/csharp.md has the whole mapping, the threading rules and the rest of the API.

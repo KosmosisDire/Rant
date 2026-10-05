@@ -16,20 +16,26 @@ the scene. Only one is allowed, and a second warns and stays inactive.
 ```csharp
 using Rant;
 using UnityEngine;
-
-public struct Pose { public float X, Y, Z; }
+using Std = Rant.Types;   // Unity has its own Pose and Quaternion
 
 public class PoseSender : MonoBehaviour {
-    RantTopic<Pose> pose;
-    void OnEnable() { pose = RantNodeUnity.Topic<Pose>("player/pose"); }
-    void Update()   { pose.Publish(new Pose { X = transform.position.x,
-                                              Y = transform.position.y,
-                                              Z = transform.position.z }); }
+    RantTopic<Std.Pose> pose;
+    void OnEnable() { pose = RantNodeUnity.Topic<Std.Pose>("player/pose"); }
+    void Update() {
+        Vector3 p = transform.position; Quaternion q = transform.rotation;
+        pose.Publish(new Std.Pose {
+            Position    = new Std.Double3 { X = p.x, Y = p.y, Z = p.z },
+            Orientation = new Std.Quaternion { X = q.x, Y = q.y, Z = q.z, W = q.w } });
+    }
 }
 
 public class PoseReceiver : MonoBehaviour {
-    void OnEnable() => RantNodeUnity.Topic<Pose>("player/pose").Subscribe(this, OnPose);
-    void OnPose(Pose p) { transform.position = new Vector3(p.X, p.Y, p.Z); }
+    void OnEnable() => RantNodeUnity.Topic<Std.Pose>("player/pose").Subscribe(this, OnPose);
+    void OnPose(Std.Pose p) {
+        Std.Double3 v = p.Position; Std.Quaternion r = p.Orientation;
+        transform.SetPositionAndRotation(new Vector3((float)v.X, (float)v.Y, (float)v.Z),
+            new Quaternion((float)r.X, (float)r.Y, (float)r.Z, (float)r.W));
+    }
 }
 ```
 
@@ -38,8 +44,10 @@ ten scripts and you get the same `RantTopic<T>` back, so a topic is shared acros
 rather than duplicated. `RantNodeUnity.Topic(name)` is the raw form carrying `byte[]` or a
 UTF-8 `string`.
 
-Message types are written as docs/csharp.md describes, and the field names have to match on
-every node using the topic.
+A standard type from `Rant.Types`, such as `Pose`, is the same type in every language, so
+any peer reads it. Unity's axes are left handed with y up, and a peer that uses another
+convention converts at its edge. Your own message types are written as docs/csharp.md
+describes, and the field names have to match on every node using the topic.
 
 ## Your handlers always run on the main thread
 
@@ -81,7 +89,7 @@ QoS is the `Qos` object of docs/csharp.md, passed the first time a name is reque
 callers share the topic that already exists, so their QoS is ignored and the Console says so.
 
 ```csharp
-RantNodeUnity.Topic<Pose>("player/pose", new Qos { MaxRateHz = 30 })
+RantNodeUnity.Topic<Std.Pose>("player/pose", new Qos { MaxRateHz = 30 })
              .Subscribe(this, OnPose);
 ```
 

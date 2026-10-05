@@ -14,15 +14,15 @@ from dataclasses import dataclass
 import rant
 
 @dataclass
-class Pose:
-    stamp: rant.u64 = 0
-    x:     rant.f64 = 0.0
-    frame: rant.string(16) = ""
+class Conveyor:
+    speed:   rant.f64 = 0.0
+    running: bool = False
+    part:    rant.string(16) = ""
 
 node = rant.Node("robot1", domain=7)
-pose = node.publisher("pose", Pose, reliable=True)
-pose.send(Pose(stamp=1, x=1.0, frame="map"))
-node.subscriber("pose", Pose, lambda p: print(p))
+belt = node.publisher("line1/conveyor", Conveyor, reliable=True)
+belt.send(Conveyor(speed=0.5, running=True, part="bracket"))
+node.subscriber("line1/conveyor", Conveyor, lambda c: print(c))
 ```
 
 `rant.Node(name, **options)` opens a node, the name optional. The options are
@@ -96,10 +96,11 @@ language is the same wire bytes and the same hash.
 
 The schema argument of every handle is a schema class, a bare type, a compiled `Schema` or
 DSL text, and None makes a raw handle whose payloads are bytes or str. The package ships
-type stubs, so a checker sees `node.publisher("pose", Pose).send` take a `Pose` and the
-handler of `node.subscriber("pose", Pose, handler)` take one, and `rant.Publisher[Pose]` is
-the annotation for one. The scalars are `int` and `float` aliases to a checker. A capped
-string, a fixed or variable array and a pinned enum width are spelled
+type stubs, so a checker sees `node.publisher("line1/conveyor", Conveyor).send` take a
+`Conveyor` and the handler of `node.subscriber("line1/conveyor", Conveyor, handler)` take
+one, and `rant.Publisher[Conveyor]` is the annotation for one. The scalars are `int` and
+`float` aliases to a checker. A capped string, a fixed or variable array and a pinned
+enum width are spelled
 `Annotated[T, "<dsl field type>"]`, the Python type for the checker and the DSL for the
 wire: `Annotated[str, "string<16>"]`, `Annotated[bytes, "u8[4]"]`,
 `Annotated[list[float], "f32[]"]`, `Annotated[Mode, "u8"]`. The text may name a struct

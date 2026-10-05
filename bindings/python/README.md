@@ -13,15 +13,15 @@ from dataclasses import dataclass
 import rant
 
 @dataclass
-class Pose:
-    stamp: rant.u64 = 0
-    x:     rant.f64 = 0.0
-    frame: rant.string(16) = ""
+class Conveyor:
+    speed:   rant.f64 = 0.0
+    running: bool = False
+    part:    rant.string(16) = ""
 
 node = rant.Node("robot1", domain=7)
-pose = node.publisher("pose", Pose, reliable=True)
-pose.send(Pose(stamp=1, x=1.0, frame="map"))
-node.subscriber("pose", Pose, lambda p: print(p))
+belt = node.publisher("line1/conveyor", Conveyor, reliable=True)
+belt.send(Conveyor(speed=0.5, running=True, part="bracket"))
+node.subscriber("line1/conveyor", Conveyor, lambda c: print(c))
 ```
 
 The guide is docs/python.md in the repository: https://github.com/KosmosisDire/Rant

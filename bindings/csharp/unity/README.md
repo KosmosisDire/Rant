@@ -42,20 +42,26 @@ owns the shared node and every other script publishes and subscribes through it:
 ```csharp
 using Rant;
 using UnityEngine;
-
-public struct Pose { public float X, Y, Z; }
+using Std = Rant.Types;   // Unity has its own Pose and Quaternion
 
 public class PoseSender : MonoBehaviour {
-    RantTopic<Pose> pose;
-    void OnEnable() { pose = RantNodeUnity.Topic<Pose>("player/pose"); }
-    void Update()   { pose.Publish(new Pose { X = transform.position.x,
-                                              Y = transform.position.y,
-                                              Z = transform.position.z }); }
+    RantTopic<Std.Pose> pose;
+    void OnEnable() { pose = RantNodeUnity.Topic<Std.Pose>("player/pose"); }
+    void Update() {
+        Vector3 p = transform.position; Quaternion q = transform.rotation;
+        pose.Publish(new Std.Pose {
+            Position    = new Std.Double3 { X = p.x, Y = p.y, Z = p.z },
+            Orientation = new Std.Quaternion { X = q.x, Y = q.y, Z = q.z, W = q.w } });
+    }
 }
 
 public class PoseReceiver : MonoBehaviour {
-    void OnEnable() => RantNodeUnity.Topic<Pose>("player/pose").Subscribe(this, OnPose);
-    void OnPose(Pose p) { transform.position = new Vector3(p.X, p.Y, p.Z); }  // main thread, always
+    void OnEnable() => RantNodeUnity.Topic<Std.Pose>("player/pose").Subscribe(this, OnPose);
+    void OnPose(Std.Pose p) {   // main thread, always
+        Std.Double3 v = p.Position; Std.Quaternion r = p.Orientation;
+        transform.SetPositionAndRotation(new Vector3((float)v.X, (float)v.Y, (float)v.Z),
+            new Quaternion((float)r.X, (float)r.Y, (float)r.Z, (float)r.W));
+    }
 }
 ```
 

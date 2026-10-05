@@ -45,7 +45,7 @@ def main():
                 # `when` is the publisher's wall clock in the same units everywhere, so the
                 # difference against ours is one-way latency plus clock skew.
                 age_ms = (rant.types.now() - last.when) / 1000.0 if last.when else 0.0
-                p = last.at.translation
+                p = last.at.pose.position
                 print("received=%d  rate=%.0f Hz  age=%.1f ms  at=(%.2f, %.2f, %.2f)"
                       % (count, rate, age_ms, p.x, p.y, p.z))
                 last_report, last_count = now, count

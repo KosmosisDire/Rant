@@ -66,8 +66,8 @@ To run one handle's callbacks on a thread of your own, pass it a queue from
 ## Types
 
 ```cpp
-struct Odom { double x, y; rant::String<16> frame; };
-RANT_SCHEMA(Odom, x, y, frame);
+struct Conveyor { double speed; bool running; rant::String<16> part; };
+RANT_SCHEMA(Conveyor, speed, running, part);
 ```
 
 `RANT_SCHEMA` goes after the struct at global scope and lists its members in order. C#
@@ -110,16 +110,16 @@ inside the callback only.
 ## Topics
 
 ```cpp
-auto pub = node.publisher<Odom>("odom");
-auto sub = node.subscriber<Odom>("odom", [](const Odom& p) { /* ... */ });
-pub.send({ 1, 2, {} });
+auto pub = node.publisher<Conveyor>("line1/conveyor");
+auto sub = node.subscriber<Conveyor>("line1/conveyor", [](const Conveyor& c) { /* ... */ });
+pub.send({ 0.5, true, {} });
 ```
 
 A subscriber with no handler is pulled: you read messages when you want them.
 
 ```cpp
-auto sub = node.subscriber<Odom>("odom");
-if (auto p = sub.take_latest()) draw(*p);
+auto sub = node.subscriber<Conveyor>("line1/conveyor");
+if (auto c = sub.take_latest()) show(*c);
 ```
 
 - `take()` returns the oldest waiting message, `take_latest()` the newest.
