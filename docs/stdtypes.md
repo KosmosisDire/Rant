@@ -47,17 +47,43 @@ Float3  { x: f32, y: f32, z: f32 }      Int2    / Int3    / Int4      the same i
 Float4  { x: f32, y: f32, z: f32, w: f32 }
 ```
 
-Geometry and time:
+Placement, motion and time:
 
 ```
 Quaternion { x: f64, y: f64, z: f64, w: f64 }
-Transform  { translation: Double3, rotation: Quaternion, parent: string<30> }
+Pose       { position: Double3, orientation: Quaternion }
+Pose2D     { position: Double2, angle: f64 }            -- radians, from +x toward +y
+Transform  { pose: Pose, parent: string<30> }
 Twist      { linear: Double3, angular: Double3 }        -- m/s and rad/s
+Wrench     { force: Double3, torque: Double3 }          -- N and N m, torque about the frame origin
 GeoPoint   { lat: f64, lon: f64, alt: f64 }             -- degrees, degrees, meters
 Matrix3x3 = f32[9]        Matrix4x4 = f32[16]           -- row major
 Timestamp = i64           Duration  = i64               -- microseconds
 Uuid      = u8[16]                                      -- RFC 4122 byte order
 ```
+
+Shapes, in the units of their frame:
+
+```
+AlignedBox    { min: Double3, max: Double3 }            -- min <= max on every axis
+OrientedBox   { pose: Pose, size: Double3 }             -- full edge lengths, centered on pose
+Plane         { position: Double3, normal: Double3 }    -- any point on the plane, unit normal
+Segment       { a: Double3, b: Double3 }
+Sphere        { center: Double3, radius: f64 }
+Capsule       { axis: Segment, radius: f64 }
+Cylinder      { axis: Segment, radius: f64 }            -- axis ends are the cap centers
+Cone          { base: Double3, tip: Double3, radius: f64 }   -- radius at the base
+Polygon       { points: Double3[] }                     -- closed, planar
+
+AlignedBox2D  { min: Double2, max: Double2 }
+OrientedBox2D { pose: Pose2D, size: Double2 }
+Circle        { center: Double2, radius: f64 }
+Polygon2D     { points: Double2[] }                     -- closed
+```
+
+A pixel region is an `AlignedBox2D` in image coordinates. `Polygon` and `Polygon2D` carry a
+variable member, so they cannot be array elements. A scene of mixed shapes is a struct of
+per kind arrays: `Scene { boxes: OrientedBox[], spheres: Sphere[] }`.
 
 Sensing and robots:
 
@@ -70,12 +96,12 @@ JointState { position: f64[], velocity: f64[], effort: f64[] }
 JointNames { name: string<32>[] }
 ```
 
-Presentation:
+Presentation and other:
 
 ```
 Color { r: u8, g: u8, b: u8, a: u8 }    -- sRGB, straight alpha (not premultiplied)
-Rect  { x: f32, y: f32, w: f32, h: f32 }        RectI  the same in i32
 Uri   = string<256>
+Empty { }                               -- zero bytes, for a signal that carries no data
 ```
 
 Media:
@@ -129,7 +155,11 @@ strings every signaling stack passes verbatim.
 These are pinned, not suggestions. A number crossing Rant in one of these types means
 this:
 
-- SI units throughout. Lengths in meters, velocities in m/s, angles in radians.
+- Physical quantities are SI: velocities in m/s, forces in N, angles in radians.
+- Positions and shapes are in the units of their frame: meters in a physical frame,
+  pixels in an image frame, whose origin is the top left corner with y pointing down.
+- A 2D angle turns from +x toward +y: counterclockwise seen from above in a physical
+  frame, clockwise on screen in an image frame.
 - Time is `i64` microseconds since the Unix epoch, UTC. It is the same clock
   `RantMsg.written_us` is stamped from, so the two are directly comparable. Cross host
   comparisons are only as good as the hosts' clock sync. Never mix a `Timestamp` with the
@@ -160,7 +190,7 @@ this:
   and a C `frameId` meet with no attribute, and a path such as `"frame_id"` given to
   `rant_get_f32` finds `frameId`.
 
-Deliberately absent for now: civil date and time, unit annotated value types (SI by
+Deliberately absent for now: meshes, polylines, civil date and time, unit annotated value types (SI by
 convention today, schema level unit annotations are the future mechanism), IP addresses,
 the rest of the sensor tier (PointCloud, Imu, LaserScan), a TF tree, and WebRTC
 session signaling (SDP and ICE ride as opaque strings through an app level function, see
@@ -175,21 +205,21 @@ const RantSchema *s = rant_node_schema(node, "Track { at: Transform, id: Uuid }"
 
 uint8_t msg[256];
 RantTransform p = rant_transform_identity();
-p.translation = rant_double3(4.5, -1.25, 9.0);
+p.pose.position = rant_double3(4.5, -1.25, 9.0);
 
 rant_schema_message_default(s, msg, sizeof msg);
 memcpy(msg + /* the Transform field's offset */ 0, &p, sizeof p);  /* layout identical */
 ```
 
-The C mirror structs (`RantFloat3`, `RantTransform`, `RantColor`, `RantUuid`,
-`RantMatrix4x4` and the rest) are layout identical to the wire on any little endian
+The C mirror structs (`RantFloat3`, `RantTransform`, `RantOrientedBox`, `RantColor`,
+`RantUuid`, `RantMatrix4x4` and the rest) are layout identical to the wire on any little endian
 target, which the header static asserts, so a whole value memcpys in and out. Field at a
-time access through `rant_get_f64(msg, s, "at.translation.x")` works exactly as it does
+time access through `rant_get_f64(msg, s, "at.pose.position.x")` works exactly as it does
 for any other nested struct.
 
 A type only gets a C mirror when its packed wire size already equals its natural C size.
-`Image`, `VideoFrame`, `ExternalVideoStream` and `CameraIntrinsics` have none: they carry
-a variable member or would gain padding. The other bindings reflect field by field, so
+`Image`, `VideoFrame`, `ExternalVideoStream`, `CameraIntrinsics`, `Polygon`, `Polygon2D`
+and `Empty` have none: they carry a variable member, would gain padding, or are empty. The other bindings reflect field by field, so
 they mirror every type either way.
 
 The operations are deliberately thin: construction, add, sub, scale, dot, cross, length,

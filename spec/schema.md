@@ -101,7 +101,7 @@ validator API.
 
 ## DSL
 
-`rant_node_schema` takes name first IDL text: `Pose { stamp: u64, velocity: { dx: f32 } }`.
+`rant_node_schema` takes name first IDL text: `Odom { stamp: u64, velocity: { dx: f32 } }`.
 Commas are optional and `--` comments run to the end of the line. The text is the cross
 language interchange: reflecting languages generate it, others paste it, and identical
 text gives identical wire and hash. `rant_schema_print` is the exact inverse. It always

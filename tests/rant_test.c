@@ -2259,7 +2259,7 @@ static void schema_print_roundtrip(RantAllocator *ma, RantSchema *s, const char 
 static void schema_dsl_checks(void){
     RantAllocator ma = rant_allocator_heap(0);
     static const char POSE[] =
-        "Pose\n"
+        "Odom\n"
         "{\n"
         "    stamp:    u64,\n"
         "    x:        f64,\n"
@@ -2272,9 +2272,9 @@ static void schema_dsl_checks(void){
     txt = tcompile(&ma, POSE, NULL);
     ST_CHECK(txt != NULL, "schema-dsl: compiles");
     /* pinned: the wire of a nested struct plus a fixed array must never drift */
-    ST_CHECK(txt && rant_schema_hash(txt) == 0xf9a92ce466a346fdULL,
-             "schema-dsl: Pose canonical hash %016llx", (unsigned long long)(txt ? rant_schema_hash(txt) : 0));
-    schema_print_roundtrip(&ma, txt, "Pose (nested struct + array)");
+    ST_CHECK(txt && rant_schema_hash(txt) == 0x4f7bda001c3dc797ULL,
+             "schema-dsl: Odom canonical hash %016llx", (unsigned long long)(txt ? rant_schema_hash(txt) : 0));
+    schema_print_roundtrip(&ma, txt, "Odom (nested struct + array)");
     if (txt){
         RantSchemaFieldInfo fi;
         ST_CHECK(rant_schema_size(txt) == 8+8+8+16+1+8, "schema-dsl: size %u", rant_schema_size(txt));
@@ -2550,24 +2550,24 @@ static void schema_dsl_checks(void){
     }
     {   /* errors: NULL + err points into the text at the offending spot */
         static const char *bad[] = {
-            "Pose { x: f65 }",              /* unknown type */
-            "Pose { x f64 }",               /* missing ':' */
-            "Pose { x: f64 ",               /* missing '}' */
-            "Pose { x: u8[0] }",            /* zero count */
-            "Pose { x: u8[70000] }",        /* count > u16 */
-            "Pose { x: f64 } y",            /* trailing garbage */
-            "Pose = { x: f64 }",            /* a struct is defined as Name { }, never Name = { } */
-            "Pose { x: f64 }[2]",           /* a definition takes no array suffix */
-            "Pose { x: string[] }",   /* ragged: an array of unbounded strings is a map's job */
-            "Pose { x: string[4] }",        /* a fixed string array needs its <cap> */
-            "Pose { x: string<0> }",        /* zero cap */
-            "Pose { x: string<12 }",        /* missing '>' */
-            "Pose { v: { y: u8[] }[2] }",   /* variable field inside an array element */
-            "Pose { m: map[3] }",           /* a map has no element form */
-            "Pose { m: enum<u8> { A=300 } }",  /* value out of the backing range */
-            "Pose { m: enum<f32> { A=0 } }",   /* non-integer backing */
-            "Pose { m: enum<u8> A=0 }",        /* missing '{' */
-            "Pose { m: enum { A } }"           /* missing <backing> */
+            "Odom { x: f65 }",              /* unknown type */
+            "Odom { x f64 }",               /* missing ':' */
+            "Odom { x: f64 ",               /* missing '}' */
+            "Odom { x: u8[0] }",            /* zero count */
+            "Odom { x: u8[70000] }",        /* count > u16 */
+            "Odom { x: f64 } y",            /* trailing garbage */
+            "Odom = { x: f64 }",            /* a struct is defined as Name { }, never Name = { } */
+            "Odom { x: f64 }[2]",           /* a definition takes no array suffix */
+            "Odom { x: string[] }",   /* ragged: an array of unbounded strings is a map's job */
+            "Odom { x: string[4] }",        /* a fixed string array needs its <cap> */
+            "Odom { x: string<0> }",        /* zero cap */
+            "Odom { x: string<12 }",        /* missing '>' */
+            "Odom { v: { y: u8[] }[2] }",   /* variable field inside an array element */
+            "Odom { m: map[3] }",           /* a map has no element form */
+            "Odom { m: enum<u8> { A=300 } }",  /* value out of the backing range */
+            "Odom { m: enum<f32> { A=0 } }",   /* non-integer backing */
+            "Odom { m: enum<u8> A=0 }",        /* missing '{' */
+            "Odom { m: enum { A } }"           /* missing <backing> */
         };
         unsigned i, ok = 1;
         for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
@@ -2579,8 +2579,8 @@ static void schema_dsl_checks(void){
     }
     {   /* a shape rule the wire check enforces says which rule, never out of memory */
         static const struct { const char *text, *why; } rules[] = {
-            { "Pose { v: { y: u8[] }[2] }",   "a variable array cannot sit inside an array element" },
-            { "Pose { v: { s: string }[2] }", "a variable string or a map cannot sit inside an array element" },
+            { "Odom { v: { y: u8[] }[2] }",   "a variable array cannot sit inside an array element" },
+            { "Odom { v: { s: string }[2] }", "a variable string or a map cannot sit inside an array element" },
         };
         unsigned i, ok = 1;
         for (i = 0; i < sizeof rules / sizeof rules[0]; i++){
@@ -2673,7 +2673,7 @@ static void schema_advert_checks(void){
     int t, pose_ok=0, raw_ok=0;
     const i_RantDiscoveryPeerView *peers; uint16_t n_peers=0;
 
-    sch = tcompile(&ma, "Pose { x: f64, y: f64, tags: u8[16] }", NULL);
+    sch = tcompile(&ma, "Odom { x: f64, y: f64, tags: u8[16] }", NULL);
     ST_CHECK(sch!=NULL, "announce: schema compiles");
     if (!sch) return;
 
@@ -2702,11 +2702,11 @@ static void schema_advert_checks(void){
                  && strstr(rant_last_error(P).schema_detail, "expected } at the end") != NULL,
                  "announce: a truncated text is refused at the end (%s)",
                  rant_last_error(P).schema_detail ? rant_last_error(P).schema_detail : "null");
-        ST_CHECK(rant_node_schema(P, "Pose { p: Nope }") == NULL && rant_last_error(P).schema_detail
+        ST_CHECK(rant_node_schema(P, "Odom { p: Nope }") == NULL && rant_last_error(P).schema_detail
                  && strstr(rant_last_error(P).schema_detail, "unknown type near: Nope") != NULL,
                  "announce: an unknown type is named (%s)",
                  rant_last_error(P).schema_detail ? rant_last_error(P).schema_detail : "null");
-        ST_CHECK(rant_node_schema(P, "Pose { x: f64 }") != NULL && rant_node_schema(P, "Pose") != NULL,
+        ST_CHECK(rant_node_schema(P, "Odom { x: f64 }") != NULL && rant_node_schema(P, "Odom") != NULL,
                  "announce: a definition made on the node names the next compile");
     }
     i_rant_schema_free(sch, rant_allocator_alloc, &ma);       /* the node registered its own: freed NOW */
@@ -2777,11 +2777,11 @@ static void schema_bind_checks(void){
     RantNodeOpts po, so; RantNode *P=NULL, *S=NULL;
     RantTopic *pc, *pc_bad; RantTopicOpts co; RantAddr seed;
     RantSchema *W, *R, *WB, *RB; int t;
-    /* writer: the full Pose. reader: a reordered subset of it */
+    /* writer: the full Odom. reader: a reordered subset of it */
     W  = tcompile(&ma,
-             "Pose { stamp: u64, x: f64, y: f64, tag: u8 }", NULL);      /* 25 B */
+             "Odom { stamp: u64, x: f64, y: f64, tag: u8 }", NULL);      /* 25 B */
     R  = tcompile(&ma,
-             "Pose { y: f64, stamp: u64 }", NULL);
+             "Odom { y: f64, stamp: u64 }", NULL);
     WB = tcompile(&ma, "Bad { v: u64 }", NULL);
     RB = tcompile(&ma, "Bad { v: f64 }", NULL);
     ST_CHECK(W && R && WB && RB, "schema-bind: schemas compile");
@@ -2810,7 +2810,7 @@ static void schema_bind_checks(void){
     ST_CHECK(rant_topic_match_count(pc_bad)==0, "schema-bind: kind-conflict reader refused");
     ST_CHECK(sb_mismatch_n>=1, "schema-bind: refusal surfaced (%lu RANT_E_SCHEMA_MISMATCH)", sb_mismatch_n);
 
-    {   /* publish one Pose packed in the writer's layout. The reader decodes through the
+    {   /* publish one Odom packed in the writer's layout. The reader decodes through the
            rebased schema with its own indices */
         uint8_t buf[25]; uint64_t bits; double x=1.5, y=-2.25;
         i_rant_le_w64(buf, 0x1122334455667788ULL);                /* stamp @0 */
@@ -3613,15 +3613,21 @@ static void schema_v8_checks(void){
 /* (19a5) the standard type library: names always in scope, golden bytes and hash, shape
    verifying recognition, and an end to end pair publishing Transform and Image. */
 static volatile long sd_pose_recv = 0, sd_img_recv = 0, sd_bad_recv = 0, sd_mismatch = 0;
+static volatile long sd_empty_recv = 0; static size_t sd_empty_len = 1;
 static double sd_px = 0.0, sd_qw = 0.0;
 static unsigned sd_iw = 0, sd_ih = 0, sd_ifmt = 0; static size_t sd_ilen = 0;
 static void sd_on_message(const RantMsg *m){
     if (!m->schema) return;
-    if (rant_get_f64(m->data, m->schema, "translation.x") != 0.0 ||
-        rant_schema_field_index(m->schema, "rotation.w") >= 0){
-        if (rant_schema_field_index(m->schema, "translation.x") >= 0){
-            sd_px = rant_get_f64(m->data, m->schema, "translation.x");
-            sd_qw = rant_get_f64(m->data, m->schema, "rotation.w");
+    if (rant_schema_field_count(m->schema) == 0){
+        sd_empty_len = m->data.len;
+        sd_empty_recv++;
+        return;
+    }
+    if (rant_get_f64(m->data, m->schema, "pose.position.x") != 0.0 ||
+        rant_schema_field_index(m->schema, "pose.orientation.w") >= 0){
+        if (rant_schema_field_index(m->schema, "pose.position.x") >= 0){
+            sd_px = rant_get_f64(m->data, m->schema, "pose.position.x");
+            sd_qw = rant_get_f64(m->data, m->schema, "pose.orientation.w");
             sd_pose_recv++;
             return;
         }
@@ -3645,7 +3651,7 @@ static void stdtypes_checks(void){
     RantAllocator sa = rant_allocator_heap(0);
     RantNodeOpts po, so; RantNode *P = NULL, *S = NULL;
     RantTopicOpts co; RantAddr seed;
-    RantTopic *ppose, *pimg, *pbad; RantSchema *SPose, *SImg, *SBad, *SBadSub;
+    RantTopic *ppose, *pimg, *pbad, *pempty; RantSchema *SPose, *SImg, *SBad, *SBadSub, *SEmpty;
     int t;
 
     i_rant_registry_init(&reg, rant_allocator_alloc, &ma);
@@ -3719,18 +3725,58 @@ static void stdtypes_checks(void){
     /* the C mirrors line up with the wire, byte for byte */
     {   RantSchema *sp = tcompile(&ma, "Transform", NULL);
         RantTransform p = rant_transform_identity(); uint8_t m[sizeof(RantTransform)];
-        p.translation = rant_double3(1.0, 2.0, 3.0);
+        p.pose.position = rant_double3(1.0, 2.0, 3.0);
         memcpy(m, &p, sizeof p);
         ST_CHECK(sp && sizeof(RantTransform) == rant_schema_size(sp),
                  "stdtypes: sizeof(RantTransform) == the wire size (%u)",
                  sp ? rant_schema_size(sp) : 0);
         if (sp){
             RantBytes b = rant_bytes(m, sizeof m);
-            ST_CHECK(rant_get_f64(b, sp, "translation.y") == 2.0
-                     && rant_get_f64(b, sp, "rotation.w") == 1.0,
+            ST_CHECK(rant_get_f64(b, sp, "pose.position.y") == 2.0
+                     && rant_get_f64(b, sp, "pose.orientation.w") == 1.0,
                      "stdtypes: a memcpy'd RantTransform reads back through the schema");
         }
         if (sp) i_rant_schema_free(sp, rant_allocator_alloc, &ma);
+    }
+    {   static const struct { const char *name; size_t size; } mirrors[] = {
+            { "Pose", sizeof(RantPose) }, { "Pose2D", sizeof(RantPose2D) },
+            { "Wrench", sizeof(RantWrench) },
+            { "AlignedBox", sizeof(RantAlignedBox) }, { "AlignedBox2D", sizeof(RantAlignedBox2D) },
+            { "OrientedBox", sizeof(RantOrientedBox) }, { "OrientedBox2D", sizeof(RantOrientedBox2D) },
+            { "Plane", sizeof(RantPlane) }, { "Segment", sizeof(RantSegment) },
+            { "Sphere", sizeof(RantSphere) }, { "Capsule", sizeof(RantCapsule) },
+            { "Cylinder", sizeof(RantCylinder) }, { "Cone", sizeof(RantCone) },
+            { "Circle", sizeof(RantCircle) }
+        };
+        int i, ok = 1;
+        for (i = 0; i < (int)(sizeof mirrors / sizeof mirrors[0]); i++){
+            RantSchema *s = tcompile(&ma, mirrors[i].name, NULL);
+            if (!s || rant_schema_size(s) != mirrors[i].size){
+                ok = 0;
+                ST_CHECK(0, "stdtypes: %s mirror is %u bytes, the wire %u", mirrors[i].name,
+                         (unsigned)mirrors[i].size, s ? rant_schema_size(s) : 0);
+            }
+            if (s) i_rant_schema_free(s, rant_allocator_alloc, &ma);
+        }
+        ST_CHECK(ok, "stdtypes: every shape mirror is its wire size");
+    }
+    {   RantSchema *cap = tcompile(&ma, "Capsule", NULL), *cyl = tcompile(&ma, "Cylinder", NULL);
+        RantSchema *ob = tcompile(&ma, "OrientedBox", NULL), *e = tcompile(&ma, "Empty", NULL);
+        RantOrientedBox box = {{{0}}}; uint8_t m[sizeof(RantOrientedBox)];
+        ST_CHECK(cap && cyl && !rant_schema_subset(cap, cyl) && !rant_schema_subset(cyl, cap),
+                 "stdtypes: Capsule and Cylinder share bytes but never cross wire");
+        ST_CHECK(e && rant_schema_size(e) == 0 && rant_schema_field_count(e) == 0,
+                 "stdtypes: Empty is zero bytes and no fields");
+        box.pose.orientation = rant_quaternion_identity();
+        box.size = rant_double3(1.0, 2.0, 3.0);
+        memcpy(m, &box, sizeof box);
+        ST_CHECK(ob && rant_get_f64(rant_bytes(m, sizeof m), ob, "pose.orientation.w") == 1.0
+                 && rant_get_f64(rant_bytes(m, sizeof m), ob, "size.z") == 3.0,
+                 "stdtypes: a memcpy'd RantOrientedBox reads back through the schema");
+        if (cap) i_rant_schema_free(cap, rant_allocator_alloc, &ma);
+        if (cyl) i_rant_schema_free(cyl, rant_allocator_alloc, &ma);
+        if (ob)  i_rant_schema_free(ob,  rant_allocator_alloc, &ma);
+        if (e)   i_rant_schema_free(e,   rant_allocator_alloc, &ma);
     }
     {   RantColor c = rant_color_from_hex(0x11223344u);
         RantDouble3 v = rant_quaternion_rotate(rant_quaternion(0.0, 0.0, 1.0, 0.0),
@@ -3760,15 +3806,16 @@ static void stdtypes_checks(void){
     SImg  = tcompile(&ma, "Image", NULL);
     SBad  = tcompile(&ma, "Twist", NULL);
     SBadSub = tcompile(&ma, "Transform", NULL);
-    ST_CHECK(SPose && SImg && SBad && SBadSub, "stdtypes: e2e schemas compile");
-    if (!(SPose && SImg && SBad && SBadSub)){ rant_allocator_reset(&ma); return; }
+    SEmpty = tcompile(&ma, "Empty", NULL);
+    ST_CHECK(SPose && SImg && SBad && SBadSub && SEmpty, "stdtypes: e2e schemas compile");
+    if (!(SPose && SImg && SBad && SBadSub && SEmpty)){ rant_allocator_reset(&ma); return; }
 
     memset(&co,0,sizeof co); co.qos.keep_last=4; co.qos.reliability=RANT_RELIABLE;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
     memset(&po,0,sizeof po); po.domain=ST_DOMAIN+23; po.discovery.max_peers=4;
     po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
     so=po;
-    sd_pose_recv=sd_img_recv=sd_bad_recv=sd_mismatch=0;
+    sd_pose_recv=sd_img_recv=sd_bad_recv=sd_mismatch=sd_empty_recv=0; sd_empty_len=1;
     P = rant_node_open(&pa, "sd-pub", NULL,          sd_on_event, &po);
     S = rant_node_open(&sa, "sd-sub", sd_on_message, sd_on_event, &so);
     ST_CHECK(P&&S, "stdtypes: nodes open");
@@ -3776,12 +3823,15 @@ static void stdtypes_checks(void){
     ppose = rant_node_create_topic(P, "sd/pose", RANT_PUB_ONLY, SPose, &co);
     pimg  = rant_node_create_topic(P, "sd/img",  RANT_PUB_ONLY, SImg,    &co);
     pbad  = rant_node_create_topic(P, "sd/bad",  RANT_PUB_ONLY, SBad,    &co);
+    pempty = rant_node_create_topic(P, "sd/empty", RANT_PUB_ONLY, SEmpty, &co);
     rant_node_create_topic(S, "sd/pose", RANT_SUB_ONLY, SPose, &co);
     rant_node_create_topic(S, "sd/img",  RANT_SUB_ONLY, SImg,    &co);
     rant_node_create_topic(S, "sd/bad",  RANT_SUB_ONLY, SBadSub, &co);     /* Twist writer: refused */
-    ST_CHECK(ppose && pimg && pbad, "stdtypes: topics created");
+    rant_node_create_topic(S, "sd/empty", RANT_SUB_ONLY, SEmpty, &co);
+    ST_CHECK(ppose && pimg && pbad && pempty, "stdtypes: topics created");
 
-    for (t=0;t<1200 && (rant_topic_match_count(ppose)==0 || rant_topic_match_count(pimg)==0);t++){
+    for (t=0;t<1200 && (rant_topic_match_count(ppose)==0 || rant_topic_match_count(pimg)==0
+                        || rant_topic_match_count(pempty)==0);t++){
         rant_node_poll(P,2); rant_node_poll(S,2);
     }
     ST_CHECK(rant_topic_match_count(ppose)==1 && rant_topic_match_count(pimg)==1,
@@ -3792,9 +3842,11 @@ static void stdtypes_checks(void){
 
     {   uint8_t m[sizeof(RantTransform)]; RantTransform p = rant_transform_identity();
         uint8_t *img; uint32_t need; size_t px = 64u*48u*3u;
-        p.translation = rant_double3(4.5, -1.25, 9.0);
+        p.pose.position = rant_double3(4.5, -1.25, 9.0);
         memcpy(m, &p, sizeof p);
         rant_topic_send(ppose, rant_bytes(m, sizeof p), NULL);
+        ST_CHECK(rant_topic_send(pempty, rant_bytes(NULL, 0), NULL) >= 0,
+                 "stdtypes: an Empty message sends");
         need = rant_schema_msg_min(SImg) + (uint32_t)px;
         img = (uint8_t *)i_rant_plat_realloc(NULL, need);
         if (img){
@@ -3813,7 +3865,7 @@ static void stdtypes_checks(void){
             rant_topic_send(pimg, rant_bytes(img, rant_schema_msg_len(SImg, img, need)), NULL);
             i_rant_plat_realloc(img, 0);
         }
-        for (t=0;t<1200 && (sd_pose_recv==0 || sd_img_recv==0);t++){
+        for (t=0;t<1200 && (sd_pose_recv==0 || sd_img_recv==0 || sd_empty_recv==0);t++){
             rant_node_poll(P,1); rant_node_poll(S,2);
         }
     }
@@ -3823,6 +3875,8 @@ static void stdtypes_checks(void){
              && sd_ilen==64u*48u*3u,
              "stdtypes: Image delivered whole (%ux%u fmt=%u %u bytes)",
              sd_iw, sd_ih, sd_ifmt, (unsigned)sd_ilen);
+    ST_CHECK(sd_empty_recv==1 && sd_empty_len==0,
+             "stdtypes: Empty delivered as zero bytes (recv=%ld len=%u)", sd_empty_recv, (unsigned)sd_empty_len);
     ST_CHECK(sd_bad_recv==0, "stdtypes: the refused topic delivered nothing");
     rant_node_close(S,1); rant_node_close(P,1);
     rant_allocator_reset(&ma); rant_allocator_reset(&pa); rant_allocator_reset(&sa);
@@ -3839,7 +3893,7 @@ static void detail_codec_checks(void){
     uint8_t req[256], resp[1024], out2[1024];
     size_t rl, need, len;
 
-    S = tcompile(&ma, "Pose { stamp: u64, x: f64 }", NULL);
+    S = tcompile(&ma, "Odom { stamp: u64, x: f64 }", NULL);
     memset(ch,0,sizeof ch);
     ch[0].name="dt/typed"; ch[1].name="dt/raw";
     ch[2].name="dt/off"; ch[2].role=RANT_INACTIVE;
@@ -3942,7 +3996,7 @@ static void detail_paging_checks(void){
     char names[DP_N][RANT_TOPIC_NAME_MAX + 1];
     int done[DP_N], i, rounds, resolved, max_page = 0;
 
-    S = tcompile(&ma, "Pose { stamp: u64, x: f64, y: f64 }", NULL);
+    S = tcompile(&ma, "Odom { stamp: u64, x: f64, y: f64 }", NULL);
     memset(&tc, 0, sizeof tc);
     tc.topics = NULL; tc.n_topics = DP_N; tc.max_peers = 2; tc.allocator = rant_allocator_alloc; tc.user = &ma;
     { size_t need = i_rant_transport_required_memory(&tc);         /* dynamic reserve mode */
@@ -4038,7 +4092,7 @@ static void detail_live_checks(void){
     uint16_t dom = ST_DOMAIN+10;
     int t;
 
-    W = tcompile(&ma, "Pose { stamp: u64, x: f64 }", NULL);
+    W = tcompile(&ma, "Odom { stamp: u64, x: f64 }", NULL);
     memset(&co,0,sizeof co); co.qos.keep_last=2;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
     memset(&po,0,sizeof po); po.domain=dom; po.discovery.max_peers=4;

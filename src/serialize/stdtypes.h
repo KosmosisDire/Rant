@@ -18,9 +18,13 @@ typedef enum {
     RANT_STD_INT2, RANT_STD_INT3, RANT_STD_INT4,
     RANT_STD_QUATERNION,
     RANT_STD_COLOR,
-    RANT_STD_RECT, RANT_STD_RECTI,
-    RANT_STD_TRANSFORM, RANT_STD_TWIST,
+    RANT_STD_POSE, RANT_STD_POSE2D, RANT_STD_TRANSFORM, RANT_STD_TWIST, RANT_STD_WRENCH,
     RANT_STD_GEOPOINT,
+    RANT_STD_ALIGNEDBOX, RANT_STD_ALIGNEDBOX2D, RANT_STD_ORIENTEDBOX, RANT_STD_ORIENTEDBOX2D,
+    RANT_STD_PLANE, RANT_STD_SEGMENT, RANT_STD_SPHERE,
+    RANT_STD_CAPSULE, RANT_STD_CYLINDER, RANT_STD_CONE, RANT_STD_POLYGON,
+    RANT_STD_CIRCLE, RANT_STD_POLYGON2D,
+    RANT_STD_EMPTY,
     RANT_STD_UUID,
     RANT_STD_TIMESTAMP, RANT_STD_DURATION,
     RANT_STD_MATRIX3X3, RANT_STD_MATRIX4X4,
@@ -49,12 +53,25 @@ typedef struct { int32_t x, y, z;    } RantInt3;
 typedef struct { int32_t x, y, z, w; } RantInt4;
 typedef struct { double x, y, z, w; } RantQuaternion;     /* x, y, z, w in that order */
 typedef struct { uint8_t r, g, b, a; } RantColor;         /* sRGB, straight alpha */
-typedef struct { float   x, y, w, h; } RantRect;
-typedef struct { int32_t x, y, w, h; } RantRectI;
-typedef struct { RantDouble3 translation; RantQuaternion rotation;
-                 uint16_t parent_len; char parent[30]; } RantTransform;
+typedef struct { RantDouble3 position; RantQuaternion orientation; } RantPose;
+typedef struct { RantDouble2 position; double angle; } RantPose2D;   /* radians, from +x toward +y */
+typedef struct { RantPose pose; uint16_t parent_len; char parent[30]; } RantTransform;
 typedef struct { RantDouble3 linear, angular; } RantTwist;       /* m/s and rad/s */
+typedef struct { RantDouble3 force, torque; } RantWrench;        /* N and N m about the frame origin */
 typedef struct { double lat, lon, alt; } RantGeoPoint;           /* degrees, degrees, meters */
+
+/* The shapes, in the units of their frame. Polygon and Polygon2D are variable, so no mirror. */
+typedef struct { RantDouble3 min, max; } RantAlignedBox;         /* min <= max on every axis */
+typedef struct { RantDouble2 min, max; } RantAlignedBox2D;
+typedef struct { RantPose pose; RantDouble3 size; } RantOrientedBox;   /* full edge lengths */
+typedef struct { RantPose2D pose; RantDouble2 size; } RantOrientedBox2D;
+typedef struct { RantDouble3 position, normal; } RantPlane;      /* any point on it, unit normal */
+typedef struct { RantDouble3 a, b; } RantSegment;
+typedef struct { RantDouble3 center; double radius; } RantSphere;
+typedef struct { RantSegment axis; double radius; } RantCapsule;
+typedef struct { RantSegment axis; double radius; } RantCylinder;      /* axis ends are the cap centers */
+typedef struct { RantDouble3 base, tip; double radius; } RantCone;    /* radius at the base */
+typedef struct { RantDouble2 center; double radius; } RantCircle;
 typedef struct { uint8_t bytes[16]; } RantUuid;                  /* RFC 4122 byte order */
 typedef int64_t RantTimestamp;     /* microseconds since the Unix epoch, UTC */
 typedef int64_t RantDuration;                                  /* microseconds */
@@ -87,8 +104,13 @@ typedef enum {
 typedef char i_rant_std_size_check[
       (sizeof(RantFloat3) == 12 && sizeof(RantFloat4) == 16 &&
        sizeof(RantDouble3) == 24 && sizeof(RantQuaternion) == 32 &&
-       sizeof(RantColor) == 4 && sizeof(RantRect) == 16 &&
-       sizeof(RantTransform) == 88 && sizeof(RantTwist) == 48 &&
+       sizeof(RantColor) == 4 && sizeof(RantPose) == 56 && sizeof(RantPose2D) == 24 &&
+       sizeof(RantTransform) == 88 && sizeof(RantTwist) == 48 && sizeof(RantWrench) == 48 &&
+       sizeof(RantAlignedBox) == 48 && sizeof(RantAlignedBox2D) == 32 &&
+       sizeof(RantOrientedBox) == 80 && sizeof(RantOrientedBox2D) == 40 &&
+       sizeof(RantPlane) == 48 && sizeof(RantSegment) == 48 && sizeof(RantSphere) == 32 &&
+       sizeof(RantCapsule) == 56 && sizeof(RantCylinder) == 56 && sizeof(RantCone) == 56 &&
+       sizeof(RantCircle) == 24 &&
        sizeof(RantUuid) == 16 && sizeof(RantMatrix4x4) == 64) ? 1 : -1];
 
 /* The thin operations, header only. */
@@ -138,7 +160,7 @@ RANT_API RantDouble3        rant_quaternion_rotate(RantQuaternion q, RantDouble3
 
 static inline RantTransform rant_transform_identity(void){
     RantTransform t = {{0}};     /* zero fills the parent name too, it reaches the wire */
-    t.rotation = rant_quaternion_identity(); return t;
+    t.pose.orientation = rant_quaternion_identity(); return t;
 }
 static inline RantColor rant_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a){
     RantColor c; c.r = r; c.g = g; c.b = b; c.a = a; return c;
