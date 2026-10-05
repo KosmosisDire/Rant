@@ -407,6 +407,11 @@ static bool stdtypes_leg() {
     chk("std: Transform is 88 bytes", sizeof(rant::types::Transform) == 88);
     chk("std: Uuid is 16 bytes", sizeof(rant::types::Uuid) == 16);
     chk("std: Color is 4 bytes", sizeof(rant::types::Color) == 4);
+    chk("std: the shape mirrors are their wire sizes",
+        sizeof(rant::types::Pose) == 56 && sizeof(rant::types::Pose2D) == 24 &&
+        sizeof(rant::types::Wrench) == 48 && sizeof(rant::types::OrientedBox) == 80 &&
+        sizeof(rant::types::OrientedBox2D) == 40 && sizeof(rant::types::Capsule) == 56 &&
+        sizeof(rant::types::Cone) == 56 && sizeof(rant::types::Circle) == 24);
 
     {   /* a standard type as a whole schema: its name, its canonical hash */
         rant::Schema f3 = a.schema("Float3");
@@ -424,13 +429,14 @@ static bool stdtypes_leg() {
            shapes of W, so each goes on its own node */
         rant::Schema named_f = a.schema("W { at: Transform }");
         rant::Schema bare_f  = b.schema(
-            "W { at: { translation: { x: f64, y: f64, z: f64 },"
-            "          rotation: { x: f64, y: f64, z: f64, w: f64 }, parent: string<30> } }");
+            "W { at: { pose: { position: { x: f64, y: f64, z: f64 },"
+            "                  orientation: { x: f64, y: f64, z: f64, w: f64 } },"
+            "          parent: string<30> } }");
         chk("std: an anonymous field of the same shape reads a Transform field",
             named_f && bare_f && bare_f.can_read(named_f) && !named_f.can_read(bare_f));
         if (tf) {
             rant::Schema::Field f;
-            int i = tf.field_index("translation");
+            int i = tf.field_index("pose.position");
             chk("std: a named member reports its type name",
                 i >= 0 && tf.field_at((uint16_t)i, f) && f.type_name == "Double3");
         }
@@ -463,15 +469,15 @@ static bool stdtypes_leg() {
     {   /* end to end through the typed codec */
         auto pub = a.publisher<Track>("std/track2");
         auto sub = b.subscriber<Track>("std/track2", [](const Track& t) {
-            g_track_x = t.at.translation.x;
+            g_track_x = t.at.pose.position.x;
             g_track_id0 = t.id.bytes[0];
             g_track_recv++;
         });
         chk("std: publisher and subscriber match",
             wait_for(4000, [&] { return pub.match_count() == 1; }, &b));
         Track t{};
-        t.at.translation = { 4.5, -1.25, 9.0 };
-        t.at.rotation = rant::types::identity_rotation();
+        t.at = rant::types::identity_transform();
+        t.at.pose.position = { 4.5, -1.25, 9.0 };
         t.id.bytes[0] = 0xAB;
         t.when = rant::types::now();
         t.tag = rant::types::color_from_hex(0x112233FFu);
@@ -480,6 +486,37 @@ static bool stdtypes_leg() {
         chk("std: a Track crosses whole",
             wait_for(4000, [&] { return g_track_recv.load() > 0; }, &b)
             && g_track_x == 4.5 && g_track_id0 == 0xAB);
+    }
+
+    {   /* shapes and Empty through the typed codec, a variable Polygon included */
+        static std::atomic<int> box_recv{0}, poly_recv{0}, empty_recv{0};
+        static double box_z = 0.0, poly_y = 0.0; static size_t poly_n = 0;
+        auto pbox  = a.publisher<rant::types::OrientedBox>("std/box");
+        auto ppoly = a.publisher<rant::types::Polygon2D>("std/poly");
+        auto pnone = a.publisher<rant::types::Empty>("std/empty");
+        auto sbox  = b.subscriber<rant::types::OrientedBox>("std/box",
+            [](const rant::types::OrientedBox& o) { box_z = o.size.z; box_recv++; });
+        auto spoly = b.subscriber<rant::types::Polygon2D>("std/poly",
+            [](const rant::types::Polygon2D& p) {
+                poly_n = p.points.size(); poly_y = poly_n ? p.points.back().y : 0.0; poly_recv++; });
+        auto snone = b.subscriber<rant::types::Empty>("std/empty",
+            [](const rant::types::Empty&) { empty_recv++; });
+        chk("std: shape topics match", wait_for(4000, [&] {
+            return pbox.match_count() == 1 && ppoly.match_count() == 1 && pnone.match_count() == 1;
+        }, &b));
+        rant::types::OrientedBox box{};
+        box.pose.orientation = rant::types::identity_rotation();
+        box.size = { 1.0, 2.0, 3.0 };
+        pbox.send(box);
+        ppoly.send(rant::types::Polygon2D{ { { 0, 0 }, { 1, 0 }, { 1, 2 } } });
+        pnone.send(rant::types::Empty{});
+        chk("std: an OrientedBox, a Polygon2D and an Empty cross whole",
+            wait_for(4000, [&] {
+                return box_recv.load() > 0 && poly_recv.load() > 0 && empty_recv.load() > 0;
+            }, &b) && box_z == 3.0 && poly_n == 3 && poly_y == 2.0);
+        rant::Schema cap = a.schema("Capsule"), cyl = a.schema("Cylinder");
+        chk("std: Capsule and Cylinder never cross wire",
+            cap && cyl && !cap.can_read(cyl) && !cyl.can_read(cap));
     }
 
     {   /* the video family: mirrors with a variable member ride the codec's tail path */

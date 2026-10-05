@@ -66,8 +66,8 @@ To run one handle's callbacks on a thread of your own, pass it a queue from
 ## Types
 
 ```cpp
-struct Pose { double x, y; rant::String<16> frame; };
-RANT_SCHEMA(Pose, x, y, frame);
+struct Odom { double x, y; rant::String<16> frame; };
+RANT_SCHEMA(Odom, x, y, frame);
 ```
 
 `RANT_SCHEMA` goes after the struct at global scope and lists its members in order. C#
@@ -90,7 +90,7 @@ A value that does not fit its type, such as a `String<N>` longer than N, is refu
 cut short.
 
 The standard types of docs/stdtypes.md are in `rant::types`: `rant::types::Transform`,
-`rant::types::Color` and the rest.
+`rant::types::OrientedBox`, `rant::types::Empty` and the rest.
 
 ### Raw messages
 
@@ -110,15 +110,15 @@ inside the callback only.
 ## Topics
 
 ```cpp
-auto pub = node.publisher<Pose>("pose");
-auto sub = node.subscriber<Pose>("pose", [](const Pose& p) { /* ... */ });
+auto pub = node.publisher<Odom>("odom");
+auto sub = node.subscriber<Odom>("odom", [](const Odom& p) { /* ... */ });
 pub.send({ 1, 2, {} });
 ```
 
 A subscriber with no handler is pulled: you read messages when you want them.
 
 ```cpp
-auto sub = node.subscriber<Pose>("pose");
+auto sub = node.subscriber<Odom>("odom");
 if (auto p = sub.take_latest()) draw(*p);
 ```
 

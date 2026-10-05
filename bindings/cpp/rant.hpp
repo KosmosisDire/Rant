@@ -1027,12 +1027,28 @@ struct Int3    { int32_t x, y, z; };
 struct Int4    { int32_t x, y, z, w; };
 struct Quaternion { double x, y, z, w; };            /* stored x, y, z, w */
 struct Color   { uint8_t r, g, b, a; };              /* sRGB, straight alpha */
-struct Rect    { float x, y, w, h; };
-struct RectI   { int32_t x, y, w, h; };
-/* meters and radians. parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned */
-struct Transform { Double3 translation; Quaternion rotation; String<30> parent; };
+struct Pose    { Double3 position; Quaternion orientation; };
+struct Pose2D  { Double2 position; double angle; };            /* radians, from +x toward +y */
+/* parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned */
+struct Transform { Pose pose; String<30> parent; };
 struct Twist   { Double3 linear, angular; };                    /* m/s, rad/s */
+struct Wrench  { Double3 force, torque; };                      /* N, N m about the frame origin */
 struct GeoPoint{ double lat, lon, alt; };                       /* degrees, degrees, meters */
+/* The shapes, in the units of their frame. */
+struct AlignedBox    { Double3 min, max; };                     /* min <= max on every axis */
+struct AlignedBox2D  { Double2 min, max; };
+struct OrientedBox   { Pose pose; Double3 size; };              /* full edge lengths */
+struct OrientedBox2D { Pose2D pose; Double2 size; };
+struct Plane    { Double3 position, normal; };                  /* any point on it, unit normal */
+struct Segment  { Double3 a, b; };
+struct Sphere   { Double3 center; double radius; };
+struct Capsule  { Segment axis; double radius; };
+struct Cylinder { Segment axis; double radius; };               /* axis ends are the cap centers */
+struct Cone     { Double3 base, tip; double radius; };          /* radius at the base */
+struct Polygon  { std::vector<Double3> points; };               /* closed, planar */
+struct Circle   { Double2 center; double radius; };
+struct Polygon2D{ std::vector<Double2> points; };               /* closed */
+struct Empty    {};                                             /* zero bytes on the wire */
 struct Uuid    { uint8_t bytes[16]; };                          /* RFC 4122 byte order */
 struct Matrix3x3 { float m[9];  };                              /* row-major */
 struct Matrix4x4 { float m[16]; };                              /* row-major */
@@ -1126,7 +1142,7 @@ inline Double3 rotate(Quaternion q, Double3 v) {
     return { r.x, r.y, r.z };
 }
 inline Transform identity_transform() {
-    return { { 0.0, 0.0, 0.0 }, identity_rotation(), {} };
+    return { { { 0.0, 0.0, 0.0 }, identity_rotation() }, {} };
 }
 inline bool is_nil(const Uuid& u) {
     for (int i = 0; i < 16; i++) if (u.bytes[i]) return false;
@@ -1154,7 +1170,7 @@ inline Uuid      new_uuid() { Uuid u; detail::rant_uuid_new((detail::RantUuid*)&
         using is_rant_schema = void; \
         static constexpr const char* type_name = #T; \
         template <class V> static void visit(V&& v) { \
-            RANT_OFFSETOF_BEGIN RANT_STD_MEMBERS_##T(v) RANT_OFFSETOF_END \
+            (void)v; RANT_OFFSETOF_BEGIN RANT_STD_MEMBERS_##T(v) RANT_OFFSETOF_END \
         } \
     }; \
     template <> struct rant::std_type<rant::types::T> { \
@@ -1176,14 +1192,26 @@ inline Uuid      new_uuid() { Uuid u; detail::rant_uuid_new((detail::RantUuid*)&
 #define RANT_STD_MEMBERS_Int4(v)      RANT_STD_F(Int4,x)      RANT_STD_F(Int4,y)      RANT_STD_F(Int4,z)      RANT_STD_F(Int4,w)
 #define RANT_STD_MEMBERS_Quaternion(v) RANT_STD_F(Quaternion,x) RANT_STD_F(Quaternion,y) RANT_STD_F(Quaternion,z) RANT_STD_F(Quaternion,w)
 #define RANT_STD_MEMBERS_Color(v)     RANT_STD_F(Color,r)     RANT_STD_F(Color,g)     RANT_STD_F(Color,b)     RANT_STD_F(Color,a)
-#define RANT_STD_MEMBERS_Rect(v)      RANT_STD_F(Rect,x)      RANT_STD_F(Rect,y)      RANT_STD_F(Rect,w)      RANT_STD_F(Rect,h)
-#define RANT_STD_MEMBERS_RectI(v)     RANT_STD_F(RectI,x)     RANT_STD_F(RectI,y)     RANT_STD_F(RectI,w)     RANT_STD_F(RectI,h)
-#define RANT_STD_MEMBERS_Transform(v) v(::rant::field_tag<::rant::types::Double3>{}, "translation", offsetof(::rant::types::Transform, translation)); \
-                                    v(::rant::field_tag<::rant::types::Quaternion>{}, "rotation", offsetof(::rant::types::Transform, rotation)); \
-                                    RANT_STD_F(Transform,parent)
-#define RANT_STD_MEMBERS_Twist(v)     v(::rant::field_tag<::rant::types::Double3>{}, "linear", offsetof(::rant::types::Twist, linear)); \
-                                    v(::rant::field_tag<::rant::types::Double3>{}, "angular", offsetof(::rant::types::Twist, angular));
+#define RANT_STD_MEMBERS_Pose(v)      RANT_STD_F(Pose,position) RANT_STD_F(Pose,orientation)
+#define RANT_STD_MEMBERS_Pose2D(v)    RANT_STD_F(Pose2D,position) RANT_STD_F(Pose2D,angle)
+#define RANT_STD_MEMBERS_Transform(v) RANT_STD_F(Transform,pose) RANT_STD_F(Transform,parent)
+#define RANT_STD_MEMBERS_Twist(v)     RANT_STD_F(Twist,linear) RANT_STD_F(Twist,angular)
+#define RANT_STD_MEMBERS_Wrench(v)    RANT_STD_F(Wrench,force) RANT_STD_F(Wrench,torque)
 #define RANT_STD_MEMBERS_GeoPoint(v) RANT_STD_F(GeoPoint,lat) RANT_STD_F(GeoPoint,lon) RANT_STD_F(GeoPoint,alt)
+#define RANT_STD_MEMBERS_AlignedBox(v)    RANT_STD_F(AlignedBox,min) RANT_STD_F(AlignedBox,max)
+#define RANT_STD_MEMBERS_AlignedBox2D(v)  RANT_STD_F(AlignedBox2D,min) RANT_STD_F(AlignedBox2D,max)
+#define RANT_STD_MEMBERS_OrientedBox(v)   RANT_STD_F(OrientedBox,pose) RANT_STD_F(OrientedBox,size)
+#define RANT_STD_MEMBERS_OrientedBox2D(v) RANT_STD_F(OrientedBox2D,pose) RANT_STD_F(OrientedBox2D,size)
+#define RANT_STD_MEMBERS_Plane(v)     RANT_STD_F(Plane,position) RANT_STD_F(Plane,normal)
+#define RANT_STD_MEMBERS_Segment(v)   RANT_STD_F(Segment,a) RANT_STD_F(Segment,b)
+#define RANT_STD_MEMBERS_Sphere(v)    RANT_STD_F(Sphere,center) RANT_STD_F(Sphere,radius)
+#define RANT_STD_MEMBERS_Capsule(v)   RANT_STD_F(Capsule,axis) RANT_STD_F(Capsule,radius)
+#define RANT_STD_MEMBERS_Cylinder(v)  RANT_STD_F(Cylinder,axis) RANT_STD_F(Cylinder,radius)
+#define RANT_STD_MEMBERS_Cone(v)      RANT_STD_F(Cone,base) RANT_STD_F(Cone,tip) RANT_STD_F(Cone,radius)
+#define RANT_STD_MEMBERS_Polygon(v)   RANT_STD_F(Polygon,points)
+#define RANT_STD_MEMBERS_Circle(v)    RANT_STD_F(Circle,center) RANT_STD_F(Circle,radius)
+#define RANT_STD_MEMBERS_Polygon2D(v) RANT_STD_F(Polygon2D,points)
+#define RANT_STD_MEMBERS_Empty(v)
 #define RANT_STD_MEMBERS_Image(v)        RANT_STD_F(Image,width) RANT_STD_F(Image,height) \
                                        RANT_STD_F(Image,stride) RANT_STD_F(Image,format) RANT_STD_F(Image,data)
 #define RANT_STD_MEMBERS_VideoFrame(v) RANT_STD_F(VideoFrame,codec) \
@@ -5256,8 +5284,15 @@ RANT_STD_STRUCT(Float2);     RANT_STD_STRUCT(Float3);     RANT_STD_STRUCT(Float4
 RANT_STD_STRUCT(Double2);    RANT_STD_STRUCT(Double3);    RANT_STD_STRUCT(Double4);
 RANT_STD_STRUCT(Int2);       RANT_STD_STRUCT(Int3);       RANT_STD_STRUCT(Int4);
 RANT_STD_STRUCT(Quaternion);
-RANT_STD_STRUCT(Color);      RANT_STD_STRUCT(Rect);       RANT_STD_STRUCT(RectI);
-RANT_STD_STRUCT(Transform); RANT_STD_STRUCT(Twist);       RANT_STD_STRUCT(GeoPoint);
+RANT_STD_STRUCT(Color);
+RANT_STD_STRUCT(Pose);       RANT_STD_STRUCT(Pose2D);     RANT_STD_STRUCT(Transform);
+RANT_STD_STRUCT(Twist);      RANT_STD_STRUCT(Wrench);     RANT_STD_STRUCT(GeoPoint);
+RANT_STD_STRUCT(AlignedBox); RANT_STD_STRUCT(AlignedBox2D);
+RANT_STD_STRUCT(OrientedBox); RANT_STD_STRUCT(OrientedBox2D);
+RANT_STD_STRUCT(Plane);      RANT_STD_STRUCT(Segment);    RANT_STD_STRUCT(Sphere);
+RANT_STD_STRUCT(Capsule);    RANT_STD_STRUCT(Cylinder);   RANT_STD_STRUCT(Cone);
+RANT_STD_STRUCT(Polygon);    RANT_STD_STRUCT(Circle);     RANT_STD_STRUCT(Polygon2D);
+RANT_STD_STRUCT(Empty);
 RANT_STD_ALIAS(Uuid,        uint8_t[16]);
 RANT_STD_ALIAS(Timestamp, int64_t);
 RANT_STD_ALIAS(Duration,    int64_t);
