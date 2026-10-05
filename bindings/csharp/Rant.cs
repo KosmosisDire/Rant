@@ -1308,37 +1308,27 @@ namespace Rant
             /// <summary>Alpha, 0 transparent to 255 opaque.</summary>
             public byte A;
         }
-        /// <summary>An axis aligned rectangle in 32 bit floats.</summary>
-        [RantSchema("Rect")] public struct Rect
+        /// <summary>Where something is and how it is turned, in a frame stated elsewhere.</summary>
+        [RantSchema("Pose")] public struct Pose
         {
-            /// <summary>The left edge.</summary>
-            public float X;
-            /// <summary>The top edge.</summary>
-            public float Y;
-            /// <summary>The width.</summary>
-            public float W;
-            /// <summary>The height.</summary>
-            public float H;
+            /// <summary>The position.</summary>
+            public Double3 Position;
+            /// <summary>The orientation.</summary>
+            public Quaternion Orientation;
         }
-        /// <summary>An axis aligned rectangle in 32 bit integers.</summary>
-        [RantSchema("RectI")] public struct RectI
+        /// <summary>A 2D pose: a position and a heading.</summary>
+        [RantSchema("Pose2D")] public struct Pose2D
         {
-            /// <summary>The left edge.</summary>
-            public int X;
-            /// <summary>The top edge.</summary>
-            public int Y;
-            /// <summary>The width.</summary>
-            public int W;
-            /// <summary>The height.</summary>
-            public int H;
+            /// <summary>The position.</summary>
+            public Double2 Position;
+            /// <summary>The heading in radians, turning from +x toward +y.</summary>
+            public double Angle;
         }
-        /// <summary>A pose in meters and radians, measured in the Parent frame.</summary>
+        /// <summary>A pose measured in the Parent frame.</summary>
         [RantSchema("Transform")] public struct Transform
         {
-            /// <summary>The position in meters.</summary>
-            public Double3 Translation;
-            /// <summary>The orientation.</summary>
-            public Quaternion Rotation;
+            /// <summary>The position and orientation.</summary>
+            public Pose Pose;
             /// <summary>The frame this one is measured in, "" when unstated. Capped at 30 so
             /// the packed 88 bytes stay 8 aligned.</summary>
             [RantString(30)] public string Parent;
@@ -1351,6 +1341,14 @@ namespace Rant
             /// <summary>The angular velocity in rad/s.</summary>
             public Double3 Angular;
         }
+        /// <summary>A force in N and a torque in N m about the frame origin.</summary>
+        [RantSchema("Wrench")] public struct Wrench
+        {
+            /// <summary>The force in N.</summary>
+            public Double3 Force;
+            /// <summary>The torque in N m.</summary>
+            public Double3 Torque;
+        }
         /// <summary>A place on the earth.</summary>
         [RantSchema("GeoPoint")] public struct GeoPoint
         {
@@ -1361,6 +1359,111 @@ namespace Rant
             /// <summary>The altitude in meters.</summary>
             public double Alt;
         }
+
+        /// <summary>A box aligned to the frame's axes, in the units of its frame.</summary>
+        [RantSchema("AlignedBox")] public struct AlignedBox
+        {
+            /// <summary>The low corner, at most Max on every axis.</summary>
+            public Double3 Min;
+            /// <summary>The high corner.</summary>
+            public Double3 Max;
+        }
+        /// <summary>A rectangle aligned to the frame's axes. In an image, Min is the top left.</summary>
+        [RantSchema("AlignedBox2D")] public struct AlignedBox2D
+        {
+            /// <summary>The low corner, at most Max on every axis.</summary>
+            public Double2 Min;
+            /// <summary>The high corner.</summary>
+            public Double2 Max;
+        }
+        /// <summary>A box turned by its pose.</summary>
+        [RantSchema("OrientedBox")] public struct OrientedBox
+        {
+            /// <summary>The center and orientation.</summary>
+            public Pose Pose;
+            /// <summary>The full edge lengths.</summary>
+            public Double3 Size;
+        }
+        /// <summary>A rectangle turned by its pose.</summary>
+        [RantSchema("OrientedBox2D")] public struct OrientedBox2D
+        {
+            /// <summary>The center and heading.</summary>
+            public Pose2D Pose;
+            /// <summary>The full edge lengths.</summary>
+            public Double2 Size;
+        }
+        /// <summary>An unbounded plane.</summary>
+        [RantSchema("Plane")] public struct Plane
+        {
+            /// <summary>Any point on the plane.</summary>
+            public Double3 Position;
+            /// <summary>The unit normal.</summary>
+            public Double3 Normal;
+        }
+        /// <summary>A line segment between two points.</summary>
+        [RantSchema("Segment")] public struct Segment
+        {
+            /// <summary>One end.</summary>
+            public Double3 A;
+            /// <summary>The other end.</summary>
+            public Double3 B;
+        }
+        /// <summary>A sphere.</summary>
+        [RantSchema("Sphere")] public struct Sphere
+        {
+            /// <summary>The center.</summary>
+            public Double3 Center;
+            /// <summary>The radius.</summary>
+            public double Radius;
+        }
+        /// <summary>A segment swept by a sphere.</summary>
+        [RantSchema("Capsule")] public struct Capsule
+        {
+            /// <summary>The centers of the two end caps.</summary>
+            public Segment Axis;
+            /// <summary>The radius.</summary>
+            public double Radius;
+        }
+        /// <summary>A cylinder with flat caps.</summary>
+        [RantSchema("Cylinder")] public struct Cylinder
+        {
+            /// <summary>The centers of the two caps.</summary>
+            public Segment Axis;
+            /// <summary>The radius.</summary>
+            public double Radius;
+        }
+        /// <summary>A cone from a round base to a tip.</summary>
+        [RantSchema("Cone")] public struct Cone
+        {
+            /// <summary>The center of the base.</summary>
+            public Double3 Base;
+            /// <summary>The tip.</summary>
+            public Double3 Tip;
+            /// <summary>The radius at the base.</summary>
+            public double Radius;
+        }
+        /// <summary>A closed planar polygon.</summary>
+        [RantSchema("Polygon")] public struct Polygon
+        {
+            /// <summary>The corners in order. The last joins the first.</summary>
+            public Double3[] Points;
+        }
+        /// <summary>A circle.</summary>
+        [RantSchema("Circle")] public struct Circle
+        {
+            /// <summary>The center.</summary>
+            public Double2 Center;
+            /// <summary>The radius.</summary>
+            public double Radius;
+        }
+        /// <summary>A closed 2D polygon.</summary>
+        [RantSchema("Polygon2D")] public struct Polygon2D
+        {
+            /// <summary>The corners in order. The last joins the first.</summary>
+            public Double2[] Points;
+        }
+        /// <summary>No data: zero bytes on the wire, for a signal alone.</summary>
+        [RantSchema("Empty")] public struct Empty { }
 
         /// <summary>How an Image's data is laid out. A value of 16 or more is a compressed
         /// container, so data holds the file bytes rather than pixels.</summary>
@@ -5172,7 +5275,8 @@ namespace Rant
                     if (tn != null) plan.TypeName = tn.Name;
                     plans.Add(plan);
                 }
-                if (plans.Count == 0)
+                // only [RantSchema] says empty on purpose, else no members is a mapping mistake
+                if (plans.Count == 0 && attr == null)
                     throw new SchemaException(t.Name + " has no public fields or auto properties to map");
                 cached = new TypeSpec { Name = name, Fields = plans };
                 PlanConstruction(t, cached);

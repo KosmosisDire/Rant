@@ -23,7 +23,7 @@ struct Sensor
     public Dictionary<string, object> Extras;  // self-describing map
 }
 
-struct Pose
+struct Odom
 {
     public ulong Stamp;
     public double X;
@@ -100,7 +100,7 @@ static class Program
             Threading = threading, FetchDetails = fetchDetails,
         };
     static RantMessage Received;
-    static Pose ReceivedPose;
+    static Odom ReceivedPose;
 
     // Encode and decode round trip of the variable kinds, no networking.
     static bool RoundTrip()
@@ -663,8 +663,8 @@ static class Program
         // Two shapes of W, so each goes on its own node
         {
             var named = a.Schema("W { at: Transform }");
-            var bare = b.Schema("W { at: { translation: { x: f64, y: f64, z: f64 }," +
-                                "         rotation: { x: f64, y: f64, z: f64, w: f64 }," +
+            var bare = b.Schema("W { at: { pose: { position: { x: f64, y: f64, z: f64 }," +
+                                "                  orientation: { x: f64, y: f64, z: f64, w: f64 } }," +
                                 "         parent: string<30> } }");
             var xform = a.Schema("Transform");
             var twist = a.Schema("Twist");
@@ -683,8 +683,9 @@ static class Program
             Check("its message is the sum of the wire shapes (88+8+4+16+12)", SizeOf(sch) == 128);
 
             var t = new Track {
-                At = new Rant.Types.Transform { Translation = new Rant.Types.Double3 { X = 4.5, Y = -1.25, Z = 9.0 },
-                                Rotation = new Rant.Types.Quaternion { W = 1.0 } },
+                At = new Rant.Types.Transform { Pose = new Rant.Types.Pose {
+                    Position = new Rant.Types.Double3 { X = 4.5, Y = -1.25, Z = 9.0 },
+                    Orientation = new Rant.Types.Quaternion { W = 1.0 } } },
                 When = Rant.Types.Timestamp.Now(),
                 Tag = new Rant.Types.Color { R = 0x11, G = 0x22, B = 0x33, A = 0xFF },
                 Id = new byte[16],
@@ -692,10 +693,43 @@ static class Program
             for (int i = 0; i < 16; i++) t.Id[i] = (byte)i;
             var back = (Track)sch.Decode(sch.Encode(t));
             Check("a Track round-trips whole",
-                  back.At.Translation.X == 4.5 && back.At.Rotation.W == 1.0
+                  back.At.Pose.Position.X == 4.5 && back.At.Pose.Orientation.W == 1.0
                   && back.When == t.When && back.Tag.R == 0x11 && back.Tag.A == 0xFF
                   && back.Id != null && back.Id[15] == 15 && back.Velocity.Z == 3.0f);
             Check("Timestamp.Now is Unix-epoch microseconds", Rant.Types.Timestamp.Now() > 1600000000000000L);
+        }
+        // the shapes: every mirror compiles to its canonical name and size, Capsule and
+        // Cylinder never cross wire, and a variable Polygon2D and an Empty round-trip
+        {
+            (Type, int)[] shapes =
+            {
+                (typeof(Rant.Types.Pose), 56), (typeof(Rant.Types.Pose2D), 24),
+                (typeof(Rant.Types.Wrench), 48), (typeof(Rant.Types.AlignedBox), 48),
+                (typeof(Rant.Types.AlignedBox2D), 32), (typeof(Rant.Types.OrientedBox), 80),
+                (typeof(Rant.Types.OrientedBox2D), 40), (typeof(Rant.Types.Plane), 48),
+                (typeof(Rant.Types.Segment), 48), (typeof(Rant.Types.Sphere), 32),
+                (typeof(Rant.Types.Capsule), 56), (typeof(Rant.Types.Cylinder), 56),
+                (typeof(Rant.Types.Cone), 56), (typeof(Rant.Types.Circle), 24),
+                (typeof(Rant.Types.Empty), 0),
+            };
+            foreach (var (type, size) in shapes)
+            {
+                var mirror = a.Schema(type);
+                Check($"{type.Name} mirror is the canonical type, {size} bytes",
+                      mirror.Hash == a.Schema(type.Name).Hash && SizeOf(mirror) == size);
+            }
+            Check("Capsule and Cylinder never cross wire",
+                  !a.Schema("Capsule").CanRead(a.Schema("Cylinder")));
+            var poly = a.Schema(typeof(Rant.Types.Polygon2D));
+            var p = new Rant.Types.Polygon2D { Points = new[] {
+                new Rant.Types.Double2 { X = 0, Y = 0 }, new Rant.Types.Double2 { X = 1, Y = 0 },
+                new Rant.Types.Double2 { X = 1, Y = 2 } } };
+            var pb = (Rant.Types.Polygon2D)poly.Decode(poly.Encode(p));
+            Check("a Polygon2D round-trips whole", pb.Points != null && pb.Points.Length == 3 && pb.Points[2].Y == 2);
+            var empty = a.Schema(typeof(Rant.Types.Empty));
+            Check("an Empty encodes to zero bytes and decodes back",
+                  empty.Encode(new Rant.Types.Empty()).Length == 0
+                  && empty.Decode(Array.Empty<byte>()) is Rant.Types.Empty);
         }
         // the video family: the shipped mirror must compile to the canonical bytes, and the
         // bare name must resolve to the same ones, so both forms are checked hash-exact
@@ -1277,16 +1311,16 @@ static class Program
 
         var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
         // the handler gets the value and the envelope: the stamps are checked below
-        sub.Subscriber<Pose>("pose", (p, m) =>
+        sub.Subscriber<Odom>("pose", (p, m) =>
         {
             Received = m;
             ReceivedPose = p;
             Console.WriteLine($"recv: [{m.TopicName}] from {m.PublisherName} -> {p}");
             Got.Set();
         }, qos);
-        var pubch = pub.Publisher<Pose>("pose", qos);
+        var pubch = pub.Publisher<Odom>("pose", qos);
 
-        var sent = new Pose
+        var sent = new Odom
         {
             Stamp = 7,
             X = 1.5,
@@ -1325,8 +1359,8 @@ static class Program
                                   + $" written={Received.WrittenUs} recv={Received.RecvUs}");
             }
             if (ok) Console.WriteLine("PASS");
-            var s = pub.Schema(typeof(Pose));
-            Console.WriteLine("Pose DSL (for C interop):\n" + s.Dsl);
+            var s = pub.Schema(typeof(Odom));
+            Console.WriteLine("Odom DSL (for C interop):\n" + s.Dsl);
             if (!s.Dsl.Contains("vel: Velocity")) { ok = false; Console.WriteLine("FAIL: the nested type is not named"); }
         }
         else
@@ -1339,7 +1373,7 @@ static class Program
         {
             try
             {
-                pubch.Send(new Pose { Frame = "way-too-long-for-sixteen-bytes" });
+                pubch.Send(new Odom { Frame = "way-too-long-for-sixteen-bytes" });
                 Console.WriteLine("FAIL: over-cap string did not throw");
                 ok = false;
             }
@@ -1355,8 +1389,8 @@ static class Program
         {
             var subT = new RantNode("sub", Local(42));
             var pubT = new RantNode("pub", Local(42));
-            subT.Subscriber<Pose>("pose", p => { ReceivedPose = p; Got.Set(); }, qos);
-            var pubchT = pubT.Publisher<Pose>("pose", qos);
+            subT.Subscriber<Odom>("pose", p => { ReceivedPose = p; Got.Set(); }, qos);
+            var pubchT = pubT.Publisher<Odom>("pose", qos);
             if (pubT.Poll(0) != (int)SendStatus.State) { Console.WriteLine("FAIL: Poll not refused under the service thread"); ok = false; }
             else
             {

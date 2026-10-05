@@ -48,8 +48,9 @@ static class Program
                 double angle = seq * 0.01;
                 ch.Send(new Tick {
                     Seq = seq, When = Timestamp.Now(), Value = Math.Sin(angle),
-                    At = new Transform { Translation = new Double3 { X = Math.Cos(angle), Y = Math.Sin(angle) },
-                                         Rotation = new Quaternion { W = 1.0 } } });
+                    At = new Transform { Pose = new Pose {
+                        Position = new Double3 { X = Math.Cos(angle), Y = Math.Sin(angle) },
+                        Orientation = new Quaternion { W = 1.0 } } } });
                 seq++;
             }
             node.Poll(0);                                      // non-blocking: flush the burst + service RX

@@ -52,7 +52,7 @@ Console.ReadLine();
 //                 // `when` is the publisher's wall clock in the same units everywhere, so the
 //                 // difference against ours is one-way latency plus clock skew.
 //                 double ageMs = _last.When != 0 ? (Timestamp.Now() - _last.When) / 1000.0 : 0.0;
-//                 var p = _last.At.Translation;
+//                 var p = _last.At.Pose.Position;
 //                 Console.WriteLine($"received={_count}  rate={rate:F0} Hz  age={ageMs:F1} ms  " +
 //                                   $"at=({p.X:F2}, {p.Y:F2}, {p.Z:F2})");
 //                 lastCount = _count; lastReport = now;
