@@ -636,7 +636,8 @@ static uint32_t i_rant_reflect_name(i_RantNodeCore *c, i_RantReflect *r, RantStr
     return off;
 }
 
-/* an interest apply: kind, role, reliability and hash per advertised index. Absent slots clear */
+/* an interest apply: kind, role, reliability and hash per advertised index. Absent slots clear.
+   A peer reuses indices, so a slot that now holds another channel drops its details */
 static void i_rant_node_core_reflect_interest(i_RantNodeCore *c, i_RantNodePeerExtra *ex,
                                               RantBytes interest){
     i_RantReflect *r = &ex->refl;
@@ -647,6 +648,10 @@ static void i_rant_node_core_reflect_interest(i_RantNodeCore *c, i_RantNodePeerE
     while (i_rant_interest_next(interest, &it, &e)){
         i_RantChannel *ch = i_rant_reflect_channel(c, r, e.index);
         if (!ch) return;
+        if (ch->hash != e.hash || ch->kind != e.kind){
+            ch->name_off = I_RANT_NAME_NONE; ch->name_len = 0;
+            ch->schema = NULL; ch->schema_hash = 0; ch->attrs = 0;
+        }
         ch->hash = e.hash; ch->kind = e.kind; ch->role = e.role;
         ch->reliable = e.reliable; ch->present = 1;
     }
@@ -788,9 +793,31 @@ static void i_rant_reflect_set_name(i_RantPeerEntity *e, const i_RantReflect *r,
     e->id = i_rant_topic_id(buf);
 }
 
+/* drops the names no channel holds any more, so a peer that keeps reusing indices does not
+   grow the arena. Only the fold may move names, since it rebuilds every entity's offset */
+static void i_rant_reflect_compact(i_RantNodeCore *c, i_RantReflect *r){
+    uint32_t i, live = 0, w = 0;
+    char *keep;
+    for (i = 0; i < r->n_chan; i++)
+        if (r->chan[i].name_off != I_RANT_NAME_NONE) live += r->chan[i].name_len + 1u;
+    if (r->names_len <= 2u * live + 1024u) return;
+    keep = (char*)i_rant_node_core_scratch(c, live + 1u);
+    if (!keep) return;
+    for (i = 0; i < r->n_chan; i++){
+        i_RantChannel *ch = &r->chan[i];
+        if (ch->name_off == I_RANT_NAME_NONE) continue;
+        memcpy(keep + w, r->names + ch->name_off, ch->name_len + 1u);
+        ch->name_off = w;
+        w += ch->name_len + 1u;
+    }
+    memcpy(r->names, keep, w);
+    r->names_len = w;
+}
+
 static void i_rant_reflect_fold(i_RantNodeCore *c, i_RantReflect *r){
     i_RantHashPair *sorted; uint32_t n = 0, i;
     r->dirty = 0;
+    if (r != &c->self) i_rant_reflect_compact(c, r);   /* our own arena restarts on every walk */
     r->n_ent = 0;
     for (i = 0; i < r->n_chan; i++) r->chan[i].entity = I_RANT_NONE16;
     sorted = (i_RantHashPair*)i_rant_node_core_scratch(c, r->n_chan * (uint32_t)sizeof *sorted + 1u);

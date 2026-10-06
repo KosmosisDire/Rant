@@ -7039,6 +7039,72 @@ static void reflect_dropped_checks(void){
     rant_allocator_reset(&aa); rant_allocator_reset(&ba);
 }
 
+/* How many of a peer's entities carry name, and whether one of them is a complete kind. */
+static int rr_count(RantNode *obs, uint32_t pid, const char *name, RantEntityKind kind, int *complete){
+    RantIter it; RantEntityInfo ei; size_t len = strlen(name); int n = 0;
+    *complete = 0;
+    memset(&it,0,sizeof it);
+    while (rant_node_entities_next(obs, pid, &it, &ei)){
+        if (ei.name.len != len || memcmp(ei.name.data, name, len) != 0) continue;
+        n++;
+        if (ei.kind == kind && !ei.incomplete) *complete = 1;
+    }
+    return n;
+}
+
+/* Index reuse (19e4b): a retired slot rebound to another channel must drop the old name and
+ * schema, or an observer shows the new channel under the old name until it restarts. */
+static void reflect_reuse_checks(void){
+    RantAllocator aa = rant_allocator_heap(0);
+    RantAllocator ba = rant_allocator_heap(0);
+    RantNodeOpts ao, bo; RantNode *A, *B; RantAddr seed;
+    RantTopic *joints; RantFunction *fn; uint32_t pid = 0; int t, ok, n, i;
+    char name[64];
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=ST_DOMAIN+37; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    bo=ao;
+    bo.fetch_details = 1;
+    A = rant_node_open(&aa, "reuse-host", NULL, NULL, &ao);
+    B = rant_node_open(&ba, "reuse-obs",  NULL, NULL, &bo);
+    ST_CHECK(A && B, "reuse: nodes open");
+    if (!(A && B)){ if(A)rant_node_close(A,0); if(B)rant_node_close(B,0); return; }
+
+    joints = rant_node_create_topic(A, "rr/joints", RANT_PUB_ONLY, NULL, NULL);
+    ST_CHECK(joints != NULL, "reuse: topic created");
+    for (t=0, ok=0; t<2000 && !ok; t++){
+        const i_RantDiscoveryPeerView *ps; uint16_t pc;
+        pf_pump(A,B,2);
+        ps = st_peers(B, &pc);
+        if (!(ps && pc)) continue;
+        pid = ps[0].id;
+        rr_count(B, pid, "rr/joints", RANT_ENTITY_TOPIC, &ok);
+    }
+    ST_CHECK(ok, "reuse: observer names the topic");
+
+    ST_CHECK(rant_topic_retire(joints) == RANT_OK, "reuse: topic retired");
+    fn = rant_node_create_function_definition(A, "rr/call", NULL, NULL, pf_add_handler, NULL, NULL);
+    ST_CHECK(fn != NULL, "reuse: function takes the retired slot");
+    for (t=0, ok=0; t<2000 && !ok; t++){ pf_pump(A,B,2); rr_count(B, pid, "rr/call", RANT_ENTITY_FUNCTION, &ok); }
+    n = rr_count(B, pid, "rr/joints", RANT_ENTITY_FUNCTION, &i);
+    ST_CHECK(ok, "reuse: the function shows whole under its own name");
+    ST_CHECK(n == 0, "reuse: nothing keeps the old name (%d)", n);
+
+    /* every rebind appends a name, so this crosses the arena's compaction threshold */
+    if (fn) rant_function_retire(fn);
+    for (i=0, ok=1; i<48 && ok; i++){
+        RantTopic *tp;
+        snprintf(name, sizeof name, "rr/churn/a-long-enough-name-to-grow-the-arena/%02d", i);
+        tp = rant_node_create_topic(A, name, RANT_PUB_ONLY, NULL, NULL);
+        for (t=0, ok=0; tp && t<2000 && !ok; t++){ pf_pump(A,B,2); rr_count(B, pid, name, RANT_ENTITY_TOPIC, &ok); }
+        if (tp) rant_topic_retire(tp);
+    }
+    ST_CHECK(ok && i == 48, "reuse: 48 rebinds each show their own name (stopped at %d)", i);
+
+    rant_node_close(A,0); rant_node_close(B,0);
+    rant_allocator_reset(&aa); rant_allocator_reset(&ba);
+}
+
 /* The variable set match wait (19e5): a fresh accessor's first write rides the send path's
  * match wait, so NO_TOPIC means the owner is genuinely absent. */
 static void varwait_checks(void){
@@ -8730,6 +8796,7 @@ static int selftest_main(void){
     dup_authority_checks();       /* 19e2. duplicate provider or owner, both rivals */
     retire_checks();              /* 19e3. pattern retire: a successor binds, no shadow */
     reflect_dropped_checks();     /* 19e4. entity walk refuses dropped peers unless opted in */
+    reflect_reuse_checks();       /* 19e4b. a reused index drops the old name and schema */
     varwait_checks();             /* 19e5. accessor first write rides the match wait */
     churn_checks();               /* 19e6. retire/reuse churn soak: slots reuse, nothing balloons */
     task_checks();                /* 19e7. tasks: progress, cancel, no_cancel, bare return */
