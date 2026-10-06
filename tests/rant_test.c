@@ -7011,15 +7011,20 @@ static void reflect_dropped_checks(void){
 
     def = rant_node_create_variable_definition(A, "gdial", NULL, NULL);
     ST_CHECK(def != NULL, "ghost: variable definition created");
-    { int ents = 0;
-      for (t=0;t<2000 && !ents;t++){
+    { int ents = 0, unnamed = 1;
+      /* an entity shows by its hash before its details name it, so wait for every name */
+      for (t=0;t<2000 && (!ents || unnamed);t++){
           RantIter eit; RantEntityInfo ei; const i_RantDiscoveryPeerView *ps; uint16_t pc;
           pf_pump(A,B,2);
           ps = st_peers(B, &pc);
           if (!(ps && pc)) continue;
           pid = ps[0].id;
+          ents = unnamed = 0;
           memset(&eit,0,sizeof eit);
-          while (rant_node_entities_next(B, pid, &eit, &ei)) ents += !st_builtin(&ei);
+          while (rant_node_entities_next(B, pid, &eit, &ei)){
+              ents += !st_builtin(&ei);
+              unnamed += !ei.name.len;
+          }
       }
       ST_CHECK(ents == 1, "ghost: live peer enumerates its entity (%d)", ents); }
 
