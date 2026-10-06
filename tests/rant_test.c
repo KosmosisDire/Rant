@@ -4536,24 +4536,29 @@ static void threaded_checks(void){
       r = test_node_open(dummy, 0, "th-csub", th_on_message, th_on_event, o, cd, 1);
       ST_CHECK(w && r, "capped: nodes open");
       if (w && r){
-          uint64_t worst = 0; int i;
+          uint64_t worst = 0, began; double secs; unsigned long most; int i;
           th_recv = 0;
           rant_node_start(w); rant_node_start(r);
           { uint64_t end = i_rant_plat_now_us() + 5000000u;
             while (rant_node_publisher_match_count(w, 0) == 0 && i_rant_plat_now_us() < end)
                 sw_sleep_ms(5); }
           sw_sleep_ms(300);                     /* the rate section rides an announce */
+          began = i_rant_plat_now_us();
           for (i=0;i<200;i++){
               uint64_t t0 = i_rant_plat_now_us(), dt;
               rant_node_send(w, 0, payload, sizeof payload);
               dt = i_rant_plat_now_us() - t0;
               if (dt > worst) worst = dt;
-              sw_sleep_ms(1);
+              while (i_rant_plat_now_us() - t0 < 1000u) {}   /* a sleep can last a 15.6 ms tick */
           }
+          /* the cap is judged over the real span, a busy publisher may still send slower */
+          secs = (double)(i_rant_plat_now_us() - began) / 1e6;
+          most = (unsigned long)(50.0 * secs * 1.25) + 2u;
           ST_CHECK(worst < 10000u, "capped: no send waits for the capped lane (worst %.2f ms)",
                    worst/1000.0);
-          ST_CHECK(th_recv >= 2 && th_recv < 100, "capped: the subscriber is still paced (%lu of 200)",
-                   th_recv);
+          ST_CHECK(th_recv >= 2 && th_recv <= most && th_recv < 200,
+                   "capped: the subscriber is still paced (%lu of 200 in %.0f ms, at most %lu)",
+                   th_recv, secs * 1000.0, most);
           ST_CHECK(rant_node_evicted_unsent(w) == 0, "capped: a held back sample is not an eviction (%u)",
                    rant_node_evicted_unsent(w));
           /* a lone held back sample leaves at the lane's 20 ms tick: the send that armed the
