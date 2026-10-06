@@ -738,6 +738,19 @@ static int st_builtin(const RantEntityInfo *e){
 static const i_RantDiscoveryPeerView *st_peers(RantNode *n, uint16_t *count){
     return i_rant_discovery_peers(n->discovery, count);
 }
+
+/* The first UDP port from port up that binds now, for a phase that needs a fixed one. Another
+   program may hold the derived port, such as Tailscale on 41641. */
+static uint16_t st_free_port(uint16_t port){
+    uint16_t k;
+    for (k = 0; k < 100; k++){
+        i_RantSock s = i_rant_plat_udp_open();
+        int ok = s != RANT_SOCK_BAD && i_rant_plat_bind(s, 0, (uint16_t)(port + k), 0);
+        if (s != RANT_SOCK_BAD) i_rant_plat_close(s);
+        if (ok) return (uint16_t)(port + k);
+    }
+    return port;
+}
 /* cond is evaluated exactly once: a condition with side effects must not run twice, or
    the second evaluation fails silently after the first printed ok */
 #define ST_CHECK(cond, ...) do { int st_ok_ = !!(cond); \
@@ -7456,7 +7469,7 @@ static void matchwait_checks(void){
        while A matches B. Unblocking lets B verify and repair must deliver the original sample. */
     { /* per-process fixed port, like the domain base: concurrent selftests must not
          collide on the bind (the phase needs it fixed only to intercept by port) */
-      const uint16_t MW_PORT = (uint16_t)(40000u + st_domain_base % 20000u);
+      const uint16_t MW_PORT = st_free_port((uint16_t)(40000u + st_domain_base % 20000u));
       RantAllocator aa = rant_allocator_heap(0);
       RantAllocator ba = rant_allocator_heap(0);
       RantNodeOpts ao, bo; RantNode *A, *B; RantTopic *at=NULL, *bt=NULL;
@@ -7505,7 +7518,7 @@ static void matchwait_checks(void){
     /* (a2) THE WINDOW: A never receives B's DETAIL_RESPs, so B stays a candidate forever. The
        wait bridges A's own coming up only: one window after the create, then no send waits,
        and a subscriber that appears later never blocks a send at all. */
-    { const uint16_t MW_PORT2 = (uint16_t)(40000u + (st_domain_base + 1u) % 20000u);
+    { const uint16_t MW_PORT2 = st_free_port((uint16_t)(40000u + (st_domain_base + 1u) % 20000u));
       RantAllocator aa = rant_allocator_heap(0);
       RantAllocator ba = rant_allocator_heap(0);
       RantNodeOpts ao, bo; RantNode *A, *B; RantTopic *poison=NULL, *late=NULL;
