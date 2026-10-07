@@ -91,6 +91,8 @@ RANT_API RantNode        *rant_node_open(RantAllocator *alloc, const char *name,
 /* The most recent error. n NULL returns the process global slot, the reason an open
  * returned NULL. .error is RANT_E_NONE if none occurred. */
 RANT_API RantEvent        rant_last_error(RantNode *n);
+/* The compiled library's version, such as "0.0.17". RANT_VERSION is the header's. */
+RANT_API const char      *rant_version(void);
 /* One loop tick, blocking up to timeout_ms. RANT_ERR_STATE while a service thread runs
  * or from inside a callback. */
 RANT_API int            rant_node_poll(RantNode *n, int timeout_ms);

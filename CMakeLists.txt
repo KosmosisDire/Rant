@@ -82,6 +82,7 @@ add_custom_command(
   OUTPUT  ${RANT_DIST}
   COMMAND ${RANT_PACK}
   DEPENDS ${RANT_SRC} "${CMAKE_CURRENT_SOURCE_DIR}/tools/pack.cmake"
+          "${CMAKE_CURRENT_SOURCE_DIR}/VERSION"
           "${CMAKE_CURRENT_SOURCE_DIR}/bindings/cpp/rant.hpp"
   COMMENT "Rant: amalgamating src/ -> dist/ single-headers"
   VERBATIM)

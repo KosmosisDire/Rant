@@ -103,6 +103,20 @@ gcc -std=c99 -Wall -Idist tests/rant_test.c -o rant_test.exe -lws2_32 -lbcrypt -
 `rant_test.c` uses `rant.h` and needs the implementation in its own translation unit
 so its diagnostic `sendto` and `recvfrom` wrappers can intercept the transport's calls.
 
+## Version and detection
+
+- `rant_version()` returns the compiled library's version, such as `"0.0.17"`.
+  `RANT_VERSION` is the header's. They differ only when a header meets another build's
+  shared library.
+- Bindings: `rant::version()` in C++, `RantNode.Version` in C#, `rant.version()` in Python.
+- Every binary that opens a node carries the bytes `\0RANT-MAGIC v<version>` followed by
+  its features and a NUL, for example `RANT-MAGIC v0.0.17 threads shm proc_stats patterns
+  stdtypes`. A byte search finds Rant in any executable, library or firmware image:
+
+```sh
+grep -a -o "RANT-MAGIC v[ -~]*" app.exe
+```
+
 ## Testing
 
 All test tooling is one C program, `rant_test`.

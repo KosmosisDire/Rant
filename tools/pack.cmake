@@ -59,9 +59,11 @@ endfunction()
 # rant.h: every layer in dependency order. Declarations first, then the implementation
 # under RANT_IMPLEMENTATION.
 function(build_header f)
+  file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/../VERSION" version LIMIT_COUNT 1)
   file(WRITE  "${f}" "${BANNER}")
   file(APPEND "${f}" "${REGION_GUARD}")
   file(APPEND "${f}" "${POSIX_PREAMBLE}")
+  file(APPEND "${f}" "#define RANT_VERSION \"${version}\"   /* the header's version, from VERSION */\n\n")
 
   rant_emit("${f}" common/api.h)
   rant_emit("${f}" common/features.h)

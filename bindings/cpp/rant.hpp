@@ -61,6 +61,9 @@ namespace detail {
 #if defined(__cplusplus) && !defined(RANT_IMPLEMENTATION)
 }   /* namespace detail */
 
+/* The compiled library's version, such as "0.0.17". RANT_VERSION is the header's. */
+inline std::string_view version() { return detail::rant_version(); }
+
 /* How a topic delivers. BestEffort may drop under load, Reliable repairs gaps and applies
  * backpressure. A reliable reader refuses a best effort writer. */
 enum class Reliability { BestEffort = 0, Reliable = 1 };

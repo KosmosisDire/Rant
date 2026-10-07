@@ -605,6 +605,8 @@ namespace Rant
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern RantEventNative rant_last_error(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr rant_version();
+        [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_node_poll(IntPtr node, int timeout_ms);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_node_close(IntPtr node, int send_bye);
@@ -2359,6 +2361,9 @@ namespace Rant
 
         /// <summary>Who drives the loop, as opened.</summary>
         public Threading Threading { get; }
+
+        /// <summary>The native library's version, such as "0.0.17".</summary>
+        public static string Version => Marshal.PtrToStringAnsi(Native.rant_version());
 
         /// <summary>Open a node and join the mesh. Null options are the C defaults. The service
         /// thread runs from here unless options.Threading is Manual, and OnEvent may attach

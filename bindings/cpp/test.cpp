@@ -1848,6 +1848,9 @@ int main(int argc, char** argv) {
     bool factory_ok = factory_leg();
     std::printf("%s\n", factory_ok ? "PASS: node factories" : "FAIL: factory leg");
 
+    std::printf("version leg:\n");
+    chk("version: the library's matches the header's", rant::version() == RANT_VERSION);
+
     std::printf("%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 2;
 #if defined(__cpp_exceptions)

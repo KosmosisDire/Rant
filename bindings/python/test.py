@@ -1216,6 +1216,12 @@ def on_event(tag):
 
 
 def main():
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "VERSION")) as f:
+        want = f.read().strip()
+    ok = rant.version() == want
+    print("version: " + rant.version() + (" PASS\n" if ok else " FAIL, VERSION says " + want + "\n"))
+    if not ok:
+        return 1
     if not round_trip():
         return 1
     if not value_roots():

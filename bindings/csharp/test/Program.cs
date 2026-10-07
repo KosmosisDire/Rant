@@ -1298,6 +1298,9 @@ static class Program
 
     static int Main()
     {
+        bool versionOk = System.Text.RegularExpressions.Regex.IsMatch(RantNode.Version ?? "", @"^\d+\.\d+\.\d+$");
+        Console.WriteLine("version: " + RantNode.Version + (versionOk ? " PASS\n" : " FAIL\n"));
+        if (!versionOk) return 1;
         if (!RoundTrip()) return 1;
         if (!ValueRoots()) return 1;
         if (!StdTypes()) return 1;

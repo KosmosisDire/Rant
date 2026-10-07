@@ -25,8 +25,13 @@ __all__ = [
     "FunctionDefinition", "RemoteFunction", "Request", "Response", "Deferred",
     "TaskDefinition", "RemoteTask", "TaskContext", "Progress",
     "Variable", "VariableDefinition", "RemoteVariable", "VariableUpdate",
-    "LogLine", "Reflection", "Peer", "Entity", "MetaSnapshot",
+    "LogLine", "Reflection", "Peer", "Entity", "MetaSnapshot", "version",
 ]
+
+
+def version():
+    """The native library's version, such as "0.0.17"."""
+    return _c.load().rant_version().decode("ascii")
 
 
 # The enums. Values match the C wire, names mirror the C# wrapper.

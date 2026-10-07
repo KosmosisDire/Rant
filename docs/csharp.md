@@ -33,6 +33,7 @@ docs/discovery.md (`SeedPeers` as "ip" or "ip:port" strings, `UnicastOnly`, `Sel
 `AdvertisePort`) and the rest. `node.OnEvent` carries peer lifecycle, loss and error
 events. It is optional: with no handler attached, error events print to stderr, and
 `LastError` records the last error either way, null before any. `Stats` reads the node's memory, backpressure and evicted unsent counters.
+The static `RantNode.Version` is the native library's version, such as "0.0.17".
 
 Every handle comes from the node method named after it: `Publisher<T>`, `Subscriber<T>`,
 `FunctionDefinition<TReq, TRsp>`, `RemoteFunction<TReq, TRsp>`,

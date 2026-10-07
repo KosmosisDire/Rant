@@ -34,6 +34,7 @@ rant::Node node("robot", { .domain = 7 });
   to stderr.
 - `settle()` waits until discovery is done. Call it after creating your handles.
 - `close()` or the destructor shuts the node down.
+- `rant::version()` is the library's version, such as `"0.0.17"`.
 
 Durations are `std::chrono`: write `500ms` or `2s`. `rant::forever` waits with no end.
 

@@ -420,6 +420,7 @@ def bind(lib):
     F("rant_node_open", [POINTER(RantAllocator), c_char_p, MsgFn, EvtFn,
                          POINTER(RantNodeOpts)], c_void_p)
     F("rant_last_error", [c_void_p], RantEvent)
+    F("rant_version", [], c_char_p)
     F("rant_node_poll", [c_void_p, c_int], c_int)
     F("rant_node_close", [c_void_p, c_int], c_int)
     F("rant_node_start", [c_void_p], c_int)

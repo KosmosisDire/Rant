@@ -72,6 +72,17 @@ Rant as a subproject or finds the installed package.
   reads it through an MSBuild property function, `pyproject.toml` through the
   scikit-build-core regex provider, and the Unity packer stamps it into `package.json`.
   A release is a tag `v` plus that number, and the workflow refuses any other tag.
+- The packer reads `VERSION` too and writes `#define RANT_VERSION` at the top of
+  `dist/rant.h`, so a consumer that compiles the header gets the version with no build
+  define. `VERSION` is a dependency of the pack command, so a bump re packs.
+- The magic is `i_rant_magic` in `node/runtime.c`: a leading NUL, `RANT-MAGIC v`, the
+  version, then one space separated word per feature compiled in (`threads`, `shm`,
+  `proc_stats`, `patterns`, `stdtypes`, `plat_custom`) and the closing NUL. Words are only
+  ever appended, so a reader splits on spaces and ignores words it does not know.
+  `rant_node_open` reads one byte of it through a volatile pointer: a static link with
+  `--gc-sections` or `/OPT:REF` drops unreferenced data, and every Rant user opens a node.
+  A tool that searches for the magic must not carry the whole pattern itself, or it
+  finds itself.
 - Three builds, one macro. `src/common/api.h` defines `RANT_API`, which every public
   declaration carries. The default build compiles Rant into the caller's own binary and
   needs no decoration. `RANT_BUILD_SHARED` marks each entry point exported, so the shared

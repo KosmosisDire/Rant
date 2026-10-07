@@ -928,6 +928,46 @@ static int i_rant_node_on_shm(void *u, uint16_t topic_index, uint32_t from, cons
 
 static void i_rant_node_logs_open(RantNode *n);       /* defined with the log API below */
 
+/* The build's features, listed in the magic */
+#ifdef RANT_THREADS
+  #define RANT_MAGIC_THREADS " threads"
+#else
+  #define RANT_MAGIC_THREADS ""
+#endif
+#ifdef RANT_SHM
+  #define RANT_MAGIC_SHM " shm"
+#else
+  #define RANT_MAGIC_SHM ""
+#endif
+#ifdef RANT_PROC_STATS
+  #define RANT_MAGIC_PROC_STATS " proc_stats"
+#else
+  #define RANT_MAGIC_PROC_STATS ""
+#endif
+#ifndef RANT_NO_PATTERNS
+  #define RANT_MAGIC_PATTERNS " patterns"
+#else
+  #define RANT_MAGIC_PATTERNS ""
+#endif
+#ifndef RANT_NO_STDTYPES
+  #define RANT_MAGIC_STDTYPES " stdtypes"
+#else
+  #define RANT_MAGIC_STDTYPES ""
+#endif
+#ifdef RANT_PLAT_CUSTOM
+  #define RANT_MAGIC_PLAT " plat_custom"
+#else
+  #define RANT_MAGIC_PLAT ""
+#endif
+
+/* Marks every binary that links Rant, found by a byte search. spec/build.md has the format. */
+static const char i_rant_magic[] = "\0RANT-MAGIC v" RANT_VERSION RANT_MAGIC_THREADS
+    RANT_MAGIC_SHM RANT_MAGIC_PROC_STATS RANT_MAGIC_PATTERNS RANT_MAGIC_STDTYPES RANT_MAGIC_PLAT;
+
+const char *rant_version(void){
+    return RANT_VERSION;
+}
+
 RantAllocator rant_allocator_heap(uint32_t page_size){
     return rant_allocator_dynamic(i_rant_plat_realloc, page_size);
 }
@@ -938,6 +978,9 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     uint8_t *base; void *arena; size_t need; RantAllocator pool;
     RantNode *n; i_RantSock fd; uint16_t local_port;
     char node_name[RANT_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;
+
+    /* a live reference, so a linker that drops unreferenced data keeps the magic */
+    (void)*(const volatile char *)i_rant_magic;
 
     memset(&o, 0, sizeof o);
     if (opts) o = *opts;

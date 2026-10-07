@@ -62,7 +62,8 @@ A construction failure raises `rant.Error` with the C reason in the message and 
 the node's counters as one `NodeStats`, and `last_error` is the most recent error `Event`.
 An `Event` carries `kind`, `error`, `peer`, `peer_name`, `topic` and `topic_name`, plus the
 C event's other fields flat, zero or None where the kind does not set them, as in
-docs/node.md. `str(event)` is the one line text.
+docs/node.md. `str(event)` is the one line text. `rant.version()` is the native library's
+version, such as "0.0.17".
 
 ## Schemas
 
