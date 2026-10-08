@@ -205,22 +205,29 @@ size_t i_rant_plat_env(const char *name, char *buf, size_t cap){
     buf[0] = 0;
 #if defined(_WIN32)
     {   /* the wide call, so a name outside the ANSI code page arrives as UTF-8 */
-        wchar_t wname[64], wval[256]; DWORD len; int i;
+        wchar_t wname[64], wval[256]; char utf8[768]; DWORD len; int i;
         for (i = 0; name[i] && i < 63; i++) wname[i] = (wchar_t)(unsigned char)name[i];
         wname[i] = 0;
         len = GetEnvironmentVariableW(wname, wval, 256);
-        if (len == 0 || len >= 256) return 0;
-        i = WideCharToMultiByte(CP_UTF8, 0, wval, (int)len, buf, (int)(cap - 1), NULL, NULL);
-        n = i > 0 ? (size_t)i : 0;
+        if (len == 0) return 0;
+        if (len >= 256) return len;      /* too long for wval: report the cut with buf empty */
+        i = WideCharToMultiByte(CP_UTF8, 0, wval, (int)len, utf8, (int)sizeof utf8, NULL, NULL);
+        if (i <= 0) return 0;
+        n = (size_t)i;
+        memcpy(buf, utf8, n < cap ? n : cap - 1);
+        buf[n < cap ? n : cap - 1] = 0;
+        return n;
     }
 #else
-    {   const char *v = getenv(name);
+    {   const char *v = getenv(name); size_t w;
         if (!v) return 0;
-        while (v[n] && n + 1 < cap){ buf[n] = v[n]; n++; }
+        while (v[n]) n++;
+        w = n < cap ? n : cap - 1;
+        memcpy(buf, v, w);
+        buf[w] = 0;
+        return n;
     }
 #endif
-    buf[n] = 0;
-    return n;
 }
 
 /* process usage and wall clock */

@@ -142,6 +142,7 @@ class RantNodeOpts(Structure):
         ("net", RantNodeNet),
         ("discovery", RantNodeDiscovery),
         ("event_queue_bytes", c_uint32),
+        ("prefix", c_char_p),
     ]
 
 

@@ -151,7 +151,8 @@ misbehaves.
 | setting | meaning |
 |---|---|
 | Node Name | the name peers see. Empty means one is generated |
-| Domain | nodes only see peers on the same domain |
+| Domain | nodes only see peers on the same domain. 0 takes `RANT_DOMAIN` |
+| Prefix | goes with `/` in front of every name this node creates. A name starting with `/` skips it |
 | Max Topics | how many topics this node may create |
 | Multicast Interface | this machine's LAN IP, for hosts with VPN or docker adapters. Empty means probe for it |
 | Queue Bytes | default size of each topic's frame queue |

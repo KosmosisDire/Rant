@@ -88,26 +88,27 @@ class ErrorKind(IntEnum):
     SCHEMA_MISMATCH = 4
     INTEREST_OVERFLOW = 5
     META_TRUNCATED_INTEREST = 6
-    META_TRUNCATED_SCHEMA = 7
-    PEER_META_TOO_BIG = 8
-    MSG_TOO_BIG = 9
-    PEER_REFUSED = 10
-    EVICTED_UNSENT = 11
-    UNMATCHED_SEND = 12
-    DUPLICATE_AUTHORITY = 13
-    OOM = 14
-    PLATFORM = 15
-    SOCKET = 16
-    BIND = 17
-    MCAST_JOIN = 18
-    SEND = 19
-    RECV = 20
-    POLL = 21
-    WAKER = 22
-    BAD_ADDRESS = 23
-    BAD_NAME = 24
-    STATE = 25
-    BAD_SCHEMA = 26
+    PEER_META_TOO_BIG = 7
+    MSG_TOO_BIG = 8
+    PEER_REFUSED = 9
+    EVICTED_UNSENT = 10
+    UNMATCHED_SEND = 11
+    DUPLICATE_AUTHORITY = 12
+    OOM = 13
+    PLATFORM = 14
+    SOCKET = 15
+    BIND = 16
+    MCAST_JOIN = 17
+    SEND = 18
+    RECV = 19
+    POLL = 20
+    WAKER = 21
+    BAD_ADDRESS = 22
+    BAD_NAME = 23
+    STATE = 24
+    BAD_SCHEMA = 25
+    BAD_DOMAIN = 26
+    BAD_PREFIX = 27
 
 class PeerLiveness(IntEnum):
     ACTIVE = 0
@@ -374,7 +375,8 @@ class Node:
     MANUAL."""
     def __init__(self, name: str | None = None, *,
                  on_event: Callable[[Event], object] | None = None,
-                 domain: int = 0, multicast_interface: str | None = None, max_topics: int = 0,
+                 domain: int = 0, prefix: str | None = None,
+                 multicast_interface: str | None = None, max_topics: int = 0,
                  match_wait: float | None = 0.0, disable_shm: bool = False,
                  fetch_details: bool = False, disable_logs: bool = False,
                  disable_meta: bool = False, disable_error_logs: bool = False,

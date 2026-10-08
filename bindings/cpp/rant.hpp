@@ -101,7 +101,9 @@ enum class ErrorKind {
     Oom, Platform, Socket, Bind, McastJoin, Send, Recv, Poll, Waker, BadAddress,
     BadName,              /* a create's name is empty, too long or carries '@' */
     State,                /* refused at this moment, such as a close inside its own callback */
-    BadSchema             /* schema text or wire that does not compile */
+    BadSchema,            /* schema text or wire that does not compile */
+    BadDomain,            /* RANT_DOMAIN is not a number from 0 to 65535 */
+    BadPrefix             /* RANT_PREFIX or the prefix option holds '@', starts or ends with '/' or is too long */
 };
 
 /* Schema field kinds for reflection, the C wire values. Array and String are fixed,
@@ -137,6 +139,8 @@ static_assert((int)EventKind::Error == detail::RANT_ERROR, "event enum drift");
 static_assert((int)ErrorKind::Waker == detail::RANT_E_WAKER, "error enum drift");
 static_assert((int)ErrorKind::BadAddress == detail::RANT_E_BAD_ADDRESS, "error enum drift");
 static_assert((int)ErrorKind::BadSchema == detail::RANT_E_BAD_SCHEMA, "error enum drift");
+static_assert((int)ErrorKind::BadDomain == detail::RANT_E_BAD_DOMAIN, "error enum drift");
+static_assert((int)ErrorKind::BadPrefix == detail::RANT_E_BAD_PREFIX, "error enum drift");
 static_assert((int)FieldType::Struct == detail::RANT_STRUCT, "field-type enum drift");
 static_assert((int)FieldType::String == detail::RANT_STR, "field-type enum drift");
 static_assert((int)FieldType::Map == detail::RANT_MAP, "field-type enum drift");
@@ -373,7 +377,8 @@ enum class Threading {
 /* A node's options. All zero or empty means every default. */
 struct NodeOptions {
     Threading                threading            = Threading::ServiceThread;
-    uint16_t                 domain               = 0;   /* nodes see only their own domain */
+    uint16_t                 domain               = 0;   /* nodes see only their own domain, 0 takes RANT_DOMAIN */
+    std::string              prefix;                     /* goes with '/' in front of every name, inside RANT_PREFIX */
     uint16_t                 max_topics           = 8;   /* topic slots, a function uses 2, a task 3 */
     bool                     disable_shm          = false;   /* same host peers use UDP too */
     bool                     fetch_details        = false;   /* fetch every peer topic's schema */
@@ -2734,6 +2739,7 @@ public:
         detail::RantNodeOpts co;
         std::memset(&co, 0, sizeof co);
         co.domain        = o.domain;
+        co.prefix        = o.prefix.empty() ? nullptr : o.prefix.c_str();   /* copied at open */
         co.max_topics    = o.max_topics;
         co.disable_shm   = o.disable_shm ? 1 : 0;
         co.fetch_details = o.fetch_details ? 1 : 0;

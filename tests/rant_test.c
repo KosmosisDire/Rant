@@ -7947,6 +7947,96 @@ static void launchname_checks(void){
     rant_allocator_reset(&a);
 }
 
+/* The launch domain phase: RANT_DOMAIN fills a domain the code left at 0, never one it set,
+ * and a value that is not a u16 refuses the open. */
+static void launchdomain_checks(void){
+    static const char *bad[] = { "70000", "12x", "-1", "0000000000000000000000000000000000001" };
+    RantAllocator a = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *n; char env[16]; size_t i;
+    memset(&o,0,sizeof o); o.net.multicast_interface="127.0.0.1";
+    snprintf(env, sizeof env, "%u", (unsigned)(ST_DOMAIN+39));
+    st_setenv("RANT_DOMAIN", env);
+    n = rant_node_open(&a, "ld", NULL, NULL, &o);
+    ST_CHECK(n && n->domain == ST_DOMAIN+39, "launchdomain: RANT_DOMAIN fills the default domain (%u)",
+             n ? (unsigned)n->domain : 0u);
+    if (n) rant_node_close(n, 0);
+    rant_allocator_reset(&a);
+    o.domain = ST_DOMAIN+40;
+    n = rant_node_open(&a, "ld", NULL, NULL, &o);
+    ST_CHECK(n && n->domain == ST_DOMAIN+40, "launchdomain: a domain set in code stands (%u)",
+             n ? (unsigned)n->domain : 0u);
+    if (n) rant_node_close(n, 0);
+    rant_allocator_reset(&a);
+    o.domain = 0;
+    for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
+        RantEvent err;
+        st_setenv("RANT_DOMAIN", bad[i]);
+        n = rant_node_open(&a, "ld", NULL, NULL, &o);
+        err = rant_last_error(NULL);
+        ST_CHECK(n == NULL && err.error == RANT_E_BAD_DOMAIN, "launchdomain: '%s' refuses the open", bad[i]);
+        if (n) rant_node_close(n, 0);
+        rant_allocator_reset(&a);
+    }
+    st_setenv("RANT_DOMAIN", "");
+}
+
+static int st_name_is(RantTopic *t, const char *want){
+    RantString s = i_rant_topic_name(t);
+    return t && s.len == strlen(want) && memcmp(s.data, want, s.len) == 0;
+}
+
+/* The name prefix phase: RANT_PREFIX stacks outside opts.prefix on every create, a leading
+ * '/' skips both, a bad prefix refuses the open and RANT_NODE_NAME_PREFIX names the node. */
+static void prefix_checks(void){
+    static const char *bad_code[] = { "/x", "x/", "a@b", "012345678901234567890123456789012345678901234567890123456789012" };
+    RantAllocator a = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *n; RantTopic *t; RantEntityInfo info; RantEvent err; size_t i;
+    memset(&o,0,sizeof o); o.domain=ST_DOMAIN+41; o.net.multicast_interface="127.0.0.1";
+    o.prefix = "robot1";
+    st_setenv("RANT_PREFIX", "cellA");
+    st_setenv("RANT_NODE_NAME_PREFIX", "lab");
+    n = rant_node_open(&a, "arm", NULL, NULL, &o);
+    ST_CHECK(n != NULL, "prefix: open with RANT_PREFIX and opts.prefix");
+    if (n){
+        ST_CHECK(strcmp(n->name, "lab/arm") == 0, "prefix: RANT_NODE_NAME_PREFIX names the node (%s)", n->name);
+        t = rant_node_create_topic(n, "pose", RANT_PUB_ONLY, NULL, NULL);
+        ST_CHECK(st_name_is(t, "cellA/robot1/pose"), "prefix: a topic goes under env then code");
+        t = rant_node_create_topic(n, "/clock", RANT_SUB_ONLY, NULL, NULL);
+        ST_CHECK(st_name_is(t, "clock"), "prefix: a leading '/' skips the prefix");
+        ST_CHECK(rant_node_create_function_definition(n, "add", NULL, NULL, NULL, NULL, NULL) != NULL
+                 && rant_node_mesh_find(n, RANT_ENTITY_FUNCTION, "cellA/robot1/add", &info) == 1,
+                 "prefix: a function goes under the prefix");
+        ST_CHECK(rant_node_create_variable_definition(n, "speed", NULL, NULL) != NULL
+                 && rant_node_mesh_find(n, RANT_ENTITY_VARIABLE, "cellA/robot1/speed", &info) == 1,
+                 "prefix: a variable goes under the prefix");
+        ST_CHECK(rant_node_create_topic(n, "a@b", RANT_PUB_ONLY, NULL, NULL) == NULL
+                 && rant_last_error(n).error == RANT_E_BAD_NAME, "prefix: '@' in a name is refused");
+        /* 13 prefix bytes leave 51, and a function needs 4 more for its suffix */
+        ST_CHECK(rant_node_create_remote_function(n, "012345678901234567890123456789012345678901234567",
+                                                  NULL, NULL, NULL) == NULL
+                 && rant_last_error(n).error == RANT_E_BAD_NAME, "prefix: a name too long under the prefix is refused");
+        rant_node_close(n, 0);
+    }
+    rant_allocator_reset(&a);
+    st_setenv("RANT_PREFIX", ""); st_setenv("RANT_NODE_NAME_PREFIX", "");
+    for (i = 0; i < sizeof bad_code / sizeof bad_code[0]; i++){
+        o.prefix = bad_code[i];
+        n = rant_node_open(&a, "arm", NULL, NULL, &o);
+        err = rant_last_error(NULL);
+        ST_CHECK(n == NULL && err.error == RANT_E_BAD_PREFIX, "prefix: '%s' refuses the open", bad_code[i]);
+        if (n) rant_node_close(n, 0);
+        rant_allocator_reset(&a);
+    }
+    o.prefix = NULL;
+    st_setenv("RANT_PREFIX", "/cellA");
+    n = rant_node_open(&a, "arm", NULL, NULL, &o);
+    err = rant_last_error(NULL);
+    ST_CHECK(n == NULL && err.error == RANT_E_BAD_PREFIX, "prefix: a bad RANT_PREFIX refuses the open");
+    if (n) rant_node_close(n, 0);
+    rant_allocator_reset(&a);
+    st_setenv("RANT_PREFIX", "");
+}
+
 /* The source timestamp phase: every message carries the writer's wall clock unless the
  * topic opts out. Delivery, opt out, replay, the queued path and the patterns are covered. */
 #define TS_CH_PLAIN  0   /* reliable, catch_up 2: the stamp + the late-joiner replay */
@@ -8858,6 +8948,8 @@ static int selftest_main(void){
     nat_checks();                 /* 19f2b. a unicast only node behind an outbound only NAT */
     selfip_checks();              /* 19f3. stating our own locator (self_ip / advertise_port) */
     launchname_checks();          /* 19f4. a launcher names the node through RANT_NODE_NAME */
+    launchdomain_checks();        /* 19f5. RANT_DOMAIN fills a domain the code left at 0 */
+    prefix_checks();              /* 19f6. the name prefix and the node name prefix */
     ts_checks();                  /* 19g. the source timestamp: stamp, opt out, replay, queue */
 #ifdef RANT_THREADS
     threaded_checks();            /* 20 to 24. service thread, flow control, unsent guard, waker */

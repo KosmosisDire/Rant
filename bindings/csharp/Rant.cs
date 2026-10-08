@@ -132,7 +132,12 @@ namespace Rant
         /// <summary>A create was refused at this moment: from a handler, or the table is full.</summary>
         State,
         /// <summary>A schema text or wire was refused: SchemaDetail says why and where.</summary>
-        BadSchema
+        BadSchema,
+        /// <summary>RANT_DOMAIN is not a number from 0 to 65535, so the open was refused.</summary>
+        BadDomain,
+        /// <summary>RANT_PREFIX or Prefix holds '@', starts or ends with '/' or is too long, so
+        /// the open was refused.</summary>
+        BadPrefix
     }
 
     /// <summary>A schema field's kind, valued as its wire kind byte.</summary>
@@ -329,6 +334,7 @@ namespace Rant
         public RantNodeNet net;
         public RantNodeDiscovery discovery;
         public uint event_queue_bytes;
+        public IntPtr prefix;                  // copied at open
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -983,8 +989,11 @@ namespace Rant
     /// C default. <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/node.md">docs/node.md</see> and <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/discovery.md">docs/discovery.md</see> explain each.</summary>
     public sealed class NodeOptions
     {
-        /// <summary>Nodes only see peers on the same domain.</summary>
+        /// <summary>Nodes only see peers on the same domain. 0 takes RANT_DOMAIN.</summary>
         public ushort Domain;
+        /// <summary>Goes with '/' in front of every name this node creates, inside RANT_PREFIX.
+        /// A name starting with '/' skips it.</summary>
+        public string Prefix;
         /// <summary>Topics this node may create, 0 = 8.</summary>
         public ushort MaxTopics;
         /// <summary>Never use the same host shared memory path.</summary>
@@ -2409,6 +2418,8 @@ namespace Rant
             // the group/interface strings, which the wrapper keeps for the node's life)
             IntPtr selfIpPtr = Codec.CStrPtr(o.SelfIp);
             co.net.self_ip = selfIpPtr;
+            IntPtr prefixPtr = Codec.CStrPtr(o.Prefix);     // copied by open, freed below
+            co.prefix = prefixPtr;
             co.net.advertise_port = o.AdvertisePort;
             co.net.fragment_size = o.FragmentSize;
             co.net.recv_buffer_bytes = o.RecvBufferBytes;
@@ -2422,6 +2433,7 @@ namespace Rant
             IntPtr h = Native.rant_node_open(ref _alloc, cname, s_onMsg, s_onEvt, ref co);
             if (seedBlock != IntPtr.Zero) Marshal.FreeHGlobal(seedBlock);
             Codec.FreeCStr(selfIpPtr);
+            Codec.FreeCStr(prefixPtr);
 
             if (h == IntPtr.Zero)
             {

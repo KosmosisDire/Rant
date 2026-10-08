@@ -30,6 +30,7 @@ rant::Node node("robot", { .domain = 7 });
 ```
 
 - The name and the options are both optional. Options left at zero use the defaults.
+  `NodeOptions` mirrors docs/getting-started.md's node options, `prefix` included.
 - `on_event(handler)` gets peer, loss and error events. With no handler, errors print
   to stderr.
 - `settle()` waits until discovery is done. Call it after creating your handles.

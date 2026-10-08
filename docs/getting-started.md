@@ -44,8 +44,36 @@ The node name is a human readable label. Pass `NULL` for an auto generated
 message as `publisher_name`, whose `.data` is never NULL (`unknown-peer` when missing).
 Names are capped at `RANT_NODE_NAME_MAX` (32) bytes.
 
-A launcher names the node instead when it sets the environment variable `RANT_NODE_NAME`,
-which replaces the name the code passes. The `rant` CLI sets it for every node it starts.
+## Environment
+
+| variable | effect |
+|---|---|
+| `RANT_NODE_NAME` | replaces the node name the code passes. The `rant` CLI sets it for every node it starts |
+| `RANT_NODE_NAME_PREFIX` | goes with `/` in front of the node name, cut to the 32 byte cap |
+| `RANT_DOMAIN` | the domain for a node whose code leaves `domain` at 0. Not a number from 0 to 65535 refuses the open with `RANT_E_BAD_DOMAIN` |
+| `RANT_PREFIX` | the outer name prefix, in front of `opts.prefix` (see Name prefix) |
+
+All are read once at `rant_node_open`. Set `RANT_DOMAIN` machine wide, or per workspace,
+to put every node there on one domain.
+
+## Name prefix
+
+Every name a node creates (topics, functions, tasks, variables) goes under its prefix:
+`RANT_PREFIX`, then `opts.prefix`, then the name, joined with `/`.
+
+```c
+/* RANT_PREFIX=cellA */
+RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){ .prefix = "robot1" });
+rant_node_create_topic(n, "pose", RANT_PUB_ONLY, NULL, NULL);    /* cellA/robot1/pose */
+rant_node_create_topic(n, "/clock", RANT_SUB_ONLY, NULL, NULL);  /* clock */
+```
+
+- A name starting with `/` skips the prefix, to reach a shared name or another prefix.
+- The full name counts toward `RANT_TOPIC_NAME_MAX` (64). Too long fires `RANT_E_BAD_NAME`.
+- A prefix holding `@`, starting or ending with `/`, or too long refuses the open with
+  `RANT_E_BAD_PREFIX`.
+- Messages, reflection and `rant_node_mesh_find` use full names, with no prefix applied.
+- Node names are not prefixed. `RANT_NODE_NAME_PREFIX` does that separately.
 
 ## Memory
 
@@ -59,7 +87,8 @@ event, never a silent truncation. spec/allocation.md lists what is allocated whe
 
 | option | meaning |
 |---|---|
-| `domain` | logical network selector, nodes only see their own domain |
+| `domain` | logical network selector, nodes only see their own domain. 0 takes `RANT_DOMAIN` |
+| `prefix` | goes with `/` in front of every name this node creates, inside `RANT_PREFIX` (see Name prefix) |
 | `max_topics` | how many topics can be created (default 8) |
 | `disable_shm` | force the wire path even to a same host peer |
 | `match_wait_ms` | first send match wait bound, 0 = 1 s, negative = off (docs/topics.md) |

@@ -591,7 +591,7 @@ static void i_rant_func_drop_parked(RantFunction *fn){
 }
 
 /* a leading '@' is reserved for the @rant/ builtins, refused in every public constructor */
-static int i_rant_pat_reserved(const char *name){ return name && name[0] == '@'; }
+#define RANT__PAT_SUFFIX 4u     /* "@req", "@rsp", "@prg" and "@set" */
 
 /* Creates the channels for a function or task. mode 1 = a definition, 0 = a remote, 2 =
  * both sides in one handle (the @rant/meta shape). topts non NULL = the task shape. */
@@ -700,14 +700,18 @@ static RantFunction *i_rant_function_new(RantNode *n, const char *name,
 RantFunction *rant_node_create_function_definition(RantNode *n, const char *name,
                     const RantSchema *req_schema, const RantSchema *rsp_schema,
                     RantRequestFn on_request, void *user, const RantFunctionOpts *opts){
-    if (i_rant_pat_reserved(name)) return NULL;
-    return i_rant_function_new(n, name, req_schema, rsp_schema, on_request, user, opts, 1, NULL, NULL);
+    char full[RANT_TOPIC_NAME_MAX + 1];
+    const char *mesh_name = i_rant_node_mesh_name(n, name, RANT__PAT_SUFFIX, full);
+    if (!mesh_name) return NULL;
+    return i_rant_function_new(n, mesh_name, req_schema, rsp_schema, on_request, user, opts, 1, NULL, NULL);
 }
 RantFunction *rant_node_create_remote_function(RantNode *n, const char *name,
                     const RantSchema *req_schema, const RantSchema *rsp_schema,
                     const RantFunctionOpts *opts){
-    if (i_rant_pat_reserved(name)) return NULL;
-    return i_rant_function_new(n, name, req_schema, rsp_schema, NULL, NULL, opts, 0, NULL, NULL);
+    char full[RANT_TOPIC_NAME_MAX + 1];
+    const char *mesh_name = i_rant_node_mesh_name(n, name, RANT__PAT_SUFFIX, full);
+    if (!mesh_name) return NULL;
+    return i_rant_function_new(n, mesh_name, req_schema, rsp_schema, NULL, NULL, opts, 0, NULL, NULL);
 }
 
 /* a pattern channel's entity name, the topic name minus its suffix, in a static scratch */
@@ -737,21 +741,23 @@ RantFunction *rant_node_create_task_definition(RantNode *n, const char *name,
                     const RantSchema *req_schema, const RantSchema *prg_schema,
                     const RantSchema *rsp_schema, RantRequestFn on_request, void *user,
                     const RantTaskOpts *opts){
-    RantTaskOpts to; RantFunctionOpts fo;
-    if (i_rant_pat_reserved(name)) return NULL;
+    RantTaskOpts to; RantFunctionOpts fo; char full[RANT_TOPIC_NAME_MAX + 1];
+    const char *mesh_name = i_rant_node_mesh_name(n, name, RANT__PAT_SUFFIX, full);
+    if (!mesh_name) return NULL;
     memset(&to, 0, sizeof to); if (opts) to = *opts;
     fo = i_rant_task_fn_opts(&to);
-    return i_rant_function_new(n, name, req_schema, rsp_schema, on_request, user, &fo, 1,
+    return i_rant_function_new(n, mesh_name, req_schema, rsp_schema, on_request, user, &fo, 1,
                                prg_schema, &to);
 }
 RantFunction *rant_node_create_remote_task(RantNode *n, const char *name,
                     const RantSchema *req_schema, const RantSchema *prg_schema,
                     const RantSchema *rsp_schema, const RantTaskOpts *opts){
-    RantTaskOpts to; RantFunctionOpts fo;
-    if (i_rant_pat_reserved(name)) return NULL;
+    RantTaskOpts to; RantFunctionOpts fo; char full[RANT_TOPIC_NAME_MAX + 1];
+    const char *mesh_name = i_rant_node_mesh_name(n, name, RANT__PAT_SUFFIX, full);
+    if (!mesh_name) return NULL;
     memset(&to, 0, sizeof to); if (opts) to = *opts;
     fo = i_rant_task_fn_opts(&to);
-    return i_rant_function_new(n, name, req_schema, rsp_schema, NULL, NULL, &fo, 0,
+    return i_rant_function_new(n, mesh_name, req_schema, rsp_schema, NULL, NULL, &fo, 0,
                                prg_schema, &to);
 }
 
@@ -1473,13 +1479,17 @@ static RantVariable *i_rant_variable_new(RantNode *n, const char *name, const Ra
 
 RantVariable *rant_node_create_variable_definition(RantNode *n, const char *name,
                               const RantSchema *schema, const RantVariableOpts *opts){
-    if (i_rant_pat_reserved(name)) return NULL;
-    return i_rant_variable_new(n, name, schema, opts, 1);
+    char full[RANT_TOPIC_NAME_MAX + 1];
+    const char *mesh_name = i_rant_node_mesh_name(n, name, RANT__PAT_SUFFIX, full);
+    if (!mesh_name) return NULL;
+    return i_rant_variable_new(n, mesh_name, schema, opts, 1);
 }
 RantVariable *rant_node_create_remote_variable(RantNode *n, const char *name,
                               const RantSchema *schema, const RantVariableOpts *opts){
-    if (i_rant_pat_reserved(name)) return NULL;
-    return i_rant_variable_new(n, name, schema, opts, 0);
+    char full[RANT_TOPIC_NAME_MAX + 1];
+    const char *mesh_name = i_rant_node_mesh_name(n, name, RANT__PAT_SUFFIX, full);
+    if (!mesh_name) return NULL;
+    return i_rant_variable_new(n, mesh_name, schema, opts, 0);
 }
 
 int rant_variable_get(RantVariable *var, RantBytes *out){

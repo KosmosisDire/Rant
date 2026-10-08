@@ -18,8 +18,10 @@ namespace Rant
     {
         [Tooltip("Human-readable node name, synced to peers; empty = auto node-XXXXXXXX.")]
         [SerializeField] private string nodeName = "";
-        [Tooltip("Discovery domain: nodes only see peers on the same domain.")]
+        [Tooltip("Discovery domain: nodes only see peers on the same domain. 0 takes RANT_DOMAIN.")]
         [SerializeField] private int domain = 0;
+        [Tooltip("Goes with '/' in front of every name this node creates, inside RANT_PREFIX. A name starting with '/' skips it. Empty = none.")]
+        [SerializeField] private string prefix = "";
         [Tooltip("Max topics this node can create (the core default of 8 is small for a scene of components).")]
         [SerializeField] private int maxTopics = 32;
         [Tooltip("Multihomed hosts (VPN adapters, WSL, docker bridges): this machine's LAN IP, so discovery uses the right interface. Empty = auto probe.")]
@@ -43,6 +45,7 @@ namespace Rant
         private readonly Dictionary<string, RantTopicBase> _topics = new Dictionary<string, RantTopicBase>();
         private readonly Dictionary<string, SharedEntry> _shared = new Dictionary<string, SharedEntry>();
         private string _openName; private int _openDomain; private int _openMax; private string _openIf;
+        private string _openPrefix;
 
         /// <summary>The scene's RantNodeUnity (found lazily), or null if none exists.</summary>
         public static RantNodeUnity Main
@@ -271,7 +274,7 @@ namespace Rant
             bool shouldRun = isActiveAndEnabled && s_main == this
                 && (Application.isPlaying || runInEditMode);
             bool changed = _node != null
-                && (_openName != nodeName || _openDomain != domain
+                && (_openName != nodeName || _openDomain != domain || _openPrefix != prefix
                     || _openMax != maxTopics || _openIf != multicastInterface);
             if (_node != null && (!shouldRun || changed)) CloseNativeNode();
             if (_node == null && shouldRun) OpenNativeNode();
@@ -282,6 +285,7 @@ namespace Rant
             var options = new NodeOptions
             {
                 Domain = (ushort)Mathf.Clamp(domain, 0, ushort.MaxValue),
+                Prefix = string.IsNullOrEmpty(prefix) ? null : prefix,
                 MaxTopics = (ushort)Mathf.Clamp(maxTopics, 0, ushort.MaxValue),
                 // A frame must never block: publishing into an unresolved match returns at
                 // once and topic.Ready is the check (docs/topics.md).
@@ -301,6 +305,7 @@ namespace Rant
             }
             _node.OnEvent += OnNodeEvent;
             _openName = nodeName; _openDomain = domain; _openMax = maxTopics; _openIf = multicastInterface;
+            _openPrefix = prefix;
             foreach (RantTopicBase ch in _topics.Values) ch.OnNodeOpened();
             foreach (KeyValuePair<string, SharedEntry> kv in _shared)
             {

@@ -224,6 +224,28 @@ one summary line. The ring is allocated on the first error, so a healthy node ne
 for it. `RANT_E_SEND` carries the datagram size and the first submessage's topic, so a
 starved link (an ESP32 out of WiFi buffers reports ENOMEM) says which topic and how big.
 
+## Name prefix
+
+The prefix is built once at open: `RANT_PREFIX` outermost, then `opts.prefix`, joined with
+`/` into `n->prefix`. A launcher can move a whole program under a cell without the program
+knowing, and the program can still group its own names. Each part is checked at open: no
+`@`, no leading or trailing `/`, and room left for a `/` and a one byte name.
+
+Every public create (topic, function, task, variable, both sides) passes its name through
+`i_rant_node_mesh_name` before anything else sees it. Everything below that point, from the
+pattern channels and their `@` suffixes to reflect_from_mesh and the transport identity
+hash, only ever sees the full mesh name, so there is one name per entity. A leading `/` is
+the way out: it is stripped and the prefix is skipped. A name that holds `@`, is empty, or
+will not fit `RANT_TOPIC_NAME_MAX` with its channel suffix fires `RANT_E_BAD_NAME`.
+
+Reflection and `rant_node_mesh_find` take and give full names. They describe the mesh, and
+an observer like the explorer passes back names it read from a walk. Built ins are made
+below the resolver and are never prefixed.
+
+`RANT_NODE_NAME_PREFIX` is separate. It goes with `/` in front of the node name after
+`RANT_NODE_NAME` and the auto name, and the result is cut to `RANT_NODE_NAME_MAX` like any
+node name.
+
 ## Built ins
 
 The builtins ride outside `opts.max_topics` in a block at the top of the reserve, so user

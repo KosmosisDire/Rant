@@ -46,7 +46,8 @@ cannot measure implements nothing. The SHM and THREADS detection blocks are mirr
   /dev/urandom. A failure returns 0 and the caller falls back to hostname, pid and time.
   On ESP the hostname is `esp-` plus the factory MAC, since lwIP has no gethostname.
 - Environment. `i_rant_plat_env` reads one variable, a launcher input such as
-  `RANT_NODE_NAME`. A platform with no environment, like a MotoPlus kernel module, returns 0.
+  `RANT_NODE_NAME` or `RANT_DOMAIN`. It returns the full length like snprintf, so a caller
+  sees a value cut short. A platform with no environment, like a MotoPlus kernel module, returns 0.
 - Heap. `i_rant_plat_realloc` is the single heap dependency (ptr NULL allocates, size 0
   frees). A target with a custom heap overrides just this.
 - Process stats are per process, not per node, so several nodes in one process report the

@@ -38,6 +38,8 @@ typedef struct {
     RantNodeDiscovery     discovery;
     uint32_t              event_queue_bytes; /* the event ring cap once rant_node_set_event_queue is
                                                 called, 0 = 64 KB. Overflow drops the oldest event */
+    const char           *prefix;        /* goes with '/' in front of every name this node creates,
+                                            inside RANT_PREFIX. NULL = none. docs/node.md */
 } RantNodeOpts;
 
 typedef struct RantQueue RantQueue;       /* a callback queue, owned by the node, freed at close */
@@ -303,6 +305,10 @@ RantTopic *i_rant_node_create_pattern_topic(RantNode *n, const char *name, RantR
                               const RantSchema *schema, const RantTopicOpts *opts,
                               uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
                               i_RantSysMsgFn on_msg, void *on_msg_user);
+/* The mesh name for a name the app passed: the node's prefix and '/' in front, or the rest
+ * after a leading '/'. NULL with RANT_E_BAD_NAME when it is empty, holds '@' or will not fit
+ * with room bytes of channel suffix. buf holds RANT_TOPIC_NAME_MAX + 1. */
+const char *i_rant_node_mesh_name(RantNode *n, const char *name, size_t room, char *buf);
 /* Re types a live pattern channel in place, the engine of rant_topic_refresh. Lock not held. */
 int  i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reliability);
 /* The reflect_from_mesh pick for one channel (which: 0 primary, 1 rsp, 2 prg). */

@@ -122,6 +122,8 @@ class ErrorKind(_pyenum.IntEnum):
     BAD_NAME = 23        # a create refused: the name is empty, too long or carries '@'
     STATE = 24           # a create refused from a callback, or the topic reserve is full
     BAD_SCHEMA = 25      # a create refused: the schema failed to parse
+    BAD_DOMAIN = 26      # an open refused: RANT_DOMAIN is not a number from 0 to 65535
+    BAD_PREFIX = 27      # an open refused: RANT_PREFIX or prefix holds '@', starts or ends with '/' or is too long
 
 
 class PeerLiveness(_pyenum.IntEnum):
@@ -1814,7 +1816,7 @@ class Node:
                  "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock", "_name",
                  "_threading", "_queue", "_pump", "__weakref__")
 
-    def __init__(self, name=None, *, on_event=None, domain=0,
+    def __init__(self, name=None, *, on_event=None, domain=0, prefix=None,
                  multicast_interface=None, max_topics=0, match_wait=0.0, disable_shm=False,
                  fetch_details=False, disable_logs=False, disable_meta=False,
                  disable_error_logs=False, data_port=0, discovery_group=None,
@@ -1856,6 +1858,7 @@ class Node:
         co = _c.RantNodeOpts()
         _c.memset(_c.byref(co), 0, _c.sizeof(co))
         co.domain = domain
+        co.prefix = prefix.encode("utf-8") if prefix else None   # copied by open
         co.max_topics = max_topics
         co.disable_shm = 1 if disable_shm else 0
         co.fetch_details = 1 if fetch_details else 0

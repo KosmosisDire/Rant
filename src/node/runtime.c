@@ -183,6 +183,8 @@ struct RantNode {
     uint16_t     *snap_pend; uint16_t snap_pend_cap;   /* per topic pending counts, one walk */
     char          name[RANT_NODE_NAME_MAX + 1];     /* our advertised node name */
     uint8_t       name_len;
+    char          prefix[RANT_TOPIC_NAME_MAX + 1];  /* RANT_PREFIX then opts.prefix, '/' joined */
+    uint8_t       prefix_len;
     void          *arena;      /* the control structs block, relocated on grow */
     /* the node's pool, copied from the caller's allocator at open and reset on close */
     RantAllocator pool;
@@ -975,21 +977,51 @@ RantAllocator rant_allocator_heap(uint32_t page_size){
     return rant_allocator_dynamic(i_rant_plat_realloc, page_size);
 }
 
+/* Appends one prefix part behind a '/'. 0 when it holds '@', starts or ends with '/', or the
+ * whole leaves no room for a '/' and a one byte name. */
+static int i_rant_prefix_join(char *out, size_t *len, const char *part, size_t part_len){
+    size_t i, at = *len ? *len + 1u : 0u;
+    if (!part_len) return 1;
+    if (part[0] == '/' || part[part_len - 1] == '/') return 0;
+    for (i = 0; i < part_len; i++) if (part[i] == '@') return 0;
+    if (at + part_len + 2u > RANT_TOPIC_NAME_MAX) return 0;
+    if (*len) out[*len] = '/';
+    memcpy(out + at, part, part_len);
+    *len = at + part_len; out[*len] = '\0';
+    return 1;
+}
+
 RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_message, RantEventFn on_event, const RantNodeOpts *opts){
     RantNodeOpts o; i_RantDiscoveryCoreConfig dc; i_RantTransportConfig tc; i_RantNodeBlocks blocks;
     uint16_t max_peers, max_topics, user_topics;
     uint8_t *base; void *arena; size_t need; RantAllocator pool;
     RantNode *n; i_RantSock fd; uint16_t local_port;
     char node_name[RANT_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;
-    char launch_name[RANT_NODE_NAME_MAX + 1];
+    char launch_name[RANT_NODE_NAME_MAX + 1], launch_domain[32]; size_t len;
+    char launch_prefix[RANT_TOPIC_NAME_MAX + 1], prefix[RANT_TOPIC_NAME_MAX + 1]; size_t prefix_len = 0;
 
     /* a live reference, so a linker that drops unreferenced data keeps the magic */
     (void)*(const volatile char *)i_rant_magic;
     /* a launcher names the instance, so the code cannot. spec/discovery.md, Node names */
-    if (i_rant_plat_env("RANT_NODE_NAME", launch_name, sizeof launch_name)) name = launch_name;
+    if (i_rant_plat_env("RANT_NODE_NAME", launch_name, sizeof launch_name) && launch_name[0]) name = launch_name;
 
     memset(&o, 0, sizeof o);
     if (opts) o = *opts;
+    /* the machine or workspace domain, for code that left the default. spec/discovery.md, Domains */
+    if (!o.domain && (len = i_rant_plat_env("RANT_DOMAIN", launch_domain, sizeof launch_domain))){
+        uint32_t d = 0; size_t i;
+        for (i = 0; launch_domain[i] >= '0' && launch_domain[i] <= '9' && d <= 65535u; i++)
+            d = d*10u + (uint32_t)(launch_domain[i] - '0');
+        if (launch_domain[i] || d > 65535u || len >= sizeof launch_domain)
+            return i_rant_node_open_fail(on_event, o.user_data, RANT_E_BAD_DOMAIN, 0, 0, 0);
+        o.domain = (uint16_t)d;
+    }
+    /* the launcher's prefix outside the code's own. spec/node.md, Name prefix */
+    prefix[0] = '\0';
+    len = i_rant_plat_env("RANT_PREFIX", launch_prefix, sizeof launch_prefix);
+    if (len >= sizeof launch_prefix || !i_rant_prefix_join(prefix, &prefix_len, launch_prefix, len)
+        || (o.prefix && !i_rant_prefix_join(prefix, &prefix_len, o.prefix, strlen(o.prefix))))
+        return i_rant_node_open_fail(on_event, o.user_data, RANT_E_BAD_PREFIX, 0, 0, 0);
     /* a node has no memory of its own, so no allocator is the same fault as one that
        returns NULL. Reported, never a bare NULL with an empty last error. */
     if (!alloc) return i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, sizeof *n);
@@ -1059,6 +1091,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     }
 #endif
     n->domain = o.domain;
+    memcpy(n->prefix, prefix, prefix_len + 1u); n->prefix_len = (uint8_t)prefix_len;
     n->net = o.net;
     n->announce_us = o.discovery.announce_interval_us ? o.discovery.announce_interval_us
                                                       : RANT_ANNOUNCE_INTERVAL_US;
@@ -1109,6 +1142,15 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
 
     /* the sans-IO node core, bound to discovery's peer table below once it exists */
     node_name_len = i_rant_discovery_default_name(node_name, sizeof node_name, name);
+    {   /* RANT_NODE_NAME_PREFIX groups node names, cut to the cap like any node name */
+        char np[RANT_NODE_NAME_MAX + 1], joined[2u*RANT_NODE_NAME_MAX + 2u]; size_t pl;
+        if (i_rant_plat_env("RANT_NODE_NAME_PREFIX", np, sizeof np) && np[0]){
+            pl = strlen(np);
+            memcpy(joined, np, pl); joined[pl] = '/';
+            memcpy(joined + pl + 1u, node_name, node_name_len); joined[pl + 1u + node_name_len] = '\0';
+            node_name_len = i_rant_discovery_default_name(node_name, sizeof node_name, joined);
+        }
+    }
     memcpy(n->name, node_name, node_name_len); n->name[node_name_len] = '\0';   /* snapshot copy */
     n->name_len = node_name_len;
     {   i_RantNodeCoreConfig cc;
@@ -1477,9 +1519,29 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
     return h;
 }
 
+const char *i_rant_node_mesh_name(RantNode *n, const char *name, size_t room, char *buf){
+    const char *rel; size_t at, nl; int acquired;
+    if (!n || !name) return NULL;
+    rel = name[0] == '/' ? name + 1 : name;
+    at = (rel == name && n->prefix_len) ? (size_t)n->prefix_len + 1u : 0u;
+    for (nl = 0; rel[nl] && rel[nl] != '@' && at + nl + room < RANT_TOPIC_NAME_MAX; nl++) {}
+    if (nl == 0 || rel[nl]){     /* empty, an '@' or too long */
+        acquired = i_rant_node_lock(n);
+        i_rant_node_create_fail(n, RANT_E_BAD_NAME, name, 0, acquired);
+        i_rant_node_unlock(n, acquired);
+        return NULL;
+    }
+    if (at){ memcpy(buf, n->prefix, n->prefix_len); buf[n->prefix_len] = '/'; }
+    memcpy(buf + at, rel, nl); buf[at + nl] = '\0';
+    return buf;
+}
+
 RantTopic *rant_node_create_topic(RantNode *n, const char *name, RantRole role,
                                       const RantSchema *schema, const RantTopicOpts *opts){
-    return i_rant_node_create_impl(n, name, role, schema, opts, RANT_KIND_TOPIC, 0, 0, 0, NULL, NULL, 0);
+    char full[RANT_TOPIC_NAME_MAX + 1];
+    const char *mesh_name = i_rant_node_mesh_name(n, name, 0, full);
+    if (!mesh_name) return NULL;
+    return i_rant_node_create_impl(n, mesh_name, role, schema, opts, RANT_KIND_TOPIC, 0, 0, 0, NULL, NULL, 0);
 }
 
 RantTopic *i_rant_node_create_pattern_topic(RantNode *n, const char *name, RantRole role,

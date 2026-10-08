@@ -144,6 +144,10 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
         }
         p=i_rant_event_append_str(p,end,"bad-schema "); p=i_rant_event_append_topic(p,end,ev);
         p=i_rant_event_append_str(p,end,": the schema failed to parse, create refused"); break;
+    case RANT_E_BAD_DOMAIN:
+        p=i_rant_event_append_str(p,end,"bad-domain: RANT_DOMAIN is not a number from 0 to 65535, open refused"); break;
+    case RANT_E_BAD_PREFIX:
+        p=i_rant_event_append_str(p,end,"bad-prefix: RANT_PREFIX or opts.prefix holds '@', starts or ends with '/' or is too long, open refused"); break;
     case RANT_E_NONE:
         p=i_rant_event_append_str(p,end,"no error"); break;
     default:

@@ -207,4 +207,15 @@ there is no entropy source.
 `RANT_NODE_NAME` in the environment, read through `i_rant_plat_env` at open, replaces the
 name the code passed, for every node the process opens. It is a launcher input, never an
 API parameter, so a launcher such as the `rant` CLI decides the instance's name and the
-code cannot.
+code cannot. `RANT_NODE_NAME_PREFIX` then goes with `/` in front of it (spec/node.md, Name
+prefix).
+
+## Domains
+
+The u16 domain rides every announce and every uDTL header, and a datagram from another
+domain is dropped. `RANT_DOMAIN` in the environment, read through `i_rant_plat_env` at
+open, sets the domain only when the code left `RantNodeOpts.domain` at 0. So a machine or a
+workspace puts every node on one domain, while a tool that picks its domain on purpose,
+like the selftest or the explorer, keeps it. A value that is not a decimal number from 0
+to 65535 refuses the open with `RANT_E_BAD_DOMAIN`, never a silent fall back to 0. An
+empty value counts as unset.
