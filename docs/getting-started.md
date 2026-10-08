@@ -44,6 +44,9 @@ The node name is a human readable label. Pass `NULL` for an auto generated
 message as `publisher_name`, whose `.data` is never NULL (`unknown-peer` when missing).
 Names are capped at `RANT_NODE_NAME_MAX` (32) bytes.
 
+A launcher names the node instead when it sets the environment variable `RANT_NODE_NAME`,
+which replaces the name the code passes. The `rant` CLI sets it for every node it starts.
+
 ## Memory
 
 A `RantAllocator` is the one memory model at every layer. `rant_allocator_dynamic` takes

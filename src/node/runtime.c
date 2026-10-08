@@ -981,9 +981,12 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     uint8_t *base; void *arena; size_t need; RantAllocator pool;
     RantNode *n; i_RantSock fd; uint16_t local_port;
     char node_name[RANT_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;
+    char launch_name[RANT_NODE_NAME_MAX + 1];
 
     /* a live reference, so a linker that drops unreferenced data keeps the magic */
     (void)*(const volatile char *)i_rant_magic;
+    /* a launcher names the instance, so the code cannot. spec/discovery.md, Node names */
+    if (i_rant_plat_env("RANT_NODE_NAME", launch_name, sizeof launch_name)) name = launch_name;
 
     memset(&o, 0, sizeof o);
     if (opts) o = *opts;

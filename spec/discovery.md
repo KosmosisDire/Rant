@@ -204,3 +204,7 @@ The node name rides the announce blob once, never per message, capped at
 `RANT_NODE_NAME_MAX` (32) bytes. `RantMsg.publisher_name` is a view into discovery state.
 A NULL or empty name becomes `node-` plus eight random hex digits, from the pid when
 there is no entropy source.
+`RANT_NODE_NAME` in the environment, read through `i_rant_plat_env` at open, replaces the
+name the code passed, for every node the process opens. It is a launcher input, never an
+API parameter, so a launcher such as the `rant` CLI decides the instance's name and the
+code cannot.

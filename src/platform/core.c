@@ -199,6 +199,30 @@ uint64_t i_rant_plat_pid(void){
 #endif
 }
 
+size_t i_rant_plat_env(const char *name, char *buf, size_t cap){
+    size_t n = 0;
+    if (!name || !buf || cap == 0) return 0;
+    buf[0] = 0;
+#if defined(_WIN32)
+    {   /* the wide call, so a name outside the ANSI code page arrives as UTF-8 */
+        wchar_t wname[64], wval[256]; DWORD len; int i;
+        for (i = 0; name[i] && i < 63; i++) wname[i] = (wchar_t)(unsigned char)name[i];
+        wname[i] = 0;
+        len = GetEnvironmentVariableW(wname, wval, 256);
+        if (len == 0 || len >= 256) return 0;
+        i = WideCharToMultiByte(CP_UTF8, 0, wval, (int)len, buf, (int)(cap - 1), NULL, NULL);
+        n = i > 0 ? (size_t)i : 0;
+    }
+#else
+    {   const char *v = getenv(name);
+        if (!v) return 0;
+        while (v[n] && n + 1 < cap){ buf[n] = v[n]; n++; }
+    }
+#endif
+    buf[n] = 0;
+    return n;
+}
+
 /* process usage and wall clock */
 #ifdef RANT_PROC_STATS
 int i_rant_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes,

@@ -7919,6 +7919,34 @@ static void selfip_checks(void){
     }
 }
 
+/* The launch name phase: RANT_NODE_NAME, set by a launcher such as the rant CLI, names the
+ * node over the name the code passes, and once unset the code's name stands again. */
+static void st_setenv(const char *name, const char *value){
+#ifdef _WIN32
+    _putenv_s(name, value);     /* an empty value removes it */
+#else
+    if (*value) setenv(name, value, 1); else unsetenv(name);
+#endif
+}
+
+static void launchname_checks(void){
+    RantAllocator a = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *n;
+    memset(&o,0,sizeof o); o.domain=ST_DOMAIN+38; o.net.multicast_interface="127.0.0.1";
+    st_setenv("RANT_NODE_NAME", "launched");
+    n = rant_node_open(&a, "from-code", NULL, NULL, &o);
+    ST_CHECK(n && strcmp(n->name, "launched") == 0, "launchname: RANT_NODE_NAME names the node (%s)",
+             n ? n->name : "no node");
+    if (n) rant_node_close(n, 0);
+    rant_allocator_reset(&a);
+    st_setenv("RANT_NODE_NAME", "");
+    n = rant_node_open(&a, "from-code", NULL, NULL, &o);
+    ST_CHECK(n && strcmp(n->name, "from-code") == 0, "launchname: unset, the code's name stands (%s)",
+             n ? n->name : "no node");
+    if (n) rant_node_close(n, 0);
+    rant_allocator_reset(&a);
+}
+
 /* The source timestamp phase: every message carries the writer's wall clock unless the
  * topic opts out. Delivery, opt out, replay, the queued path and the patterns are covered. */
 #define TS_CH_PLAIN  0   /* reliable, catch_up 2: the stamp + the late-joiner replay */
@@ -8829,6 +8857,7 @@ static int selftest_main(void){
     relay_checks();               /* 19f2. unicast-only node relayed into the mesh by a peer */
     nat_checks();                 /* 19f2b. a unicast only node behind an outbound only NAT */
     selfip_checks();              /* 19f3. stating our own locator (self_ip / advertise_port) */
+    launchname_checks();          /* 19f4. a launcher names the node through RANT_NODE_NAME */
     ts_checks();                  /* 19g. the source timestamp: stamp, opt out, replay, queue */
 #ifdef RANT_THREADS
     threaded_checks();            /* 20 to 24. service thread, flow control, unsent guard, waker */

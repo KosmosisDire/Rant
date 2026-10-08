@@ -31,6 +31,9 @@ int      i_rant_plat_random(void *buf, size_t len);
 /* Host identity for the uuid fallback. Returns the bytes written. */
 size_t   i_rant_plat_hostname(char *buf, size_t cap);
 uint64_t i_rant_plat_pid(void);
+/* Copies an environment variable into buf, NUL terminated and cut to fit. Returns the bytes
+ * written, 0 when it is unset or empty or the platform has no environment. */
+size_t   i_rant_plat_env(const char *name, char *buf, size_t cap);
 /* Wall clock microseconds since the Unix epoch, for timestamps compared across hosts. */
 uint64_t i_rant_plat_wall_us(void);
 
