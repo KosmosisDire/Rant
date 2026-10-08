@@ -75,10 +75,13 @@ Rant as a subproject or finds the installed package.
 - The packer reads `VERSION` too and writes `#define RANT_VERSION` at the top of
   `dist/rant.h`, so a consumer that compiles the header gets the version with no build
   define. `VERSION` is a dependency of the pack command, so a bump re packs.
-- The magic is `i_rant_magic` in `node/runtime.c`: a leading NUL, `RANT-MAGIC v`, the
-  version, then one space separated word per feature compiled in (`threads`, `shm`,
-  `proc_stats`, `patterns`, `stdtypes`, `plat_custom`) and the closing NUL. Words are only
-  ever appended, so a reader splits on spaces and ignores words it does not know.
+- The magic is `i_rant_magic` in `node/runtime.c`: a leading NUL, `RANT-MAGIC `, the
+  format number, then the closing NUL. `RANT-MAGIC ` and the decimal format number after
+  it never change shape, so a reader parses the number first and stops at one it does
+  not know. Format 1 continues with ` v` and the version, then one space separated word
+  per feature compiled in (`threads`, `shm`, `proc_stats`, `patterns`, `stdtypes`,
+  `plat_custom`). A new feature word keeps the format and a reader ignores words it does
+  not know. Any other change bumps `RANT_MAGIC_FORMAT`.
   `rant_node_open` reads one byte of it through a volatile pointer: a static link with
   `--gc-sections` or `/OPT:REF` drops unreferenced data, and every Rant user opens a node.
   A tool that searches for the magic must not carry the whole pattern itself, or it

@@ -109,12 +109,13 @@ so its diagnostic `sendto` and `recvfrom` wrappers can intercept the transport's
   `RANT_VERSION` is the header's. They differ only when a header meets another build's
   shared library.
 - Bindings: `rant::version()` in C++, `RantNode.Version` in C#, `rant.version()` in Python.
-- Every binary that opens a node carries the bytes `\0RANT-MAGIC v<version>` followed by
-  its features and a NUL, for example `RANT-MAGIC v0.0.17 threads shm proc_stats patterns
-  stdtypes`. A byte search finds Rant in any executable, library or firmware image:
+- Every binary that opens a node carries the bytes `\0RANT-MAGIC <format> v<version>`
+  followed by its features and a NUL, for example `RANT-MAGIC 1 v0.0.17 threads shm
+  proc_stats patterns stdtypes`. Read the format number first and stop at one you do not
+  know. A byte search finds Rant in any executable, library or firmware image:
 
 ```sh
-grep -a -o "RANT-MAGIC v[ -~]*" app.exe
+grep -a -o "RANT-MAGIC [ -~]*" app.exe
 ```
 
 ## Testing

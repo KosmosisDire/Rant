@@ -960,8 +960,11 @@ static void i_rant_node_logs_open(RantNode *n);       /* defined with the log AP
   #define RANT_MAGIC_PLAT ""
 #endif
 
+/* The magic's layout version. Bump it on any change but a new feature word. */
+#define RANT_MAGIC_FORMAT "1"
+
 /* Marks every binary that links Rant, found by a byte search. spec/build.md has the format. */
-static const char i_rant_magic[] = "\0RANT-MAGIC v" RANT_VERSION RANT_MAGIC_THREADS
+static const char i_rant_magic[] = "\0RANT-MAGIC " RANT_MAGIC_FORMAT " v" RANT_VERSION RANT_MAGIC_THREADS
     RANT_MAGIC_SHM RANT_MAGIC_PROC_STATS RANT_MAGIC_PATTERNS RANT_MAGIC_STDTYPES RANT_MAGIC_PLAT;
 
 const char *rant_version(void){
