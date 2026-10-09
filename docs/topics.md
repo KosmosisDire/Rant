@@ -6,6 +6,10 @@ creation order, which is `RantMsg.topic_index` on delivery. Peers match on the n
 matter how each ordered its topics. `opts.max_topics` (default 8) bounds how many you can
 create.
 
+Names match without regard to ASCII case: `armPose` and `ArmPose` are one topic, and the
+same goes for functions, tasks and variables. Each node shows the spelling it was created
+with.
+
 ```c
 RantTopic *t = rant_node_create_topic(n, "pose", RANT_PUBSUB, schema,
                    &(RantTopicOpts){ .qos = { .reliability = RANT_RELIABLE, .keep_last = 16 } });

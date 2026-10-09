@@ -432,6 +432,11 @@ class _Spec:
         self.attrs = {f.wire: f.name for f in fields}   # the attribute a wire name reads
 
 
+def _name_key(name):
+    """An entity name as matching sees it: ASCII case folded, as in the C core."""
+    return name.encode("utf-8").lower()
+
+
 def _wire_name(name, as_type=False):
     """The wire spelling of a member name, or of a type name with as_type, the library's
     rule (docs/stdtypes.md)."""
@@ -1841,7 +1846,7 @@ class Node:
         self._on_log = None
         self._log_bound = False
         self._topic_specs = {}
-        self._topics_by_name = {}   # name to _TopicRec
+        self._topics_by_name = {}   # folded name to _TopicRec
         self._create_lock = _threading.Lock()
         self._sub_handlers = {}     # topic index to [Message handlers]
         self._pattern_boxes = []    # pattern handler box ids (reaped at close)
@@ -2013,7 +2018,7 @@ class Node:
         with self._create_lock:
             if not self._h:
                 raise Error("node is closed")
-            rec = self._topics_by_name.get(name)
+            rec = self._topics_by_name.get(_name_key(name))
             sh = sch.hash if sch else 0
             if rec is not None:
                 if sh and rec.schema_hash and sh != rec.schema_hash:
@@ -2042,14 +2047,14 @@ class Node:
                     raise Error("topic %r create failed: %s" % (name, err), err)
                 rec = _TopicRec(h, self._lib.rant_topic_index(h), sh, opts.queue, opts.pull)
                 self._topic_specs[rec.index] = sch._spec if sch else None
-                self._topics_by_name[name] = rec
+                self._topics_by_name[_name_key(name)] = rec
             rec.hold(bit)
             return rec.handle
 
     def _release_topic(self, name, bit):
         """Drop one hold. False when the C refused from a callback, where the hold stays."""
         with self._create_lock:
-            rec = self._topics_by_name.get(name)
+            rec = self._topics_by_name.get(_name_key(name))
             if rec is None or not self._h:
                 return True
             old = rec.bits
@@ -2059,7 +2064,7 @@ class Node:
                 if self._lib.rant_topic_retire(rec.handle) != 0:
                     rec.hold(bit)
                     return False
-                del self._topics_by_name[name]
+                del self._topics_by_name[_name_key(name)]
                 # the slot may be reused by a different topic: its old decode spec and message
                 # handlers must never apply to the successor
                 self._topic_specs.pop(rec.index, None)

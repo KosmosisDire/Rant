@@ -4,7 +4,9 @@ How topics match across nodes. The user facing behavior is in docs/topics.md.
 
 ## Identity and index
 
-A topic's cross peer identity is its name, hashed with FNV-1a to 64 bits. The local
+A topic's cross peer identity is its name with ASCII case folded, hashed with FNV-1a to 64
+bits. Names that differ only in case are one name, and every name compare folds the same
+way. The spelling a node created a name with is what it advertises and shows. The local
 handle is the topic's index in creation order. Peers match on the identity whatever order
 each created its topics in.
 

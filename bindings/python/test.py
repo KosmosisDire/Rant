@@ -595,7 +595,7 @@ def handles():
     b = rant.Node("HB", on_event=lambda e: None, domain=48, multicast_interface=IFACE)
     try:
         p = a.publisher("shared", Velocity, reliable=True)
-        s = a.subscriber("shared", Velocity, lambda t: None, reliable=True)
+        s = a.subscriber("Shared", Velocity, lambda t: None, reliable=True)   # names ignore case
         try:
             a.publisher("shared", Reading)
             check("a different schema on a live name is refused", False)

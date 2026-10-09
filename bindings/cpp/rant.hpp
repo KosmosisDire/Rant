@@ -11,6 +11,7 @@
 
 #if defined(__cplusplus) && !defined(RANT_IMPLEMENTATION)
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -2076,6 +2077,16 @@ using MessageHandler = std::function<void(const MessageView&)>;
 using EventHandler   = std::function<void(const Event&)>;
 using LogHandler     = std::function<void(const LogLine&)>;
 
+/* Entity names match without regard to ASCII case, as in the C core. */
+struct NameLess {
+    using is_transparent = void;
+    static unsigned char fold(char c) { return (unsigned char)(c >= 'A' && c <= 'Z' ? c + 32 : c); }
+    bool operator()(std::string_view a, std::string_view b) const {
+        return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(),
+                                            [](char x, char y) { return fold(x) < fold(y); });
+    }
+};
+
 /* One name's topic slot and how many live handles hold each side of it. */
 struct TopicRec {
     detail::RantTopic* ch; uint8_t bits; uint64_t schema_hash; detail::RantQueue* queue; bool pull;
@@ -2103,7 +2114,7 @@ struct NodeImpl {
      * leaf lock, never call into C while holding it. */
     std::mutex               create_mu;
     std::mutex               reg_mu;
-    std::map<std::string, TopicRec, std::less<>> topics;   /* name to shared slot */
+    std::map<std::string, TopicRec, NameLess> topics;   /* name to shared slot */
     std::unordered_map<uint16_t, std::shared_ptr<const std::vector<SubHandler>>> sub_handlers;
     uint64_t                 next_handler_id = 1;
     std::vector<std::unique_ptr<HandlerBox>> boxes;  /* pattern handler boxes */

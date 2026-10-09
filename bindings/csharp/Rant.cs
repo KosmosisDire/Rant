@@ -2342,7 +2342,24 @@ namespace Rant
         // same name topic sharing: one native slot per name and a hold count per role, so the
         // role follows the live handles and the last release retires the slot
         private sealed class TopicRec { public IntPtr Handle; public IntPtr Queue; public bool Pull; public ulong SchemaHash; public int Pubs, Subs; }
-        private readonly Dictionary<string, TopicRec> _topicsByName = new Dictionary<string, TopicRec>();
+        private readonly Dictionary<string, TopicRec> _topicsByName = new Dictionary<string, TopicRec>(new NameComparer());
+        // entity names match without regard to ASCII case, as in the C core
+        private sealed class NameComparer : IEqualityComparer<string>
+        {
+            private static char Fold(char c) => c >= 'A' && c <= 'Z' ? (char)(c + 32) : c;
+            public bool Equals(string a, string b)
+            {
+                if (a == null || b == null || a.Length != b.Length) return a == b;
+                for (int i = 0; i < a.Length; i++) if (Fold(a[i]) != Fold(b[i])) return false;
+                return true;
+            }
+            public int GetHashCode(string s)
+            {
+                int h = 17;
+                foreach (char c in s) h = h * 31 + Fold(c);
+                return h;
+            }
+        }
         private readonly object _createLock = new object();
         // per topic subscriber handlers, copy on write arrays so the poll thread read never
         // takes more than a volatile fetch

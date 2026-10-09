@@ -9,9 +9,9 @@
 
 
 /* The wire name is the whole name, so the identity recomputed from it equals i_rant_topic_id. */
-static uint64_t i_rant_identity_hash(const uint8_t *name, size_t n){ return i_rant_fnv1a64(name, n); }
+static uint64_t i_rant_identity_hash(const uint8_t *name, size_t n){ return i_rant_name_hash(name, n); }
 
-uint64_t i_rant_topic_id(const char *name){ return i_rant_fnv1a64_str(name); }
+uint64_t i_rant_topic_id(const char *name){ return name ? i_rant_name_hash(name, strlen(name)) : 0; }
 
 uint64_t i_rant_topic_identity(const i_RantTopicDef *def){
     return i_rant_topic_id(def->name);
@@ -1467,7 +1467,7 @@ uint16_t i_rant_transport_apply_peer_details(i_RantTransportState *st, uint32_t 
             astate[dd.index] = RANT__AST_DETAILED;
             fresh++; continue;
         }
-        if (topic->name_len != dd.name.len || memcmp(topic->name, dd.name.data, dd.name.len) != 0){
+        if (!i_rant_name_eq(topic->name, topic->name_len, dd.name.data, dd.name.len)){
             astate[dd.index] = RANT__AST_DETAILED;     /* the same id, a different name: refused */
             i_rant_transport_fire_event(st, RANT_E_NAME_COLLISION, (uint16_t)cidx,
                         peer_id, id64, 0);
