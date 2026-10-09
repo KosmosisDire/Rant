@@ -123,7 +123,8 @@ ExternalVideoStream { kind: enum<u8> { Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpe
 
 The `--` lines above are DSL comments.
 
-`Image.stride` 0 means tightly packed rows. A `format` of 16 or more is a compressed
+Raw `Image.data` starts with the bottom row, as the image frame's origin is its bottom left
+corner. `Image.stride` 0 means tightly packed rows. A `format` of 16 or more is a compressed
 container, so `data` holds the file bytes rather than pixels. `Image` and `VideoFrame`
 carry a variable member, which makes them topic or root types: they can nest as a struct
 member (the frame is hoisted to the message tail) but they cannot be array elements.
