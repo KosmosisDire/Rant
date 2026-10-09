@@ -123,7 +123,7 @@ ExternalVideoStream { kind: enum<u8> { Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpe
 
 The `--` lines above are DSL comments.
 
-Raw `Image.data` starts with the bottom row, as the image frame's origin is its bottom left
+Raw `Image.data` starts with the top row, as the image frame's origin is its top left
 corner. `Image.stride` 0 means tightly packed rows. A `format` of 16 or more is a compressed
 container, so `data` holds the file bytes rather than pixels. `Image` and `VideoFrame`
 carry a variable member, which makes them topic or root types: they can nest as a struct
@@ -159,9 +159,13 @@ this:
 - Physical quantities are SI: velocities in m/s, forces in N, angles in radians.
 - Positions and shapes are in the units of their frame: meters in a physical frame,
   pixels in an image frame.
-- 3D frames are right handed with z up. 2D frames are x right and y up, an image frame
-  too, with its origin at the bottom left corner.
-- A 2D angle turns from +x toward +y, counterclockwise.
+- Every frame is right handed, and an angle turns from +x toward +y.
+- A physical 3D frame has z up.
+- A physical 2D frame is the top view of that 3D frame: x right, y up, z toward the viewer.
+  Its angles turn counterclockwise seen from above.
+- An image or screen frame has its origin at the top left corner: x right, y down, z away
+  from the viewer. Its angles turn clockwise as seen on screen. Raw image rows start at the
+  top, the row at y = 0.
 - Time is `i64` microseconds since the Unix epoch, UTC. It is the same clock
   `RantMsg.written_us` is stamped from, so the two are directly comparable. Cross host
   comparisons are only as good as the hosts' clock sync. Never mix a `Timestamp` with the
