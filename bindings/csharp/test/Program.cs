@@ -1251,7 +1251,7 @@ static class Program
             int n1 = 0, n2 = 0;
             var pub = a.Publisher<Level>("shared", qos);
             var s1 = b.Subscriber<Level>("shared", v => n1 = v.Value, qos);
-            var s2 = b.Subscriber<Level>("Shared", v => n2 = v.Value, qos);   // names ignore case
+            var s2 = b.Subscriber<Level>("shared", v => n2 = v.Value, qos);
             var deadline = DateTime.UtcNow.AddSeconds(8);
             while (DateTime.UtcNow < deadline && !(n1 == 1 && n2 == 1))
             {

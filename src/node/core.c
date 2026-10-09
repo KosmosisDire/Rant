@@ -2,7 +2,6 @@
 
 #include "core.h"
 #include "../common/arena.h"
-#include "../common/hash.h"
 #include <string.h>
 
 /* rant_event_str and its bounded appenders. No stdio, so it stays in the sans-IO core. */
@@ -762,7 +761,7 @@ static uint16_t i_rant_reflect_partner(const i_RantReflect *r, const i_RantHashP
         if (ch->kind != kind) continue;
         /* a fetched partner name must really be base plus suffix, 32 bit hashes collide */
         if (ch->name_off != I_RANT_NAME_NONE
-            && !i_rant_name_eq(r->names + ch->name_off, ch->name_len, buf, base_len + sl))
+            && (ch->name_len != base_len + sl || memcmp(r->names + ch->name_off, buf, base_len + sl) != 0))
             continue;
         return sorted[lo].index;
     }

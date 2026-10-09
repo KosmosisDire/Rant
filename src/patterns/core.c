@@ -2,7 +2,6 @@
  * knows nothing of what these patterns mean. The rules are in spec/patterns.md. */
 #include "core.h"
 #include "../common/bytes.h"
-#include "../common/hash.h"
 #include <string.h>
 #include <stddef.h>            /* offsetof */
 
@@ -61,7 +60,7 @@ static int i_rant_pat_peer_entity(RantNode *n, uint32_t peer, RantTopic *channel
         if (out->kind != kind) continue;
         /* rivals never exchange details, so the peer's name may never arrive: the hash
            decides then, the fetched name otherwise */
-        if (out->name.len ? i_rant_name_eq(out->name.data, out->name.len, nm.data, len)
+        if (out->name.len ? (out->name.len == len && memcmp(out->name.data, nm.data, len) == 0)
                           : out->hash == hash)
             return 1;
     }
@@ -1826,7 +1825,7 @@ static void i_rant_pat_dup_check_peer(i_RantPatterns *pm, uint32_t peer){
             if (ei.name.len){
                 RantString nm = i_rant_topic_name(a->primary); size_t len = nm.len;
                 if (len >= 5 && nm.data[len - 4] == '@') len -= 4;   /* the entity's base name */
-                if (!i_rant_name_eq(ei.name.data, ei.name.len, nm.data, len)) continue;
+                if (ei.name.len != len || memcmp(ei.name.data, nm.data, len) != 0) continue;
             }
             if (i_rant_pat_dup_reported(*a->ids, *a->n_ids, peer)) continue;
             i_rant_pat_dup_remember(pm->n, a->ids, a->n_ids, a->cap, peer);

@@ -1288,7 +1288,7 @@ static bool queue_leg() {
     chk("queue: every callback ran on this thread", !stray.load());
     bool refused = false;
 #if defined(__cpp_exceptions)
-    try { auto other = b.publisher<Speed>("Q/Extra", rel); }   // names ignore case
+    try { auto other = b.publisher<Speed>("q/extra", rel); }
     catch (const rant::Error&) { refused = true; }
     chk("queue: a same name handle on another queue is refused", refused);
 #endif

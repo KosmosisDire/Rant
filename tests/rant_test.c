@@ -2105,7 +2105,7 @@ static void evu_on_event(const RantEvent *ev){
 }
 static void event_user_checks(void){
     static uint8_t mem_w[1<<20], mem_r[1<<20]; static int sentinel;
-    const char *A="92dncpj9q03wb", *B="671m2hcj7vhmb";   /* both to one folded identity */
+    const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both to one identity, see collide.c */
     i_RantTopicDef cw, cr; RantNodeOpts wo, ro; RantNode *w, *r;
     uint8_t payload[16]; int i; memset(payload,0x5A,sizeof payload);
     memset(&cw,0,sizeof cw);
@@ -6902,12 +6902,12 @@ static void loud_checks(void){
     pose = tcompile(&aa, "LoudPose { x: f32, y: f32 }", NULL);
     ST_CHECK(pose != NULL, "loud: schema compiled");
     {   RantTopic *tp = rant_node_create_topic(A, "loud/pose", RANT_PUB_ONLY, pose, NULL);
-        RantTopic *twin = rant_node_create_topic(A, "Loud/Pose", RANT_SUB_ONLY, pose, NULL);
+        RantTopic *twin = rant_node_create_topic(A, "loud/pose", RANT_SUB_ONLY, pose, NULL);
         RantTopic *parked;
         uint8_t junk[3] = {1,2,3}, good[8] = {0};
         int rc_junk, rc_good;
         ST_CHECK(tp && twin==NULL && rant_last_error(A).error==RANT_E_NAME_COLLISION,
-                 "loud: a live same name topic, in any case, is refused as NAME_COLLISION (%d)", (int)rant_last_error(A).error);
+                 "loud: a live same name topic is refused as NAME_COLLISION (%d)", (int)rant_last_error(A).error);
         parked = rant_node_create_topic(A, "loud/pose", RANT_INACTIVE, pose, NULL);
         ST_CHECK(parked != NULL, "loud: an INACTIVE twin is still accepted (the QoS switch)");
         le = rant_last_error(A);
@@ -8841,8 +8841,7 @@ static int selftest_main(void){
     }
 
     /* 7. NAMED: the cross peer identity is the topic name hash, independent of each node's
-       local handle and of ASCII case. A distinct name never cross wires and clean names
-       raise no collision. */
+       local handle. A distinct name never cross wires and clean names raise no collision. */
     { static uint8_t mem_nw[1<<20], mem_nr[1<<20];
       i_RantTopicDef nw[1], nr[2];
       RantNodeOpts wo2, ro2; RantNode *w2, *r2;
@@ -8850,7 +8849,7 @@ static int selftest_main(void){
       nw[0].name="robot/lidar"; nw[0].role=RANT_PUB_ONLY;
       nw[0].qos.reliability=RANT_RELIABLE; nw[0].qos.keep_last=1;
       nw[0].qos.catch_up=1; nw[0].qos.max_message_bytes=32; nw[0].qos.heartbeat_us=50000;
-      nr[0]=nw[0]; nr[0].name="Robot/Lidar"; nr[0].role=RANT_SUB_ONLY;   /* same name in other case */
+      nr[0]=nw[0]; nr[0].role=RANT_SUB_ONLY;     /* same name (index 0), other node */
       nr[1]=nw[0]; nr[1].name="sensors/imu"; nr[1].role=RANT_SUB_ONLY;     /* index 1 */
       wo2 = (RantNodeOpts){ .domain=ST_DOMAIN+2, .discovery={ .max_peers=4 } };
       ro2=wo2;
@@ -8877,10 +8876,10 @@ static int selftest_main(void){
     /* 8. COLLISION: two names with the same 64 bit identity, found by Pollard's rho against
        FNV-1a. Rant must fire on_collision and refuse the match, never cross wire. */
     { static uint8_t mem_cw[1<<20], mem_cr[1<<20];
-      const char *A="92dncpj9q03wb", *B="671m2hcj7vhmb";   /* both hash to a988428a276dd813 */
+      const char *A="iuZA9tcJzAG", *B="5wVGxhTCmOC";   /* both hash to 23f58aa8628b1cce */
       i_RantTopicDef cw, cr; RantNodeOpts wo3, ro3; RantNode *w3, *r3;
       ST_CHECK(i_rant_topic_id(A)==i_rant_topic_id(B) && strcmp(A,B)!=0,
-               "collision: test pair still shares one identity");
+               "collision: test pair still shares one identity (else regen via collide)");
       memset(&cw,0,sizeof cw);
       cw.name=A; cw.role=RANT_PUB_ONLY;
       cw.qos.reliability=RANT_RELIABLE; cw.qos.keep_last=1; cw.qos.catch_up=1;
