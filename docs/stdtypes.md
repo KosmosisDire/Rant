@@ -157,9 +157,10 @@ this:
 
 - Physical quantities are SI: velocities in m/s, forces in N, angles in radians.
 - Positions and shapes are in the units of their frame: meters in a physical frame,
-  pixels in an image frame, whose origin is the top left corner with y pointing down.
-- A 2D angle turns from +x toward +y: counterclockwise seen from above in a physical
-  frame, clockwise on screen in an image frame.
+  pixels in an image frame.
+- 3D frames are right handed with z up. 2D frames are x right and y up, an image frame
+  too, with its origin at the bottom left corner.
+- A 2D angle turns from +x toward +y, counterclockwise.
 - Time is `i64` microseconds since the Unix epoch, UTC. It is the same clock
   `RantMsg.written_us` is stamped from, so the two are directly comparable. Cross host
   comparisons are only as good as the hosts' clock sync. Never mix a `Timestamp` with the
@@ -171,8 +172,6 @@ this:
 - Color is RGBA bytes in sRGB, straight alpha.
 - Uuid holds the 16 bytes in RFC 4122 order, not a platform GUID's mixed endian layout.
   The C# binding converts explicitly rather than calling `Guid.ToByteArray`.
-- A right handed coordinate frame is recommended but not enforced. Rant carries the
-  numbers. The frame convention is your system's to state.
 - `Transform.parent` names the frame this one is measured in, `""` when unstated. The cap
   is 30 rather than 32 so the packed 88 bytes stay 8 aligned and the C mirror still matches.
 - A `JointState` array is positional. The names ride a `JointNames` variable published
