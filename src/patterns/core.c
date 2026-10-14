@@ -623,7 +623,9 @@ static RantFunction *i_rant_function_new(RantNode *n, const char *name,
     /* an inline reply is a reentrant send that cannot wait for a TX pass, so this ring is
        the only thing holding a drained batch of replies. See spec/patterns.md */
     topt.qos.keep_last = (opts && opts->keep_last) ? opts->keep_last : 0u;
-    topt.qos.backpressure_wait_us = (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
+    /* @rant/meta never waits: an ask a dead peer cannot ack only times out */
+    topt.qos.backpressure_wait_us = mode == 2 ? 0u
+                                  : (opts && opts->backpressure_wait_us) ? opts->backpressure_wait_us
                                                                          : RANT_PATTERN_BP_WAIT_US;
     /* the ring goes on the channels this side receives on, so a definition's rsp and a
        remote's req stay plain senders */

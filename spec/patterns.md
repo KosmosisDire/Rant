@@ -263,7 +263,9 @@ stall the task.
 
 `@rant/meta` rides this layer as one handle carrying both sides (mode 2 of the function
 constructor). Its request channel is reliable, so a caller's immediate in order ack from
-the provider samples the round trip. See spec/node.md for the snapshot.
+the provider samples the round trip. It has no backpressure wait: a caller polling every
+peer never blocks on one that died, and an ask the dead peer never acks only times out.
+See spec/node.md for the snapshot.
 
 ## Deferred, designed but not built
 
