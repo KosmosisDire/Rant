@@ -73,6 +73,11 @@ class Capsule:
     radius: float = 0.0
 
 @dataclass
+class Capsule2D:
+    axis: Segment2D = ...
+    radius: float = 0.0
+
+@dataclass
 class Circle:
     center: Double2 = ...
     radius: float = 0.0
@@ -201,6 +206,11 @@ class Plane:
     normal: Double3 = ...
 
 @dataclass
+class Plane2D:
+    position: Double2 = ...
+    normal: Double2 = ...
+
+@dataclass
 class Polygon:
     points: list[Double3] = ...
 
@@ -231,6 +241,11 @@ class Segment:
     b: Double3 = ...
 
 @dataclass
+class Segment2D:
+    a: Double2 = ...
+    b: Double2 = ...
+
+@dataclass
 class Sphere:
     center: Double3 = ...
     radius: float = 0.0
@@ -241,9 +256,19 @@ class Transform:
     parent: str = ''
 
 @dataclass
+class Transform2D:
+    pose: Pose2D = ...
+    parent: str = ''
+
+@dataclass
 class Twist:
     linear: Double3 = ...
     angular: Double3 = ...
+
+@dataclass
+class Twist2D:
+    linear: Double2 = ...
+    angular: float = 0.0
 
 @dataclass
 class VideoFrame:
@@ -258,5 +283,10 @@ class VideoFrame:
 class Wrench:
     force: Double3 = ...
     torque: Double3 = ...
+
+@dataclass
+class Wrench2D:
+    force: Double2 = ...
+    torque: float = 0.0
 
 def now() -> int: ...

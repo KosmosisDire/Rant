@@ -202,7 +202,9 @@ def std_types():
     for cls, size in ((T.Pose, 56), (T.Pose2D, 24), (T.Wrench, 48), (T.AlignedBox, 48),
                       (T.AlignedBox2D, 32), (T.OrientedBox, 80), (T.OrientedBox2D, 40),
                       (T.Plane, 48), (T.Segment, 48), (T.Sphere, 32), (T.Capsule, 56),
-                      (T.Cylinder, 56), (T.Cone, 56), (T.Circle, 24), (T.Empty, 0)):
+                      (T.Cylinder, 56), (T.Cone, 56), (T.Circle, 24), (T.Empty, 0),
+                      (T.Transform2D, 56), (T.Twist2D, 24), (T.Wrench2D, 24),
+                      (T.Plane2D, 32), (T.Segment2D, 32), (T.Capsule2D, 40)):
         s = a.schema(cls)
         check("%s mirror is the canonical type, %d bytes" % (cls.__name__, size),
               s.hash == a.schema(cls.__name__).hash and len(s.encode(cls())) == size)

@@ -1039,8 +1039,11 @@ struct Pose    { Double3 position; Quaternion orientation; };
 struct Pose2D  { Double2 position; double angle; };            /* radians, from +x toward +y */
 /* parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned */
 struct Transform { Pose pose; String<30> parent; };
+struct Transform2D { Pose2D pose; String<30> parent; };
 struct Twist   { Double3 linear, angular; };                    /* m/s, rad/s */
+struct Twist2D { Double2 linear; double angular; };
 struct Wrench  { Double3 force, torque; };                      /* N, N m about the frame origin */
+struct Wrench2D{ Double2 force; double torque; };
 struct GeoPoint{ double lat, lon, alt; };                       /* degrees, degrees, meters */
 /* The shapes, in the units of their frame. */
 struct AlignedBox    { Double3 min, max; };                     /* min <= max on every axis */
@@ -1054,7 +1057,10 @@ struct Capsule  { Segment axis; double radius; };
 struct Cylinder { Segment axis; double radius; };               /* axis ends are the cap centers */
 struct Cone     { Double3 base, tip; double radius; };          /* radius at the base */
 struct Polygon  { std::vector<Double3> points; };               /* closed, planar */
+struct Plane2D  { Double2 position, normal; };                  /* a line: any point on it, unit normal */
+struct Segment2D{ Double2 a, b; };
 struct Circle   { Double2 center; double radius; };
+struct Capsule2D{ Segment2D axis; double radius; };
 struct Polygon2D{ std::vector<Double2> points; };               /* closed */
 struct Empty    {};                                             /* zero bytes on the wire */
 struct Uuid    { uint8_t bytes[16]; };                          /* RFC 4122 byte order */
@@ -1203,8 +1209,11 @@ inline Uuid      new_uuid() { Uuid u; detail::rant_uuid_new((detail::RantUuid*)&
 #define RANT_STD_MEMBERS_Pose(v)      RANT_STD_F(Pose,position) RANT_STD_F(Pose,orientation)
 #define RANT_STD_MEMBERS_Pose2D(v)    RANT_STD_F(Pose2D,position) RANT_STD_F(Pose2D,angle)
 #define RANT_STD_MEMBERS_Transform(v) RANT_STD_F(Transform,pose) RANT_STD_F(Transform,parent)
+#define RANT_STD_MEMBERS_Transform2D(v) RANT_STD_F(Transform2D,pose) RANT_STD_F(Transform2D,parent)
 #define RANT_STD_MEMBERS_Twist(v)     RANT_STD_F(Twist,linear) RANT_STD_F(Twist,angular)
+#define RANT_STD_MEMBERS_Twist2D(v)   RANT_STD_F(Twist2D,linear) RANT_STD_F(Twist2D,angular)
 #define RANT_STD_MEMBERS_Wrench(v)    RANT_STD_F(Wrench,force) RANT_STD_F(Wrench,torque)
+#define RANT_STD_MEMBERS_Wrench2D(v)  RANT_STD_F(Wrench2D,force) RANT_STD_F(Wrench2D,torque)
 #define RANT_STD_MEMBERS_GeoPoint(v) RANT_STD_F(GeoPoint,lat) RANT_STD_F(GeoPoint,lon) RANT_STD_F(GeoPoint,alt)
 #define RANT_STD_MEMBERS_AlignedBox(v)    RANT_STD_F(AlignedBox,min) RANT_STD_F(AlignedBox,max)
 #define RANT_STD_MEMBERS_AlignedBox2D(v)  RANT_STD_F(AlignedBox2D,min) RANT_STD_F(AlignedBox2D,max)
@@ -1217,7 +1226,10 @@ inline Uuid      new_uuid() { Uuid u; detail::rant_uuid_new((detail::RantUuid*)&
 #define RANT_STD_MEMBERS_Cylinder(v)  RANT_STD_F(Cylinder,axis) RANT_STD_F(Cylinder,radius)
 #define RANT_STD_MEMBERS_Cone(v)      RANT_STD_F(Cone,base) RANT_STD_F(Cone,tip) RANT_STD_F(Cone,radius)
 #define RANT_STD_MEMBERS_Polygon(v)   RANT_STD_F(Polygon,points)
+#define RANT_STD_MEMBERS_Plane2D(v)   RANT_STD_F(Plane2D,position) RANT_STD_F(Plane2D,normal)
+#define RANT_STD_MEMBERS_Segment2D(v) RANT_STD_F(Segment2D,a) RANT_STD_F(Segment2D,b)
 #define RANT_STD_MEMBERS_Circle(v)    RANT_STD_F(Circle,center) RANT_STD_F(Circle,radius)
+#define RANT_STD_MEMBERS_Capsule2D(v) RANT_STD_F(Capsule2D,axis) RANT_STD_F(Capsule2D,radius)
 #define RANT_STD_MEMBERS_Polygon2D(v) RANT_STD_F(Polygon2D,points)
 #define RANT_STD_MEMBERS_Empty(v)
 #define RANT_STD_MEMBERS_Image(v)        RANT_STD_F(Image,width) RANT_STD_F(Image,height) \
@@ -5294,13 +5306,16 @@ RANT_STD_STRUCT(Double2);    RANT_STD_STRUCT(Double3);    RANT_STD_STRUCT(Double
 RANT_STD_STRUCT(Int2);       RANT_STD_STRUCT(Int3);       RANT_STD_STRUCT(Int4);
 RANT_STD_STRUCT(Quaternion);
 RANT_STD_STRUCT(Color);
-RANT_STD_STRUCT(Pose);       RANT_STD_STRUCT(Pose2D);     RANT_STD_STRUCT(Transform);
-RANT_STD_STRUCT(Twist);      RANT_STD_STRUCT(Wrench);     RANT_STD_STRUCT(GeoPoint);
+RANT_STD_STRUCT(Pose);       RANT_STD_STRUCT(Pose2D);
+RANT_STD_STRUCT(Transform);  RANT_STD_STRUCT(Transform2D);
+RANT_STD_STRUCT(Twist);      RANT_STD_STRUCT(Twist2D);
+RANT_STD_STRUCT(Wrench);     RANT_STD_STRUCT(Wrench2D);   RANT_STD_STRUCT(GeoPoint);
 RANT_STD_STRUCT(AlignedBox); RANT_STD_STRUCT(AlignedBox2D);
 RANT_STD_STRUCT(OrientedBox); RANT_STD_STRUCT(OrientedBox2D);
 RANT_STD_STRUCT(Plane);      RANT_STD_STRUCT(Segment);    RANT_STD_STRUCT(Sphere);
 RANT_STD_STRUCT(Capsule);    RANT_STD_STRUCT(Cylinder);   RANT_STD_STRUCT(Cone);
-RANT_STD_STRUCT(Polygon);    RANT_STD_STRUCT(Circle);     RANT_STD_STRUCT(Polygon2D);
+RANT_STD_STRUCT(Polygon);    RANT_STD_STRUCT(Plane2D);    RANT_STD_STRUCT(Segment2D);
+RANT_STD_STRUCT(Circle);     RANT_STD_STRUCT(Capsule2D);  RANT_STD_STRUCT(Polygon2D);
 RANT_STD_STRUCT(Empty);
 RANT_STD_ALIAS(Uuid,        uint8_t[16]);
 RANT_STD_ALIAS(Timestamp, int64_t);

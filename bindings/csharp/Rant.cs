@@ -1344,6 +1344,14 @@ namespace Rant
             /// the packed 88 bytes stay 8 aligned.</summary>
             [RantString(30)] public string Parent;
         }
+        /// <summary>A 2D pose measured in the Parent frame.</summary>
+        [RantSchema("Transform2D")] public struct Transform2D
+        {
+            /// <summary>The position and heading.</summary>
+            public Pose2D Pose;
+            /// <summary>The frame this one is measured in, "" when unstated.</summary>
+            [RantString(30)] public string Parent;
+        }
         /// <summary>A velocity: linear in m/s and angular in rad/s.</summary>
         [RantSchema("Twist")] public struct Twist
         {
@@ -1352,6 +1360,14 @@ namespace Rant
             /// <summary>The angular velocity in rad/s.</summary>
             public Double3 Angular;
         }
+        /// <summary>A 2D velocity: linear in m/s and angular in rad/s.</summary>
+        [RantSchema("Twist2D")] public struct Twist2D
+        {
+            /// <summary>The linear velocity in m/s.</summary>
+            public Double2 Linear;
+            /// <summary>The angular velocity in rad/s, turning from +x toward +y.</summary>
+            public double Angular;
+        }
         /// <summary>A force in N and a torque in N m about the frame origin.</summary>
         [RantSchema("Wrench")] public struct Wrench
         {
@@ -1359,6 +1375,14 @@ namespace Rant
             public Double3 Force;
             /// <summary>The torque in N m.</summary>
             public Double3 Torque;
+        }
+        /// <summary>A 2D force in N and a torque in N m about the frame origin.</summary>
+        [RantSchema("Wrench2D")] public struct Wrench2D
+        {
+            /// <summary>The force in N.</summary>
+            public Double2 Force;
+            /// <summary>The torque in N m, turning from +x toward +y.</summary>
+            public double Torque;
         }
         /// <summary>A place on the earth.</summary>
         [RantSchema("GeoPoint")] public struct GeoPoint
@@ -1459,11 +1483,35 @@ namespace Rant
             /// <summary>The corners in order. The last joins the first.</summary>
             public Double3[] Points;
         }
+        /// <summary>An unbounded line, the 2D plane.</summary>
+        [RantSchema("Plane2D")] public struct Plane2D
+        {
+            /// <summary>Any point on the line.</summary>
+            public Double2 Position;
+            /// <summary>The unit normal.</summary>
+            public Double2 Normal;
+        }
+        /// <summary>A 2D line segment between two points.</summary>
+        [RantSchema("Segment2D")] public struct Segment2D
+        {
+            /// <summary>One end.</summary>
+            public Double2 A;
+            /// <summary>The other end.</summary>
+            public Double2 B;
+        }
         /// <summary>A circle.</summary>
         [RantSchema("Circle")] public struct Circle
         {
             /// <summary>The center.</summary>
             public Double2 Center;
+            /// <summary>The radius.</summary>
+            public double Radius;
+        }
+        /// <summary>A 2D segment swept by a circle.</summary>
+        [RantSchema("Capsule2D")] public struct Capsule2D
+        {
+            /// <summary>The centers of the two end caps.</summary>
+            public Segment2D Axis;
             /// <summary>The radius.</summary>
             public double Radius;
         }

@@ -3759,7 +3759,10 @@ static void stdtypes_checks(void){
             { "Plane", sizeof(RantPlane) }, { "Segment", sizeof(RantSegment) },
             { "Sphere", sizeof(RantSphere) }, { "Capsule", sizeof(RantCapsule) },
             { "Cylinder", sizeof(RantCylinder) }, { "Cone", sizeof(RantCone) },
-            { "Circle", sizeof(RantCircle) }
+            { "Circle", sizeof(RantCircle) },
+            { "Transform2D", sizeof(RantTransform2D) }, { "Twist2D", sizeof(RantTwist2D) },
+            { "Wrench2D", sizeof(RantWrench2D) }, { "Plane2D", sizeof(RantPlane2D) },
+            { "Segment2D", sizeof(RantSegment2D) }, { "Capsule2D", sizeof(RantCapsule2D) }
         };
         int i, ok = 1;
         for (i = 0; i < (int)(sizeof mirrors / sizeof mirrors[0]); i++){

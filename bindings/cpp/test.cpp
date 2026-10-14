@@ -411,7 +411,10 @@ static bool stdtypes_leg() {
         sizeof(rant::types::Pose) == 56 && sizeof(rant::types::Pose2D) == 24 &&
         sizeof(rant::types::Wrench) == 48 && sizeof(rant::types::OrientedBox) == 80 &&
         sizeof(rant::types::OrientedBox2D) == 40 && sizeof(rant::types::Capsule) == 56 &&
-        sizeof(rant::types::Cone) == 56 && sizeof(rant::types::Circle) == 24);
+        sizeof(rant::types::Cone) == 56 && sizeof(rant::types::Circle) == 24 &&
+        sizeof(rant::types::Transform2D) == 56 && sizeof(rant::types::Twist2D) == 24 &&
+        sizeof(rant::types::Wrench2D) == 24 && sizeof(rant::types::Plane2D) == 32 &&
+        sizeof(rant::types::Segment2D) == 32 && sizeof(rant::types::Capsule2D) == 40);
 
     {   /* a standard type as a whole schema: its name, its canonical hash */
         rant::Schema f3 = a.schema("Float3");

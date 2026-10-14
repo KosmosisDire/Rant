@@ -50,17 +50,23 @@ Float4  { x: f32, y: f32, z: f32, w: f32 }
 Placement, motion and time:
 
 ```
-Quaternion { x: f64, y: f64, z: f64, w: f64 }
-Pose       { position: Double3, orientation: Quaternion }
-Pose2D     { position: Double2, angle: f64 }            -- radians, from +x toward +y
-Transform  { pose: Pose, parent: string<30> }
-Twist      { linear: Double3, angular: Double3 }        -- m/s and rad/s
-Wrench     { force: Double3, torque: Double3 }          -- N and N m, torque about the frame origin
-GeoPoint   { lat: f64, lon: f64, alt: f64 }             -- degrees, degrees, meters
+Quaternion  { x: f64, y: f64, z: f64, w: f64 }
+Pose        { position: Double3, orientation: Quaternion }
+Pose2D      { position: Double2, angle: f64 }           -- radians, from +x toward +y
+Transform   { pose: Pose, parent: string<30> }
+Transform2D { pose: Pose2D, parent: string<30> }
+Twist       { linear: Double3, angular: Double3 }       -- m/s and rad/s
+Twist2D     { linear: Double2, angular: f64 }
+Wrench      { force: Double3, torque: Double3 }         -- N and N m, torque about the frame origin
+Wrench2D    { force: Double2, torque: f64 }
+GeoPoint    { lat: f64, lon: f64, alt: f64 }            -- degrees, degrees, meters
 Matrix3x3 = f32[9]        Matrix4x4 = f32[16]           -- row major
 Timestamp = i64           Duration  = i64               -- microseconds
 Uuid      = u8[16]                                      -- RFC 4122 byte order
 ```
+
+A 2D type is the top view of its 3D type, so its scalar angle, angular velocity or
+torque turns about z, from +x toward +y.
 
 Shapes, in the units of their frame:
 
@@ -77,7 +83,10 @@ Polygon       { points: Double3[] }                     -- closed, planar
 
 AlignedBox2D  { min: Double2, max: Double2 }
 OrientedBox2D { pose: Pose2D, size: Double2 }
+Plane2D       { position: Double2, normal: Double2 }    -- a line: any point on it, unit normal
+Segment2D     { a: Double2, b: Double2 }
 Circle        { center: Double2, radius: f64 }
+Capsule2D     { axis: Segment2D, radius: f64 }
 Polygon2D     { points: Double2[] }                     -- closed
 ```
 
@@ -177,8 +186,9 @@ this:
 - Color is RGBA bytes in sRGB, straight alpha.
 - Uuid holds the 16 bytes in RFC 4122 order, not a platform GUID's mixed endian layout.
   The C# binding converts explicitly rather than calling `Guid.ToByteArray`.
-- `Transform.parent` names the frame this one is measured in, `""` when unstated. The cap
-  is 30 rather than 32 so the packed 88 bytes stay 8 aligned and the C mirror still matches.
+- `Transform.parent` and `Transform2D.parent` name the frame this one is measured in, `""`
+  when unstated. The cap is 30 rather than 32 so the packed 88 and 56 bytes stay 8 aligned
+  and the C mirrors still match.
 - A `JointState` array is positional. The names ride a `JointNames` variable published
   once, never a field of every sample. `velocity` and `effort` may be empty.
 - A new fixed type lists its widest member first, so the packed wire size matches the

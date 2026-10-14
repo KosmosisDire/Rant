@@ -112,16 +112,34 @@ class Transform:
     parent: string(30) = ""
 
 
+@_std("Transform2D")
+class Transform2D:
+    pose: Pose2D = _dataclasses.field(default_factory=Pose2D)
+    parent: string(30) = ""
+
+
 @_std("Twist")
 class Twist:
     linear: Double3 = _dataclasses.field(default_factory=Double3)    # m/s
     angular: Double3 = _dataclasses.field(default_factory=Double3)   # rad/s
 
 
+@_std("Twist2D")
+class Twist2D:
+    linear: Double2 = _dataclasses.field(default_factory=Double2)    # m/s
+    angular: f64 = 0.0                                                # rad/s, from +x toward +y
+
+
 @_std("Wrench")
 class Wrench:
     force: Double3 = _dataclasses.field(default_factory=Double3)     # N
     torque: Double3 = _dataclasses.field(default_factory=Double3)    # N m about the frame origin
+
+
+@_std("Wrench2D")
+class Wrench2D:
+    force: Double2 = _dataclasses.field(default_factory=Double2)     # N
+    torque: f64 = 0.0                                                 # N m, from +x toward +y
 
 
 @_std("GeoPoint")
@@ -199,9 +217,27 @@ class Polygon:
     points: list[Double3] = _dataclasses.field(default_factory=list)  # closed, planar
 
 
+@_std("Plane2D")
+class Plane2D:
+    position: Double2 = _dataclasses.field(default_factory=Double2)  # any point on the line
+    normal: Double2 = _dataclasses.field(default_factory=Double2)    # unit length
+
+
+@_std("Segment2D")
+class Segment2D:
+    a: Double2 = _dataclasses.field(default_factory=Double2)
+    b: Double2 = _dataclasses.field(default_factory=Double2)
+
+
 @_std("Circle")
 class Circle:
     center: Double2 = _dataclasses.field(default_factory=Double2)
+    radius: f64 = 0.0
+
+
+@_std("Capsule2D")
+class Capsule2D:
+    axis: Segment2D = _dataclasses.field(default_factory=Segment2D)
     radius: f64 = 0.0
 
 

@@ -18,12 +18,13 @@ typedef enum {
     RANT_STD_INT2, RANT_STD_INT3, RANT_STD_INT4,
     RANT_STD_QUATERNION,
     RANT_STD_COLOR,
-    RANT_STD_POSE, RANT_STD_POSE2D, RANT_STD_TRANSFORM, RANT_STD_TWIST, RANT_STD_WRENCH,
+    RANT_STD_POSE, RANT_STD_POSE2D, RANT_STD_TRANSFORM, RANT_STD_TRANSFORM2D,
+    RANT_STD_TWIST, RANT_STD_TWIST2D, RANT_STD_WRENCH, RANT_STD_WRENCH2D,
     RANT_STD_GEOPOINT,
     RANT_STD_ALIGNEDBOX, RANT_STD_ALIGNEDBOX2D, RANT_STD_ORIENTEDBOX, RANT_STD_ORIENTEDBOX2D,
     RANT_STD_PLANE, RANT_STD_SEGMENT, RANT_STD_SPHERE,
     RANT_STD_CAPSULE, RANT_STD_CYLINDER, RANT_STD_CONE, RANT_STD_POLYGON,
-    RANT_STD_CIRCLE, RANT_STD_POLYGON2D,
+    RANT_STD_PLANE2D, RANT_STD_SEGMENT2D, RANT_STD_CIRCLE, RANT_STD_CAPSULE2D, RANT_STD_POLYGON2D,
     RANT_STD_EMPTY,
     RANT_STD_UUID,
     RANT_STD_TIMESTAMP, RANT_STD_DURATION,
@@ -56,8 +57,11 @@ typedef struct { uint8_t r, g, b, a; } RantColor;         /* sRGB, straight alph
 typedef struct { RantDouble3 position; RantQuaternion orientation; } RantPose;
 typedef struct { RantDouble2 position; double angle; } RantPose2D;   /* radians, from +x toward +y */
 typedef struct { RantPose pose; uint16_t parent_len; char parent[30]; } RantTransform;
+typedef struct { RantPose2D pose; uint16_t parent_len; char parent[30]; } RantTransform2D;
 typedef struct { RantDouble3 linear, angular; } RantTwist;       /* m/s and rad/s */
+typedef struct { RantDouble2 linear; double angular; } RantTwist2D;
 typedef struct { RantDouble3 force, torque; } RantWrench;        /* N and N m about the frame origin */
+typedef struct { RantDouble2 force; double torque; } RantWrench2D;
 typedef struct { double lat, lon, alt; } RantGeoPoint;           /* degrees, degrees, meters */
 
 /* The shapes, in the units of their frame. Polygon and Polygon2D are variable, so no mirror. */
@@ -71,7 +75,10 @@ typedef struct { RantDouble3 center; double radius; } RantSphere;
 typedef struct { RantSegment axis; double radius; } RantCapsule;
 typedef struct { RantSegment axis; double radius; } RantCylinder;      /* axis ends are the cap centers */
 typedef struct { RantDouble3 base, tip; double radius; } RantCone;    /* radius at the base */
+typedef struct { RantDouble2 position, normal; } RantPlane2D;    /* a line: any point on it, unit normal */
+typedef struct { RantDouble2 a, b; } RantSegment2D;
 typedef struct { RantDouble2 center; double radius; } RantCircle;
+typedef struct { RantSegment2D axis; double radius; } RantCapsule2D;
 typedef struct { uint8_t bytes[16]; } RantUuid;                  /* RFC 4122 byte order */
 typedef int64_t RantTimestamp;     /* microseconds since the Unix epoch, UTC */
 typedef int64_t RantDuration;                                  /* microseconds */
@@ -106,6 +113,8 @@ typedef char i_rant_std_size_check[
        sizeof(RantDouble3) == 24 && sizeof(RantQuaternion) == 32 &&
        sizeof(RantColor) == 4 && sizeof(RantPose) == 56 && sizeof(RantPose2D) == 24 &&
        sizeof(RantTransform) == 88 && sizeof(RantTwist) == 48 && sizeof(RantWrench) == 48 &&
+       sizeof(RantTransform2D) == 56 && sizeof(RantTwist2D) == 24 && sizeof(RantWrench2D) == 24 &&
+       sizeof(RantPlane2D) == 32 && sizeof(RantSegment2D) == 32 && sizeof(RantCapsule2D) == 40 &&
        sizeof(RantAlignedBox) == 48 && sizeof(RantAlignedBox2D) == 32 &&
        sizeof(RantOrientedBox) == 80 && sizeof(RantOrientedBox2D) == 40 &&
        sizeof(RantPlane) == 48 && sizeof(RantSegment) == 48 && sizeof(RantSphere) == 32 &&

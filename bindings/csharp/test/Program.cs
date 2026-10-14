@@ -711,6 +711,9 @@ static class Program
                 (typeof(Rant.Types.Capsule), 56), (typeof(Rant.Types.Cylinder), 56),
                 (typeof(Rant.Types.Cone), 56), (typeof(Rant.Types.Circle), 24),
                 (typeof(Rant.Types.Empty), 0),
+                (typeof(Rant.Types.Transform2D), 56), (typeof(Rant.Types.Twist2D), 24),
+                (typeof(Rant.Types.Wrench2D), 24), (typeof(Rant.Types.Plane2D), 32),
+                (typeof(Rant.Types.Segment2D), 32), (typeof(Rant.Types.Capsule2D), 40),
             };
             foreach (var (type, size) in shapes)
             {
