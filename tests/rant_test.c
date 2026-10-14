@@ -2285,7 +2285,7 @@ static void schema_dsl_checks(void){
     txt = tcompile(&ma, POSE, NULL);
     ST_CHECK(txt != NULL, "schema-dsl: compiles");
     /* pinned: the wire of a nested struct plus a fixed array must never drift */
-    ST_CHECK(txt && rant_schema_hash(txt) == 0x213591e8dc0bd9f5ULL,
+    ST_CHECK(txt && rant_schema_hash(txt) == 0xb8157f3bb2e197e7ULL,
              "schema-dsl: Reading canonical hash %016llx", (unsigned long long)(txt ? rant_schema_hash(txt) : 0));
     schema_print_roundtrip(&ma, txt, "Reading (nested struct + array)");
     if (txt){
@@ -3576,23 +3576,24 @@ static void schema_v8_checks(void){
         ST_CHECK(s && same, "names: a text of mixed spellings compiles");
         if (s && same){
             rant_schema_print(s, buf, sizeof buf);
-            ST_CHECK(strstr(buf, "RobotPose {") && strstr(buf, "frameId:") && strstr(buf, "httpServer:")
-                     && strstr(buf, "imu9Dof:") && strstr(buf, "mono8:") && strstr(buf, "Idle")
+            ST_CHECK(strstr(buf, "RobotPose {") && strstr(buf, "frame_id:") && strstr(buf, "http_server:")
+                     && strstr(buf, "imu9_dof:") && strstr(buf, "mono8:") && strstr(buf, "Idle")
                      && strstr(buf, "RunningFast"),
-                     "names: fields spell camelCase, types and options PascalCase (%s)", buf);
+                     "names: fields spell snake_case, types and options PascalCase (%s)", buf);
             ST_CHECK(rant_schema_field_index(s, "FrameId") == 0 && rant_schema_field_index(s, "frame_id") == 0
                      && rant_schema_field_index(s, "http_server") == 1,
                      "names: a path finds a field in any spelling");
             ST_CHECK(rant_schema_hash(s) == rant_schema_hash(same),
                      "names: the same fields in another spelling are the same schema");
         }
-        ST_CHECK(rant_field_name("HTTPServer", w, sizeof w) == 10 && strcmp(w, "httpServer") == 0
-                 && rant_field_name("wall_us", w, sizeof w) == 6 && strcmp(w, "wallUs") == 0
-                 && rant_field_name("Pos2D", w, sizeof w) == 5 && strcmp(w, "pos2D") == 0
+        ST_CHECK(rant_field_name("HTTPServer", w, sizeof w) == 11 && strcmp(w, "http_server") == 0
+                 && rant_field_name("wallUs", w, sizeof w) == 7 && strcmp(w, "wall_us") == 0
+                 && rant_field_name("Imu9Dof", w, sizeof w) == 8 && strcmp(w, "imu9_dof") == 0
+                 && rant_field_name("Pos2D", w, sizeof w) == 6 && strcmp(w, "pos2_d") == 0
                  && rant_type_name("frame_id", w, sizeof w) == 7 && strcmp(w, "FrameId") == 0
                  && rant_type_name("RectI", w, sizeof w) == 5 && strcmp(w, "RectI") == 0
                  && rant_field_name("__", w, sizeof w) == 0 && rant_field_name("_1", w, sizeof w) == 0
-                 && rant_field_name("frameId", w, 7) == 0,
+                 && rant_field_name("frameId", w, 8) == 0 && rant_field_name("frameId", w, 9) == 8,
                  "names: the public rule");
         ST_CHECK(sv("A { x: u8, X: u8 }") == NULL && sv("A { frame_id: u8, frameId: u8 }") == NULL
                  && sv("A { a: { x: u8, X: u8 } }") == NULL && sv("A { x: u8, b: { x: u8 } }") != NULL,
@@ -8483,7 +8484,7 @@ static void interest_external_checks(void){
 static int ml_n, ml_boom0, ml_mirror, ml_live, ml_in_dispatch, ml_dispatching;
 static void ml_on_msg(const RantMsg *m){
     RantString txt = rant_get_string(m->data, m->schema, "text");
-    uint64_t wall = rant_get_uint(m->data, m->schema, "wallUs");
+    uint64_t wall = rant_get_uint(m->data, m->schema, "wall_us");
     char tb[64]; size_t tl = txt.len < sizeof tb - 1 ? txt.len : sizeof tb - 1;
     memcpy(tb, txt.data, tl); tb[tl] = '\0';
     ml_n++;
@@ -8597,7 +8598,7 @@ static void metalog_checks(void){
             ST_CHECK(ok_topics && topv.count == 1 && hid == 0,
                      "metalog: snapshot lists app topics only (%u rows, %d hidden)",
                      (unsigned)(ok_topics?topv.count:0), hid); }
-          ST_CHECK(ok_node && rant_map_get(nodev.bytes, "uptimeUs", &upt) && upt.v.u > 0,
+          ST_CHECK(ok_node && rant_map_get(nodev.bytes, "uptime_us", &upt) && upt.v.u > 0,
                    "metalog: snapshot uptime present");
       }
 

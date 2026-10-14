@@ -174,7 +174,7 @@ type   := base | base '[' count ']' | base '[' ']' | '{' fields '}' ('[' count? 
 base   := scalar | 'string' ('<' cap '>')? | 'map' | 'enum' '<' scalar '>' '{' options '}' | NAME
 ```
 
-Every IDENT and NAME is normalized as it is read, fields to camelCase and types and enum
+Every IDENT and NAME is normalized as it is read, fields to snake_case and types and enum
 options to PascalCase (`i_rant_name_normalize`, public as `rant_field_name` and
 `rant_type_name`), and a field name already used in the open struct is refused by
 walking the struct's bytes written so far. A path given to the accessors is normalized

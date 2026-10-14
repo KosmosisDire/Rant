@@ -73,8 +73,8 @@ RANT_SCHEMA(Conveyor, speed, running, part);
 ```
 
 `RANT_SCHEMA` goes after the struct at global scope and lists its members in order. C#
-and Python see the same type. Member names go on the wire in camelCase, so `frame_id` is
-`frameId`.
+and Python see the same type. Member names go on the wire in snake_case, so `frameId` is
+`frame_id`.
 
 Supported members:
 

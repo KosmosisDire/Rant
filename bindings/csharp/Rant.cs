@@ -1689,11 +1689,11 @@ namespace Rant
     }
 
     /// <summary>Name a member on the wire when its own name will not do. Any spelling works,
-    /// the wire keeps camelCase (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/stdtypes.md">docs/stdtypes.md</see>).</summary>
+    /// the wire keeps snake_case (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/stdtypes.md">docs/stdtypes.md</see>).</summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantFieldAttribute : Attribute
     {
-        /// <summary>The wire name, in any spelling. The wire keeps camelCase.</summary>
+        /// <summary>The wire name, in any spelling. The wire keeps snake_case.</summary>
         public string Name;
         /// <summary>Name the member on the wire.</summary>
         public RantFieldAttribute(string name) { Name = name; }
@@ -2081,7 +2081,7 @@ namespace Rant
     {
         /// <summary>The peer that answered.</summary>
         public uint Provider;
-        /// <summary>The whole decoded body, every section by its camelCase keys.</summary>
+        /// <summary>The whole decoded body, every section by its snake_case keys.</summary>
         public IReadOnlyDictionary<string, object> Info;
 
         /// <summary>The node's name.</summary>
@@ -2157,24 +2157,24 @@ namespace Rant
             if (info.TryGetValue("node", out var no) && no is Dictionary<string, object> node)
             {
                 s.Name = S(node, "name");
-                s.UptimeUs = U(node, "uptimeUs"); s.WallUs = U(node, "wallUs");
-                s.MemInUse = U(node, "memInUse"); s.MemPeak = U(node, "memPeak");
-                s.AllocCalls = U(node, "allocCalls"); s.EvictedUnsent = U(node, "evictedUnsent");
-                s.BpWaitedUs = U(node, "bpWaitedUs"); s.BpWaits = U(node, "bpWaits");
-                s.Peers = U(node, "peers"); s.MaxPeers = U(node, "maxPeers");
-                s.Topics = U(node, "topics"); s.MaxTopics = U(node, "maxTopics");
-                s.ShmTx = U(node, "shmTx"); s.ShmRx = U(node, "shmRx");
-                s.LastError = U(node, "lastError"); s.LastErrorText = S(node, "lastErrorText");
+                s.UptimeUs = U(node, "uptime_us"); s.WallUs = U(node, "wall_us");
+                s.MemInUse = U(node, "mem_in_use"); s.MemPeak = U(node, "mem_peak");
+                s.AllocCalls = U(node, "alloc_calls"); s.EvictedUnsent = U(node, "evicted_unsent");
+                s.BpWaitedUs = U(node, "bp_waited_us"); s.BpWaits = U(node, "bp_waits");
+                s.Peers = U(node, "peers"); s.MaxPeers = U(node, "max_peers");
+                s.Topics = U(node, "topics"); s.MaxTopics = U(node, "max_topics");
+                s.ShmTx = U(node, "shm_tx"); s.ShmRx = U(node, "shm_rx");
+                s.LastError = U(node, "last_error"); s.LastErrorText = S(node, "last_error_text");
             }
             if (info.TryGetValue("proc", out var po) && po is Dictionary<string, object> proc)
             {
                 s.HaveProc = true;
-                s.HaveCpu = proc.ContainsKey("cpuUs");
-                s.Pid = U(proc, "pid"); s.CpuUs = U(proc, "cpuUs");
-                s.Rss = U(proc, "rss"); s.PeakRss = U(proc, "peakRss");
-                s.HeapTotal = U(proc, "heapTotal"); s.HeapFree = U(proc, "heapFree");
-                s.HeapMinFree = U(proc, "heapMinFree");
-                s.HeapLargestFreeBlock = U(proc, "heapLargestFreeBlock");
+                s.HaveCpu = proc.ContainsKey("cpu_us");
+                s.Pid = U(proc, "pid"); s.CpuUs = U(proc, "cpu_us");
+                s.Rss = U(proc, "rss"); s.PeakRss = U(proc, "peak_rss");
+                s.HeapTotal = U(proc, "heap_total"); s.HeapFree = U(proc, "heap_free");
+                s.HeapMinFree = U(proc, "heap_min_free");
+                s.HeapLargestFreeBlock = U(proc, "heap_largest_free_block");
             }
             return s;
         }
@@ -2914,7 +2914,7 @@ namespace Rant
                     {
                         Level = lv, Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
                         WrittenUs = m.WrittenUs,
-                        WallUs = LogFieldU(f, "wallUs"), MonoUs = LogFieldU(f, "monoUs"),
+                        WallUs = LogFieldU(f, "wall_us"), MonoUs = LogFieldU(f, "mono_us"),
                         Text = f != null && f.TryGetValue("text", out var t) ? t as string ?? "" : "",
                     });
                 });
@@ -2959,7 +2959,7 @@ namespace Rant
         /// array and T[] a variable one. { name: type, ... } is a struct, commas optional.
         /// enum&lt;u8&gt; { Idle, Run = 5 } is a named integer. Name { ... } defines a struct
         /// and Name = type any other type. A standard type such as Float3 or Timestamp is
-        /// always in scope. Names take any spelling: fields become camelCase, types and
+        /// always in scope. Names take any spelling: fields become snake_case, types and
         /// options PascalCase. A refusal throws SchemaException saying why and where.</remarks>
         public Schema Schema(string text)
         {

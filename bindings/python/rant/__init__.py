@@ -258,24 +258,24 @@ class MetaSnapshot:
         if isinstance(node, dict):
             g = node.get
             s.name = g("name", "") or ""
-            s.uptime_us = int(g("uptimeUs", 0)); s.wall_us = int(g("wallUs", 0))
-            s.mem_in_use = int(g("memInUse", 0)); s.mem_peak = int(g("memPeak", 0))
-            s.alloc_calls = int(g("allocCalls", 0)); s.evicted_unsent = int(g("evictedUnsent", 0))
-            s.bp_waited_us = int(g("bpWaitedUs", 0)); s.bp_waits = int(g("bpWaits", 0))
-            s.peers = int(g("peers", 0)); s.max_peers = int(g("maxPeers", 0))
-            s.topics = int(g("topics", 0)); s.max_topics = int(g("maxTopics", 0))
-            s.shm_tx = int(g("shmTx", 0)); s.shm_rx = int(g("shmRx", 0))
-            s.last_error = int(g("lastError", 0)); s.last_error_text = g("lastErrorText", "") or ""
+            s.uptime_us = int(g("uptime_us", 0)); s.wall_us = int(g("wall_us", 0))
+            s.mem_in_use = int(g("mem_in_use", 0)); s.mem_peak = int(g("mem_peak", 0))
+            s.alloc_calls = int(g("alloc_calls", 0)); s.evicted_unsent = int(g("evicted_unsent", 0))
+            s.bp_waited_us = int(g("bp_waited_us", 0)); s.bp_waits = int(g("bp_waits", 0))
+            s.peers = int(g("peers", 0)); s.max_peers = int(g("max_peers", 0))
+            s.topics = int(g("topics", 0)); s.max_topics = int(g("max_topics", 0))
+            s.shm_tx = int(g("shm_tx", 0)); s.shm_rx = int(g("shm_rx", 0))
+            s.last_error = int(g("last_error", 0)); s.last_error_text = g("last_error_text", "") or ""
         proc = info.get("proc")
         if isinstance(proc, dict):
             g = proc.get
             s.have_proc = True
-            s.have_cpu = "cpuUs" in proc
-            s.pid = int(g("pid", 0)); s.cpu_us = int(g("cpuUs", 0))
-            s.rss = int(g("rss", 0)); s.peak_rss = int(g("peakRss", 0))
-            s.heap_total = int(g("heapTotal", 0)); s.heap_free = int(g("heapFree", 0))
-            s.heap_min_free = int(g("heapMinFree", 0))
-            s.heap_largest_free_block = int(g("heapLargestFreeBlock", 0))
+            s.have_cpu = "cpu_us" in proc
+            s.pid = int(g("pid", 0)); s.cpu_us = int(g("cpu_us", 0))
+            s.rss = int(g("rss", 0)); s.peak_rss = int(g("peak_rss", 0))
+            s.heap_total = int(g("heap_total", 0)); s.heap_free = int(g("heap_free", 0))
+            s.heap_min_free = int(g("heap_min_free", 0))
+            s.heap_largest_free_block = int(g("heap_largest_free_block", 0))
         return s
 
 
@@ -2156,7 +2156,7 @@ class Node:
                 return
             f = m.value if isinstance(m.value, dict) else {}
             handler(LogLine(level=level, node=m.publisher_name, node_id=m.publisher_id,
-                            wall_us=int(f.get("wallUs", 0)), mono_us=int(f.get("monoUs", 0)),
+                            wall_us=int(f.get("wall_us", 0)), mono_us=int(f.get("mono_us", 0)),
                             recv_us=m.recv_us, written_us=m.written_us,
                             text=f.get("text", "") or ""))
         return deliver

@@ -49,7 +49,7 @@ class Sensor:
     extras:  dict = field(default_factory=dict)               # self-describing map
 
 
-# member names in Python style, camelCase on the wire
+# member names in Python style, snake_case on the wire too
 @dataclass
 class Waypoint:
     frame_id: Annotated[str, "string<16>"] = ""
@@ -72,16 +72,16 @@ def round_trip():
     print("Sensor DSL:\n" + sch.dsl)
 
     wp = node.schema(Waypoint)
-    check("snake_case members spell camelCase on the wire",
-          "frameId: string<16>" in wp.dsl and "maxSpeedMps: f32" in wp.dsl and "gpsFix: bool" in wp.dsl)
+    check("snake_case members spell snake_case on the wire",
+          "frame_id: string<16>" in wp.dsl and "max_speed_mps: f32" in wp.dsl and "gps_fix: bool" in wp.dsl)
     check("a text in another spelling is the same schema",
           node.schema("Waypoint { FrameId: string<16>, max_speed_mps: f32, GPSFix: bool }").hash == wp.hash)
     back = wp.decode(wp.encode(Waypoint(frame_id="map", max_speed_mps=1.5, gps_fix=True)))
     check("and decode back into the members",
           back.frame_id == "map" and abs(back.max_speed_mps - 1.5) < 1e-6 and back.gps_fix is True)
     wd = node.schema(wp.dsl).decode(wp.encode(Waypoint(frame_id="odom")))
-    check("a dictionary carries the wire names", wd["frameId"] == "odom")
-    any_spelling = wp.decode(wp.encode({"frame_id": "x", "MaxSpeedMps": 2.0}))
+    check("a dictionary carries the wire names", wd["frame_id"] == "odom")
+    any_spelling = wp.decode(wp.encode({"frameId": "x", "MaxSpeedMps": 2.0}))
     check("a dictionary source may use any spelling",
           any_spelling.frame_id == "x" and abs(any_spelling.max_speed_mps - 2.0) < 1e-6)
     src = Sensor(id=42, name="lidar",

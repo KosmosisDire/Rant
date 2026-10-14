@@ -391,9 +391,15 @@ size_t i_rant_name_normalize(const char *in, char *out, size_t cap, int as_type)
             int pupper = prev >= 'A' && prev <= 'Z', nlower = p[1] >= 'a' && p[1] <= 'z';
             if (plower || pdigit || (pupper && nlower)) boundary = 1;
         }
-        if (n + 1 >= cap) return 0;
-        if (boundary && (n || as_type)) out[n++] = upper ? c : (lower ? (char)(c - 32) : c);
-        else out[n++] = upper ? (char)(c + 32) : c;
+        if (as_type && boundary){
+            if (n + 1 >= cap) return 0;
+            out[n++] = lower ? (char)(c - 32) : c;
+        } else {
+            int joint = boundary && n;    /* a field joins its words with an underscore */
+            if (n + 1 + joint >= cap) return 0;
+            if (joint) out[n++] = '_';
+            out[n++] = upper ? (char)(c + 32) : c;
+        }
         boundary = 0; prev = c;
     }
     out[n] = '\0';

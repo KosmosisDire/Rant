@@ -80,10 +80,10 @@ RANT_API int           rant_schema_field_at(const RantSchema *s, uint16_t i, Ran
 /* Resolves a dotted or indexed path ("velocity.dx", "corners[2].x") to the flat index, or -1.
  * Each name may be in any spelling, it is matched by its wire spelling. */
 RANT_API int           rant_schema_field_index(const RantSchema *s, const char *path);
-/* The one wire spelling of a name: fields camelCase (frame_id, FrameId and frameId are all
- * frameId), types and enum options PascalCase (robot_pose is RobotPose, IDLE is Idle). An
+/* The one wire spelling of a name: fields snake_case (frame_id, FrameId and frameId are all
+ * frame_id), types and enum options PascalCase (robot_pose is RobotPose, IDLE is Idle). An
  * underscore, a case change and the last capital of a run split words, so HTTPServer is
- * httpServer, and a digit stays with its word, so Imu9Dof is imu9Dof. The parser applies
+ * http_server, and a digit stays with its word, so Imu9Dof is imu9_dof. The parser applies
  * this to every name in a text, and every binding derives a member's wire name with it.
  * The length written, 0 when nothing is left, it starts with a digit or out is too small. */
 RANT_API size_t        rant_field_name(const char *name, char *out, size_t cap);

@@ -73,8 +73,8 @@ gives a constructor. Field types are `rant.u8` to `rant.f64`,
 fixed array, a nested annotated class, plain `int`, `float` and `bool`, `str` for an
 unbounded string, `list[...]` for a variable array, `dict` for a map, and an `IntEnum` or
 `rant.enum(cls, backing)` for a named integer. A member's wire name is its own name in
-the wire spelling, camelCase (docs/stdtypes.md): `frame_id` is `frameId`, the same field
-a C# `FrameId` names, and it decodes back into `frame_id`. A decoded dictionary carries
+the wire spelling, snake_case (docs/stdtypes.md): `frame_id` stays `frame_id`, the same
+field a C# `FrameId` names, and it decodes back into `frame_id`. A decoded dictionary carries
 the wire names and a dictionary source may spell its keys any way. `__rant_name__` on the
 class overrides the wire type name. `rant.dsl(source)` gives the DSL text of a class, a bare type, a compiled
 `Schema` or DSL text, with no library load, for display or for pasting into a C node.

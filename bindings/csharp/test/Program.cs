@@ -59,7 +59,7 @@ record struct Point2(float X, float Y);
 struct Sample { public uint Id; public float Value { get; set; } public ulong Stamp; }
 class GetOnly { public int Id { get; } }
 
-// member names in C# style, camelCase on the wire
+// member names in C# style, snake_case on the wire
 struct Waypoint
 {
     [RantString(16)] public string FrameId;
@@ -280,18 +280,18 @@ static class Program
             Check("an anonymous object encodes by name", ((PoseClass)ps.Decode(anon)).Frame == "odom");
         }
 
-        // members spell camelCase on the wire, whatever the C# style, and meet any text
+        // members spell snake_case on the wire, whatever the C# style, and meet any text
         {
             var ws = node.Schema(typeof(Waypoint));
-            Check("PascalCase members spell camelCase on the wire",
-                  ws.Dsl.Contains("frameId: string<16>") && ws.Dsl.Contains("maxSpeedMps: f32") && ws.Dsl.Contains("gpsFix: bool"));
+            Check("PascalCase members spell snake_case on the wire",
+                  ws.Dsl.Contains("frame_id: string<16>") && ws.Dsl.Contains("max_speed_mps: f32") && ws.Dsl.Contains("gps_fix: bool"));
             Check("a text in another spelling is the same handle",
-                  node.Schema("Waypoint { frame_id: string<16>, max_speed_mps: f32, GPSFix: bool }").Handle == ws.Handle);
+                  node.Schema("Waypoint { frameId: string<16>, MaxSpeedMps: f32, GPSFix: bool }").Handle == ws.Handle);
             var wb = (Waypoint)ws.Decode(ws.Encode(new Waypoint { FrameId = "map", MaxSpeedMps = 1.5f, GpsFix = true }));
             Check("and decode back into the members", wb.FrameId == "map" && wb.MaxSpeedMps == 1.5f && wb.GpsFix);
             var wd = (Dictionary<string, object>)node.Schema(ws.Dsl).Decode(ws.Encode(new Waypoint { FrameId = "odom" }));
-            Check("a dictionary carries the wire names", (string)wd["frameId"] == "odom");
-            var fromAny = (Waypoint)ws.Decode(ws.Encode(new Dictionary<string, object> { { "frame_id", "x" }, { "MaxSpeedMps", 2.0f } }));
+            Check("a dictionary carries the wire names", (string)wd["frame_id"] == "odom");
+            var fromAny = (Waypoint)ws.Decode(ws.Encode(new Dictionary<string, object> { { "frameId", "x" }, { "MaxSpeedMps", 2.0f } }));
             Check("a dictionary source may use any spelling", fromAny.FrameId == "x" && fromAny.MaxSpeedMps == 2.0f);
         }
 

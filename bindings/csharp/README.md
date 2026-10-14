@@ -94,8 +94,8 @@ var acc = viewer.RemoteVariable<Level>("level");          // acc.Value / acc.Set
 ```
 
 Any struct, class or record is a message type: its public fields and auto properties
-become the schema in the order written, each named on the wire in camelCase, so `FrameId`
-is `frameId` in every language. `[RantArray(n)]` fixes an array's length and
+become the schema in the order written, each named on the wire in snake_case, so `FrameId`
+is `frame_id` in every language. `[RantArray(n)]` fixes an array's length and
 `[RantString(cap)]` caps a string, and without them both are variable.
 `node.Schema(typeof(Conveyor)).Dsl` prints the DSL for pasting into a C or C++ node.
 docs/csharp.md has the whole mapping, the threading rules and the rest of the API.

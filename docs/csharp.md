@@ -81,8 +81,8 @@ through the constructor whose parameters name the members, and a getter only mem
 neither fills is refused at `node.Schema`. An anonymous object encodes by name against any
 schema. `node.Schema(typeof(T)).Dsl` prints the reflected DSL.
 
-A member's wire name is its own name in the wire spelling, camelCase: `FrameId` is
-`frameId`, the same field a Python `frame_id` or a C `frameId` names (docs/stdtypes.md).
+A member's wire name is its own name in the wire spelling, snake_case: `FrameId` is
+`frame_id`, the same field a Python `frame_id` or a C `frame_id` names (docs/stdtypes.md).
 The type name is the class name. Attributes change the defaults, and on a record parameter
 one is written `[property: RantField("w")] double Omega`.
 
