@@ -189,6 +189,8 @@ int i_rant_transport_send_would_evict(i_RantTransportState *st, uint16_t topic_i
     if (!slot->valid) return 0;
     for (li=topic->lane_head; li!=RANT__NIL; li=st->lanes[li].topic_next){
         i_RantLane *l=&st->lanes[li];
+        /* a directed sample is owed to its peer only, so a silent peer never stalls the rest */
+        if (slot->dest_slot != RANT__DEST_ALL && slot->dest_slot != l->peer_slot) continue;
         if (l->w.used && l->w.reader_reliable && !st->peer_dormant[l->peer_slot]
             && l->w.acked_upto < slot->base + slot->count) return 1;
     }

@@ -180,9 +180,11 @@ straight into history. A private line only pays off where there is no repair.
 A directed send shares the topic's single seqno line. Only the destination lane carries
 the message. Every other matched reliable lane is advanced past the seqno and skipped via
 its HB floor, with no cross delivery, no repair and no `MSG_LOST` on a directed topic.
-Known costs of the shared ring for directed reliable, accepted at RPC rates: cross peer
-backpressure coupling, O(peers) floor HB traffic per directed send, repair depth diluted
-by active destinations, and `catch_up` refused at define.
+The backpressure wait counts only the destination lane's ack for a directed sample, so a
+dead or joining peer that never acks stalls only the sends addressed to it.
+Known costs of the shared ring for directed reliable, accepted at RPC rates: O(peers)
+floor HB traffic per directed send, repair depth diluted by active destinations, and
+`catch_up` refused at define.
 A sample stores its destination as a peer slot, not an id. Slot reuse is safe because a
 directed topic never replays history and a new peer joins at the head, above every
 stamped sample.
