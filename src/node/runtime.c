@@ -434,7 +434,8 @@ static void i_rant_node_split(RantTopic *h, RantBytes wire, RantBytes *hdr, Rant
         pfx += 1u + (ml <= avail ? ml : avail);
     }
     hdr->data = pfx ? wire.data : NULL; hdr->len = pfx;
-    payload->data = wire.data + pfx; payload->len = wire.len - pfx;
+    payload->data = wire.data ? wire.data + pfx : NULL;    /* an empty sample has no bytes */
+    payload->len = wire.len - pfx;
 }
 
 /* the queue ring */

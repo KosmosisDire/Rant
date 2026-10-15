@@ -253,9 +253,10 @@ void i_rant_reader_data(i_RantTransportState *st, int topic_index, int peer_slot
     topic->repair_stats.frags_recv++;   /* every accepted fragment, dups included */
     new_frag = !i_rant_bit_get(a->bitmap,frag);
     if (new_frag){
-        /* reassemble at the source peer's fragment size, the cap guard catches a stray offset */
+        /* reassemble at the source peer's fragment size, the cap guard catches a stray offset.
+           An empty sample has no buffer, and offsetting NULL is undefined even by zero */
         uint32_t offset=(uint32_t)frag*st->peer_frag[peer_slot];
-        if (offset+payload_len<=a->cap) memcpy(a->buf+offset,payload,payload_len);
+        if (payload_len && offset+payload_len<=a->cap) memcpy(a->buf+offset,payload,payload_len);
         i_rant_bit_set(a->bitmap,frag);
         if (frag==a->low)                                    /* extended the contiguous front */
             while (a->low<count && i_rant_bit_get(a->bitmap,a->low)) a->low++;
