@@ -1,7 +1,5 @@
-# Build Rant on every push and pull request, on the three desktop platforms.
-#
-# The test suites are deliberately not run here yet. The test rework lands first and ctest
-# gets wired in after it, so a red build here means a build broke, never a flaky network leg.
+# Build and test Rant on every push and pull request, on the three desktop platforms.
+# Fuzzing stays local: ctest only replays each fuzz target's seeds and saved crashes.
 name: build
 
 on:
@@ -24,10 +22,26 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Before the configure, which registers the C# and Python suites only when it finds them
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
       - name: Configure and build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release --parallel 4
+
+      # The tests discover on loopback multicast, which a Linux runner leaves off
+      - name: Loopback multicast
+        if: runner.os == 'Linux'
+        run: sudo ip link set lo multicast on
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure --parallel 4
 
       # The CPM and FetchContent path: a consumer writes no anchor and defines nothing.
       - name: A consumer builds from source
@@ -46,14 +60,8 @@ jobs:
         shell: bash
         run: ls -l dist/native/*/
 
-      - uses: actions/setup-dotnet@v6
-        with:
-          dotnet-version: '8.0.x'
       - name: NuGet package
         run: dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
 
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
       - name: Python wheel
         run: python -m pip wheel . --no-deps -w dist
