@@ -214,6 +214,23 @@ if(CMAKE_CXX_COMPILER)
   rant_binding_test(bindings.cpp)
 endif()
 
+# cargo builds the Rust suite only when ctest runs, into a target folder of this build tree,
+# compiling dist/rant.c into the crate. The cargo lock lets one cargo command run at a time.
+find_program(CARGO_EXECUTABLE cargo)
+set(RANT_CARGO_TARGET "${CMAKE_CURRENT_BINARY_DIR}/rust")
+if(CARGO_EXECUTABLE)
+  set(_rust_manifest "${PROJECT_SOURCE_DIR}/bindings/rust/Cargo.toml")
+  add_test(NAME bindings.rust COMMAND "${CARGO_EXECUTABLE}" test --manifest-path "${_rust_manifest}")
+  set_property(TEST bindings.rust APPEND PROPERTY ENVIRONMENT "CARGO_TARGET_DIR=${RANT_CARGO_TARGET}")
+  set_tests_properties(bindings.rust PROPERTIES RESOURCE_LOCK cargo)
+  rant_binding_test(bindings.rust)
+  # The checked in FFI against a fresh bindgen of dist/rant.h. Skipped without libclang.
+  add_test(NAME bindings.rust.ffi
+           COMMAND "${CARGO_EXECUTABLE}" run --quiet --manifest-path "${_rust_manifest}" -p rant-ffigen -- --check)
+  set_tests_properties(bindings.rust.ffi PROPERTIES ENVIRONMENT "CARGO_TARGET_DIR=${RANT_CARGO_TARGET}"
+                       RESOURCE_LOCK cargo SKIP_RETURN_CODE 77 LABELS bindings TIMEOUT 300)
+endif()
+
 # Python and C# load the shared library the build copies into dist/native.
 if(TARGET rant_shared AND RANT_STAGE_NATIVE)
   set(Python3_FIND_REGISTRY LAST)       # the Python a shell runs, as the wheel targets do
@@ -255,6 +272,7 @@ set(_tick_name_c c-tick-pub)
 set(_tick_name_cpp cpp-tick-pub)
 set(_tick_name_python py-tick-pub)
 set(_tick_name_csharp cs-tick-pub)
+set(_tick_name_rust rust-tick-pub)
 set(_tick_langs c)
 set(_tick_c "$<TARGET_FILE:rant_tick_c>")
 if(CMAKE_CXX_COMPILER)
@@ -275,6 +293,14 @@ if(TARGET rant_shared AND RANT_STAGE_NATIVE AND DOTNET_EXECUTABLE)
   set_tests_properties(interop.csharp.build PROPERTIES FIXTURES_SETUP interop_csharp RESOURCE_LOCK dotnet
                        LABELS interop TIMEOUT 300)
 endif()
+if(CARGO_EXECUTABLE)
+  list(APPEND _tick_langs rust)
+  set(_tick_rust "${RANT_CARGO_TARGET}/debug/rant_tick${CMAKE_EXECUTABLE_SUFFIX}")
+  add_test(NAME interop.rust.build
+           COMMAND "${CARGO_EXECUTABLE}" build --manifest-path "${_rust_manifest}" -p rant-tick)
+  set_tests_properties(interop.rust.build PROPERTIES ENVIRONMENT "CARGO_TARGET_DIR=${RANT_CARGO_TARGET}"
+                       FIXTURES_SETUP interop_rust RESOURCE_LOCK cargo LABELS interop TIMEOUT 300)
+endif()
 foreach(_pub ${_tick_langs})
   foreach(_sub ${_tick_langs})
     if(NOT _pub STREQUAL _sub)
@@ -282,9 +308,11 @@ foreach(_pub ${_tick_langs})
       add_test(NAME ${_test} COMMAND rant_interop_pair ${_tick_${_pub}} pub 30 --
                                      ${_tick_${_sub}} sub 20 ${_tick_name_${_pub}})
       set_tests_properties(${_test} PROPERTIES LABELS interop TIMEOUT 90)
-      if(_pub STREQUAL "csharp" OR _sub STREQUAL "csharp")
-        set_tests_properties(${_test} PROPERTIES FIXTURES_REQUIRED interop_csharp)
-      endif()
+      foreach(_built csharp rust)
+        if(_pub STREQUAL _built OR _sub STREQUAL _built)
+          set_property(TEST ${_test} APPEND PROPERTY FIXTURES_REQUIRED interop_${_built})
+        endif()
+      endforeach()
       rant_test_domain(${_test} RANT_DOMAIN)
     endif()
   endforeach()

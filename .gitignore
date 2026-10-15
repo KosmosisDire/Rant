@@ -25,3 +25,6 @@ __pycache__/
 *.egg-info/
 # the examples restore the packed Rant package here, never the global cache
 /bindings/csharp/.packages/
+# Rust binding build output, and the C sources a crate package carries
+/bindings/rust/target/
+/bindings/rust/rant/csrc/
