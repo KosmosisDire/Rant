@@ -995,7 +995,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     RantNodeOpts o; i_RantDiscoveryCoreConfig dc; i_RantTransportConfig tc; i_RantNodeBlocks blocks;
     uint16_t max_peers, max_topics, user_topics;
     uint8_t *base; void *arena; size_t need; RantAllocator pool;
-    RantNode *n; i_RantSock fd; uint16_t local_port;
+    RantNode *n; i_RantSock fd; uint16_t local_port; uint32_t bind_naddr;
     char node_name[RANT_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;
     char launch_name[RANT_NODE_NAME_MAX + 1], launch_domain[32]; size_t len;
     char launch_prefix[RANT_TOPIC_NAME_MAX + 1], prefix[RANT_TOPIC_NAME_MAX + 1]; size_t prefix_len = 0;
@@ -1168,11 +1168,14 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     }
 
     /* the data socket is bound before discovery opens so we advertise its real port. No
-       reuse: a unicast endpoint owns its port, so a collision fails loudly here */
+       reuse: a unicast endpoint owns its port, so a collision fails loudly here. A node
+       pinned to loopback is single host and binds loopback only */
     fd = i_rant_plat_udp_open();
     if (fd==RANT_SOCK_BAD){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_SOCKET, i_rant_plat_last_socket_error(), 0, 0); goto fail_threads; }
     n->fd=fd;                       /* owned now: fail_sock closes it */
-    if (!i_rant_plat_bind(fd, 0, o.net.data_port, 0)){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_BIND, i_rant_plat_last_socket_error(), o.net.data_port, 0); goto fail_sock; }
+    bind_naddr = i_rant_plat_parse_ip(o.net.multicast_interface);
+    if (!i_rant_plat_is_loopback(bind_naddr)) bind_naddr = 0;
+    if (!i_rant_plat_bind(fd, bind_naddr, o.net.data_port, 0)){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_BIND, i_rant_plat_last_socket_error(), o.net.data_port, 0); goto fail_sock; }
     local_port = i_rant_plat_local_port(fd);
     if (local_port==0){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_SOCKET, 0, 0, 0); goto fail_sock; }
     i_rant_plat_set_nonblock(fd);     /* never block in recv or send, poll drains the queue */

@@ -532,6 +532,18 @@ uint32_t i_rant_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d){
 uint32_t i_rant_plat_ip4_to_naddr(const uint8_t ip[4]){
     uint32_t n; memcpy(&n, ip, 4); return n;
 }
+int i_rant_plat_is_loopback(uint32_t naddr){
+    uint8_t ip[4]; memcpy(ip, &naddr, 4);
+    return ip[0] == 127;
+}
+uint32_t i_rant_plat_loopback_group_bind(uint32_t loopback_naddr){
+#ifdef _WIN32
+    return loopback_naddr;     /* off the network, so the firewall never asks */
+#else
+    (void)loopback_naddr;
+    return 0;
+#endif
+}
 void i_rant_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]){
     memcpy(out, &naddr, 4);
 }

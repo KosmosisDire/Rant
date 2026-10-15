@@ -88,6 +88,10 @@ uint32_t i_rant_plat_parse_ip(const char *dotted);            /* "1.2.3.4" to na
 uint32_t i_rant_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
 uint32_t i_rant_plat_ip4_to_naddr(const uint8_t ip[4]);
 void     i_rant_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
+int      i_rant_plat_is_loopback(uint32_t naddr);               /* in 127.0.0.0/8 */
+/* The address a socket receiving a group joined on the loopback address binds. Windows hands
+   group traffic to a socket bound to the interface, POSIX only to one bound to any */
+uint32_t i_rant_plat_loopback_group_bind(uint32_t loopback_naddr);
 /* The source address the OS would use toward dst, with no packet sent. A diagnostic only. */
 uint32_t i_rant_plat_route_src(uint32_t dst_naddr, uint16_t port);
 

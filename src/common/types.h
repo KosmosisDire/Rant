@@ -109,7 +109,8 @@ typedef struct {
     const char           *discovery_group;   /* RANT_DISCOVERY_GROUP */
     uint16_t              discovery_port;    /* RANT_DISCOVERY_PORT */
     const char           *multicast_interface;/* pin discovery to this interface IP. NULL = every
-                                                interface, "127.0.0.1" = single host */
+                                                interface, "127.0.0.1" = single host, where no
+                                                socket listens on the network */
     uint8_t               multicast_ttl;     /* hops an announce may travel, 1 */
     const RantAddr       *seed_peers;        /* unicast announces here too, port 0 = discovery_port */
     uint16_t              n_seed_peers;

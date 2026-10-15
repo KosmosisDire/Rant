@@ -19,11 +19,13 @@ means raise `opts.discovery.max_peers` (default 16).
 
 ## Interfaces
 
-Both sockets bind every interface. Discovery joins the group on every interface the host
-has and sends each announce out all of them, so multihomed hosts, VPN adapters, WSL and
-docker bridges need no configuration. Interfaces are re scanned every 3 s.
-`opts.net.multicast_interface` pins discovery to one interface. `"127.0.0.1"` isolates a
-run from the LAN.
+Both sockets bind every interface, except in single host mode below. Discovery joins the
+group on every interface the host has and sends each announce out all of them, so
+multihomed hosts, VPN adapters, WSL and docker bridges need no configuration. Interfaces
+are re scanned every 3 s.
+`opts.net.multicast_interface` pins discovery to one interface. `"127.0.0.1"` is single
+host: the data socket binds loopback, and so does discovery on Windows, so nothing listens on
+the network and the Windows firewall never asks.
 
 A peer heard on several paths is reached at the best ranked address: one on our own
 subnet first, then any routed address, then link local. At equal rank the address in use

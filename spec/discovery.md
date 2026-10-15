@@ -98,7 +98,7 @@ would stand beside a restarted live one. The explorer shows only ACTIVE peers.
 
 ## Interfaces and locator ranking
 
-Both sockets bind INADDR_ANY. Discovery joins the group on every interface and sends each
+Both sockets bind INADDR_ANY unless pinned to loopback, below. Discovery joins the group on every interface and sends each
 announce out every one. A per interface join or send failure is ordinary (an adapter with
 no multicast, two addresses on one adapter, a membership cap). Open fails only if no
 membership takes, then through an INADDR_ANY fallback. Loopback is the fallback for a
@@ -106,7 +106,9 @@ loopback only host and never a member of the normal set, or it would duplicate e
 host announce. Auto mode re enumerates every 3 s (`RANT_DISCOVERY_IF_SCAN_US`), so a link
 that comes up later is joined and one that goes away drops its membership.
 `multicast_interface` pins one interface and freezes the set (its mask is still looked up
-so the ranking works).
+so the ranking works). A loopback pin is single host: the data socket binds 127.0.0.1, and
+the discovery socket does too on Windows. POSIX stacks hand group traffic only to a socket
+bound to INADDR_ANY, so discovery stays there, and no POSIX firewall prompts for it.
 
 An announce carries no address of its own, so each copy arrives with the source address
 correct for its path. A peer heard on several paths has several candidate locators, and
