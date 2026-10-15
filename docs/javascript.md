@@ -11,10 +11,10 @@ semantics are the C ones, so docs/topics.md, docs/patterns.md and docs/tasks.md 
 
 ```js
 const node = await RantNode.connect("ws://localhost:7480", { name: "dashboard" });
-const pub  = await node.publisher("line1/conveyor",
+const pub  = await node.publisher("Line1/Conveyor",
                                   "Conveyor { speed: f64, running: bool, part: string<16> }");
 pub.send({ speed: 0.5, running: true, part: "bracket" });
-const add  = await node.remoteFunction("add", "A { a: i32, b: i32 }", "R { sum: i32 }");
+const add  = await node.remoteFunction("Add", "A { a: i32, b: i32 }", "R { sum: i32 }");
 const r    = await add.call({ a: 2, b: 3 });
 ```
 

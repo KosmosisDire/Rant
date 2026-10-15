@@ -71,7 +71,7 @@ size), or a parked reader heals through the slow repair path. The extra copy cos
 
 ```c
 RantQueue *main_q = rant_node_create_queue(n);
-RantTopic *pose = rant_node_create_topic(n, "robot/pose", RANT_SUB_ONLY, pose_schema,
+RantTopic *pose = rant_node_create_topic(n, "Robot/Pose", RANT_SUB_ONLY, pose_schema,
                                          &(RantTopicOpts){ .queue = main_q });
 rant_node_start(n);
 while (running){
@@ -95,7 +95,7 @@ pull. The views stay valid until that topic's next take. Timeouts work as on
 `rant_queue_dispatch`. Pull with a `queue` is refused, since pull has no callbacks to park.
 
 ```c
-RantTopic *img = rant_node_create_topic(n, "camera/image", RANT_SUB_ONLY, img_schema,
+RantTopic *img = rant_node_create_topic(n, "Camera/Image", RANT_SUB_ONLY, img_schema,
                                         &(RantTopicOpts){ .pull = 1 });
 RantMsg m;
 if (rant_topic_take_latest(img, &m, 0) == 1) draw(m.data);

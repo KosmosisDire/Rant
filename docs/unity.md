@@ -20,7 +20,7 @@ using Std = Rant.Types;   // Unity has its own Pose and Quaternion
 
 public class PoseSender : MonoBehaviour {
     RantTopic<Std.Pose> pose;
-    void OnEnable() { pose = RantNodeUnity.Topic<Std.Pose>("player/pose"); }
+    void OnEnable() { pose = RantNodeUnity.Topic<Std.Pose>("Player/Pose"); }
     void Update() {
         Vector3 p = transform.position; Quaternion q = transform.rotation;
         pose.Publish(new Std.Pose {
@@ -30,7 +30,7 @@ public class PoseSender : MonoBehaviour {
 }
 
 public class PoseReceiver : MonoBehaviour {
-    void OnEnable() => RantNodeUnity.Topic<Std.Pose>("player/pose").Subscribe(this, OnPose);
+    void OnEnable() => RantNodeUnity.Topic<Std.Pose>("Player/Pose").Subscribe(this, OnPose);
     void OnPose(Std.Pose p) {
         Std.Double3 v = p.Position; Std.Quaternion r = p.Orientation;
         transform.SetPositionAndRotation(new Vector3((float)v.X, (float)v.Y, (float)v.Z),
@@ -89,7 +89,7 @@ QoS is the `Qos` object of docs/csharp.md, passed the first time a name is reque
 callers share the topic that already exists, so their QoS is ignored and the Console says so.
 
 ```csharp
-RantNodeUnity.Topic<Std.Pose>("player/pose", new Qos { MaxRateHz = 30 })
+RantNodeUnity.Topic<Std.Pose>("Player/Pose", new Qos { MaxRateHz = 30 })
              .Subscribe(this, OnPose);
 ```
 
@@ -111,7 +111,7 @@ scripts can use one variable.
 public class MotorPanel : MonoBehaviour {
     RemoteVariable<float> speed;
     void OnEnable() {
-        speed = RantNodeUnity.RemoteVariable<float>("motor/speed");
+        speed = RantNodeUnity.RemoteVariable<float>("Motor/Speed");
         speed.OnChange += OnSpeed;
     }
     void OnDisable() { if (speed != null) speed.OnChange -= OnSpeed; }
@@ -126,8 +126,8 @@ The shorthands are `VariableDefinition<T>(name)`, `VariableDefinition<T>(name, i
 not cover, build the handle yourself and let the component share it:
 
 ```csharp
-RantNodeUnity.Shared("motor/speed",
-    n => n.RemoteVariable<float>("motor/speed", new VariableOptions { CatchUp = 5 }));
+RantNodeUnity.Shared("Motor/Speed",
+    n => n.RemoteVariable<float>("Motor/Speed", new VariableOptions { CatchUp = 5 }));
 ```
 
 A variable's `OnChange` and `OnWrite` are plain C# events, so remove the handler in

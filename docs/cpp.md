@@ -100,7 +100,7 @@ Use `rant::Bytes` as the type to work with schemas at run time:
 
 ```cpp
 rant::Schema s = node.schema("Chat { seq: u32, text: string }");
-auto pub = node.publisher<rant::Bytes>("chat", {}, s);
+auto pub = node.publisher<rant::Bytes>("Chat", {}, s);
 rant::MessageBuilder m(s);
 m.set_uint("seq", 1).set_string("text", "hi");
 pub.send(m);
@@ -112,15 +112,15 @@ inside the callback only.
 ## Topics
 
 ```cpp
-auto pub = node.publisher<Conveyor>("line1/conveyor");
-auto sub = node.subscriber<Conveyor>("line1/conveyor", [](const Conveyor& c) { /* ... */ });
+auto pub = node.publisher<Conveyor>("Line1/Conveyor");
+auto sub = node.subscriber<Conveyor>("Line1/Conveyor", [](const Conveyor& c) { /* ... */ });
 pub.send({ 0.5, true, {} });
 ```
 
 A subscriber with no handler is pulled: you read messages when you want them.
 
 ```cpp
-auto sub = node.subscriber<Conveyor>("line1/conveyor");
+auto sub = node.subscriber<Conveyor>("Line1/Conveyor");
 if (auto c = sub.take_latest()) show(*c);
 ```
 
@@ -132,10 +132,10 @@ if (auto c = sub.take_latest()) show(*c);
 ## Functions
 
 ```cpp
-auto add = node.function_definition<AddReq, int>("add",
+auto add = node.function_definition<AddReq, int>("Add",
     [](const AddReq& r) { return r.a + r.b; });
 
-auto fn = node.remote_function<AddReq, int>("add");
+auto fn = node.remote_function<AddReq, int>("Add");
 auto r = fn.call({ 1, 2 });
 if (r) std::printf("%d\n", *r.value());
 else   std::printf("%s\n", r.message().data());
@@ -152,14 +152,14 @@ else   std::printf("%s\n", r.message().data());
 A task is a function that reports progress and can be cancelled.
 
 ```cpp
-auto job = node.task_definition<Goal, float, Result>("move",
+auto job = node.task_definition<Goal, float, Result>("Move",
     [](const Goal& g, rant::TaskRequest<float, Result>& t) {
         t.start();
         auto p = t.defer();   // finish on another thread
         worker(std::move(p));
     });
 
-auto move = node.remote_task<Goal, float, Result>("move");
+auto move = node.remote_task<Goal, float, Result>("Move");
 auto r = move.call(goal, [](const rant::ProgressView<float>& p) { /* *p is the progress */ });
 ```
 
@@ -171,9 +171,9 @@ auto r = move.call(goal, [](const rant::ProgressView<float>& p) { /* *p is the p
 ## Variables
 
 ```cpp
-auto speed = node.variable_definition<float>("speed", { .initial = 1.5f });
+auto speed = node.variable_definition<float>("Speed", { .initial = 1.5f });
 
-auto remote = node.remote_variable<float>("speed");
+auto remote = node.remote_variable<float>("Speed");
 remote.on_change([](float v) { /* ... */ });
 remote.set(2.0f);
 ```

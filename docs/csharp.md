@@ -14,13 +14,13 @@ using Rant.Types;
 public record Conveyor(double Speed, bool Running, [property: RantString(16)] string Part);
 
 var robot = new RantNode("robot", new NodeOptions { Domain = 7 });
-var pub = robot.Publisher<Conveyor>("line1/conveyor", new Qos { Reliability = Reliability.Reliable });
-robot.FunctionDefinition<(double, double), double>("add", r => r.Item1 + r.Item2);
+var pub = robot.Publisher<Conveyor>("Line1/Conveyor", new Qos { Reliability = Reliability.Reliable });
+robot.FunctionDefinition<(double, double), double>("Add", r => r.Item1 + r.Item2);
 
 var viewer = new RantNode("viewer", new NodeOptions { Domain = 7 });   // usually another process
 viewer.OnEvent += e => Console.Error.WriteLine(e);
-viewer.Subscriber<Conveyor>("line1/conveyor", c => Console.WriteLine(c.Speed));
-double sum = viewer.RemoteFunction<(double, double), double>("add").Call((2, 3));
+viewer.Subscriber<Conveyor>("Line1/Conveyor", c => Console.WriteLine(c.Speed));
+double sum = viewer.RemoteFunction<(double, double), double>("Add").Call((2, 3));
 pub.Send(new Conveyor(0.5, true, "bracket"));
 ```
 
@@ -110,8 +110,8 @@ A bare type as a handle's type is the whole schema: `Publisher<bool>`,
 is the same bytes and hash in every language.
 
 A tuple such as `(double, double)` has no name of its own, so the handle names it after
-itself in PascalCase: `AddReq` and `AddRsp` on function `add`, `AddPrg` on a task,
-`MotorSpeed` on a topic or variable named `motor/speed`. Every run of letters and digits
+itself in PascalCase: `AddReq` and `AddRsp` on function `Add`, `AddPrg` on a task,
+`MotorSpeed` on a topic or variable named `Motor/Speed`. Every run of letters and digits
 is a word and everything else is dropped. Its fields are `item1`, `item2` and so on. Both
 ends of a C# pair derive the same name, and another language must spell it.
 `node.Schema(typeof((double, double)))` on its own throws.
@@ -145,9 +145,9 @@ C ones of docs/topics.md under C# names, and a `Us` suffix means microseconds.
 
 ```csharp
 var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
-var sub = node.Subscriber<Conveyor>("line1/conveyor", (c, msg) => Console.WriteLine($"{c.Speed} from {msg.PublisherName}"), qos);
+var sub = node.Subscriber<Conveyor>("Line1/Conveyor", (c, msg) => Console.WriteLine($"{c.Speed} from {msg.PublisherName}"), qos);
 
-var belt = node.Subscriber<Conveyor>("line1/conveyor");   // no handler: pulled
+var belt = node.Subscriber<Conveyor>("Line1/Conveyor");   // no handler: pulled
 if (belt.TryTakeLatest(out Conveyor newest)) Show(newest);
 ```
 

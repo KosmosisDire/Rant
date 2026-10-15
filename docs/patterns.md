@@ -21,9 +21,9 @@ static void on_add(RantRequest *req, void *user){
     int32_t sum = add(req->data);                  /* decode req->data with req->schema */
     rant_request_reply(req, rant_bytes(&sum, sizeof sum));
 }
-RantFunction *def = rant_node_create_function_definition(n, "add", req_schema, rsp_schema,
+RantFunction *def = rant_node_create_function_definition(n, "Add", req_schema, rsp_schema,
                         on_add, NULL, NULL);
-RantFunction *fn    = rant_node_create_remote_function(n, "add", req_schema, rsp_schema, NULL);
+RantFunction *fn    = rant_node_create_remote_function(n, "Add", req_schema, rsp_schema, NULL);
 
 RantResponse rsp;
 if (rant_function_call(fn, req, &rsp, 1000, NULL) == 1 && rsp.status == RANT_CALL_OK) ...
@@ -77,9 +77,9 @@ docs/tasks.md has the full model, the handler forms and the wrappers.
 ## Variables
 
 ```c
-RantVariable *owner    = rant_node_create_variable_definition(n, "speed", schema,
+RantVariable *owner    = rant_node_create_variable_definition(n, "Speed", schema,
                            &(RantVariableOpts){ .initial = rant_bytes(&v, sizeof v) });
-RantVariable *remote = rant_node_create_remote_variable(n, "speed", schema, NULL);
+RantVariable *remote = rant_node_create_remote_variable(n, "Speed", schema, NULL);
 rant_variable_set(remote, value);            /* pushed to the owner, no response */
 rant_variable_get(remote, &bytes);           /* the latest replicated value */
 rant_variable_wait(remote, 1000);            /* until the first value arrives */

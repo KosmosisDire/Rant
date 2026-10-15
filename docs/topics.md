@@ -7,7 +7,7 @@ matter how each ordered its topics. `opts.max_topics` (default 8) bounds how man
 create.
 
 ```c
-RantTopic *t = rant_node_create_topic(n, "pose", RANT_PUBSUB, schema,
+RantTopic *t = rant_node_create_topic(n, "Pose", RANT_PUBSUB, schema,
                    &(RantTopicOpts){ .qos = { .reliability = RANT_RELIABLE, .keep_last = 16 } });
 ```
 

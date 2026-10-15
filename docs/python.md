@@ -20,9 +20,9 @@ class Conveyor:
     part:    rant.string(16) = ""
 
 node = rant.Node("robot1", domain=7)
-belt = node.publisher("line1/conveyor", Conveyor, reliable=True)
+belt = node.publisher("Line1/Conveyor", Conveyor, reliable=True)
 belt.send(Conveyor(speed=0.5, running=True, part="bracket"))
-node.subscriber("line1/conveyor", Conveyor, lambda c: print(c))
+node.subscriber("Line1/Conveyor", Conveyor, lambda c: print(c))
 ```
 
 `rant.Node(name, **options)` opens a node, the name optional. The options are
@@ -90,15 +90,15 @@ fixed, `Annotated[list[Float2], "Float2[4]"]`, and nests to any depth. `encode` 
 or of dicts and `decode` gives one back, typed when the schema came from a class. DSL text
 also declares the fixed form, `{ x: f32, y: f32 }[3]`, which zero fills to its count.
 
-A bare type is a schema of its own: `node.publisher("estop", bool)` sends plain booleans,
+A bare type is a schema of its own: `node.publisher("EStop", bool)` sends plain booleans,
 and so do the scalars, `rant.string(N)`, arrays, `list[rant.f32]`, `str`, `dict`, an enum
 class and the plain Python scalars. Such a root is anonymous, so the same one in any
 language is the same wire bytes and the same hash.
 
 The schema argument of every handle is a schema class, a bare type, a compiled `Schema` or
 DSL text, and None makes a raw handle whose payloads are bytes or str. The package ships
-type stubs, so a checker sees `node.publisher("line1/conveyor", Conveyor).send` take a
-`Conveyor` and the handler of `node.subscriber("line1/conveyor", Conveyor, handler)` take
+type stubs, so a checker sees `node.publisher("Line1/Conveyor", Conveyor).send` take a
+`Conveyor` and the handler of `node.subscriber("Line1/Conveyor", Conveyor, handler)` take
 one, and `rant.Publisher[Conveyor]` is the annotation for one. The scalars are `int` and
 `float` aliases to a checker. A capped string, a fixed or variable array and a pinned
 enum width are spelled
@@ -140,7 +140,7 @@ subscriber takes no `queue`. `queue_stats` on a subscriber and `counts` on eithe
 the ring and traffic counters.
 
 ```python
-frames = node.subscriber("camera/image", rant.types.Image)
+frames = node.subscriber("Camera/Image", rant.types.Image)
 img = frames.latest()          # newest frame since the last call, or None
 ```
 

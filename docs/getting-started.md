@@ -62,10 +62,10 @@ Every name a node creates (topics, functions, tasks, variables) goes under its p
 `RANT_PREFIX`, then `opts.prefix`, then the name, joined with `/`.
 
 ```c
-/* RANT_PREFIX=cellA */
-RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){ .prefix = "robot1" });
-rant_node_create_topic(n, "pose", RANT_PUB_ONLY, NULL, NULL);    /* cellA/robot1/pose */
-rant_node_create_topic(n, "/clock", RANT_SUB_ONLY, NULL, NULL);  /* clock */
+/* RANT_PREFIX=CellA */
+RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){ .prefix = "Robot1" });
+rant_node_create_topic(n, "Pose", RANT_PUB_ONLY, NULL, NULL);    /* CellA/Robot1/Pose */
+rant_node_create_topic(n, "/Clock", RANT_SUB_ONLY, NULL, NULL);  /* Clock */
 ```
 
 - A name starting with `/` skips the prefix, to reach a shared name or another prefix.

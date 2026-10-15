@@ -19,9 +19,9 @@ class Conveyor:
     part:    rant.string(16) = ""
 
 node = rant.Node("robot1", domain=7)
-belt = node.publisher("line1/conveyor", Conveyor, reliable=True)
+belt = node.publisher("Line1/Conveyor", Conveyor, reliable=True)
 belt.send(Conveyor(speed=0.5, running=True, part="bracket"))
-node.subscriber("line1/conveyor", Conveyor, lambda c: print(c))
+node.subscriber("Line1/Conveyor", Conveyor, lambda c: print(c))
 ```
 
 The guide is docs/python.md in the repository: https://github.com/KosmosisDire/Rant

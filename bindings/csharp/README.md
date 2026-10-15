@@ -66,12 +66,12 @@ public struct Conveyor {
 }
 
 var robot = new RantNode("robot", new NodeOptions { Domain = 7 });  // the service thread runs from here
-var pub = robot.Publisher<Conveyor>("line1/conveyor", new Qos { Reliability = Reliability.Reliable });
+var pub = robot.Publisher<Conveyor>("Line1/Conveyor", new Qos { Reliability = Reliability.Reliable });
 
 // usually another process
 var viewer = new RantNode("viewer", new NodeOptions { Domain = 7 });
 viewer.OnEvent += e => Console.Error.WriteLine(e);                   // the diagnostics, optional
-viewer.Subscriber<Conveyor>("line1/conveyor", c => Console.WriteLine(c.Speed));
+viewer.Subscriber<Conveyor>("Line1/Conveyor", c => Console.WriteLine(c.Speed));
 
 pub.Send(new Conveyor { Speed = 0.5, Running = true, Part = "bracket" });   // thread-safe from any thread
 // (or Threading = Threading.Manual in the options and drive node.Poll(1) in your own loop)
@@ -82,15 +82,15 @@ for the untyped case:
 
 ```csharp
 // request/response: ONE definition on the network, callers anywhere
-var def = robot.FunctionDefinition<AddReq, AddRsp>("add", q => new AddRsp { Sum = q.A + q.B });
-var fn  = viewer.RemoteFunction<AddReq, AddRsp>("add");
+var def = robot.FunctionDefinition<AddReq, AddRsp>("Add", q => new AddRsp { Sum = q.A + q.B });
+var fn  = viewer.RemoteFunction<AddReq, AddRsp>("Add");
 var rsp = fn.Call(new AddReq { A = 2, B = 3 });          // blocking, throws CallException off Ok
 var sum = await fn.CallAsync(new AddReq { A = 2, B = 3 });   // the same, awaited
 var r   = fn.TryCall(new AddReq { A = 2, B = 3 });       // never throws: r.Ok / r.Status / r.Value
 
 // replicated state: ONE owner, remotes read the cached latest and push writes
-var own = robot.VariableDefinition<Level>("level", new Level { Value = 5 });
-var acc = viewer.RemoteVariable<Level>("level");          // acc.Value / acc.Set(...) / acc.Wait(...)
+var own = robot.VariableDefinition<Level>("Level", new Level { Value = 5 });
+var acc = viewer.RemoteVariable<Level>("Level");          // acc.Value / acc.Set(...) / acc.Wait(...)
 ```
 
 Any struct, class or record is a message type: its public fields and auto properties

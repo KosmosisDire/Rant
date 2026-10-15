@@ -49,10 +49,10 @@ build one from cancel (C#: `CancellationTokenSource.CancelAfter`).
 ## Creating and calling
 
 ```c
-RantFunction *t = rant_node_create_task_definition(n, "transfer",
+RantFunction *t = rant_node_create_task_definition(n, "Transfer",
                       req_schema, prg_schema, rsp_schema, on_transfer, NULL,
                       &(RantTaskOpts){ 0 });                 /* NULL = all defaults */
-RantFunction *r = rant_node_create_remote_task(n, "transfer",
+RantFunction *r = rant_node_create_remote_task(n, "Transfer",
                       req_schema, prg_schema, rsp_schema, NULL);
 
 uint32_t id;
