@@ -26,8 +26,11 @@
       "cacheVariables": {
         "RANT_BIN_DIR": "${sourceDir}/build-asan/bin",
         "RANT_STAGE_NATIVE": "OFF",
+        "RANT_STATIC_RUNTIME": "OFF",
         "CMAKE_C_FLAGS": "/DWIN32 /D_WINDOWS /fsanitize=address",
-        "CMAKE_CXX_FLAGS": "/DWIN32 /D_WINDOWS /EHsc /fsanitize=address"
+        "CMAKE_CXX_FLAGS": "/DWIN32 /D_WINDOWS /EHsc /fsanitize=address",
+        "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO": "/debug /INCREMENTAL:NO",
+        "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO": "/debug /INCREMENTAL:NO"
       }
     },
     {
@@ -39,6 +42,7 @@
       "cacheVariables": {
         "RANT_BIN_DIR": "${sourceDir}/build-asan/bin",
         "RANT_STAGE_NATIVE": "OFF",
+        "RANT_STATIC_RUNTIME": "OFF",
         "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer",
         "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
@@ -54,6 +58,7 @@
       "cacheVariables": {
         "RANT_BIN_DIR": "${sourceDir}/build-tsan/bin",
         "RANT_STAGE_NATIVE": "OFF",
+        "RANT_STATIC_RUNTIME": "OFF",
         "CMAKE_C_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
         "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
@@ -69,6 +74,7 @@
       "cacheVariables": {
         "RANT_BIN_DIR": "${sourceDir}/build-coverage/bin",
         "RANT_STAGE_NATIVE": "OFF",
+        "RANT_STATIC_RUNTIME": "OFF",
         "CMAKE_C_FLAGS": "--coverage -fprofile-update=atomic",
         "CMAKE_CXX_FLAGS": "--coverage -fprofile-update=atomic",
         "CMAKE_EXE_LINKER_FLAGS": "--coverage",

@@ -415,6 +415,8 @@ docs/building.md) run the C and C++ entries instrumented.
   need thread atomics in the platform layer, which today has them only under `RANT_SHM`.
 - Coverage counters update atomically (`-fprofile-update=atomic`), or service threads
   corrupt them and gcovr refuses negative counts.
+- Instrumented trees link the C and C++ runtimes dynamically (`RANT_STATIC_RUNTIME` off),
+  since they never leave the machine.
 
 ## Measurement traps
 
