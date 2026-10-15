@@ -11,6 +11,8 @@ makes a test or a measurement trustworthy.
   case runner, the checks, the pumps and the node helpers, and `wire_tap.c` wraps the
   platform's `sendto`, `recvfrom` and `bind` to count datagrams by type, inject faults and
   catch a socket bound outside loopback.
+- `tests/interop/` holds one Tick program per language and the driver that runs a pair.
+- `tests/golden/` holds the schema hashes every binding pins.
 - `tests/bench/` is `rant_bench`: the sweep and the benches.
 
 ## Harness rules
@@ -73,6 +75,8 @@ program in this order.
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
 | `bench.memscale` | `rant_bench memscale`, a steady state send never allocates |
+| `bindings.cpp`, `.python`, `.csharp` | the binding suites, below |
+| `interop.<pub>_to_<sub>` | one language publishing to another, below |
 
 ## Phases
 
@@ -369,6 +373,18 @@ The C# and Python suites mirror the same ground. Two things every suite shares:
   offsets with `build/tests/layout.txt`, which `tests/support/layout.c` writes at build
   time. A mirror that drifted from the C struct fails there instead of crashing a node
   open.
+
+## Interop
+
+Each binding suite talks only to itself, so `tests/interop/` crosses them. Every language
+has a Tick program (`tick.c`, `tick.cpp`, `tick.py`, `csharp/`) on one schema, `Tick { seq:
+u64, when: Timestamp, value: f64, at: Transform }`, reliable with keep_last 64 on loopback.
+`pub` sends `value = sin(seq * 0.01)` and the position `(cos, sin, 0)`, `sub <seconds>
+<publisher>` exits 0 once twenty ticks from that node decoded right. `rant_interop_pair`
+starts a publisher, then a subscriber, returns the subscriber's exit code and stops the
+publisher. ctest runs every ordered pair of the languages this machine has, one
+`interop.<pub>_to_<sub>` entry each, and hands the pair its domain through `RANT_DOMAIN`.
+C# builds as the `interop.csharp.build` fixture.
 
 ## Measurement traps
 
