@@ -495,6 +495,18 @@ static int i_rant_dsl_enum_value(i_RantDsl *d, int64_t *out){
     *out = neg ? -(int64_t)v : (int64_t)v;
     return 1;
 }
+/* whether name already names one of the count options written after count_pos, each laid
+ * out as [value, vsize bytes][u8 length][name] */
+static int i_rant_dsl_option_taken(const i_RantSchemaBuilder *b, size_t count_pos, uint16_t count,
+                                   uint32_t vsize, const char *name, size_t len){
+    size_t pos = count_pos + 2u; uint16_t i;
+    for (i = 0; i < count; i++){
+        uint8_t l = b->buf[pos + vsize];
+        if (l == len && memcmp(b->buf + pos + vsize + 1u, name, len) == 0) return 1;
+        pos += vsize + 1u + l;
+    }
+    return 0;
+}
 /* enum<uN> { Name [= value], ... } after the word enum was read. Streams the options. */
 static void i_rant_dsl_enum(i_RantDsl *d, i_RantSchemaBuilder *b){
     char wname[256]; RantSchemaTypeKind backing; size_t count_pos; uint16_t count = 0; int64_t next = 0;
@@ -518,6 +530,10 @@ static void i_rant_dsl_enum(i_RantDsl *d, i_RantSchemaBuilder *b){
         if (!i_rant_dsl_ident(d, vname)) return;
         if (!i_rant_name_normalize(vname, vwire, sizeof vwire, 1)){
             i_rant_dsl_fail(d, vat, "an option name needs a letter"); return;
+        }
+        if (!b->err && i_rant_dsl_option_taken(b, count_pos, count, rant_schema_scalar_size(backing),
+                                               vwire, strlen(vwire))){
+            i_rant_dsl_fail(d, vat, "two options of one enum spell the same wire name"); return;
         }
         i_rant_dsl_ws(d);
         if (*d->p == '='){   /* an explicit value, else auto increment */

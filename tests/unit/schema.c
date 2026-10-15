@@ -799,6 +799,14 @@ static void schema_v8_checks(void){
         CHECK(sv("A { x: u8, X: u8 }") == NULL && sv("A { frame_id: u8, frameId: u8 }") == NULL
                  && sv("A { a: { x: u8, X: u8 } }") == NULL && sv("A { x: u8, b: { x: u8 } }") != NULL,
                  "names: two fields of one struct with one wire name are refused");
+        {   i_RantSchemaErr ep = { NULL, NULL };
+            CHECK(test_compile(&sv_ma, "M = enum<u8> { Idle, Busy, IDLE }", &ep) == NULL
+                     && ep.why && strstr(ep.why, "same wire name") && ep.at && strncmp(ep.at, "IDLE", 4) == 0
+                     && sv("M = enum<u8> { RX, R_X }") == NULL
+                     && sv("A { m: enum<u8> { running_fast = 2, RunningFast = 3 } }") == NULL
+                     && sv("M = enum<u8> { Idle, Busy, IdleNot }") != NULL,
+                     "names: two options of one enum with one wire name are refused (%s)",
+                     ep.why ? ep.why : "null"); }
     }
 
     /* the registry: definitions persist across compiles, a failed text keeps nothing */

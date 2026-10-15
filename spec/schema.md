@@ -180,7 +180,8 @@ options to PascalCase (`i_rant_name_normalize`, public as `rant_field_name` and
 result is read once more and a run of them joins one word (`point_x_y` to `PointXY` to
 `PointXy`). Every spelling then lands on a fixed point, which makes print the inverse of
 compile. A field name already used in the open struct is refused by
-walking the struct's bytes written so far. A path given to the accessors is normalized
+walking the struct's bytes written so far, and an option name already used in the open enum
+by walking its options the same way. A path given to the accessors is normalized
 the same way before it is matched. A type word that is not a built in resolves against
 the node's registry, then the
 standard library, which is expanded into the registry on first use, and emits as a NAMED

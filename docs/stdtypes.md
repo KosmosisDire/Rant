@@ -201,7 +201,7 @@ this:
   is `http_server`), a digit stays with its word (`Imu9Dof` is `imu9_dof`). PascalCase
   cannot show where single letters split, so in a type a run of them is one word:
   `point_x_y`, `point_xy` and `PointXY` are all `PointXy`. Two fields of
-  one struct with the same wire name are refused. Every binding derives a member's wire
+  one struct, or two options of one enum, with the same wire name are refused. Every binding derives a member's wire
   name by the same rule, `rant_field_name` in C, so a C# `FrameId`, a Python `frame_id`
   and a C `frameId` meet with no attribute, and a path such as `"frameId"` given to
   `rant_get_f32` finds `frame_id`.
