@@ -225,13 +225,15 @@ if(TARGET rant_shared AND RANT_STAGE_NATIVE)
   endif()
 
   # dotnet builds the test only when ctest runs, as a fixture, never in the normal build.
+  # Two dotnet builds at once race over its first run setup and NuGet caches, so the dotnet
+  # lock lets one build at a time.
   find_program(DOTNET_EXECUTABLE dotnet)
   if(DOTNET_EXECUTABLE)
     set(_csharp_out "${CMAKE_CURRENT_BINARY_DIR}/csharp")
     add_test(NAME bindings.csharp.build
              COMMAND "${DOTNET_EXECUTABLE}" build "${PROJECT_SOURCE_DIR}/bindings/csharp/test"
                      -c Release -o "${_csharp_out}" --nologo -v q)
-    set_tests_properties(bindings.csharp.build PROPERTIES FIXTURES_SETUP csharp
+    set_tests_properties(bindings.csharp.build PROPERTIES FIXTURES_SETUP csharp RESOURCE_LOCK dotnet
                          LABELS bindings TIMEOUT 300)
     add_test(NAME bindings.csharp COMMAND "${DOTNET_EXECUTABLE}" "${_csharp_out}/rant_csharp_test.dll")
     set_tests_properties(bindings.csharp PROPERTIES FIXTURES_REQUIRED csharp)
@@ -270,7 +272,7 @@ if(TARGET rant_shared AND RANT_STAGE_NATIVE AND DOTNET_EXECUTABLE)
   add_test(NAME interop.csharp.build
            COMMAND "${DOTNET_EXECUTABLE}" build "${CMAKE_CURRENT_SOURCE_DIR}/interop/csharp"
                    -c Release -o "${CMAKE_CURRENT_BINARY_DIR}/interop_csharp" --nologo -v q)
-  set_tests_properties(interop.csharp.build PROPERTIES FIXTURES_SETUP interop_csharp
+  set_tests_properties(interop.csharp.build PROPERTIES FIXTURES_SETUP interop_csharp RESOURCE_LOCK dotnet
                        LABELS interop TIMEOUT 300)
 endif()
 foreach(_pub ${_tick_langs})
