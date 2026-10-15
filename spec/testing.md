@@ -402,6 +402,20 @@ publisher. ctest runs every ordered pair of the languages this machine has, one
 `interop.<pub>_to_<sub>` entry each, and hands the pair its domain through `RANT_DOMAIN`.
 C# builds as the `interop.csharp.build` fixture.
 
+## Sanitizers and coverage
+
+The `linux-asan`, `windows-asan`, `linux-tsan` and `linux-coverage` presets (commands in
+docs/building.md) run the C and C++ entries instrumented.
+
+- ASan and UBSan pass on Linux and Windows. A leak, an overflow or undefined behaviour stops
+  the program, so the entry fails.
+- TSan fails eleven entries on one known library race: the node lock's reentrancy check
+  (`lock_held`, `lock_owner` in `src/node/runtime.c`) reads the owner outside the mutex.
+  The sync function call's `done` flag in `src/patterns/core.c` races the same way. Both
+  need thread atomics in the platform layer, which today has them only under `RANT_SHM`.
+- Coverage counters update atomically (`-fprofile-update=atomic`), or service threads
+  corrupt them and gcovr refuses negative counts.
+
 ## Measurement traps
 
 - Never redirect a child's stdout through a PowerShell pipe. The pipe fills and an

@@ -1,6 +1,9 @@
 old
 *.exe
 /build/
+/build-asan/
+/build-tsan/
+/build-coverage/
 
 /Debug/
 *.png

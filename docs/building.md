@@ -132,9 +132,31 @@ Labels: `unit` (sans IO, no sockets), `e2e` (real nodes on loopback), `noshm` (t
 program built with `RANT_NO_SHM`), `bindings` (the C++, Python and C# suites, the last two
 when Python and dotnet are found), `interop` (each language publishing to every other one),
 `build` (the implementation compiled with every warning an error) and `bench`
-(`rant_bench memscale`). A program exits 0
-on pass, 1 on a failed check and 77 when it skips. Every test stays on loopback, so the
-Windows firewall never asks.
+(`rant_bench memscale`). A program exits 0 on pass, 1 on a failed check and 77 when it
+skips. Every test stays on loopback, so the Windows firewall never asks.
+
+### Sanitizers and coverage
+
+Each of these presets builds every program instrumented in its own tree (`build-asan`,
+`build-tsan`, `build-coverage`), so `build/` and `bin/` stay as they are. The Python and C#
+suites load the staged library, so they run only in the normal build.
+
+```sh
+cmake --preset linux-asan && cmake --build --preset linux-asan && ctest --preset linux-asan
+cmake --preset windows-asan && cmake --build --preset windows-asan && ctest --preset windows-asan
+cmake --preset linux-tsan && cmake --build --preset linux-tsan
+setarch $(uname -m) -R ctest --preset linux-tsan
+cmake --preset linux-coverage && cmake --build --preset linux-coverage
+ctest --preset linux-coverage
+gcovr -r . --filter 'dist/rant\.h$' --merge-mode-functions=separate build-coverage
+```
+
+- `linux-asan` is AddressSanitizer with UBSan and leak checks, `windows-asan` is MSVC's
+  AddressSanitizer.
+- `setarch -R` turns off address randomization, which TSan rejects on recent kernels such
+  as WSL's with "unexpected memory mapping".
+- Every test compiles `dist/rant.h`, so coverage reports its line numbers. Add
+  `--html-details build-coverage/coverage.html` for a page per source line.
 
 ## Measuring
 

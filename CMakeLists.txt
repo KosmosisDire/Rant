@@ -40,14 +40,16 @@ if(RANT_IS_TOP_LEVEL)
     endif()
   endif()
 
-  # All executables land in bin/, whatever the config. Multi-config generators would
-  # otherwise append a per-config subdir (bin/Release, bin/Debug), so pin every config
-  # to bin/ directly: switching Release<->Debug overwrites the same files in place.
-  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin")
+  # Every config writes RANT_BIN_DIR itself, never bin/Release or bin/Debug, so switching
+  # configs overwrites the same files. The sanitizer and coverage presets move it.
+  set(RANT_BIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bin" CACHE PATH "Where the programs land")
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${RANT_BIN_DIR}")
   foreach(_cfg ${CMAKE_CONFIGURATION_TYPES})
     string(TOUPPER "${_cfg}" _CFG)
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_CFG} "${CMAKE_CURRENT_SOURCE_DIR}/bin")
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_CFG} "${RANT_BIN_DIR}")
   endforeach()
+  # Off in the sanitizer and coverage trees, whose instrumented library no binding may load
+  option(RANT_STAGE_NATIVE "Copy the shared library into dist/native for the packages and bindings" ON)
 endif()
 
 # 1. Amalgamate src/ -> dist/, for a consumer too since dist/ is not committed. Configure
@@ -145,13 +147,13 @@ if(RANT_BUILD_TOOLS OR NOT CMAKE_CROSSCOMPILING)
   else()
     set(RANT_RID "linux-${RANT_ARCH}")
   endif()
-  if(RANT_IS_TOP_LEVEL)
+  if(RANT_IS_TOP_LEVEL AND RANT_STAGE_NATIVE)
     add_custom_command(TARGET rant_shared POST_BUILD
       COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_SOURCE_DIR}/dist/native/${RANT_RID}"
       COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:rant_shared>"
               "${CMAKE_CURRENT_SOURCE_DIR}/dist/native/${RANT_RID}/"
       VERBATIM)
-  else()
+  elseif(NOT RANT_IS_TOP_LEVEL)
     set_target_properties(rant_shared PROPERTIES EXCLUDE_FROM_ALL ON)
   endif()
 

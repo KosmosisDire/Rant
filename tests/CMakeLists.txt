@@ -27,6 +27,15 @@ foreach(_cfg ${CMAKE_CONFIGURATION_TYPES})
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_CFG} "${CMAKE_CURRENT_BINARY_DIR}/bin")
 endforeach()
 
+# MSVC ASan programs load the runtime DLL beside the linker, which is not on PATH outside a
+# developer prompt, so it goes next to every program.
+if(MSVC AND CMAKE_C_FLAGS MATCHES "/fsanitize=address")
+  get_filename_component(_msvc_bin "${CMAKE_LINKER}" DIRECTORY)
+  file(COPY "${_msvc_bin}/clang_rt.asan_dynamic-x86_64.dll"
+       DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/bin")
+  file(COPY "${_msvc_bin}/clang_rt.asan_dynamic-x86_64.dll" DESTINATION "${RANT_BIN_DIR}")
+endif()
+
 # Every ctest entry gets its own block of 64 domains through RANT_TEST_DOMAIN, so entries run
 # in parallel. A build tree takes one of eight slots by its path, so two trees can run ctest
 # at the same time.
@@ -181,7 +190,7 @@ if(CMAKE_CXX_COMPILER)
 endif()
 
 # Python and C# load the shared library the build copies into dist/native.
-if(TARGET rant_shared)
+if(TARGET rant_shared AND RANT_STAGE_NATIVE)
   set(Python3_FIND_REGISTRY LAST)       # the Python a shell runs, as the wheel targets do
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
@@ -226,11 +235,11 @@ if(CMAKE_CXX_COMPILER)
   list(APPEND _tick_langs cpp)
   set(_tick_cpp "$<TARGET_FILE:rant_tick_cpp>")
 endif()
-if(TARGET rant_shared AND Python3_Interpreter_FOUND)
+if(TARGET rant_shared AND RANT_STAGE_NATIVE AND Python3_Interpreter_FOUND)
   list(APPEND _tick_langs python)
   set(_tick_python "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/interop/tick.py")
 endif()
-if(TARGET rant_shared AND DOTNET_EXECUTABLE)
+if(TARGET rant_shared AND RANT_STAGE_NATIVE AND DOTNET_EXECUTABLE)
   list(APPEND _tick_langs csharp)
   set(_tick_csharp "${DOTNET_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/interop_csharp/rant_tick.dll")
   add_test(NAME interop.csharp.build
