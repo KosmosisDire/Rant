@@ -885,7 +885,7 @@ static void i_rant_reflect_fold(i_RantNodeCore *c, i_RantReflect *r){
         e = i_rant_reflect_entity_new(c, r);
         if (!e) return;
         slot = (uint16_t)(r->n_ent - 1u);
-        e->kind = (ch->kind < 8) ? row->entity : RANT_ENTITY_TOPIC;
+        e->kind = (ch->kind < 8) ? row->entity : (uint8_t)RANT_ENTITY_TOPIC;
         e->hash = ch->hash; e->incomplete = 1;
         if (ch->kind < 8 && !row->primary) i_rant_reflect_attach(r, e, (uint16_t)i, slot);
         else { e->primary = (uint16_t)i; ch->entity = slot; }

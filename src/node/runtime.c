@@ -322,7 +322,8 @@ static void i_rant_node_callback_begin(RantNode *n, i_RantCallbackScope *s, int 
     memset(s, 0, sizeof *s); s->marked = (uint8_t)mark; if (mark) n->cb_out++;
 }
 static void i_rant_node_callback_end(RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out){
-    if (out) (*out)--; if (s->marked) n->cb_out--;
+    if (out) (*out)--;
+    if (s->marked) n->cb_out--;
 }
 static void i_rant_node_callbacks_settle(RantNode *n){ (void)n; }
 static void i_rant_node_settle_on(RantNode *n, const volatile uint32_t *out){ (void)n; (void)out; }
@@ -778,7 +779,7 @@ typedef struct {
     size_t     node_core_bytes, transport_bytes, discovery_bytes, rx_buf_bytes;
 } i_RantNodeBlocks;
 
-static void i_rant_node_layout(i_RantBump *b, uint16_t max_peers, uint16_t max_topics,
+static void i_rant_node_layout(i_RantBump *b, uint16_t max_topics,
                               const i_RantTransportConfig *transport_cfg,
                               const i_RantDiscoveryCoreConfig *discovery_cfg, i_RantNodeBlocks *o){
     o->handles       = (uint8_t*)i_rant_bump_take(b, (size_t)max_topics * sizeof(RantTopic*), 16);
@@ -1051,7 +1052,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     tc.allocator   = i_rant_node_alloc;     /* required by i_rant_transport_init */
 
     {   i_RantBump b; memset(&b,0,sizeof b);
-        i_rant_node_layout(&b, max_peers, max_topics, &tc, &dc, &blocks);
+        i_rant_node_layout(&b, max_topics, &tc, &dc, &blocks);
         need = b.offset + 32u; }
 
     /* The node copies the caller's allocator into its own pool, so the caller's may be a
@@ -1068,7 +1069,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     base = (uint8_t*)(((uintptr_t)arena+15u)&~(uintptr_t)15u);
     {   i_RantBump b; memset(&b,0,sizeof b);
         b.base = base; b.cap = need - (size_t)(base - (uint8_t*)arena);
-        i_rant_node_layout(&b, max_peers, max_topics, &tc, &dc, &blocks); }
+        i_rant_node_layout(&b, max_topics, &tc, &dc, &blocks); }
 
     if (!i_rant_plat_startup()){
         RantAllocator p = n->pool; rant_allocator_reset(&p);
@@ -1275,13 +1276,13 @@ static int i_rant_node_grow(RantNode *n, uint16_t new_max_peers, uint16_t new_ma
     dc.alloc = i_rant_node_alloc; dc.alloc_user = n;
 
     memset(&b,0,sizeof b);
-    i_rant_node_layout(&b, new_max_peers, new_max_topics, &tc, &dc, &nb);
+    i_rant_node_layout(&b, new_max_topics, &tc, &dc, &nb);
     need = b.offset + 32u;
     new_arena = rant_allocator_alloc(&n->pool, NULL, need);
     if (!new_arena) return 0;
     nbase = (uint8_t*)(((uintptr_t)new_arena+15u)&~(uintptr_t)15u);
     memset(&b,0,sizeof b); b.base=nbase; b.cap=need-(size_t)(nbase-(uint8_t*)new_arena);
-    i_rant_node_layout(&b, new_max_peers, new_max_topics, &tc, &dc, &nb);
+    i_rant_node_layout(&b, new_max_topics, &tc, &dc, &nb);
 
     /* migrate the three cores. Each leaves the old intact, so a failure frees the new
        arena and the old node keeps running, only refusing the growth */
@@ -2130,7 +2131,8 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
                 uint16_t slot = i_rant_transport_topic_hist_head(n->transport, topic_index);
                 void *chunk_ptr = pool ? i_rant_shm_chunk(pool, slot, NULL) : NULL;
                 if (chunk_ptr){
-                    i_RantShmDesc d; uint8_t desc[RANT_SHM_DESC_WIRE];
+                    i_RantShmDesc d = {0};     /* a stamp refused for a bad chunk writes nothing */
+                    uint8_t desc[RANT_SHM_DESC_WIRE];
                     /* gather the whole wire sample into the chunk: stamp, header, payload,
                        exactly as the inline commit writes it */
                     if (ts_bytes){
@@ -2545,7 +2547,7 @@ int rant_topic_refresh(RantTopic *topic){
     if (i_rant_node_core_reflect_pick(n->core, RANT_ENTITY_TOPIC, topic->name, 0,
                                       i_rant_role_pubs(topic->role), &ms, &rel, &gen)
         && gen != topic->generation){
-        r = i_rant_topic_retype(topic, ms, rel ? RANT_RELIABLE : RANT_BEST_EFFORT);
+        r = i_rant_topic_retype(topic, ms, (uint8_t)(rel ? RANT_RELIABLE : RANT_BEST_EFFORT));
         if (r == 0){ topic->generation = gen; r = 1; }
     }
     i_rant_node_unlock(n, acquired);

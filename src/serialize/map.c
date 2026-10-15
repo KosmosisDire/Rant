@@ -170,17 +170,17 @@ static int i_rant_map_put_scalar(RantMapWriter *w, const char *key, uint8_t kind
 
 int rant_map_put_uint(RantMapWriter *w, const char *key, uint64_t v){
     uint8_t le[8];                                       /* the smallest kind that fits */
-    uint8_t k = v <= 0xFFu ? RANT_U8 : v <= 0xFFFFu ? RANT_U16
-              : v <= 0xFFFFFFFFu ? RANT_U32 : RANT_U64;
+    uint8_t k = (uint8_t)(v <= 0xFFu ? RANT_U8 : v <= 0xFFFFu ? RANT_U16
+                        : v <= 0xFFFFFFFFu ? RANT_U32 : RANT_U64);
     i_rant_le_w64(le, v);
     return i_rant_map_put_scalar(w, key, k, le, rant_schema_scalar_size((RantSchemaTypeKind)k));
 }
 
 int rant_map_put_int(RantMapWriter *w, const char *key, int64_t v){
     uint8_t le[8];
-    uint8_t k = (v >= -128 && v <= 127) ? RANT_I8
-              : (v >= -32768 && v <= 32767) ? RANT_I16
-              : (v >= -2147483647 - 1 && v <= 2147483647) ? RANT_I32 : RANT_I64;
+    uint8_t k = (uint8_t)((v >= -128 && v <= 127) ? RANT_I8
+                        : (v >= -32768 && v <= 32767) ? RANT_I16
+                        : (v >= -2147483647 - 1 && v <= 2147483647) ? RANT_I32 : RANT_I64);
     i_rant_le_w64(le, (uint64_t)v);                        /* two's complement LE: the low bytes */
     return i_rant_map_put_scalar(w, key, k, le, rant_schema_scalar_size((RantSchemaTypeKind)k));
 }

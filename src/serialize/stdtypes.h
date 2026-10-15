@@ -168,7 +168,7 @@ RANT_API RantQuaternion rant_quaternion_normalize(RantQuaternion q);
 RANT_API RantDouble3        rant_quaternion_rotate(RantQuaternion q, RantDouble3 v);
 
 static inline RantTransform rant_transform_identity(void){
-    RantTransform t = {{0}};     /* zero fills the parent name too, it reaches the wire */
+    RantTransform t = {{{0}}};   /* zero fills the parent name too, it reaches the wire */
     t.pose.orientation = rant_quaternion_identity(); return t;
 }
 static inline RantColor rant_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a){

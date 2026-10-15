@@ -228,6 +228,7 @@ void i_rant_reader_data(i_RantTransportState *st, int topic_index, int peer_slot
         case RANT_ORDER_INORDER:
             if (r->parked){ topic->repair_stats.frags_dup++; return; }   /* the held sample */
             a=&r->cur; break;
+        default: topic->repair_stats.frags_malformed++; return;
     }
     r->started = 1;   /* the writer is engaged */
     /* too big means the allocation failed: the head is skipped and reported, a sample
@@ -404,13 +405,12 @@ uint32_t i_rant_transport_deliver_parked(i_RantTransportState *st, uint16_t topi
         uint32_t next = st->lanes[li].topic_next;
         if (st->lanes[li].r.used && st->lanes[li].r.parked){
             uint32_t peer_slot = st->lanes[li].peer_slot;
-            uint32_t peer_id   = st->peer_ids[peer_slot];
             i_RantReaderProxy *r = &st->lanes[li].r;
             int accepted;
 #ifdef RANT_SHM
             if (r->parked_shm){
                 int ok = st->cfg.on_shm ?
-                         st->cfg.on_shm(st->cfg.user, topic_index, peer_id, r->cur.buf) : 0;
+                         st->cfg.on_shm(st->cfg.user, topic_index, st->peer_ids[peer_slot], r->cur.buf) : 0;
                 r = &st->lanes[li].r;                  /* the callback may re enter */
                 if (ok == 0){
                     /* the chunk is gone: un park, leave the gap, and let the repair path re

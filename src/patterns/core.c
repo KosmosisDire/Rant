@@ -607,8 +607,8 @@ static RantFunction *i_rant_function_new(RantNode *n, const char *name,
     RantRole rsp_role = mode == 2 ? RANT_PUBSUB : (handles_req ? RANT_PUB_ONLY : RANT_SUB_ONLY);
     i_RantSysMsgFn req_cb = handles_req ? i_rant_func_on_request : NULL;
     i_RantSysMsgFn rsp_cb = makes_calls ? i_rant_func_on_response : NULL;
-    uint8_t req_kind = topts ? RANT_KIND_TASK_REQ : RANT_KIND_FUNC_REQ;
-    uint8_t rsp_kind = topts ? RANT_KIND_TASK_RSP : RANT_KIND_FUNC_RSP;
+    uint8_t req_kind = (uint8_t)(topts ? RANT_KIND_TASK_REQ : RANT_KIND_FUNC_REQ);
+    uint8_t rsp_kind = (uint8_t)(topts ? RANT_KIND_TASK_RSP : RANT_KIND_FUNC_RSP);
     uint8_t req_attrs = 0;
     if (topts && handles_req)   /* only the definition declares the task facts */
         req_attrs = (uint8_t)((topts->no_cancel ? 0u : RANT_ATTR_CANCELLABLE)

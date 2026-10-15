@@ -823,10 +823,11 @@ RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, i_Ra
             i_rant_dsl_ws(&d);
             if (*d.p == '{' || *d.p == '='){
                 char twire[256];
-                if (!i_rant_name_normalize(word, twire, sizeof twire, 1)){
+                size_t tn = i_rant_name_normalize(word, twire, sizeof twire, 1);
+                if (!tn){
                     i_rant_dsl_fail(&d, at, "a type name needs a letter"); break;
                 }
-                strcpy(word, twire);
+                memcpy(word, twire, tn + 1);
                 i_rant_dsl_def(&d, defs, word, at, &toff, &tlen);
                 have_def = 1;
                 continue;

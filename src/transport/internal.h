@@ -301,12 +301,12 @@ static inline i_RantLane *i_rant_lane_at(i_RantTransportState *st, uint16_t topi
     return li == RANT__NIL ? NULL : &st->lanes[li];
 }
 /* NULL when the lane is unmatched. Every caller treats that as not used. */
-static inline i_RantWriterProxy *i_rant_writer_proxy_at(i_RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
-    i_RantLane *l = i_rant_lane_at(st, topic_index, peer_slot);
+static inline i_RantWriterProxy *i_rant_writer_proxy_at(i_RantTransportState *st, int topic_index, uint32_t peer_slot){
+    i_RantLane *l = i_rant_lane_at(st, (uint16_t)topic_index, peer_slot);
     return l ? &l->w : NULL;
 }
-static inline i_RantReaderProxy *i_rant_reader_proxy_at(i_RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
-    i_RantLane *l = i_rant_lane_at(st, topic_index, peer_slot);
+static inline i_RantReaderProxy *i_rant_reader_proxy_at(i_RantTransportState *st, int topic_index, uint32_t peer_slot){
+    i_RantLane *l = i_rant_lane_at(st, (uint16_t)topic_index, peer_slot);
     return l ? &l->r : NULL;
 }
 /* The wire index of a local topic is its own index. The peer mapped it from our interest. */
