@@ -378,7 +378,8 @@ static void i_rant_dsl_ws(i_RantDsl *d){
     }
 }
 /* The wire spelling of a name, see rant_field_name. Words start at an underscore, at a
- * capital after a lowercase letter or a digit, and at the last capital of a run of them. */
+ * capital after a lowercase letter or a digit, and at the last capital of a run that a
+ * lowercase letter follows. */
 size_t i_rant_name_normalize(const char *in, char *out, size_t cap, int as_type){
     size_t n = 0; int boundary = 1; char prev = 0;
     const char *p;
@@ -404,6 +405,18 @@ size_t i_rant_name_normalize(const char *in, char *out, size_t cap, int as_type)
     }
     out[n] = '\0';
     if (!n || (out[0] >= '0' && out[0] <= '9')) return 0;
+    if (as_type){
+        /* PascalCase cannot show where single letters split, so the result is read once more:
+           a capital after a capital and before no lowercase joins its word (x_y, XY to Xy) */
+        size_t i; char was = out[0];
+        for (i = 1; i < n; i++){
+            char c = out[i];
+            if (c >= 'A' && c <= 'Z' && was >= 'A' && was <= 'Z'
+                && !(out[i + 1] >= 'a' && out[i + 1] <= 'z'))
+                out[i] = (char)(c + 32);
+            was = c;
+        }
+    }
     return n;
 }
 size_t rant_field_name(const char *name, char *out, size_t cap){

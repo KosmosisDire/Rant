@@ -455,12 +455,12 @@ as `fuzz_<name>`. Fuzzing itself runs by hand, never in CI.
 - Once a crash is fixed, its input goes to `tests/fuzz/crashes/<name>/` under a name that
   says what it caught, so every build replays it.
 - Found so far, fixed with their inputs saved: a zero length fragment of an empty sample
-  offset a NULL buffer, the same empty sample offset NULL again in delivery, and a DATA
-  header claiming a sample longer than its fragments sized a 3 GB allocation.
-- Found so far and open: a peer's wire may name a standard type with another shape, name a
-  field twice or leave an option unnamed, all of which text refuses. Type names that end in
-  two single letter words (`eL` to `EL` to `El`) do not normalize to a fixed point, so such
-  a schema does not print back to itself and the `schema` fuzzer stops on it.
+  offset a NULL buffer, the same empty sample offset NULL again in delivery, a DATA header
+  claiming a sample longer than its fragments sized a 3 GB allocation, and a type name with
+  a run of single letters (`eL` to `EL` to `El`) did not print back to itself.
+- Accepted by design: a peer's wire may name a standard type with another shape, name a
+  field twice or leave an option unnamed. Text refuses all three, but none breaks the layer
+  below, so only a compiled schema owes the stricter properties.
 
 ## Measurement traps
 

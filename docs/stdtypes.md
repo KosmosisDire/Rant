@@ -198,7 +198,9 @@ this:
   PascalCase, and the parser makes them so from whatever was written. `frame_id`,
   `FrameId` and `frameId` are one field, `robot_pose` is `RobotPose`, `IDLE` is `Idle`.
   An underscore, a case change and the last capital of a run split words (`HTTPServer`
-  is `http_server`), a digit stays with its word (`Imu9Dof` is `imu9_dof`). Two fields of
+  is `http_server`), a digit stays with its word (`Imu9Dof` is `imu9_dof`). PascalCase
+  cannot show where single letters split, so in a type a run of them is one word:
+  `point_x_y`, `point_xy` and `PointXY` are all `PointXy`. Two fields of
   one struct with the same wire name are refused. Every binding derives a member's wire
   name by the same rule, `rant_field_name` in C, so a C# `FrameId`, a Python `frame_id`
   and a C `frameId` meet with no attribute, and a path such as `"frameId"` given to

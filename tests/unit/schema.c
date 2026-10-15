@@ -768,6 +768,34 @@ static void schema_v8_checks(void){
                  && rant_field_name("__", w, sizeof w) == 0 && rant_field_name("_1", w, sizeof w) == 0
                  && rant_field_name("frameId", w, 8) == 0 && rant_field_name("frameId", w, 9) == 8,
                  "names: the public rule");
+        CHECK(rant_type_name("point_x_y", w, sizeof w) == 7 && strcmp(w, "PointXy") == 0
+                 && rant_type_name("PointXY", w, sizeof w) == 7 && strcmp(w, "PointXy") == 0
+                 && rant_type_name("x_y_z", w, sizeof w) == 3 && strcmp(w, "Xyz") == 0
+                 && rant_type_name("X_AXIS", w, sizeof w) == 5 && strcmp(w, "XAxis") == 0
+                 && rant_type_name("RUNNING_FAST", w, sizeof w) == 11 && strcmp(w, "RunningFast") == 0
+                 && rant_type_name("HTTPServer", w, sizeof w) == 10 && strcmp(w, "HttpServer") == 0
+                 && rant_field_name("point_x_y", w, sizeof w) == 9 && strcmp(w, "point_x_y") == 0,
+                 "names: a run of single letters is one type word, as its PascalCase reads");
+        {   /* every spelling over a small alphabet lands on a fixed point, field and type */
+            static const char abc[] = "aAbB1_";
+            char in[6], once[16], twice[16];
+            int len, k, as_type, bad = 0;
+            long idx, total;
+            for (len = 1; len <= 5; len++){
+                for (total = 1, k = 0; k < len; k++) total *= 6;
+                for (idx = 0; idx < total; idx++){
+                    long v = idx;
+                    for (k = 0; k < len; k++){ in[k] = abc[v % 6]; v /= 6; }
+                    in[len] = 0;
+                    for (as_type = 0; as_type < 2; as_type++){
+                        size_t a = i_rant_name_normalize(in, once, sizeof once, as_type);
+                        if (a && (i_rant_name_normalize(once, twice, sizeof twice, as_type) != a
+                                  || strcmp(once, twice) != 0)) bad++;
+                    }
+                }
+            }
+            CHECK(bad == 0, "names: every spelling normalizes to a fixed point (%d do not)", bad);
+        }
         CHECK(sv("A { x: u8, X: u8 }") == NULL && sv("A { frame_id: u8, frameId: u8 }") == NULL
                  && sv("A { a: { x: u8, X: u8 } }") == NULL && sv("A { x: u8, b: { x: u8 } }") != NULL,
                  "names: two fields of one struct with one wire name are refused");

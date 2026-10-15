@@ -176,7 +176,10 @@ base   := scalar | 'string' ('<' cap '>')? | 'map' | 'enum' '<' scalar '>' '{' o
 
 Every IDENT and NAME is normalized as it is read, fields to snake_case and types and enum
 options to PascalCase (`i_rant_name_normalize`, public as `rant_field_name` and
-`rant_type_name`), and a field name already used in the open struct is refused by
+`rant_type_name`). A type's PascalCase cannot show where single letters split, so the
+result is read once more and a run of them joins one word (`point_x_y` to `PointXY` to
+`PointXy`). Every spelling then lands on a fixed point, which makes print the inverse of
+compile. A field name already used in the open struct is refused by
 walking the struct's bytes written so far. A path given to the accessors is normalized
 the same way before it is matched. A type word that is not a built in resolves against
 the node's registry, then the
