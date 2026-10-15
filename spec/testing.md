@@ -5,11 +5,12 @@ each program as one ctest entry. The commands are in docs/building.md. This file
 makes a test or a measurement trustworthy.
 
 - `tests/unit/` runs the sans IO cores with no sockets and a controlled clock.
-- `tests/rant_test.c` runs the phases that need real nodes on loopback.
+- `tests/e2e/` runs real nodes on loopback.
 - `tests/support/` is the harness every program shares: `test.h` compiles the whole
   implementation into the program so a case reaches every internal, `harness.c` holds the
-  case runner, the checks and the node helpers, and `wire_tap.c` wraps the platform's
-  `sendto` and `recvfrom` to count datagrams by type and inject faults.
+  case runner, the checks, the pumps and the node helpers, and `wire_tap.c` wraps the
+  platform's `sendto`, `recvfrom` and `bind` to count datagrams by type, inject faults and
+  catch a socket bound outside loopback.
 - `tests/bench/` is `rant_bench`: the sweep and the benches.
 
 ## Harness rules
@@ -24,10 +25,17 @@ makes a test or a measurement trustworthy.
   peer drop.
 - `ctest --preset windows` (or `linux`) must pass, plus a `rant_bench sweep` for
   transport changes. A comment only change must leave code byte identical.
-- The tests use `"127.0.0.1"` as the discovery interface to stay off the LAN. ctest hands
-  each program its own block of 64 domains through `RANT_TEST_DOMAIN`, a run by hand takes
-  one from the clock, so parallel programs and the SHM module test (segment names carry
-  the base) never meet.
+- Every node a test opens is pinned to `"127.0.0.1"`, and every bare socket binds it, so
+  nothing listens on the network and the Windows firewall never asks. On Windows the
+  harness fails a case that bound a socket anywhere else.
+- ctest hands each program its own block of 64 domains through `RANT_TEST_DOMAIN`, a run
+  by hand takes one from the clock, so parallel programs and the SHM module test (segment
+  names carry the base) never meet. A fixed port derives from the base too.
+- Wait on a condition with `PUMP_UNTIL` (or `WAIT_UNTIL` under service threads) and a
+  generous budget: it ends as soon as the condition holds. A fixed `test_pump` window is
+  only for proving that something does NOT happen, and it lasts as long as the protocol
+  needs, such as an announce interval or a peer timeout. Never count passes, which stretch
+  under load.
 - A raw transport `on_message` sees the 8 byte source stamp first. A payload tag sits at
   `data[RANT_TIMESTAMP_BYTES]`.
 - A wall clock threshold check (waker under 400 ms, varwait under 250 ms) can flake once
@@ -39,10 +47,36 @@ makes a test or a measurement trustworthy.
   datagram parks in `tx_hold` and counts as sent, so a hostile eviction test needs bursts
   bigger than one datagram plus the ring.
 
+## Programs
+
+One ctest entry per program, named `<folder>.<program>`. Every case below runs in its
+program in this order.
+
+| Program | Cases |
+|---|---|
+| `unit.transport` | basics, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
+| `unit.discovery` | discovery_core, node_core |
+| `unit.shm` | module, loss |
+| `unit.schema` | dsl, wire |
+| `unit.detail` | detail_codec, detail_paging, interest_codec |
+| `e2e.stream` | stream, scale, named, collision |
+| `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, prefix |
+| `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema |
+| `e2e.detail` | detail_live, interest_external |
+| `e2e.shm` | shm_node |
+| `e2e.queues` | queue, pull, callback_queue, callback_pattern |
+| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud |
+| `e2e.tasks` | task, task_matrix |
+| `e2e.entities` | reflect_dropped, churn, log_and_meta |
+| `e2e.matchwait` | matchwait |
+| `e2e.relay` | relay, nat, self_ip |
+| `e2e.timestamps` | timestamps |
+| `e2e.threads` | threads |
+| `bench.memscale` | `rant_bench memscale`, a steady state send never allocates |
+
 ## Phases
 
-What each phase pins. The sans IO ones are cases in `tests/unit/`, the rest in
-`tests/rant_test.c`.
+What each phase pins, grouped by layer.
 
 ### Transport core, sans IO with a controlled clock
 

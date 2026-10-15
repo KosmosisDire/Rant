@@ -1,5 +1,6 @@
-/* The wire tap: wraps the sendto and recvfrom calls of the Rant platform layer, counts every
- * datagram by transport type and injects faults. rant_impl.h routes the library through it. */
+/* The wire tap: wraps the sendto, recvfrom and bind calls of the Rant platform layer, counts
+ * every datagram by transport type, injects faults and notes binds outside loopback.
+ * rant_impl.h routes the library through it. */
 #ifndef RANT_WIRE_TAP_H
 #define RANT_WIRE_TAP_H
 
@@ -44,6 +45,8 @@ typedef struct {
     long long trace_left;                           /* received datagrams still to print */
     long long block_data;                           /* 1 = transport datagrams would block */
     long long drop_detail_resp_port;                /* swallow DETAIL_RESP to this port, 0 = off */
+    long long bind_off_loopback;                    /* sockets bound to a network address */
+    long long bind_off_loopback_port;               /* the last such socket's port */
 } WireTap;
 
 extern WireTap wire_tap;
@@ -51,13 +54,15 @@ extern WireTap wire_tap;
 long long wire_tap_read(const long long *field);
 void      wire_tap_write(long long *field, long long value);
 void      wire_tap_snapshot(WireTap *out);
-/* Zeroes the counters and keeps the fault switches. */
+/* Zeroes the datagram counters and keeps the switches and the bind record. */
 void      wire_tap_reset_counters(void);
 
 #ifdef _WIN32
+int wire_tap_bind(SOCKET s, const struct sockaddr *addr, int len);
 int wire_tap_sendto(SOCKET s, const char *buf, int len, int flags, const struct sockaddr *to, int tolen);
 int wire_tap_recvfrom(SOCKET s, char *buf, int len, int flags, struct sockaddr *from, int *fromlen);
 #else
+int     wire_tap_bind(int s, const struct sockaddr *addr, socklen_t len);
 ssize_t wire_tap_sendto(int s, const void *buf, size_t len, int flags, const struct sockaddr *to,
                         socklen_t tolen);
 ssize_t wire_tap_recvfrom(int s, void *buf, size_t len, int flags, struct sockaddr *from,

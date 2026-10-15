@@ -1,6 +1,7 @@
 /* The harness behind harness.h. Compiled into every test program next to its cases, so it
  * shares the program's build flags. It uses the declarations only, never the internals. */
 #include "harness.h"
+#include "wire_tap.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -45,6 +46,20 @@ static void pick_domain_base(void){
     else test_domain_base = (uint16_t)(1000u + (unsigned)(i_rant_plat_now_us() % 900u) * TEST_DOMAINS);
 }
 
+/* A test stays on loopback: a socket bound to the network makes the Windows firewall ask
+   and leaves a rule behind. POSIX discovery binds any by design, so only Windows checks */
+static void check_binds(void){
+#ifdef _WIN32
+    static long long seen;
+    long long now = wire_tap_read(&wire_tap.bind_off_loopback);
+    if (now != seen){
+        test_check(0, __FILE__, __LINE__, "%lld sockets bound outside loopback, the last on port %lld",
+                   now - seen, wire_tap_read(&wire_tap.bind_off_loopback_port));
+        seen = now;
+    }
+#endif
+}
+
 int test_main(int argc, char **argv, const TestCase *cases, int n){
     int i, k, ran = 0, skipped = 0;
     char failed[1024] = "";
@@ -70,6 +85,7 @@ int test_main(int argc, char **argv, const TestCase *cases, int n){
         printf("-- %s\n", cases[i].name);
         g_case_failed = g_case_skipped = 0;
         cases[i].run();
+        check_binds();
         ran++;
         if (g_case_skipped && !g_case_failed) skipped++;
         if (g_case_failed && strlen(failed) + strlen(cases[i].name) + 2 < sizeof failed){
@@ -100,11 +116,12 @@ void test_sleep_ms(int ms){
 #endif
 }
 
-void test_pump(RantNode *a, RantNode *b, int ms){
+void test_pump3(RantNode *a, RantNode *b, RantNode *c, int ms){
     uint64_t end = i_rant_plat_now_us() + (uint64_t)ms * 1000u;
     do {
         rant_node_poll(a, 1);
         if (b) rant_node_poll(b, 0);
+        if (c) rant_node_poll(c, 0);
     } while (i_rant_plat_now_us() < end);
 }
 
@@ -166,7 +183,7 @@ uint16_t test_free_port(uint16_t port){
     uint16_t k;
     for (k = 0; k < 100; k++){
         i_RantSock s = i_rant_plat_udp_open();
-        int ok = s != RANT_SOCK_BAD && i_rant_plat_bind(s, 0, (uint16_t)(port + k), 0);
+        int ok = s != RANT_SOCK_BAD && i_rant_plat_bind(s, i_rant_plat_ipv4(127,0,0,1), (uint16_t)(port + k), 0);
         if (s != RANT_SOCK_BAD) i_rant_plat_close(s);
         if (ok) return (uint16_t)(port + k);
     }

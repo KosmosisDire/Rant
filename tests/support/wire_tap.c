@@ -116,6 +116,16 @@ static int tap_fault(const unsigned char *b, long len, const struct sockaddr *to
     return 0;
 }
 
+/* A socket bound to any or to a network address listens on the network, which is what makes
+   the Windows firewall ask. Loopback binds never do */
+static void tap_bound(const struct sockaddr *addr){
+    const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
+    if (!addr || addr->sa_family != AF_INET) return;
+    if (((const unsigned char *)&in->sin_addr)[0] == 127) return;
+    TAP_ADD(&wire_tap.bind_off_loopback, 1);
+    TAP_STORE(&wire_tap.bind_off_loopback_port, ntohs(in->sin_port));
+}
+
 static void tap_sent(const unsigned char *b, long r, long long dt){
     long long max;
     TAP_ADD(&wire_tap.tx_ns, dt);
@@ -147,6 +157,14 @@ static void tap_received(const unsigned char *b, long r, const struct sockaddr *
 
 static void tap_error(int e, long long *would_block, long long *reset, long long *error){
     TAP_ADD(e == WSAEWOULDBLOCK ? would_block : e == WSAECONNRESET ? reset : error, 1);
+}
+
+int wire_tap_bind(SOCKET s, const struct sockaddr *addr, int len){
+    int r = bind(s, addr, len);
+    int e = WSAGetLastError();
+    if (r == 0) tap_bound(addr);
+    WSASetLastError(e);
+    return r;
 }
 
 int wire_tap_sendto(SOCKET s, const char *buf, int len, int flags, const struct sockaddr *to, int tolen){
@@ -182,6 +200,14 @@ int wire_tap_recvfrom(SOCKET s, char *buf, int len, int flags, struct sockaddr *
 
 static void tap_error(int e, long long *would_block, long long *reset, long long *error){
     TAP_ADD(e == EAGAIN || e == EWOULDBLOCK ? would_block : e == ECONNREFUSED ? reset : error, 1);
+}
+
+int wire_tap_bind(int s, const struct sockaddr *addr, socklen_t len){
+    int r = bind(s, addr, len);
+    int e = errno;
+    if (r == 0) tap_bound(addr);
+    errno = e;
+    return r;
 }
 
 ssize_t wire_tap_sendto(int s, const void *buf, size_t len, int flags, const struct sockaddr *to,

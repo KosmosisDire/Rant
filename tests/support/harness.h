@@ -28,13 +28,16 @@ extern uint16_t test_domain_base;
 #define TEST_DOMAINS 64
 
 void test_sleep_ms(int ms);
-/* Polls a, and b when given, for ms. b polls without waiting, so a pass costs about 1 ms */
-void test_pump(RantNode *a, RantNode *b, int ms);
+/* Polls a, and b and c when given, for ms and at least one pass. Only a waits, so a pass
+   costs about 1 ms */
+void test_pump3(RantNode *a, RantNode *b, RantNode *c, int ms);
+#define test_pump(a, b, ms) test_pump3((a), (b), NULL, (ms))
 /* Pumps until cond holds or ms run out. cond is evaluated again after every pass */
-#define PUMP_UNTIL(a, b, ms, cond) do { \
+#define PUMP3_UNTIL(a, b, c, ms, cond) do { \
         uint64_t pump_end_ = i_rant_plat_now_us() + (uint64_t)(ms) * 1000u; \
-        while (!(cond) && i_rant_plat_now_us() < pump_end_) test_pump((a), (b), 0); \
+        while (!(cond) && i_rant_plat_now_us() < pump_end_) test_pump3((a), (b), (c), 0); \
     } while (0)
+#define PUMP_UNTIL(a, b, ms, cond) PUMP3_UNTIL((a), (b), NULL, (ms), cond)
 /* Sleeps until cond holds or ms run out, for nodes on their service threads */
 #define WAIT_UNTIL(ms, cond) do { \
         uint64_t wait_end_ = i_rant_plat_now_us() + (uint64_t)(ms) * 1000u; \
