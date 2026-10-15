@@ -302,6 +302,7 @@ i_RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const i_RantDisco
     bind_naddr = i_rant_plat_parse_ip(net->multicast_interface);
     bind_naddr = i_rant_plat_is_loopback(bind_naddr) ? i_rant_plat_loopback_group_bind(bind_naddr) : 0;
     if (!i_rant_plat_bind(fd, bind_naddr, discovery_port, 1)){ int e=i_rant_plat_last_socket_error(); i_rant_plat_close(fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_BIND, e); }
+    i_rant_plat_mcast_own_groups(fd);
 
     /* Join and announce on every interface. A pinned interface means exactly that one. */
     group_naddr = i_rant_plat_parse_ip(group);

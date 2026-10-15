@@ -67,6 +67,9 @@ void      i_rant_plat_suppress_connreset(i_RantSock s);
 void i_rant_plat_mcast_setif(i_RantSock s, uint32_t if_naddr);
 void i_rant_plat_mcast_ttl    (i_RantSock s, uint8_t ttl);
 void i_rant_plat_mcast_loop (i_RantSock s, int on);
+/* Group traffic reaches s only for groups s joined itself. Linux otherwise hands it every
+   group any socket on the host joined, so a unicast only node would hear multicast */
+void i_rant_plat_mcast_own_groups(i_RantSock s);
 int  i_rant_plat_mcast_join (i_RantSock s, uint32_t group_naddr, uint32_t if_naddr); /* 1 ok */
 void i_rant_plat_mcast_leave(i_RantSock s, uint32_t group_naddr, uint32_t if_naddr);
 

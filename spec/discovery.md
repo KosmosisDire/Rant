@@ -131,7 +131,9 @@ open with `RANT_E_BAD_ADDRESS`.
 
 A `unicast_only` node joins no group, announces only to seed peers and known peers, and
 marks every announce `RELAY_ME`. It also skips the join, the group sends and the ttl and
-loop options, so a device with no multicast can open at all. A node that hears a
+loop options, so a device with no multicast can open at all. Linux would still hand its
+socket every group another socket on the host joined, so the discovery socket turns off
+`IP_MULTICAST_ALL` and hears only its own groups. A node that hears a
 `RELAY_ME` announce DIRECTLY re announces it: `i_rant_discovery_poll_relay` builds an
 announce on behalf of that peer (its uuid, its blob at the origin's version, and the
 locator we know it at stated outright) and the IO layer sends it out every path. This is

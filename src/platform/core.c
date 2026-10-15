@@ -434,6 +434,14 @@ void i_rant_plat_mcast_loop(i_RantSock s, int on){
     unsigned char l = (unsigned char)(on ? 1 : 0);
     setsockopt(RANT__FD(s), IPPROTO_IP, IP_MULTICAST_LOOP, (const char*)&l, sizeof l);
 }
+void i_rant_plat_mcast_own_groups(i_RantSock s){
+#ifdef IP_MULTICAST_ALL
+    int off = 0;
+    setsockopt(RANT__FD(s), IPPROTO_IP, IP_MULTICAST_ALL, (const char*)&off, sizeof off);
+#else
+    (void)s;     /* the other stacks deliver only the groups a socket joined */
+#endif
+}
 int i_rant_plat_mcast_join(i_RantSock s, uint32_t group_naddr, uint32_t if_naddr){
     struct ip_mreq mr; memset(&mr, 0, sizeof mr);
     mr.imr_multiaddr.s_addr = group_naddr;
