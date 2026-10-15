@@ -1,9 +1,12 @@
 /* The two node test for rant.hpp. spec/testing.md lists the legs. Single process,
- * discovery pinned to loopback on isolated domains, never 0. Exit 0 = PASS. */
+ * discovery pinned to loopback on isolated domains, never 0. `rant_cpp_test` runs every
+ * leg, `rant_cpp_test name` one, `--list` lists them, `bench` runs the cost leg. Exit 0 =
+ * PASS. */
 #include "rant.hpp"
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 #include <functional>
@@ -16,6 +19,19 @@ static void chk(const char* what, bool ok) {
     std::printf("  %s  %s\n", ok ? "ok " : "FAIL", what);
     if (!ok) g_failures++;
 }
+/* ctest hands each program a block of 64 domains through RANT_TEST_DOMAIN, a run by hand
+   takes one from the clock, so parallel runs never meet */
+static uint16_t test_domain(uint16_t offset) {
+    static uint16_t base = 0;
+    if (!base) {
+        const char* env = std::getenv("RANT_TEST_DOMAIN");
+        long v = env ? std::strtol(env, nullptr, 10) : 0;
+        auto now = (unsigned long long)std::chrono::steady_clock::now().time_since_epoch().count();
+        base = (v > 0 && v <= 65535 - 64) ? (uint16_t)v : (uint16_t)(1000u + (now % 900u) * 64u);
+    }
+    return (uint16_t)(base + offset);
+}
+
 static bool wait_for(int timeout_ms, const std::function<bool()>& pred,
                      rant::Node* pump = nullptr) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -162,7 +178,7 @@ static std::atomic<bool>        g_deferred_ready{ false };
 static bool patterns_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
-    opts.domain = 43;
+    opts.domain = test_domain(1);
     opts.multicast_interface = "127.0.0.1";
     opts.max_topics = 32;
     opts.fetch_details = true;   /* observer: peer entity names resolve, else hash placeholders */
@@ -388,7 +404,7 @@ static uint8_t g_track_id0 = 0;
 static bool stdtypes_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
-    opts.domain = 46;
+    opts.domain = test_domain(4);
     opts.multicast_interface = "127.0.0.1";
     auto on_evt = [](const rant::Event& e) {
         if (e.is_error() && e.error() != rant::ErrorKind::SchemaMismatch)
@@ -642,7 +658,7 @@ template <class T> static bool round_trip(rant::Node& n, const T& in, T& out) {
 static bool nested_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
-    opts.domain = 47;
+    opts.domain = test_domain(5);
     opts.multicast_interface = "127.0.0.1";
     opts.threading = rant::Threading::Manual;
     rant::Node a("nest-a", opts);
@@ -787,7 +803,7 @@ static bool nested_leg() {
 static bool value_root_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
-    opts.domain = 44;
+    opts.domain = test_domain(2);
     opts.multicast_interface = "127.0.0.1";
     auto on_evt = [](const char* tag) {
         return [tag](const rant::Event& e) {
@@ -905,7 +921,7 @@ static bool tails_leg() {
     int fails_at_entry = g_failures;
 
     rant::NodeOptions opts;
-    opts.domain = 47;
+    opts.domain = test_domain(5);
     opts.multicast_interface = "127.0.0.1";
     auto on_evt = [](const char* tag) {
         return [tag](const rant::Event& e) {
@@ -1017,7 +1033,7 @@ static std::atomic<int>  g_fixed_parked{ 0 };
 static bool tasks_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
-    opts.domain = 48;
+    opts.domain = test_domain(6);
     opts.multicast_interface = "127.0.0.1";
     opts.max_topics = 32;
     opts.fetch_details = true;   /* the peer entity view resolves names, schemas, attrs */
@@ -1220,7 +1236,7 @@ template <class Send, class Pump> static double us_per_round_trip(int n, Send&& 
 static bool queue_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
-    opts.domain = 50;
+    opts.domain = test_domain(8);
     opts.multicast_interface = "127.0.0.1";
     opts.max_topics = 32;
     rant::Node a("QA", opts);
@@ -1319,7 +1335,7 @@ static bool queue_leg() {
 static bool lifetime_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
-    opts.domain = 52;
+    opts.domain = test_domain(10);
     opts.multicast_interface = "127.0.0.1";
     opts.max_topics = 32;
     rant::Node a("LA", opts);
@@ -1422,7 +1438,7 @@ static bool lifetime_leg() {
 static bool failure_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
-    opts.domain = 53;
+    opts.domain = test_domain(11);
     opts.multicast_interface = "127.0.0.1";
     opts.max_topics = 32;
     rant::Node a("XA", opts);
@@ -1507,7 +1523,7 @@ static bool failure_leg() {
 static bool factory_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
-    opts.domain = 51;
+    opts.domain = test_domain(9);
     opts.multicast_interface = "127.0.0.1";
     rant::Node a("FA", opts);
     rant::Node b("FB", opts);
@@ -1609,7 +1625,7 @@ static bool bench_leg() {
     narrow::Chunk chunk, chunk_out;
     chunk.seq = 7; chunk.samples = { 1.5f, -2.5f, 8.75f }; chunk.note = "tail";
     rant::NodeOptions copt;
-    copt.domain = 49;
+    copt.domain = test_domain(7);
     copt.multicast_interface = "127.0.0.1";
     copt.threading = rant::Threading::Manual;
     rant::Node cn("bench-codec", copt);   /* holds the codecs */
@@ -1671,7 +1687,7 @@ static bool bench_leg() {
 
     {   /* the C reference: two C nodes, a typed topic, a C callback that only counts */
         rant::detail::RantNodeOpts co{};
-        co.domain = 50;
+        co.domain = test_domain(8);
         co.net.multicast_interface = "127.0.0.1";
         rant::detail::RantAllocator ca = rant::detail::rant_allocator_heap(0);
         rant::detail::RantAllocator cb = rant::detail::rant_allocator_heap(0);
@@ -1691,7 +1707,7 @@ static bool bench_leg() {
     }
 
     rant::NodeOptions opts;
-    opts.domain = 49;
+    opts.domain = test_domain(7);
     opts.multicast_interface = "127.0.0.1";
     opts.threading = rant::Threading::Manual;   /* both pumped from the bench thread */
     rant::Node a("BA", opts);
@@ -1734,13 +1750,11 @@ static bool bench_leg() {
     return ok;
 }
 
-int main(int argc, char** argv) {
-    if (argc > 1 && std::strcmp(argv[1], "bench") == 0) return bench_leg() ? 0 : 2;
-#if defined(__cpp_exceptions)
-  try {
-#endif
+/* the inline dynamic schema API, direct and over service threads */
+static bool dynamic_leg() {
+    int before = g_failures;
     rant::NodeOptions opts;
-    opts.domain = 42;
+    opts.domain = test_domain(0);
     opts.multicast_interface = "127.0.0.1";   /* single-host discovery */
 
     auto on_msg = [](const rant::MessageView& m) { decode(m); };
@@ -1752,42 +1766,41 @@ int main(int argc, char** argv) {
     manual.threading = rant::Threading::Manual;   /* both pumped from this thread first */
     rant::Node a("A", manual);
     rant::Node b("B", manual);
-    if (!a.valid() || !b.valid()) { std::printf("FAIL: node construction\n"); return 1; }
+    if (!a.valid() || !b.valid()) { chk("dynamic: node construction", false); return false; }
     a.on_event(on_evt("A"));
     b.on_event(on_evt("B"));
 
     rant::Schema schema = a.schema(SCHEMA);
-    if (!schema) { std::printf("FAIL: schema: %s\n", a.last_error().c_str()); return 1; }
+    if (!schema) { std::printf("FAIL: schema: %s\n", a.last_error().c_str()); chk("dynamic: schema", false); return false; }
     std::printf("schema '%.*s' size=%u fields=%u\n",
                 (int)schema.name().size(), schema.name().data(), schema.size(), schema.field_count());
 
     auto pub = a.publisher<rant::Bytes>("t", { rant::Reliability::Reliable }, schema);
     auto sub = b.subscriber<rant::Bytes>("t", on_msg, { rant::Reliability::Reliable }, schema);
-    if (!pub.valid() || !sub.valid()) { std::printf("FAIL: topic construction\n"); return 1; }
+    if (!pub.valid() || !sub.valid()) { chk("dynamic: topic construction", false); return false; }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     uint32_t seq = 0;
     while (!g.received && std::chrono::steady_clock::now() < deadline) {
-        if (pub.match_count() > 0 && !send_one(pub, schema, ++seq)) return 1;
+        if (pub.match_count() > 0 && !send_one(pub, schema, ++seq)) { chk("dynamic: send", false); return false; }
         a.poll(1ms);
         b.poll(1ms);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    if (!g.received) { std::printf("FAIL: no message within timeout (match_count=%d)\n", pub.match_count()); return 1; }
+    if (!g.received) { std::printf("FAIL: no message within timeout (match_count=%d)\n", pub.match_count()); chk("dynamic: delivered", false); return false; }
 
     std::printf("B received seq=%u, checking fields:\n", g.seq);
-    bool dyn_ok = verify_dynamic();
-    std::printf("%s\n", dyn_ok ? "PASS: variable kinds crossed and decoded" : "FAIL: decoded value mismatch");
+    chk("dynamic: variable kinds crossed and decoded", verify_dynamic());
 
     /* threaded mode: a fresh pair on its service threads, no poll() from us */
     a.close();
     b.close();
     rant::Node ta("TA", opts);
     rant::Node tb("TB", opts);
-    if (!ta.valid() || !tb.valid()) { std::printf("FAIL: threaded node construction\n"); return 3; }
+    if (!ta.valid() || !tb.valid()) { chk("dynamic: threaded node construction", false); return false; }
     ta.on_event(on_evt("TA"));
     tb.on_event(on_evt("TB"));
-    if (ta.poll() != (int)rant::SendStatus::State) { std::printf("FAIL: poll not refused on the service thread\n"); return 3; }
+    chk("dynamic: poll refused on the service thread", ta.poll() == (int)rant::SendStatus::State);
     rant::Schema tschema = ta.schema(SCHEMA);
     auto tpub = ta.publisher<rant::Bytes>("t", { rant::Reliability::Reliable }, tschema);
     auto tsub = tb.subscriber<rant::Bytes>("t", on_msg, { rant::Reliability::Reliable }, tschema);
@@ -1795,71 +1808,73 @@ int main(int argc, char** argv) {
     deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
     while (!(tpub.match_count() > 0 && tpub.ready()) && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    if (!send_one(tpub, tschema, ++seq)) { std::printf("FAIL: threaded send\n"); return 3; }
+    if (!send_one(tpub, tschema, ++seq)) { chk("dynamic: threaded send", false); return false; }
     deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (!g.received && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    if (!g.received || g.note != NOTE) { std::printf("FAIL: threaded delivery\n"); return 3; }
-    std::printf("PASS: threaded delivery on the service thread (evicted_unsent=%u)\n", ta.stats().evicted_unsent);
+    chk("dynamic: threaded delivery on the service thread", g.received && g.note == NOTE);
     ta.close();
     tb.close();
 
-    /* patterns + typed codec leg */
-    std::printf("patterns leg:\n");
-    bool pat_ok = patterns_leg();
-    std::printf("%s\n", pat_ok ? "PASS: patterns + typed codec" : "FAIL: patterns leg");
+    return g_failures == before;
+}
 
-    /* bare-type roots: the type itself is the schema */
-    std::printf("value-root leg:\n");
-    bool root_ok = value_root_leg();
-    std::printf("%s\n", root_ok ? "PASS: bare-type roots" : "FAIL: value-root leg");
-
-    /* nested structs and struct arrays */
-    std::printf("nested leg:\n");
-    bool nest_ok = nested_leg();
-    std::printf("%s\n", nest_ok ? "PASS: nested structs" : "FAIL: nested leg");
-
-    /* the standard type library */
-    std::printf("stdtypes leg:\n");
-    bool std_ok = stdtypes_leg();
-    std::printf("%s\n", std_ok ? "PASS: standard types" : "FAIL: stdtypes leg");
-
-    /* variable members as tail frames */
-    std::printf("tail-member leg:\n");
-    bool tl_ok = tails_leg();
-    std::printf("%s\n", tl_ok ? "PASS: variable members" : "FAIL: tail-member leg");
-
-    /* tasks: progress + cancellation over the function machinery */
-    std::printf("tasks leg:\n");
-    bool task_ok = tasks_leg();
-    std::printf("%s\n", task_ok ? "PASS: tasks" : "FAIL: tasks leg");
-
-    /* callback queues */
-    std::printf("queue leg:\n");
-    bool queue_ok = queue_leg();
-    std::printf("%s\n", queue_ok ? "PASS: callback queues" : "FAIL: queue leg");
-
-    std::printf("lifetime leg:\n");
-    bool life_ok = lifetime_leg();
-    std::printf("%s\n", life_ok ? "PASS: handle lifetime" : "FAIL: lifetime leg");
-
-    std::printf("failure leg:\n");
-    bool fail_ok = failure_leg();
-    std::printf("%s\n", fail_ok ? "PASS: loud failures" : "FAIL: failure leg");
-
-    std::printf("factory leg:\n");
-    bool factory_ok = factory_leg();
-    std::printf("%s\n", factory_ok ? "PASS: node factories" : "FAIL: factory leg");
-
-    std::printf("version leg:\n");
+static bool version_leg() {
     chk("version: the library's matches the header's", rant::version() == RANT_VERSION);
+    return true;
+}
 
-    std::printf("%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
-    return g_failures == 0 ? 0 : 2;
+struct Leg { const char* name; bool (*run)(); };
+static const Leg LEGS[] = {
+    { "dynamic",    dynamic_leg },
+    { "patterns",   patterns_leg },
+    { "value_root", value_root_leg },
+    { "nested",     nested_leg },
+    { "stdtypes",   stdtypes_leg },
+    { "tails",      tails_leg },
+    { "tasks",      tasks_leg },
+    { "queue",      queue_leg },
+    { "lifetime",   lifetime_leg },
+    { "failure",    failure_leg },
+    { "factory",    factory_leg },
+    { "version",    version_leg },
+};
+
+/* A leg runs alone so one failure never hides the rest. A throw fails that leg */
+static bool run_leg(const Leg& leg) {
+    int before = g_failures;
+    std::printf("-- %s\n", leg.name);
 #if defined(__cpp_exceptions)
-  } catch (const rant::Error& e) {
-    std::printf("FAIL: unexpected rant::Error: %s\n", e.what());
-    return 4;
-  }
+    try { if (!leg.run() && g_failures == before) chk(leg.name, false); }
+    catch (const rant::Error& e) {
+        std::printf("FAIL: unexpected rant::Error: %s\n", e.what());
+        chk(leg.name, false);
+    }
+#else
+    if (!leg.run() && g_failures == before) chk(leg.name, false);
 #endif
+    return g_failures == before;
+}
+
+int main(int argc, char** argv) {
+    std::string failed;
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    if (argc == 2 && std::strcmp(argv[1], "bench") == 0) return bench_leg() ? 0 : 2;
+    if (argc == 2 && std::strcmp(argv[1], "--list") == 0) {
+        for (const Leg& leg : LEGS) std::printf("%s\n", leg.name);
+        return 0;
+    }
+    for (int k = 1; k < argc; k++) {
+        bool known = false;
+        for (const Leg& leg : LEGS) known = known || std::strcmp(argv[k], leg.name) == 0;
+        if (!known) { std::fprintf(stderr, "no leg named %s, --list lists them\n", argv[k]); return 2; }
+    }
+    for (const Leg& leg : LEGS) {
+        bool selected = argc == 1;
+        for (int k = 1; k < argc; k++) selected = selected || std::strcmp(argv[k], leg.name) == 0;
+        if (selected && !run_leg(leg)) failed += std::string(" ") + leg.name;
+    }
+    if (g_failures) { std::printf("RESULT: FAIL in%s (%d failures)\n", failed.c_str(), g_failures); return 1; }
+    std::printf("RESULT: PASS\n");
+    return 0;
 }

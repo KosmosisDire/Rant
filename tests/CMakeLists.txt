@@ -109,6 +109,39 @@ rant_c_test(e2e threads)
 add_test(NAME bench.memscale COMMAND rant_bench memscale)
 set_tests_properties(bench.memscale PROPERTIES LABELS bench TIMEOUT 120)
 
-if(TARGET rant_cpp_test)
-  add_test(NAME rant_cpp_test COMMAND rant_cpp_test)
+# The binding suites, one entry each. Every leg runs and the result names the failed ones.
+function(rant_binding_test test)
+  set_tests_properties(${test} PROPERTIES LABELS bindings TIMEOUT 300)
+  rant_test_domain(${test})
+endfunction()
+
+if(CMAKE_CXX_COMPILER)
+  rant_cpp_program(rant_cpp_test "${PROJECT_SOURCE_DIR}/bindings/cpp/test.cpp")
+  add_test(NAME bindings.cpp COMMAND rant_cpp_test)
+  rant_binding_test(bindings.cpp)
+endif()
+
+# Python and C# load the shared library the build copies into dist/native.
+if(TARGET rant_shared)
+  set(Python3_FIND_REGISTRY LAST)       # the Python a shell runs, as the wheel targets do
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME bindings.python
+             COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/bindings/python/test.py")
+    rant_binding_test(bindings.python)
+  endif()
+
+  # dotnet builds the test only when ctest runs, as a fixture, never in the normal build.
+  find_program(DOTNET_EXECUTABLE dotnet)
+  if(DOTNET_EXECUTABLE)
+    set(_csharp_out "${CMAKE_CURRENT_BINARY_DIR}/csharp")
+    add_test(NAME bindings.csharp.build
+             COMMAND "${DOTNET_EXECUTABLE}" build "${PROJECT_SOURCE_DIR}/bindings/csharp/test"
+                     -c Release -o "${_csharp_out}" --nologo -v q)
+    set_tests_properties(bindings.csharp.build PROPERTIES FIXTURES_SETUP csharp
+                         LABELS bindings TIMEOUT 300)
+    add_test(NAME bindings.csharp COMMAND "${DOTNET_EXECUTABLE}" "${_csharp_out}/rant_csharp_test.dll")
+    set_tests_properties(bindings.csharp PROPERTIES FIXTURES_REQUIRED csharp)
+    rant_binding_test(bindings.csharp)
+  endif()
 endif()

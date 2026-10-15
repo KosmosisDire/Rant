@@ -1,5 +1,6 @@
 """The Python binding test: two nodes on one host over reliable typed pub sub, the
-patterns and the standard types. Exit 0 = pass (spec/testing.md)."""
+patterns and the standard types. `test.py` runs every leg, `test.py name` one, `--list`
+lists them. Exit 0 = pass (spec/testing.md)."""
 import enum as _enum
 import os
 import subprocess
@@ -15,8 +16,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import rant    # noqa: E402
 
-DOMAIN = 42
-IFACE = "127.0.0.1"   # pin discovery to loopback for a single-host run
+# ctest hands each program a block of 64 domains through RANT_TEST_DOMAIN, a run by hand
+# takes one from the clock, so parallel runs never meet
+DOMAIN = int(os.environ.get("RANT_TEST_DOMAIN") or 1000 + time.monotonic_ns() // 1000 % 900 * 64)
+IFACE = "127.0.0.1"   # single host: nothing listens on the network
 
 
 # any annotated class is a schema, @dataclass just gives a handy constructor
@@ -66,7 +69,7 @@ def round_trip():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    node = rant.Node("rt", on_event=lambda e: None, domain=51, multicast_interface=IFACE,
+    node = rant.Node("rt", on_event=lambda e: None, domain=DOMAIN + 9, multicast_interface=IFACE,
                      threading=rant.Threading.MANUAL)
     sch = node.schema(Sensor)
     print("Sensor DSL:\n" + sch.dsl)
@@ -153,9 +156,9 @@ def std_types():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    a = rant.Node("SA", on_event=lambda e: None, domain=52, multicast_interface=IFACE,
+    a = rant.Node("SA", on_event=lambda e: None, domain=DOMAIN + 10, multicast_interface=IFACE,
                   threading=rant.Threading.MANUAL)
-    b = rant.Node("SB", on_event=lambda e: None, domain=52, multicast_interface=IFACE,
+    b = rant.Node("SB", on_event=lambda e: None, domain=DOMAIN + 10, multicast_interface=IFACE,
                   threading=rant.Threading.MANUAL)
     f3 = a.schema("Float3")
     check("Float3 compiles by name alone, golden hash", f3.hash == HASH_FLOAT3)
@@ -248,9 +251,9 @@ def video_types():
         ok = ok and cond
 
     got = {}
-    a = rant.Node("VidA", on_event=on_event("VidA"), domain=45, multicast_interface=IFACE,
+    a = rant.Node("VidA", on_event=on_event("VidA"), domain=DOMAIN + 3, multicast_interface=IFACE,
                   threading=rant.Threading.MANUAL)
-    b = rant.Node("VidB", on_event=on_event("VidB"), domain=45, multicast_interface=IFACE,
+    b = rant.Node("VidB", on_event=on_event("VidB"), domain=DOMAIN + 3, multicast_interface=IFACE,
                   threading=rant.Threading.MANUAL)
     for name, cls, golden in (("Image", rant.types.Image, HASH_IMAGE),
                               ("VideoFrame", rant.types.VideoFrame, HASH_VIDEO_FRAME),
@@ -337,7 +340,7 @@ def struct_arrays():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    node = rant.Node("sarr", on_event=lambda e: None, domain=53, multicast_interface=IFACE,
+    node = rant.Node("sarr", on_event=lambda e: None, domain=DOMAIN + 11, multicast_interface=IFACE,
                      threading=rant.Threading.MANUAL)
     sch = node.schema(Detections)
     print("Detections DSL:\n" + sch.dsl)
@@ -439,9 +442,9 @@ def struct_arrays_live():
         ok = ok and cond
 
     seen = []
-    a = rant.Node("SA", on_event=lambda e: None, domain=45, multicast_interface=IFACE,
+    a = rant.Node("SA", on_event=lambda e: None, domain=DOMAIN + 3, multicast_interface=IFACE,
                   threading=rant.Threading.MANUAL)
-    b = rant.Node("SB", on_event=lambda e: None, domain=45, multicast_interface=IFACE,
+    b = rant.Node("SB", on_event=lambda e: None, domain=DOMAIN + 3, multicast_interface=IFACE,
                   threading=rant.Threading.MANUAL)
     try:
         pub = a.publisher("codes", Detections, reliable=True, keep_last=4)
@@ -478,7 +481,7 @@ def value_roots():
         print(("  ok  " if cond else " FAIL ") + name)
         ok = ok and cond
 
-    node = rant.Node("vr", on_event=lambda e: None, domain=54, multicast_interface=IFACE,
+    node = rant.Node("vr", on_event=lambda e: None, domain=DOMAIN + 12, multicast_interface=IFACE,
                      threading=rant.Threading.MANUAL)
     check("bool canonical hash", node.schema(bool).hash == HASH_BOOL)
     check("f32[] canonical hash", node.schema(list[rant.f32]).hash == HASH_F32ARR)
@@ -543,7 +546,7 @@ def lifecycle():
         with changed:
             return changed.wait_for(lambda: (kind, name) in seen, timeout)
 
-    watcher = rant.Node("watcher", on_event=watch, domain=47, multicast_interface=IFACE)
+    watcher = rant.Node("watcher", on_event=watch, domain=DOMAIN + 5, multicast_interface=IFACE)
     try:
         check("service thread by default", watcher.threading == rant.Threading.SERVICE_THREAD)
         check("poll refused under the service thread",
@@ -553,7 +556,7 @@ def lifecycle():
         watcher.subscriber("twist", Velocity, lambda t: got.set(), reliable=True)
 
         def open_and_drop():
-            n = rant.Node("dropped", on_event=lambda e: None, domain=47,
+            n = rant.Node("dropped", on_event=lambda e: None, domain=DOMAIN + 5,
                           multicast_interface=IFACE)
             p = n.publisher("twist", Velocity, reliable=True)
             deadline = time.time() + 8.0
@@ -567,10 +570,10 @@ def lifecycle():
         check("the dropped node said bye", saw(rant.EventKind.PEER_DOWN, "dropped", 3.0))
 
         child = ("import sys, time; sys.path.insert(0, %r); import rant; "
-                 "n = rant.Node('exiting', on_event=lambda e: None, domain=47, "
+                 "n = rant.Node('exiting', on_event=lambda e: None, domain=%d, "
                  "multicast_interface=%r); "
                  "n.subscriber('flag', bool, lambda v: None); time.sleep(1.5)"
-                 % (_HERE, IFACE))
+                 % (_HERE, DOMAIN + 5, IFACE))
         r = subprocess.run([sys.executable, "-c", child], timeout=30)
         check("exit with a live node returns 0", r.returncode == 0)
         check("the exiting node said bye", saw(rant.EventKind.PEER_DOWN, "exiting", 3.0))
@@ -592,9 +595,9 @@ def handles():
         ok = ok and cond
 
     got = []
-    a = rant.Node("HA", on_event=lambda e: None, domain=48, multicast_interface=IFACE,
+    a = rant.Node("HA", on_event=lambda e: None, domain=DOMAIN + 6, multicast_interface=IFACE,
                   fetch_details=True)
-    b = rant.Node("HB", on_event=lambda e: None, domain=48, multicast_interface=IFACE)
+    b = rant.Node("HB", on_event=lambda e: None, domain=DOMAIN + 6, multicast_interface=IFACE)
     try:
         p = a.publisher("shared", Velocity, reliable=True)
         s = a.subscriber("shared", Velocity, lambda t: None, reliable=True)
@@ -677,9 +680,9 @@ def value_roots_live():
         ok = ok and cond
 
     got = {}
-    a = rant.Node("VA", on_event=lambda e: None, domain=44, multicast_interface=IFACE,
+    a = rant.Node("VA", on_event=lambda e: None, domain=DOMAIN + 2, multicast_interface=IFACE,
                   threading=rant.Threading.MANUAL)
-    b = rant.Node("VB", on_event=lambda e: None, domain=44, multicast_interface=IFACE,
+    b = rant.Node("VB", on_event=lambda e: None, domain=DOMAIN + 2, multicast_interface=IFACE,
                   threading=rant.Threading.MANUAL)
     try:
         pub_flag = a.publisher("flag", bool, reliable=True, keep_last=4)
@@ -750,9 +753,9 @@ def patterns():
         ok = ok and cond
 
     srv = rant.Node("srv", on_event=on_event("srv"),
-                    domain=43, multicast_interface=IFACE, max_topics=32)
+                    domain=DOMAIN + 1, multicast_interface=IFACE, max_topics=32)
     cli = rant.Node("cli", on_event=on_event("cli"),
-                    domain=43, multicast_interface=IFACE, max_topics=32)
+                    domain=DOMAIN + 1, multicast_interface=IFACE, max_topics=32)
 
     # definitions on srv: the simple form, a raiser giving APP_ERROR, and a full form that
     # defers and completes off thread
@@ -909,10 +912,10 @@ def tasks():
         ok = ok and cond
 
     srv = rant.Node("tsrv", on_event=on_event("tsrv"),
-                    domain=46, multicast_interface=IFACE, max_topics=32)
+                    domain=DOMAIN + 4, multicast_interface=IFACE, max_topics=32)
     cli = rant.Node("tcli", on_event=on_event("tcli"),
-                    domain=46, multicast_interface=IFACE, max_topics=32)
-    mcli = rant.Node("tmcli", on_event=on_event("tmcli"), domain=46,
+                    domain=DOMAIN + 4, multicast_interface=IFACE, max_topics=32)
+    mcli = rant.Node("tmcli", on_event=on_event("tmcli"), domain=DOMAIN + 4,
                      multicast_interface=IFACE, max_topics=32, threading=rant.Threading.MANUAL)
     try:
         # work: streams progress then returns a result
@@ -1046,7 +1049,7 @@ def tasks():
         # on_event rebinds after open: a node joining shows up at the new handler
         ups = threading.Event()
         cli.on_event(lambda e: ups.set() if e.kind == rant.EventKind.PEER_UP else None)
-        late = rant.Node("tlate", domain=46, multicast_interface=IFACE)
+        late = rant.Node("tlate", domain=DOMAIN + 4, multicast_interface=IFACE)
         check("on_event set after open receives events", ups.wait(5.0))
         late.close()
 
@@ -1086,9 +1089,9 @@ def dispatch_leg():
     def mark(what):
         seen.setdefault(what, threading.get_ident())
 
-    srv = rant.Node("dsrv", on_event=lambda e: mark("event"), domain=55,
+    srv = rant.Node("dsrv", on_event=lambda e: mark("event"), domain=DOMAIN + 13,
                     multicast_interface=IFACE, max_topics=32, threading=rant.Threading.DISPATCH)
-    cli = rant.Node("dcli", on_event=lambda e: None, domain=55, multicast_interface=IFACE,
+    cli = rant.Node("dcli", on_event=lambda e: None, domain=DOMAIN + 13, multicast_interface=IFACE,
                     max_topics=32, threading=rant.Threading.DISPATCH)
 
     def drain():
@@ -1186,14 +1189,14 @@ def dispatch_leg():
         refused = True
     check("a pulled subscriber refuses a queue", refused)
 
-    plain = rant.Node("dplain", on_event=lambda e: None, domain=55, multicast_interface=IFACE)
+    plain = rant.Node("dplain", on_event=lambda e: None, domain=DOMAIN + 13, multicast_interface=IFACE)
     try:
         plain.dispatch()
         raised = False
     except rant.Error:
         raised = True
     check("dispatch() needs Threading.DISPATCH", raised)
-    quiet = rant.Node("dquiet", on_event=lambda e: None, domain=55, multicast_interface=IFACE,
+    quiet = rant.Node("dquiet", on_event=lambda e: None, domain=DOMAIN + 13, multicast_interface=IFACE,
                       disable_logs=True)
     try:
         quiet.on_log(lambda line: None)
@@ -1217,21 +1220,15 @@ def on_event(tag):
     return lambda e: print("event(%s):" % tag, e)
 
 
-def main():
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "VERSION")) as f:
+def version_leg():
+    with open(os.path.join(_HERE, "..", "..", "VERSION")) as f:
         want = f.read().strip()
     ok = rant.version() == want
     print("version: " + rant.version() + (" PASS\n" if ok else " FAIL, VERSION says " + want + "\n"))
-    if not ok:
-        return 1
-    if not round_trip():
-        return 1
-    if not value_roots():
-        return 1
-    if not std_types():
-        return 1
-    if not struct_arrays():
-        return 1
+    return ok
+
+
+def pose_leg():
     print("opening nodes...")
     sub = rant.Node("sub", on_event=on_event("sub"),
                     domain=DOMAIN, multicast_interface=IFACE, threading=rant.Threading.MANUAL)
@@ -1281,24 +1278,52 @@ def main():
               and subch.queue_stats.messages == 0 and pubch.name == "pose" and pub.name == "pub")
         print("PASS: handle after close" if ok else "FAIL: handle after close")
 
-    if ok:
-        ok = lifecycle()
-    if ok:
-        ok = handles()
-    if ok:
-        ok = value_roots_live()
-    if ok:
-        ok = struct_arrays_live()
-    if ok:
-        ok = video_types()
-    if ok:
-        ok = patterns()
-    if ok:
-        ok = tasks()
-    if ok:
-        ok = dispatch_leg()
-    return 0 if ok else 1
+    return ok
+
+
+LEGS = [
+    ("version", version_leg),
+    ("round_trip", round_trip),
+    ("value_roots", value_roots),
+    ("std_types", std_types),
+    ("struct_arrays", struct_arrays),
+    ("pose", pose_leg),
+    ("lifecycle", lifecycle),
+    ("handles", handles),
+    ("value_roots_live", value_roots_live),
+    ("struct_arrays_live", struct_arrays_live),
+    ("video_types", video_types),
+    ("patterns", patterns),
+    ("tasks", tasks),
+    ("dispatch", dispatch_leg),
+]
+
+
+def main(argv):
+    """Every leg runs, so one failure never hides the rest. A raise fails that leg."""
+    names = [name for name, _ in LEGS]
+    if argv == ["--list"]:
+        print("\n".join(names))
+        return 0
+    unknown = [a for a in argv if a not in names]
+    if unknown:
+        print("no leg named %s, --list lists them" % unknown[0], file=sys.stderr)
+        return 2
+    failed = []
+    for name, leg in LEGS:
+        if argv and name not in argv:
+            continue
+        print("-- " + name)
+        try:
+            ok = leg()
+        except Exception as e:   # noqa: BLE001 a crash fails the leg, the rest still run
+            print("FAIL: %s raised %r" % (name, e))
+            ok = False
+        if not ok:
+            failed.append(name)
+    print("RESULT: " + ("FAIL in " + " ".join(failed) if failed else "PASS"))
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

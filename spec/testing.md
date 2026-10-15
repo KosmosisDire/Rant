@@ -341,20 +341,27 @@ What each phase pins, grouped by layer.
 
 ## Binding tests
 
-`bindings/cpp/test.cpp` runs two nodes in one process on loopback and exits 0 on pass. Legs 1 and
-2 cover the dynamic schema API direct and over service threads, leg 3 the patterns layer
-with the memcpy, loop and rebase codec paths plus entity reflection, leg 4 bare type roots
-and the cross language hashes, leg 5 the standard types including the video family, leg 6
-variable members as tail frames, and leg 7 tasks with defer, progress, cancel, no_cancel
-and a retire mid run. The queue leg runs dispatch threading, a handle on its own queue and
-pulled subscribers, the lifetime leg shared name holds, moves, the last close retiring a
-name, handles and deferred replies outliving their node and a close refused in a callback,
-and the factory leg the node factories and their refusals,
-`reflect_from_mesh`, and the reflection walks and meta calls. Leg 8 runs only as `rant_cpp_test bench`: the cost of each codec path
+Each binding suite is one ctest entry under the `bindings` label: `bindings.cpp`
+(`rant_cpp_test`), `bindings.python` (`bindings/python/test.py`) and `bindings.csharp`
+(`bindings/csharp/test`, which the `bindings.csharp.build` fixture builds with dotnet when
+ctest runs). Each runs two nodes in one process on loopback, takes a leg name to run one
+and `--list` to list them, runs every leg even after a failure, and reads its domains from
+`RANT_TEST_DOMAIN` like the C programs.
+
+The C++ legs: dynamic covers the dynamic schema API direct and over service threads,
+patterns the patterns layer with the memcpy, loop and rebase codec paths plus entity
+reflection, value_root bare type roots and the cross language hashes, stdtypes the standard
+types including the video family, tails variable members as tail frames, tasks defer,
+progress, cancel, no_cancel and a retire mid run, queue dispatch threading, a handle on its
+own queue and pulled subscribers, lifetime shared name holds, moves, the last close
+retiring a name, handles and deferred replies outliving their node and a close refused in a
+callback, factory the node factories and their refusals, `reflect_from_mesh`, and the
+reflection walks and meta calls. `rant_cpp_test bench` runs the cost of each codec path
 (memcpy, loop, tails, dynamic) alone and end to end on loopback, next to a C node pair on
 the same footing, so a wrapper change is measured against the C floor.
-`bindings/csharp/test` and `bindings/python/test.py` mirror the same ground, and the
-golden hash vectors are shared by every binding and pinned in C by the schema root phase.
+
+The C# and Python suites mirror the same ground, and the golden hash vectors are shared by
+every binding and pinned in C by the schema root phase.
 
 ## Measurement traps
 

@@ -175,20 +175,19 @@ if(RANT_BUILD_TOOLS)
   rant_program(pubsub         tools/pubsub.c)
   rant_program(if_probe_check tools/if_probe_check.c)
 
-  # The C++ wrapper test and example, when this machine has a C++ compiler. Each compiles
-  # the C++ anchor itself, the way a consumer of the single header does.
+  # The C++ wrapper example, and its test under tests/, when this machine has a C++
+  # compiler. Each compiles the C++ anchor itself, the way a consumer of the single header does.
   include(CheckLanguage)
   check_language(CXX)
   if(CMAKE_CXX_COMPILER)
     enable_language(CXX)
     function(rant_cpp_program name src)
-      add_executable(${name} "${src}" "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.cpp")
+      add_executable(${name} "${src}" "${PROJECT_SOURCE_DIR}/dist/rant.cpp")
       target_compile_features(${name} PRIVATE cxx_std_17)
       target_link_libraries(${name} PRIVATE rant rant_platform)
       add_dependencies(${name} rant_dist)
     endfunction()
-    rant_cpp_program(rant_cpp_test    bindings/cpp/test.cpp)
-    rant_cpp_program(rant_cpp_example bindings/cpp/example.cpp)
+    rant_cpp_program(rant_cpp_example "${PROJECT_SOURCE_DIR}/bindings/cpp/example.cpp")
   endif()
 
   # rant_bench, the test programs and every ctest entry.

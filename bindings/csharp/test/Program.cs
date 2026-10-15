@@ -1,5 +1,6 @@
 // The C# binding test: two nodes on one host over reliable typed pub sub, the consumer
-// surface and the pattern legs. Exit 0 = pass (spec/testing.md).
+// surface and the pattern legs. No arguments runs every leg, a name runs one, --list lists
+// them. Exit 0 = pass (spec/testing.md).
 
 using System;
 using System.Collections.Generic;
@@ -90,13 +91,19 @@ static class Program
 {
     static readonly ManualResetEventSlim Got = new ManualResetEventSlim(false);
 
-    // A node on the loopback interface of an isolated domain, on its service thread unless
-    // the leg polls it by hand.
-    static NodeOptions Local(int domain, Threading threading = Threading.ServiceThread,
+    // ctest hands each program a block of 64 domains through RANT_TEST_DOMAIN, a run by hand
+    // takes one from the clock, so parallel runs never meet
+    static readonly int DomainBase =
+        int.TryParse(Environment.GetEnvironmentVariable("RANT_TEST_DOMAIN"), out int d) && d > 0
+            ? d : 1000 + (int)(Environment.TickCount64 % 900) * 64;
+
+    // A node on the loopback interface of the domain at offset in this run's block, on its
+    // service thread unless the leg polls it by hand. Loopback only: the firewall never asks.
+    static NodeOptions Local(int offset, Threading threading = Threading.ServiceThread,
                              bool fetchDetails = false)
         => new NodeOptions
         {
-            Domain = (ushort)domain, MulticastInterface = "127.0.0.1", MaxTopics = 32,
+            Domain = (ushort)(DomainBase + offset), MulticastInterface = "127.0.0.1", MaxTopics = 32,
             Threading = threading, FetchDetails = fetchDetails,
         };
     static RantMessage Received;
@@ -108,7 +115,7 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        using var node = new RantNode("rt", Local(51, Threading.Manual));
+        using var node = new RantNode("rt", Local(9, Threading.Manual));
         var s = node.Schema(typeof(Sensor));
         Console.WriteLine("Sensor DSL:\n" + s.Dsl);
         var src = new Sensor
@@ -314,15 +321,15 @@ static class Program
     // Functions and variables between two nodes on an isolated domain.
     static bool Patterns()
     {
-        Console.WriteLine("patterns leg: two nodes, domain 43, loopback");
+        Console.WriteLine("patterns leg: two nodes, loopback");
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
         // srv runs on its service thread, so handlers fire there. cli is polled by hand, so
         // its blocking calls drive its loop themselves.
-        var srv = new RantNode("srv", Local(43));
+        var srv = new RantNode("srv", Local(1));
         srv.OnEvent += e => Console.WriteLine("event(srv): " + e);
-        var cli = new RantNode("cli", Local(43, Threading.Manual));
+        var cli = new RantNode("cli", Local(1, Threading.Manual));
         cli.OnEvent += e => Console.WriteLine("event(cli): " + e);
 
         // definitions on srv: the simple form, a thrower giving AppError, and a full form that
@@ -460,13 +467,13 @@ static class Program
     // noCancel refusal, and the async function-handler overload.
     static bool Tasks()
     {
-        Console.WriteLine("tasks leg: two nodes, domain 47, loopback");
+        Console.WriteLine("tasks leg: two nodes, loopback");
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var srv = new RantNode("tsrv", Local(47));
+        var srv = new RantNode("tsrv", Local(5));
         srv.OnEvent += e => { if (e.IsError) Console.WriteLine("event(tsrv): " + e); };
-        var cli = new RantNode("tcli", Local(47));
+        var cli = new RantNode("tcli", Local(5));
         cli.OnEvent += e => { if (e.IsError) Console.WriteLine("event(tcli): " + e); };
         try
         {
@@ -648,8 +655,8 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        using var a = new RantNode("sa", Local(52, Threading.Manual));
-        using var b = new RantNode("sb", Local(52, Threading.Manual));
+        using var a = new RantNode("sa", Local(10, Threading.Manual));
+        using var b = new RantNode("sb", Local(10, Threading.Manual));
         {
             var f3 = a.Schema("Float3");
             var mirror = a.Schema(typeof(Rant.Types.Float3));
@@ -757,13 +764,13 @@ static class Program
     // nodes, and ExternalVideoStream is the latched variable it exists for.
     static bool VideoLive()
     {
-        Console.WriteLine("video live leg: two nodes, domain 46, loopback");
+        Console.WriteLine("video live leg: two nodes, loopback");
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var a = new RantNode("MA", Local(46, Threading.Manual));
+        var a = new RantNode("MA", Local(4, Threading.Manual));
         a.OnEvent += e => { if (e.IsError) Console.WriteLine("event(MA): " + e); };
-        var b = new RantNode("MB", Local(46, Threading.Manual));
+        var b = new RantNode("MB", Local(4, Threading.Manual));
         b.OnEvent += e => { if (e.IsError) Console.WriteLine("event(MB): " + e); };
         try
         {
@@ -854,7 +861,7 @@ static class Program
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        using var node = new RantNode("vr", Local(53, Threading.Manual));
+        using var node = new RantNode("vr", Local(11, Threading.Manual));
         {
             var sb = node.Schema(typeof(bool));
             var sa = node.Schema(typeof(float[]));
@@ -924,13 +931,13 @@ static class Program
     // Two nodes: bare-typed topics and a bare-typed variable over loopback.
     static bool ValueRootsLive()
     {
-        Console.WriteLine("bare-root live leg: two nodes, domain 44, loopback");
+        Console.WriteLine("bare-root live leg: two nodes, loopback");
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var a = new RantNode("VA", Local(44, Threading.Manual));
+        var a = new RantNode("VA", Local(2, Threading.Manual));
         a.OnEvent += e => { if (e.IsError) Console.WriteLine("event(VA): " + e); };
-        var b = new RantNode("VB", Local(44, Threading.Manual));
+        var b = new RantNode("VB", Local(2, Threading.Manual));
         b.OnEvent += e => { if (e.IsError) Console.WriteLine("event(VB): " + e); };
         try
         {
@@ -990,7 +997,7 @@ static class Program
     // thread that calls Dispatch(), never on a service thread.
     static bool DispatchLeg()
     {
-        Console.WriteLine("dispatch leg: two nodes, domain 48, loopback");
+        Console.WriteLine("dispatch leg: two nodes, loopback");
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
@@ -999,9 +1006,9 @@ static class Program
         int evtId = 0, fnId = 0, changeId = 0, doneId = 0, sum = 0, level = 0;
 
         // both wires owned by service threads: nothing polls on this one
-        var srv = new RantNode("dsrv", Local(48, Threading.Dispatch));
+        var srv = new RantNode("dsrv", Local(6, Threading.Dispatch));
         srv.OnEvent += e => { if (evtId == 0) evtId = Thread.CurrentThread.ManagedThreadId; };
-        var cli = new RantNode("dcli", Local(48, Threading.Dispatch));
+        var cli = new RantNode("dcli", Local(6, Threading.Dispatch));
         void Drain() { srv.Dispatch(); cli.Dispatch(); }
 
         var add = srv.FunctionDefinition<AddReq, AddRsp>("dadd", q =>
@@ -1103,12 +1110,12 @@ static class Program
     // OnLog on service threads: a line logged before the subscribe replays, a live one follows
     static bool LogLeg()
     {
-        Console.WriteLine("log leg: two nodes, domain 50, loopback");
+        Console.WriteLine("log leg: two nodes, loopback");
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        using var a = new RantNode("lsrc", Local(50));
-        using var b = new RantNode("lsink", Local(50));
+        using var a = new RantNode("lsrc", Local(8));
+        using var b = new RantNode("lsink", Local(8));
         var lines = new System.Collections.Concurrent.ConcurrentQueue<RantLogLine>();
         a.Log(LogLevel.Warn, "before");
         b.OnLog += l => lines.Enqueue(l);
@@ -1122,7 +1129,7 @@ static class Program
         Check("a live line arrives with its level and node",
               Has("live", LogLevel.Error));
 
-        var o = Local(50); o.DisableLogs = true;
+        var o = Local(8); o.DisableLogs = true;
         using var c = new RantNode("lnone", o);
         bool threw = false;
         try { c.OnLog += l => { }; } catch (RantException) { threw = true; }
@@ -1136,12 +1143,12 @@ static class Program
     // calling thread, and it never parks on the node's Dispatch queue
     static bool PullLeg()
     {
-        Console.WriteLine("pull leg: two nodes, domain 54, loopback");
+        Console.WriteLine("pull leg: two nodes, loopback");
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        using var a = new RantNode("psrc", Local(54));
-        using var b = new RantNode("psink", Local(54, Threading.Dispatch));
+        using var a = new RantNode("psrc", Local(12));
+        using var b = new RantNode("psink", Local(12, Threading.Dispatch));
         var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
         var pub = a.Publisher<Level>("pulled", qos);
         var sub = b.Subscriber<Level>("pulled", qos);
@@ -1173,12 +1180,12 @@ static class Program
     // mesh, which is what an observer tool or a generic HMI needs.
     static bool ReflectLeg()
     {
-        Console.WriteLine("reflect leg: two nodes, domain 49, loopback");
+        Console.WriteLine("reflect leg: two nodes, loopback");
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var a = new RantNode("rsrv", Local(49));
-        var b = new RantNode("rcli", Local(49, fetchDetails: true));
+        var a = new RantNode("rsrv", Local(7));
+        var b = new RantNode("rcli", Local(7, fetchDetails: true));
 
         var pub = a.Publisher<Level>("reflected", new Qos { Reliability = Reliability.Reliable, KeepLast = 4 });
         pub.Send(new Level { Value = 3 });
@@ -1241,12 +1248,12 @@ static class Program
     // receiving, disposing the last retires the slot so the name can carry another schema.
     static bool DisposeLeg()
     {
-        Console.WriteLine("dispose leg: two nodes, domain 50, loopback");
+        Console.WriteLine("dispose leg: two nodes, loopback");
         bool ok = true;
         void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
 
-        var a = new RantNode("da", Local(50, Threading.Manual));
-        var b = new RantNode("db", Local(50, Threading.Manual));
+        var a = new RantNode("da", Local(8, Threading.Manual));
+        var b = new RantNode("db", Local(8, Threading.Manual));
         try
         {
             Check("LastError is null on a clean node", a.LastError == null);
@@ -1299,20 +1306,22 @@ static class Program
         catch (Exception) { return false; }
     }
 
-    static int Main()
+    static bool VersionLeg()
     {
-        bool versionOk = System.Text.RegularExpressions.Regex.IsMatch(RantNode.Version ?? "", @"^\d+\.\d+\.\d+$");
-        Console.WriteLine("version: " + RantNode.Version + (versionOk ? " PASS\n" : " FAIL\n"));
-        if (!versionOk) return 1;
-        if (!RoundTrip()) return 1;
-        if (!ValueRoots()) return 1;
-        if (!StdTypes()) return 1;
+        bool ok = System.Text.RegularExpressions.Regex.IsMatch(RantNode.Version ?? "", @"^\d+\.\d+\.\d+$");
+        Console.WriteLine("version: " + RantNode.Version + (ok ? " PASS\n" : " FAIL\n"));
+        return ok;
+    }
+
+    // typed pub sub polled by hand, the over cap refusal, then the same over service threads
+    static bool PoseLeg()
+    {
         Console.WriteLine("opening nodes...");
 
         // Single-threaded: both nodes are driven by polling them in the loop below.
-        var sub = new RantNode("sub", Local(42, Threading.Manual));
+        var sub = new RantNode("sub", Local(0, Threading.Manual));
         sub.OnEvent += e => Console.WriteLine("event(sub): " + e);
-        var pub = new RantNode("pub", Local(42, Threading.Manual));
+        var pub = new RantNode("pub", Local(0, Threading.Manual));
         pub.OnEvent += e => Console.WriteLine("event(pub): " + e);
 
         var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
@@ -1393,8 +1402,8 @@ static class Program
         // no Poll() anywhere
         if (ok)
         {
-            var subT = new RantNode("sub", Local(42));
-            var pubT = new RantNode("pub", Local(42));
+            var subT = new RantNode("sub", Local(0));
+            var pubT = new RantNode("pub", Local(0));
             subT.Subscriber<Reading>("pose", p => { ReceivedPose = p; Got.Set(); }, qos);
             var pubchT = pubT.Publisher<Reading>("pose", qos);
             if (pubT.Poll(0) != (int)SendStatus.State) { Console.WriteLine("FAIL: Poll not refused under the service thread"); ok = false; }
@@ -1416,16 +1425,52 @@ static class Program
             subT.Close();
         }
 
-        if (ok) ok = ValueRootsLive();
-        if (ok) ok = VideoLive();
-        if (ok) ok = Patterns();
-        if (ok) ok = Tasks();
-        if (ok) ok = DispatchLeg();
-        if (ok) ok = LogLeg();
-        if (ok) ok = PullLeg();
-        if (ok) ok = ReflectLeg();
-        if (ok) ok = DisposeLeg();
-        Console.WriteLine(ok ? "ALL PASS" : "FAIL");
-        return ok ? 0 : 1;
+        return ok;
+    }
+
+    static readonly (string Name, Func<bool> Run)[] Legs =
+    {
+        ("version", VersionLeg),
+        ("round_trip", RoundTrip),
+        ("value_roots", ValueRoots),
+        ("std_types", StdTypes),
+        ("pose", PoseLeg),
+        ("value_roots_live", ValueRootsLive),
+        ("video_live", VideoLive),
+        ("patterns", Patterns),
+        ("tasks", Tasks),
+        ("dispatch", DispatchLeg),
+        ("log", LogLeg),
+        ("pull", PullLeg),
+        ("reflect", ReflectLeg),
+        ("dispose", DisposeLeg),
+    };
+
+    // Every leg runs, so one failure never hides the rest. A throw fails that leg.
+    static int Main(string[] args)
+    {
+        if (args.Length == 1 && args[0] == "--list")
+        {
+            foreach (var leg in Legs) Console.WriteLine(leg.Name);
+            return 0;
+        }
+        foreach (var a in args)
+            if (Array.FindIndex(Legs, l => l.Name == a) < 0)
+            {
+                Console.Error.WriteLine($"no leg named {a}, --list lists them");
+                return 2;
+            }
+        var failed = new List<string>();
+        foreach (var leg in Legs)
+        {
+            if (args.Length > 0 && Array.IndexOf(args, leg.Name) < 0) continue;
+            Console.WriteLine("-- " + leg.Name);
+            bool ok;
+            try { ok = leg.Run(); }
+            catch (Exception e) { Console.WriteLine($"FAIL: {leg.Name} threw {e}"); ok = false; }
+            if (!ok) failed.Add(leg.Name);
+        }
+        Console.WriteLine(failed.Count == 0 ? "RESULT: PASS" : "RESULT: FAIL in " + string.Join(" ", failed));
+        return failed.Count == 0 ? 0 : 1;
     }
 }
