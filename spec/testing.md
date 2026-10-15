@@ -77,6 +77,7 @@ program in this order.
 | `bench.memscale` | `rant_bench memscale`, a steady state send never allocates |
 | `bindings.cpp`, `.python`, `.csharp` | the binding suites, below |
 | `interop.<pub>_to_<sub>` | one language publishing to another, below |
+| `build.strict` | the compile checks, below |
 
 ## Phases
 
@@ -373,6 +374,17 @@ The C# and Python suites mirror the same ground. Two things every suite shares:
   offsets with `build/tests/layout.txt`, which `tests/support/layout.c` writes at build
   time. A mirror that drifted from the C struct fails there instead of crashing a node
   open.
+
+## Compile checks
+
+`build.strict` compiles the whole implementation alone with every warning an error: C99
+pedantic plus `-Wall -Wextra` on GCC and Clang, `/W4` on MSVC. It covers the default build,
+`RANT_NO_SHM`, `RANT_NO_THREADS`, the Yaskawa module's `RANT_PLAT_CUSTOM` with both of those,
+`RANT_NO_PATTERNS` with `RANT_NO_STDTYPES`, and the C++ wrapper with the implementation
+compiled as C++. That guards the cores staying C99 clean for the VxWorks GCC without its
+SDK. The entry builds the `rant_strict_*` targets in one call, so the normal build never
+fails on a warning and one build tree never runs two builds at once. Partial initializers
+are idiomatic, so `-Wmissing-field-initializers` stays off.
 
 ## Interop
 

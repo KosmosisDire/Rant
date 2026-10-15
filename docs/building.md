@@ -130,8 +130,9 @@ build/tests/bin/unit_transport rtt      # one case of one program, --list lists 
 
 Labels: `unit` (sans IO, no sockets), `e2e` (real nodes on loopback), `noshm` (the twin of a
 program built with `RANT_NO_SHM`), `bindings` (the C++, Python and C# suites, the last two
-when Python and dotnet are found), `interop` (each language publishing to every other one)
-and `bench` (`rant_bench memscale`). A program exits 0
+when Python and dotnet are found), `interop` (each language publishing to every other one),
+`build` (the implementation compiled with every warning an error) and `bench`
+(`rant_bench memscale`). A program exits 0
 on pass, 1 on a failed check and 77 when it skips. Every test stays on loopback, so the
 Windows firewall never asks.
 
