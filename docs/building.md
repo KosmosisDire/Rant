@@ -119,10 +119,18 @@ grep -a -o "RANT-MAGIC [ -~]*" app.exe
 
 ## Testing
 
-`ctest --test-dir build -C Release` runs every test. Run both `rant_test selftest` and
-`rant_test_noshm selftest` by hand from `build/tests/bin`. The phases cover loss events,
-backpressure, dynamic interest, relaying, NAT, the patterns, retire, churn, the lapped and
-ahead rules and the round trip estimator.
+Every test program is one ctest entry, and ctest runs them in parallel. Build first.
+
+```sh
+ctest --preset windows                  # everything (or linux)
+ctest --preset windows -L unit          # the sans IO cores, well under a second
+ctest --preset windows -R schema        # the entries whose name matches
+build/tests/bin/unit_transport rtt      # one case of one program, --list lists them
+```
+
+Labels: `unit` (sans IO, no sockets), `e2e` (real nodes on loopback), `noshm` (the twin of a
+program built with `RANT_NO_SHM`) and `bench` (`rant_bench memscale`). A program exits 0
+on pass, 1 on a failed check and 77 when it skips.
 
 ## Measuring
 

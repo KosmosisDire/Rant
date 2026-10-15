@@ -1,22 +1,33 @@
 # Testing and measuring
 
-`tests/rant_test.c` holds the selftest phases. `tests/bench/` is `rant_bench`: the sweep
-and the benches. `tests/support/wire_tap.c` wraps the platform's `sendto` and `recvfrom`
-for both, counting datagrams by type and injecting faults. The commands are in
-docs/building.md. This file holds what makes a test or a measurement
-trustworthy.
+`tests/` holds every test program and `rant_bench`, and `tests/CMakeLists.txt` registers
+each program as one ctest entry. The commands are in docs/building.md. This file holds what
+makes a test or a measurement trustworthy.
+
+- `tests/unit/` runs the sans IO cores with no sockets and a controlled clock.
+- `tests/rant_test.c` runs the phases that need real nodes on loopback.
+- `tests/support/` is the harness every program shares: `test.h` compiles the whole
+  implementation into the program so a case reaches every internal, `harness.c` holds the
+  case runner, the checks and the node helpers, and `wire_tap.c` wraps the platform's
+  `sendto` and `recvfrom` to count datagrams by type and inject faults.
+- `tests/bench/` is `rant_bench`: the sweep and the benches.
 
 ## Harness rules
 
-- `ST_CHECK` evaluates its condition once now, but never put a side effecting or draining
-  call inside a check macro.
+- `CHECK` evaluates its condition once, but never put a side effecting or draining call
+  inside it.
+- A program lists its cases and ends with `TEST_MAIN`. `prog` runs every case, `prog name`
+  one, `prog --list` lists them. Exit 0 passes, 1 fails and 77 skips.
+- Every program also builds with `RANT_NO_SHM` as a `.noshm` twin, except the shared memory
+  ones.
 - Launch paired processes in one shell command. The gap between two tool calls fakes a
   peer drop.
-- Both `rant_test selftest` and `rant_test_noshm selftest` must pass, plus a
-  `rant_bench sweep` for transport changes. A comment only change must leave code byte identical.
-- The selftests use `"127.0.0.1"` as the discovery interface to stay off the LAN, and a
-  per process domain base so concurrent runs and the SHM module test (segment names carry
-  it) do not collide.
+- `ctest --preset windows` (or `linux`) must pass, plus a `rant_bench sweep` for
+  transport changes. A comment only change must leave code byte identical.
+- The tests use `"127.0.0.1"` as the discovery interface to stay off the LAN. ctest hands
+  each program its own block of 64 domains through `RANT_TEST_DOMAIN`, a run by hand takes
+  one from the clock, so parallel programs and the SHM module test (segment names carry
+  the base) never meet.
 - A raw transport `on_message` sees the 8 byte source stamp first. A payload tag sits at
   `data[RANT_TIMESTAMP_BYTES]`.
 - A wall clock threshold check (waker under 400 ms, varwait under 250 ms) can flake once
@@ -28,11 +39,10 @@ trustworthy.
   datagram parks in `tx_hold` and counts as sent, so a hostile eviction test needs bursts
   bigger than one datagram plus the ring.
 
-## Selftest phases
+## Phases
 
-What each phase of `rant_test selftest` pins. The phase names match the comments in
-`tests/rant_test.c`. Every phase runs on loopback on its own domain, offset from a per
-process base picked from the clock so concurrent runs never join each other.
+What each phase pins. The sans IO ones are cases in `tests/unit/`, the rest in
+`tests/rant_test.c`.
 
 ### Transport core, sans IO with a controlled clock
 

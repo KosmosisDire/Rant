@@ -43,5 +43,23 @@
       "configurePreset": "linux",
       "configuration": "Debug"
     }
+  ],
+  "testPresets": [
+    {
+      "name": "windows",
+      "displayName": "Windows Release tests",
+      "configurePreset": "windows",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8 }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux Release tests",
+      "configurePreset": "linux",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8 }
+    }
   ]
 }
