@@ -5,16 +5,17 @@
 
 /* The match wait checks: a first send racing the announce and detail cycle, a
  * disabled wait dropping loudly, and writer authoritative delivery (spec/testing.md). */
-static volatile unsigned long mw_recv, mw_lost, mw_unmatched;
+/* a started node counts on its service thread, mw_last is read once mw_recv shows it */
+static long long mw_recv, mw_lost, mw_unmatched;
 static char mw_last[64];
 static void mw_on_message(const RantMsg *m){
     size_t c = m->data.len < sizeof mw_last - 1 ? m->data.len : sizeof mw_last - 1;
     memcpy(mw_last, m->data.data, c); mw_last[c] = 0;
-    mw_recv++;
+    test_atomic_add(&mw_recv, 1);
 }
 static void mw_on_event(const RantEvent *ev){
-    if (ev->kind == RANT_MSG_LOST) mw_lost++;
-    if (ev->kind == RANT_ERROR && ev->error == RANT_E_UNMATCHED_SEND) mw_unmatched++;
+    if (ev->kind == RANT_MSG_LOST) test_atomic_add(&mw_lost, 1);
+    if (ev->kind == RANT_ERROR && ev->error == RANT_E_UNMATCHED_SEND) test_atomic_add(&mw_unmatched, 1);
 }
 
 static void matchwait_checks(void){
@@ -55,12 +56,15 @@ static void matchwait_checks(void){
           r = rant_topic_send(at, rant_bytes("authoritative", 13), NULL);
           CHECK(r==RANT_OK, "matchwait: matched send commits (%d)", r);
           test_pump(A, B, 600);
-          CHECK(mw_recv==0, "matchwait: unverified reader drops the DATA (recv=%lu)", mw_recv);
+          CHECK(test_atomic_load(&mw_recv)==0, "matchwait: unverified reader drops the DATA (recv=%lld)",
+                   test_atomic_load(&mw_recv));
           wire_tap_write(&wire_tap.drop_detail_resp_port, 0);      /* B's next re-ask verifies A */
-          PUMP_UNTIL(A, B, 24000, mw_recv!=0);
-          CHECK(mw_recv==1 && strcmp(mw_last,"authoritative")==0,
-                   "matchwait: repair delivers the pre-verify sample (recv=%lu '%s')", mw_recv, mw_last);
-          CHECK(mw_lost==0, "matchwait: healed with no MSG_LOST (%lu)", mw_lost);
+          PUMP_UNTIL(A, B, 24000, test_atomic_load(&mw_recv)!=0);
+          { long long got = test_atomic_load(&mw_recv);
+            CHECK(got==1 && strcmp(mw_last,"authoritative")==0,
+                     "matchwait: repair delivers the pre-verify sample (recv=%lld '%s')", got, mw_last); }
+          CHECK(test_atomic_load(&mw_lost)==0, "matchwait: healed with no MSG_LOST (%lld)",
+                   test_atomic_load(&mw_lost));
           CHECK(rant_topic_pending_count(at)==0 && rant_topic_ready(at)==1,
                    "matchwait: probes converge (pending=%d ready=%d)",
                    rant_topic_pending_count(at), rant_topic_ready(at));
@@ -149,10 +153,12 @@ static void matchwait_checks(void){
           CHECK(r==RANT_OK, "matchwait: racing first send commits (%d)", r);
           CHECK(rant_topic_match_count(at) > 0,
                    "matchwait: ...after waiting out the match (%d)", rant_topic_match_count(at));
-          PUMP_UNTIL(A, NULL, 6000, mw_recv!=0);
-          CHECK(mw_recv==1 && strcmp(mw_last,"first")==0,
-                   "matchwait: subscriber got the racing first send (recv=%lu '%s')", mw_recv, mw_last);
-          CHECK(mw_unmatched==0, "matchwait: no timeout diagnostic (%lu)", mw_unmatched);
+          PUMP_UNTIL(A, NULL, 6000, test_atomic_load(&mw_recv)!=0);
+          { long long got = test_atomic_load(&mw_recv);
+            CHECK(got==1 && strcmp(mw_last,"first")==0,
+                     "matchwait: subscriber got the racing first send (recv=%lld '%s')", got, mw_last); }
+          CHECK(test_atomic_load(&mw_unmatched)==0, "matchwait: no timeout diagnostic (%lld)",
+                   test_atomic_load(&mw_unmatched));
           /* a topic NOBODY consumes must not stall once the gather has settled: the
              converged state is memoized, so this send early-outs as it always did */
           test_pump(A, NULL, 600);     /* let the post-open gather settle */
@@ -190,13 +196,14 @@ static void matchwait_checks(void){
       CHECK(A && B && at && bt, "matchwait: knob-off pair up");
       if (A && B && at && bt){
           int r = rant_topic_send(at, rant_bytes("gone", 4), NULL);   /* no wait: commits to zero */
-          CHECK(r==RANT_OK && mw_unmatched==1,
-                   "matchwait: disabled wait drops LOUDLY (r=%d events=%lu)", r, mw_unmatched);
+          CHECK(r==RANT_OK && test_atomic_load(&mw_unmatched)==1,
+                   "matchwait: disabled wait drops LOUDLY (r=%d events=%lld)", r, test_atomic_load(&mw_unmatched));
           PUMP_UNTIL(A, B, 16000, rant_topic_match_count(at)!=0);
           CHECK(rant_topic_match_count(at)==1, "matchwait: the match still forms after (%d)",
                    rant_topic_match_count(at));
           test_pump(A, B, 600);
-          CHECK(mw_recv==0, "matchwait: the dropped send never resurrects (recv=%lu)", mw_recv);
+          CHECK(test_atomic_load(&mw_recv)==0, "matchwait: the dropped send never resurrects (recv=%lld)",
+                   test_atomic_load(&mw_recv));
       }
       if (A) rant_node_close(A,1);
       if (B) rant_node_close(B,1);

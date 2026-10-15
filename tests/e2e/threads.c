@@ -6,7 +6,8 @@
 #define TH_SENDERS 3
 #define TH_MSGS    1000u
 
-static volatile unsigned long th_recv, th_order_bad, th_lost, th_evicted_evt;
+/* the sub's service thread counts, the test reads with test_atomic_load while it runs */
+static long long th_recv, th_order_bad, th_lost, th_evicted_evt;
 static unsigned long th_next_seq[TH_SENDERS];   /* only the sub's service thread writes */
 
 static void th_on_message(const RantMsg *m){
@@ -15,15 +16,15 @@ static void th_on_message(const RantMsg *m){
         uint32_t tid = (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
         uint32_t seq = (uint32_t)p[4] | ((uint32_t)p[5]<<8) | ((uint32_t)p[6]<<16) | ((uint32_t)p[7]<<24);
         if (tid < TH_SENDERS){
-            if (seq != th_next_seq[tid]) th_order_bad++;
+            if (seq != th_next_seq[tid]) test_atomic_add(&th_order_bad, 1);
             th_next_seq[tid] = seq + 1;
         }
-        th_recv++;
+        test_atomic_add(&th_recv, 1);
     }
 }
 static void th_on_event(const RantEvent *ev){
-    if (ev->kind == RANT_MSG_LOST) th_lost += (unsigned long)ev->lost_count;
-    else if (ev->kind == RANT_ERROR && ev->error == RANT_E_EVICTED_UNSENT) th_evicted_evt++;
+    if (ev->kind == RANT_MSG_LOST) test_atomic_add(&th_lost, (long long)ev->lost_count);
+    else if (ev->kind == RANT_ERROR && ev->error == RANT_E_EVICTED_UNSENT) test_atomic_add(&th_evicted_evt, 1);
 }
 
 typedef struct { RantTopic *ch; uint32_t id; } th_sender_arg;
@@ -41,7 +42,7 @@ static void th_sender(void *arg){
  * callback, and probes the forbidden reentrant calls exactly once */
 static RantNode *th_echo_b;
 static RantTopic *th_echo_rep;
-static volatile unsigned long th_echo_replies;
+static long long th_echo_replies;
 static volatile int th_cb_send_rc = -100, th_cb_create_refused = -1, th_cb_setrole_rc = -100;
 static void th_echo_b_on_msg(const RantMsg *m){
     th_cb_send_rc = rant_topic_send(th_echo_rep, m->data, NULL);
@@ -50,10 +51,10 @@ static void th_echo_b_on_msg(const RantMsg *m){
         th_cb_setrole_rc = rant_topic_set_role(th_echo_rep, RANT_PUB_ONLY);
     }
 }
-static void th_echo_a_on_msg(const RantMsg *m){ (void)m; th_echo_replies++; }
+static void th_echo_a_on_msg(const RantMsg *m){ (void)m; test_atomic_add(&th_echo_replies, 1); }
 
 /* STOP UNDER LOAD: hammer a reliable topic until told to stop */
-static volatile int th_hammer_stop;
+static long long th_hammer_stop;
 /* a slow inline handler: 30 ms of work, plus a create from inside, which stays refused */
 static volatile unsigned long th_slow_runs, th_echo_recv; static volatile int th_slow_create_refused;
 static void th_slow_on_message(const RantMsg *m){
@@ -89,7 +90,7 @@ static void th_late_creator(void *arg){
 }
 static void th_hammer(void *arg){
     uint8_t buf[8]; memset(buf, 0x77, sizeof buf);
-    while (!th_hammer_stop) rant_topic_send((RantTopic*)arg, rant_bytes(buf, sizeof buf), NULL);
+    while (!test_atomic_load(&th_hammer_stop)) rant_topic_send((RantTopic*)arg, rant_bytes(buf, sizeof buf), NULL);
 }
 
 static void threaded_checks(void){
@@ -136,16 +137,16 @@ static void threaded_checks(void){
           { int drained = test_drain(w, 0, 10000);
             CHECK(drained == 1, "threaded: drain completes"); }
           { uint64_t end = i_rant_plat_now_us() + 3000000u;      /* delivered before acked, settle */
-            while (th_recv < (unsigned long)TH_SENDERS*TH_MSGS && i_rant_plat_now_us() < end)
+            while (test_atomic_load(&th_recv) < (long long)TH_SENDERS*TH_MSGS && i_rant_plat_now_us() < end)
                 test_sleep_ms(5); }
           rant_node_stop(r); rant_node_stop(w);                    /* join: counters now settled */
-          CHECK(th_recv == (unsigned long)TH_SENDERS*TH_MSGS,
-                   "threaded: exactly-once delivery (%lu, want %lu)",
-                   th_recv, (unsigned long)TH_SENDERS*TH_MSGS);
-          CHECK(th_order_bad == 0, "threaded: per-thread order kept (bad=%lu)", th_order_bad);
-          CHECK(th_lost == 0, "threaded: no loss (lost=%lu)", th_lost);
+          CHECK(th_recv == (long long)TH_SENDERS*TH_MSGS,
+                   "threaded: exactly-once delivery (%lld, want %lld)",
+                   th_recv, (long long)TH_SENDERS*TH_MSGS);
+          CHECK(th_order_bad == 0, "threaded: per-thread order kept (bad=%lld)", th_order_bad);
+          CHECK(th_lost == 0, "threaded: no loss (lost=%lld)", th_lost);
           CHECK(th_evicted_evt == 0 && rant_node_evicted_unsent(w) == 0,
-                   "threaded: no unsent eviction (evt=%lu cnt=%u)",
+                   "threaded: no unsent eviction (evt=%lld cnt=%u)",
                    th_evicted_evt, rant_node_evicted_unsent(w));
           rant_node_close(r, 1); rant_node_close(w, 1);
       }
@@ -174,25 +175,26 @@ static void threaded_checks(void){
              each send transmits before it returns */
           for (i=0;i<64;i++) test_send(w, 0, payload, sizeof payload);
           { uint64_t end = i_rant_plat_now_us() + 3000000u;
-            while (th_recv < 64 && i_rant_plat_now_us() < end) test_sleep_ms(5); }
-          CHECK(th_recv == 64, "burst: all 64 delivered past a depth-4 ring (%lu)", th_recv);
+            while (test_atomic_load(&th_recv) < 64 && i_rant_plat_now_us() < end) test_sleep_ms(5); }
+          { long long got = test_atomic_load(&th_recv);
+            CHECK(got == 64, "burst: all 64 delivered past a depth-4 ring (%lld)", got); }
           CHECK(rant_node_evicted_unsent(w) == 0, "burst: nothing evicted unsent (%u)",
                    rant_node_evicted_unsent(w));
 
           /* WAKER: quiesce, then one send must land well inside the announce capped sleep.
              Typical is sub ms, the margin absorbs a loaded CI box losing the CPU. */
           test_sleep_ms(300);
-          { unsigned long r0 = th_recv; uint64_t t0 = i_rant_plat_now_us(), dt;
+          { long long r0 = test_atomic_load(&th_recv); uint64_t t0 = i_rant_plat_now_us(), dt;
             test_send(w, 0, payload, sizeof payload);
-            while (th_recv == r0 && i_rant_plat_now_us() - t0 < 1000000u) { /* spin */ }
+            while (test_atomic_load(&th_recv) == r0 && i_rant_plat_now_us() - t0 < 1000000u) { /* spin */ }
             dt = i_rant_plat_now_us() - t0;
-            CHECK(th_recv == r0+1 && dt < 400000u,
+            CHECK(test_atomic_load(&th_recv) == r0+1 && dt < 400000u,
                      "waker: idle-node send delivered in %.1f ms", dt/1000.0);
           }
 
           /* HOSTILE: transport TX forced to would block. The first pass parks one datagram in
              tx_hold, past that the burst overwrites unsent history, which must surface as evicted. */
-          { unsigned long r0 = th_recv; uint32_t e0 = rant_node_evicted_unsent(w);
+          { long long r0 = test_atomic_load(&th_recv), got; uint32_t e0 = rant_node_evicted_unsent(w);
             uint32_t evicted;
             wire_tap_write(&wire_tap.block_data, 1);
             for (i=0;i<64;i++) test_send(w, 0, payload, sizeof payload);
@@ -202,10 +204,11 @@ static void threaded_checks(void){
             /* the service retries the held datagram and drains the ring on its next pass, which
                the announce cadence bounds */
             { uint64_t end = i_rant_plat_now_us() + 3000000u;
-              while (th_recv - r0 + evicted < 64 && i_rant_plat_now_us() < end) test_sleep_ms(10); }
-            CHECK(th_recv - r0 + (unsigned long)evicted == 64,
-                     "hostile: every send delivered or accounted (recv=%lu evicted=%u)",
-                     th_recv - r0, evicted);
+              while (test_atomic_load(&th_recv) - r0 + evicted < 64 && i_rant_plat_now_us() < end)
+                  test_sleep_ms(10); }
+            got = test_atomic_load(&th_recv) - r0;
+            CHECK(got + evicted == 64,
+                     "hostile: every send delivered or accounted (recv=%lld evicted=%u)", got, evicted);
           }
           /* lock/unlock smoke: bracket a peer-view read while the services run */
           { uint16_t cnt = 0;
@@ -232,7 +235,7 @@ static void threaded_checks(void){
       r = test_node_open("th-csub", th_on_message, th_on_event, o, cd, 1);
       CHECK(w && r, "capped: nodes open");
       if (w && r){
-          uint64_t worst = 0, began; double secs; unsigned long most; int i;
+          uint64_t worst = 0, began; double secs; long long most, got; int i;
           th_recv = 0;
           rant_node_start(w); rant_node_start(r);
           { uint64_t end = i_rant_plat_now_us() + 5000000u;
@@ -249,27 +252,28 @@ static void threaded_checks(void){
           }
           /* the cap is judged over the real span, a busy publisher may still send slower */
           secs = (double)(i_rant_plat_now_us() - began) / 1e6;
-          most = (unsigned long)(50.0 * secs * 1.25) + 2u;
+          most = (long long)(50.0 * secs * 1.25) + 2;
           CHECK(worst < 10000u, "capped: no send waits for the capped lane (worst %.2f ms)",
                    worst/1000.0);
-          CHECK(th_recv >= 2 && th_recv <= most && th_recv < 200,
-                   "capped: the subscriber is still paced (%lu of 200 in %.0f ms, at most %lu)",
-                   th_recv, secs * 1000.0, most);
+          got = test_atomic_load(&th_recv);
+          CHECK(got >= 2 && got <= most && got < 200,
+                   "capped: the subscriber is still paced (%lld of 200 in %.0f ms, at most %lld)",
+                   got, secs * 1000.0, most);
           CHECK(rant_node_evicted_unsent(w) == 0, "capped: a held back sample is not an eviction (%u)",
                    rant_node_evicted_unsent(w));
           /* a lone held back sample leaves at the lane's 20 ms tick: the send that armed the
              tick must wake the service thread, which otherwise sleeps out its older plan */
           { uint64_t worst_gap = 0; int pair;
             for (pair=0;pair<3;pair++){
-                unsigned long r0; uint64_t t0, dt;
+                long long r0; uint64_t t0, dt;
                 test_sleep_ms(300);
-                r0 = th_recv;
+                r0 = test_atomic_load(&th_recv);
                 test_send(w, 0, payload, sizeof payload); test_sleep_ms(1);
                 test_send(w, 0, payload, sizeof payload);
                 t0 = i_rant_plat_now_us();
-                while (th_recv < r0 + 2 && i_rant_plat_now_us() - t0 < 1000000u) test_sleep_ms(1);
+                while (test_atomic_load(&th_recv) < r0 + 2 && i_rant_plat_now_us() - t0 < 1000000u) test_sleep_ms(1);
                 dt = i_rant_plat_now_us() - t0;
-                if (th_recv < r0 + 2) dt = 1000000u;
+                if (test_atomic_load(&th_recv) < r0 + 2) dt = 1000000u;
                 if (dt > worst_gap) worst_gap = dt;
             }
             CHECK(worst_gap < 100000u, "capped: a held back sample leaves at its tick (worst %.0f ms)",
@@ -373,9 +377,9 @@ static void threaded_checks(void){
                 test_sleep_ms(5); }
           for (i=0;i<10;i++) test_send(a, 0, payload, sizeof payload);
           { uint64_t end = i_rant_plat_now_us() + 3000000u;
-            while (th_echo_replies < 10 && i_rant_plat_now_us() < end) test_sleep_ms(5); }
+            while (test_atomic_load(&th_echo_replies) < 10 && i_rant_plat_now_us() < end) test_sleep_ms(5); }
           rant_node_stop(b); rant_node_stop(a);
-          CHECK(th_echo_replies == 10, "reentrant: callback send echoes (%lu/10)", th_echo_replies);
+          CHECK(th_echo_replies == 10, "reentrant: callback send echoes (%lld/10)", th_echo_replies);
           CHECK(th_cb_send_rc == RANT_OK, "reentrant: callback send returns RANT_OK (%d)", th_cb_send_rc);
           CHECK(th_cb_create_refused == 1, "reentrant: callback create_topic refused");
           CHECK(th_cb_setrole_rc == RANT_ERR_STATE, "reentrant: callback set_role refused (%d)", th_cb_setrole_rc);
@@ -404,12 +408,12 @@ static void threaded_checks(void){
             while (test_match_count(w, 0) == 0 && i_rant_plat_now_us() < end)
                 test_pump(w, r, 10); }
           rant_node_start(w);                      /* reader stays unpolled: never acks */
-          th_hammer_stop = 0;
+          test_atomic_store(&th_hammer_stop, 0);
           i_rant_plat_thread_start(&h1, th_hammer, rant_node_topic(w, 0));
           i_rant_plat_thread_start(&h2, th_hammer, rant_node_topic(w, 0));
           test_sleep_ms(50);                         /* hammers now parked in the wait */
           rant_node_stop(w);                       /* broadcasts the waiters loose */
-          th_hammer_stop = 1;
+          test_atomic_store(&th_hammer_stop, 1);
           i_rant_plat_thread_join(&h1);
           i_rant_plat_thread_join(&h2);
           rant_node_close(r, 0);

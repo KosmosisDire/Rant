@@ -9,6 +9,7 @@
 
 #include "rant_impl.h"
 #include "harness.h"
+#include "atomic.h"
 
 /* the helpers that need the implementation's own declarations */
 

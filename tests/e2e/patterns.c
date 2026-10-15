@@ -17,19 +17,20 @@ static void pf_on_reply(const RantResponse *r){
     pf_reply_msg[pf_reply_msg_len] = 0;
     pf_reply_done = 1;
 }
-static int pf_calls;
+/* handlers run on a started provider's service thread too */
+static long long pf_calls;
 static void pf_add_handler(RantRequest *req, void *user){
     uint8_t out[4];
     uint32_t v = req->data.len>=4 ? i_rant_le_r32(req->data.data) : 0;
-    (void)user; pf_calls++;
+    (void)user; test_atomic_add(&pf_calls, 1);
     i_rant_le_w32(out, v+1);
     rant_request_reply(req, rant_bytes(out,4));
 }
-static void pf_empty_handler(RantRequest *req, void *user){ (void)req;(void)user; pf_calls++; }
+static void pf_empty_handler(RantRequest *req, void *user){ (void)req;(void)user; test_atomic_add(&pf_calls, 1); }
 /* fail with an over long message and a structured payload: pins the wire carried
  * APP_ERROR text, the truncating cap, and that data still rides beside the message */
 static void pf_fail_handler(RantRequest *req, void *user){
-    char big[301]; int i; uint8_t out[4]; (void)user; pf_calls++;
+    char big[301]; int i; uint8_t out[4]; (void)user; test_atomic_add(&pf_calls, 1);
     for (i=0;i<300;i++) big[i] = (char)('a' + i%26);
     big[300] = 0;
     i_rant_le_w32(out, 13);
@@ -52,8 +53,11 @@ static void pf_on_reply_burst(const RantResponse *r){
     else { pf_burst_bad++; pf_burst_last_bad = r->status; }
     pf_burst_done++;
 }
-static volatile uint64_t pf_defer_token;
-static void pf_defer_handler(RantRequest *req, void *user){ (void)user; pf_calls++; pf_defer_token = rant_request_defer(req); }
+static long long pf_defer_token;
+static void pf_defer_handler(RantRequest *req, void *user){
+    (void)user; test_atomic_add(&pf_calls, 1);
+    test_atomic_store(&pf_defer_token, (long long)rant_request_defer(req));
+}
 /* variable on_change / on_write capture */
 typedef struct { int n; uint32_t val, seq, source; uint8_t forced; } PfVarEvt;
 static void pf_on_var_update(const RantVariableUpdate *u, void *user){
@@ -172,19 +176,21 @@ static void patterns_checks(void){
                pf_reply_val); }
 
     /* empty ack: the handler returns without replying, auto OK with an empty payload */
-    { pf_reply_done=0; pf_calls=0;
+    { pf_reply_done=0; test_atomic_store(&pf_calls, 0);
       rant_function_call_async(ce, rant_bytes(NULL,0), pf_on_reply, NULL, NULL);
       PUMP_UNTIL(P, C, 3200, pf_reply_done);
       CHECK(pf_reply_done && pf_reply_status==RANT_CALL_OK && pf_reply_val==0,
                "patterns: empty-ack auto OK (done=%d st=%d)", pf_reply_done, pf_reply_status); }
 
     /* deferred: handler defers, we complete later with a value */
-    { pf_reply_done=0; pf_defer_token=0;
+    { uint64_t tok;
+      pf_reply_done=0; test_atomic_store(&pf_defer_token, 0);
       rant_function_call_async(cd, rant_bytes(NULL,0), pf_on_reply, NULL, NULL);
-      PUMP_UNTIL(P, C, 3200, pf_defer_token);
-      CHECK(pf_defer_token!=0, "patterns: handler deferred (token=%llu)", (unsigned long long)pf_defer_token);
+      PUMP_UNTIL(P, C, 3200, test_atomic_load(&pf_defer_token));
+      tok = (uint64_t)test_atomic_load(&pf_defer_token);
+      CHECK(tok!=0, "patterns: handler deferred (token=%llu)", (unsigned long long)tok);
       { uint8_t out[4]; i_rant_le_w32(out,99);
-        rant_function_complete(pd, pf_defer_token, RANT_CALL_OK, "deferred done", rant_bytes(out,4)); }
+        rant_function_complete(pd, tok, RANT_CALL_OK, "deferred done", rant_bytes(out,4)); }
       PUMP_UNTIL(P, C, 3200, pf_reply_done);
       CHECK(pf_reply_done && pf_reply_status==RANT_CALL_OK && pf_reply_val==99,
                "patterns: deferred completion delivers 99 (done=%d val=%u)", pf_reply_done, pf_reply_val);
@@ -274,18 +280,19 @@ static void patterns_checks(void){
 
     /* a sync call that times out locally, then the deferred reply lands late: the pending
        entry must be unlinked, the late reply dropped, and a later sync call still works */
-    { RantResponse rep; int rc;
+    { RantResponse rep; int rc; uint64_t tok;
       rant_node_start(P);
-      pf_defer_token=0;
+      test_atomic_store(&pf_defer_token, 0);
       rc = rant_function_call(cd, rant_bytes(NULL,0), &rep, 120, NULL);
       CHECK(rc==0 && rep.status==RANT_CALL_TIMEOUT,
                "patterns: sync local timeout (rc=%d st=%d)", rc, rep.status);
       CHECK(rep.message.len==7 && memcmp(rep.message.data,"timeout",7)==0,
                "patterns: sync timeout carries status text");
-      PUMP_UNTIL(C, NULL, 2000, pf_defer_token);
-      CHECK(pf_defer_token!=0, "patterns: deferred token arrived");
-      if (pf_defer_token){ uint8_t out[4]; i_rant_le_w32(out,7);
-          rant_function_complete(pd, pf_defer_token, RANT_CALL_OK, NULL, rant_bytes(out,4)); }
+      PUMP_UNTIL(C, NULL, 2000, test_atomic_load(&pf_defer_token));
+      tok = (uint64_t)test_atomic_load(&pf_defer_token);
+      CHECK(tok!=0, "patterns: deferred token arrived");
+      if (tok){ uint8_t out[4]; i_rant_le_w32(out,7);
+          rant_function_complete(pd, tok, RANT_CALL_OK, NULL, rant_bytes(out,4)); }
       test_pump(C, NULL, 400);     /* late reply arrives: must be dropped safely */
       pf_reply_done=0;
       { uint8_t req[4]; i_rant_le_w32(req,60);
@@ -566,7 +573,7 @@ static void patterns_checks(void){
                "patterns: deep-ring pair matched both ways (c=%d p=%d)",
                rant_function_match_count(deep_c), rant_function_match_count(deep_p));
       test_pump(P,C,50);
-      { int before = pf_calls; (void)before;
+      { long long before = test_atomic_load(&pf_calls);
       pf_burst_done=0; pf_burst_sum=0; pf_burst_bad=0; expect_sum=0;
       for (i2=0;i2<24;i2++){
           i_rant_le_w32(req,(uint32_t)(3000+i2)); expect_sum += (uint32_t)(3000+i2+1);
@@ -576,8 +583,8 @@ static void patterns_checks(void){
       rant_node_poll(P,20);
       PUMP_UNTIL(P, C, 8000, pf_burst_done >= 24);
       CHECK(pf_burst_done==24 && pf_burst_bad==0 && pf_burst_sum==expect_sum,
-               "patterns: keep_last=32 carries a 24-reply pass (handled=%d done=%d bad=%d laststatus=%d sum=%u want=%u)",
-               pf_calls - before, pf_burst_done, pf_burst_bad, (int)pf_burst_last_bad, pf_burst_sum, expect_sum); } }
+               "patterns: keep_last=32 carries a 24-reply pass (handled=%lld done=%d bad=%d laststatus=%d sum=%u want=%u)",
+               test_atomic_load(&pf_calls) - before, pf_burst_done, pf_burst_bad, (int)pf_burst_last_bad, pf_burst_sum, expect_sum); } }
 
     /* a call still pending when the node closes gets one synthesized CANCELLED outcome */
     { RantFunction *never = rant_node_create_remote_function(C, "never-served", NULL, NULL,

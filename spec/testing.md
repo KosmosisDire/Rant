@@ -10,7 +10,8 @@ makes a test or a measurement trustworthy.
   implementation into the program so a case reaches every internal, `harness.c` holds the
   case runner, the checks, the pumps and the node helpers, and `wire_tap.c` wraps the
   platform's `sendto`, `recvfrom` and `bind` to count datagrams by type, inject faults and
-  catch a socket bound outside loopback.
+  catch a socket bound outside loopback. `atomic.h` holds the loads, stores and adds for
+  state a service thread shares with the test.
 - `tests/interop/` holds one Tick program per language and the driver that runs a pair.
 - `tests/golden/` holds the schema hashes every binding pins.
 - `tests/bench/` is `rant_bench`: the sweep and the benches.
@@ -44,6 +45,9 @@ makes a test or a measurement trustworthy.
   under load. Suspect those before the code.
 - A nested wait only pumps the calling node, so a peer in the same process must answer
   from a service thread.
+- A counter or flag that a callback on a service thread writes while the test reads it
+  goes through `atomic.h`, so the order holds and TSan sees it. A plain read is fine once
+  `rant_node_stop` joined the thread.
 - Default QoS (shallow ring, no backpressure wait) loses bursts legally. Lossless
   multithreaded tests set `keep_last` and `backpressure_wait_us`. A burst that fits one
   datagram parks in `tx_hold` and counts as sent, so a hostile eviction test needs bursts
