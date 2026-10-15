@@ -13,6 +13,8 @@ makes a test or a measurement trustworthy.
   catch a socket bound outside loopback. `atomic.h` holds the loads, stores and adds for
   state a service thread shares with the test.
 - `tests/interop/` holds one Tick program per language and the driver that runs a pair.
+- `tests/fuzz/` holds the libFuzzer targets, their replay driver and the inputs that once
+  crashed one.
 - `tests/golden/` holds the schema hashes every binding pins.
 - `tests/bench/` is `rant_bench`: the sweep and the benches.
 
@@ -80,6 +82,7 @@ program in this order.
 | `e2e.threads` | threads |
 | `bench.memscale` | `rant_bench memscale`, a steady state send never allocates |
 | `bindings.cpp`, `.python`, `.csharp` | the binding suites, below |
+| `fuzz.receive`, `.schema`, `.message` | the target's seeds and saved crashes, below |
 | `interop.<pub>_to_<sub>` | one language publishing to another, below |
 | `build.strict` | the compile checks, below |
 
@@ -415,8 +418,45 @@ docs/building.md) run the C and C++ entries instrumented.
   need thread atomics in the platform layer, which today has them only under `RANT_SHM`.
 - Coverage counters update atomically (`-fprofile-update=atomic`), or service threads
   corrupt them and gcovr refuses negative counts.
+- Clang's UBSan (the `linux-fuzz` tree) fails `bindings.cpp` and the C and C++ interop
+  pairs: the node calls the C++ wrapper's event trampoline through a pointer to the C
+  `RantEvent` function type, while the trampoline takes `rant::detail::RantEvent`. GCC has
+  no such check.
 - Instrumented trees link the C and C++ runtimes dynamically (`RANT_STATIC_RUNTIME` off),
   since they never leave the machine.
+
+## Fuzzing
+
+Each `tests/fuzz/<name>.c` defines `LLVMFuzzerTestOneInput` and `fuzz_seeds`, which hands
+over valid inputs the live code builds. Every build links it with `replay.c` as
+`fuzz_<name>_replay`, and ctest runs that as `fuzz.<name>` over the seeds and every file in
+`tests/fuzz/crashes/<name>/`. `RANT_FUZZ` (the `*-fuzz` presets) also links it with libFuzzer
+as `fuzz_<name>`. Fuzzing itself runs by hand, never in CI.
+
+- `receive` opens a node and hands each chunk, a source port and a datagram, to the
+  runtime's own dispatch (`i_rant_node_rx_one`), then polls once and walks the reflection.
+  The wire tap isolates it, so sends vanish and no real datagram arrives, and it runs on
+  domain 65000, which the seed carries. The seed is a recorded session: a peer on loopback
+  matches every entity, publishes a small and a fragmented image, calls, writes and leaves.
+- `schema` compiles DSL text (first byte even) or parses a peer's wire (odd). Any schema
+  reparses to the same hash and validates its default message. A compiled one also names
+  every option, reads itself and prints back to the same schema. A wire may hold what text
+  refuses, so those three are not asked of it.
+- `message` reads a message of one of the `schemas.h` schemas, or a bare map body, through
+  every getter, element and nested map. A valid map reads every entry, a valid message every
+  top level field, and a valid message copied field by field onto a default one still
+  validates with its integers intact.
+- `FUZZ_REQUIRE` states a property beyond not crashing. A failure aborts, which libFuzzer
+  saves as a crash.
+- Once a crash is fixed, its input goes to `tests/fuzz/crashes/<name>/` under a name that
+  says what it caught, so every build replays it.
+- Found so far, fixed with their inputs saved: a zero length fragment of an empty sample
+  offset a NULL buffer, the same empty sample offset NULL again in delivery, and a DATA
+  header claiming a sample longer than its fragments sized a 3 GB allocation.
+- Found so far and open: a peer's wire may name a standard type with another shape, name a
+  field twice or leave an option unnamed, all of which text refuses. Type names that end in
+  two single letter words (`eL` to `EL` to `El`) do not normalize to a fixed point, so such
+  a schema does not print back to itself and the `schema` fuzzer stops on it.
 
 ## Measurement traps
 

@@ -59,6 +59,17 @@ function(rant_test_domain test)
   set_property(TEST ${test} APPEND PROPERTY ENVIRONMENT "${_var}=${_domain}")
 endfunction()
 
+# rant_test_program(<target> <source>...): a program on the harness, whose own translation
+# unit compiles the whole implementation.
+function(rant_test_program target)
+  add_executable(${target} ${ARGN} support/harness.c)
+  target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_definitions(${target} PRIVATE
+    RANT_TEST_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/schemas.txt")
+  target_link_libraries(${target} PRIVATE rant_wire_tap)
+  add_dependencies(${target} rant_dist)
+endfunction()
+
 # rant_c_test(<kind> <name> [SHM_ONLY]) builds <kind>/<name>.c as ctest <kind>.<name>, and
 # again with RANT_NO_SHM as <kind>.<name>.noshm unless the program needs shared memory.
 function(rant_c_test kind name)
@@ -74,12 +85,7 @@ function(rant_c_test kind name)
       set(_target ${_target}_noshm)
       set(_test ${_test}.noshm)
     endif()
-    add_executable(${_target} ${kind}/${name}.c support/harness.c)
-    target_include_directories(${_target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_compile_definitions(${_target} PRIVATE
-      RANT_TEST_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/schemas.txt")
-    target_link_libraries(${_target} PRIVATE rant_wire_tap)
-    add_dependencies(${_target} rant_dist)
+    rant_test_program(${_target} ${kind}/${name}.c)
     if(_flavour STREQUAL "noshm")
       target_compile_definitions(${_target} PRIVATE RANT_NO_SHM)
     endif()
@@ -120,6 +126,25 @@ rant_c_test(e2e matchwait)
 rant_c_test(e2e relay)
 rant_c_test(e2e timestamps)
 rant_c_test(e2e threads)
+
+# Fuzz targets. Every build replays each target's seeds and the inputs that once crashed it
+# as fuzz.<name>. RANT_FUZZ also builds the libFuzzer programs, with Clang or MSVC.
+option(RANT_FUZZ "Build the libFuzzer programs in tests/fuzz" OFF)
+foreach(_fuzz receive schema message)
+  rant_test_program(fuzz_${_fuzz}_replay fuzz/${_fuzz}.c fuzz/read.c fuzz/replay.c)
+  add_test(NAME fuzz.${_fuzz}
+           COMMAND fuzz_${_fuzz}_replay "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/crashes/${_fuzz}")
+  set_tests_properties(fuzz.${_fuzz} PROPERTIES LABELS fuzz TIMEOUT 60)
+  if(RANT_FUZZ)
+    rant_test_program(fuzz_${_fuzz} fuzz/${_fuzz}.c fuzz/read.c)
+    if(MSVC)
+      target_compile_options(fuzz_${_fuzz} PRIVATE /fsanitize=fuzzer)
+    else()
+      target_compile_options(fuzz_${_fuzz} PRIVATE -fsanitize=fuzzer)
+      target_link_options(fuzz_${_fuzz} PRIVATE -fsanitize=fuzzer)
+    endif()
+  endif()
+endforeach()
 
 # Compile checks: the implementation alone with every warning an error, C99 pedantic on GCC
 # and Clang, /W4 on MSVC, in each feature combination a cut down build uses. The build.strict

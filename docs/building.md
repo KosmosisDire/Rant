@@ -131,9 +131,10 @@ build/tests/bin/unit_transport rtt      # one case of one program, --list lists 
 Labels: `unit` (sans IO, no sockets), `e2e` (real nodes on loopback), `noshm` (the twin of a
 program built with `RANT_NO_SHM`), `bindings` (the C++, Python and C# suites, the last two
 when Python and dotnet are found), `interop` (each language publishing to every other one),
-`build` (the implementation compiled with every warning an error) and `bench`
-(`rant_bench memscale`). A program exits 0 on pass, 1 on a failed check and 77 when it
-skips. Every test stays on loopback, so the Windows firewall never asks.
+`build` (the implementation compiled with every warning an error), `bench`
+(`rant_bench memscale`) and `fuzz` (each fuzz target's seeds and saved crashes). A program
+exits 0 on pass, 1 on a failed check and 77 when it skips. Every test stays on loopback, so
+the Windows firewall never asks.
 
 ### Sanitizers and coverage
 
@@ -157,6 +158,26 @@ gcovr -r . --filter 'dist/rant\.h$' --merge-mode-functions=separate build-covera
   as WSL's with "unexpected memory mapping".
 - Every test compiles `dist/rant.h`, so coverage reports its line numbers. Add
   `--html-details build-coverage/coverage.html` for a page per source line.
+
+### Fuzzing
+
+The `linux-fuzz` (Clang) and `windows-fuzz` (MSVC) presets add a libFuzzer program per
+target in `tests/fuzz/`: `receive` (datagrams into a live node), `schema` (DSL text and
+schema wire) and `message` (typed messages and maps). Start a corpus from the seeds, then
+fuzz for as long as you like.
+
+```sh
+cmake --preset linux-fuzz && cmake --build --preset linux-fuzz
+mkdir -p build-fuzz/corpus/receive
+build-fuzz/tests/bin/fuzz_receive_replay --seeds build-fuzz/corpus/receive
+build-fuzz/tests/bin/fuzz_receive build-fuzz/corpus/receive -max_total_time=600
+```
+
+- A versioned Clang takes `-DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19`
+  on the configure line.
+- A crash lands as `crash-<hash>` in the working folder. `fuzz_receive_replay <file>`
+  reruns it, and once fixed it goes to `tests/fuzz/crashes/receive/` so ctest replays it.
+- `-fork=4 -ignore_crashes=1` keeps fuzzing past a crash already known.
 
 ## Measuring
 

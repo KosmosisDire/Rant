@@ -1,6 +1,5 @@
-/* The wire tap: wraps the sendto, recvfrom and bind calls of the Rant platform layer, counts
- * every datagram by transport type, injects faults and notes binds outside loopback.
- * rant_impl.h routes the library through it. */
+/* The wire tap wraps the platform's sendto, recvfrom and bind: it counts datagrams by type,
+ * injects faults, isolates a node and notes binds outside loopback. rant_impl.h routes them. */
 #ifndef RANT_WIRE_TAP_H
 #define RANT_WIRE_TAP_H
 
@@ -44,6 +43,7 @@ typedef struct {
     long long tx_interest_req;                      /* interest page requests sent */
     long long trace_left;                           /* received datagrams still to print */
     long long block_data;                           /* 1 = transport datagrams would block */
+    long long isolate;                              /* 1 = sends vanish, receives find nothing */
     long long drop_detail_resp_port;                /* swallow DETAIL_RESP to this port, 0 = off */
     long long bind_off_loopback;                    /* sockets bound to a network address */
     long long bind_off_loopback_port;               /* the last such socket's port */
@@ -56,6 +56,9 @@ void      wire_tap_write(long long *field, long long value);
 void      wire_tap_snapshot(WireTap *out);
 /* Zeroes the datagram counters and keeps the switches and the bind record. */
 void      wire_tap_reset_counters(void);
+/* Sees every datagram a socket receives, NULL = off. Set it while no node runs */
+extern void (*wire_tap_on_recv)(long long sock, const unsigned char *buf, long len,
+                                const struct sockaddr *from);
 
 #ifdef _WIN32
 int wire_tap_bind(SOCKET s, const struct sockaddr *addr, int len);

@@ -12,6 +12,8 @@
 #endif
 
 WireTap wire_tap;
+void (*wire_tap_on_recv)(long long sock, const unsigned char *buf, long len,
+                         const struct sockaddr *from);
 
 long long wire_tap_read(const long long *field){ return test_atomic_load(field); }
 void wire_tap_write(long long *field, long long value){ test_atomic_store(field, value); }
@@ -84,10 +86,14 @@ static int tap_is_detail(const unsigned char *b, long len, unsigned kind){
 }
 
 /* 1 when the fault switches eat this datagram. would_block says how: a transport datagram
- * fails as would block, a swallowed DETAIL_RESP reports success. */
+ * fails as would block, a swallowed one reports success. */
 static int tap_fault(const unsigned char *b, long len, const struct sockaddr *to, int *would_block){
     unsigned type = len >= 1 ? (b[0] & WIRE_TAP_MSG_MASK) : 0;
     long long port = test_atomic_load(&wire_tap.drop_detail_resp_port);
+    if (test_atomic_load(&wire_tap.isolate)){
+        *would_block = 0;
+        return 1;
+    }
     if (test_atomic_load(&wire_tap.block_data) && type >= WIRE_TAP_DATA && type <= WIRE_TAP_NACK){
         *would_block = 1;
         return 1;
@@ -122,10 +128,12 @@ static void tap_sent(const unsigned char *b, long r, long long dt){
     if (tap_is_detail(b, r, 3)) test_atomic_add(&wire_tap.tx_interest_req, 1);
 }
 
-static void tap_received(const unsigned char *b, long r, const struct sockaddr *from, long long dt){
+static void tap_received(long long sock, const unsigned char *b, long r, const struct sockaddr *from,
+                         long long dt){
     test_atomic_add(&wire_tap.rx_ns, dt);
     test_atomic_add(&wire_tap.rx_calls, 1);
     if (r < 0) return;
+    if (wire_tap_on_recv) wire_tap_on_recv(sock, b, r, from);
     tap_classify(b, r, wire_tap.rx_type, wire_tap.rx_data_topic);
     if (r >= 1 && (b[0] & WIRE_TAP_MSG_MASK) >= WIRE_TAP_DATA && (b[0] & WIRE_TAP_MSG_MASK) <= WIRE_TAP_NACK
         && from && from->sa_family == AF_INET
@@ -171,11 +179,17 @@ int wire_tap_sendto(SOCKET s, const char *buf, int len, int flags, const struct 
 }
 
 int wire_tap_recvfrom(SOCKET s, char *buf, int len, int flags, struct sockaddr *from, int *fromlen){
-    long long a = tap_now_ns();
-    int r = recvfrom(s, buf, len, flags, from, fromlen);
-    int e = WSAGetLastError();
+    long long a;
+    int r, e;
+    if (test_atomic_load(&wire_tap.isolate)){
+        WSASetLastError(WSAEWOULDBLOCK);
+        return -1;
+    }
+    a = tap_now_ns();
+    r = recvfrom(s, buf, len, flags, from, fromlen);
+    e = WSAGetLastError();
     if (r < 0) tap_error(e, &wire_tap.rx_would_block, &wire_tap.rx_reset, &wire_tap.rx_error);
-    tap_received((const unsigned char *)buf, r, from, tap_now_ns() - a);
+    tap_received((long long)s, (const unsigned char *)buf, r, from, tap_now_ns() - a);
     WSASetLastError(e);
     return r;
 }
@@ -217,11 +231,18 @@ ssize_t wire_tap_sendto(int s, const void *buf, size_t len, int flags, const str
 
 ssize_t wire_tap_recvfrom(int s, void *buf, size_t len, int flags, struct sockaddr *from,
                           socklen_t *fromlen){
-    long long a = tap_now_ns();
-    ssize_t r = recvfrom(s, buf, len, flags, from, fromlen);
-    int e = errno;
+    long long a;
+    ssize_t r;
+    int e;
+    if (test_atomic_load(&wire_tap.isolate)){
+        errno = EAGAIN;
+        return -1;
+    }
+    a = tap_now_ns();
+    r = recvfrom(s, buf, len, flags, from, fromlen);
+    e = errno;
     if (r < 0) tap_error(e, &wire_tap.rx_would_block, &wire_tap.rx_reset, &wire_tap.rx_error);
-    tap_received((const unsigned char *)buf, (long)r, from, tap_now_ns() - a);
+    tap_received((long long)s, (const unsigned char *)buf, (long)r, from, tap_now_ns() - a);
     errno = e;
     return r;
 }

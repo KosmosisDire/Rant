@@ -4,6 +4,7 @@ old
 /build-asan/
 /build-tsan/
 /build-coverage/
+/build-fuzz/
 
 /Debug/
 *.png
