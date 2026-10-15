@@ -427,7 +427,7 @@ static void metalog_checks(void){
             RantValue row, nm; uint16_t r; int hid = 0;
             for (r = 0; ok_topics && r < topv.count; r++)
                 if (rant_map_array_at(topv.bytes, r, &row) && rant_map_get(row.bytes, "name", &nm)
-                    && nm.bytes.len >= 8 && !memcmp(nm.bytes.data, "@rant/", 8)) hid++;
+                    && nm.bytes.len >= 6 && !memcmp(nm.bytes.data, "@rant/", 6)) hid++;
             CHECK(ok_topics && topv.count == 1 && hid == 0,
                      "metalog: snapshot lists app topics only (%u rows, %d hidden)",
                      (unsigned)(ok_topics?topv.count:0), hid); }
