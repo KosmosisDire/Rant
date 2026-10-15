@@ -77,7 +77,9 @@ strict prefix of it.
   450k a second where the handoff reached 750k with a deep history.
   `pollers_sleeping` is a counter, since a flag lost kicks with several pollers.
 - A plain topic `on_message` runs with the lock released (`i_rant_node_callback_begin`
-  and `end`), so a send on another thread never waits for a handler. The thread is
+  and `end`), so a send on another thread never waits for a handler. The blocking
+  function call's own capture is internal and stays under the lock, so its caller finds
+  the call answered or still pending, never mid copy. The thread is
   stamped `cb_thread` while it is out and `cb_out` counts such callbacks. A call the
   handler makes takes the lock back for its duration (`cb_depth` counts the nesting) and
   still gets `acquired = 0`, so it keeps the callback rules: no wait, no pump, and the

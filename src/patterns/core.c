@@ -508,7 +508,8 @@ static void i_rant_func_on_response(void *user, const RantMsg *msg){
               ? rant_string((const char*)msg->header.data + RANT__FN_PREFIX + 1u,
                             msg->header.len - (RANT__FN_PREFIX + 1u))
               : i_rant_call_status_msg(r.status);
-    if (p->on_response){
+    if (p->on_response && p->sync) p->on_response(&r);   /* internal capture, see rant_function_call */
+    else if (p->on_response){
         i_RantCallbackScope cs;
         i_rant_node_sys_callback_begin(fn->n, &cs, &fn->cb_out);
         p->on_response(&r);
@@ -916,9 +917,9 @@ int rant_function_refresh(RantFunction *fn){
     return 1;
 }
 
-/* The blocking call's response capture: copies the payload into the function's scratch.
- * The schema pointer is safe to hold, an interned schema lives until close. */
-typedef struct { RantFunction *fn; volatile int done; RantCallStatus status;
+/* The blocking call's response capture, run under the node lock: copies the payload into the
+ * function's scratch. The schema pointer is safe to hold, an interned schema lives until close. */
+typedef struct { RantFunction *fn; int done; RantCallStatus status;
                  const RantSchema *schema; uint32_t len; uint32_t provider;
                  uint64_t written_us; } i_RantSyncCtx;
 static void i_rant_func_sync_response(const RantResponse *r){
@@ -972,10 +973,9 @@ int rant_function_call(RantFunction *fn, RantBytes req, RantResponse *out, int t
     cw.deadline = i_rant_node_now_us(fn->n)
                 + (uint64_t)(timeout_ms >= 0 ? (uint64_t)timeout_ms * 1000u : fn->timeout_us) + 20000u;
     (void)i_rant_node_sys_wait(fn->n, i_rant_func_call_wait_done, &cw);
-    if (!ctx.done){
-        /* the local wait expired first: unlink the entry before this frame dies, or a late
-           response fires into a reclaimed frame. A racing poller may have completed it */
-        i_RantPending *p;
+    /* The capture runs under the lock, so under it the call is answered or still pending.
+       A pending entry is unlinked here, so nothing writes this frame once it returns */
+    {   i_RantPending *p;
         acquired = i_rant_node_sys_lock(fn->n);
         if (!ctx.done && (p = i_rant_func_take_pending(fn, id)) != NULL)
             i_rant_node_sys_alloc(fn->n, p, 0);

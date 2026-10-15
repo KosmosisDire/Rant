@@ -73,7 +73,7 @@ program in this order.
 | `e2e.detail` | detail_live, interest_external |
 | `e2e.shm` | shm_node |
 | `e2e.queues` | queue, pull, callback_queue, callback_pattern |
-| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud |
+| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture |
 | `e2e.tasks` | task, task_matrix |
 | `e2e.entities` | reflect_dropped, churn, log_and_meta |
 | `e2e.matchwait` | matchwait |
@@ -269,6 +269,10 @@ What each phase pins, grouped by layer.
   their own reply. A burst past keep_last engages backpressure without the pattern layer
   holding the node lock. A deferred reply landing after a local timeout is dropped and
   the next call still works.
+- Blocking call capture: the caller's page hook stalls any allocation the caller makes
+  without its own lock. None may happen, and a call the provider never answers runs its
+  whole timeout. When the capture ran unlocked, a call timed out mid copy, the late write
+  ended the next call early and closing the node crashed.
 - Provider reply burst: an inline reply is a reentrant send that never waits, so the rsp
   ring is the only thing between a drained batch and lost replies, which are invisible at
   the provider. The caller needs the same depth in its req ring, and both lanes must be
@@ -412,10 +416,10 @@ docs/building.md) run the C and C++ entries instrumented.
 
 - ASan and UBSan pass on Linux and Windows. A leak, an overflow or undefined behaviour stops
   the program, so the entry fails.
-- TSan fails eleven entries on one known library race: the node lock's reentrancy check
-  (`lock_held`, `lock_owner` in `src/node/runtime.c`) reads the owner outside the mutex.
-  The sync function call's `done` flag in `src/patterns/core.c` races the same way. Both
-  need thread atomics in the platform layer, which today has them only under `RANT_SHM`.
+- TSan flags the node lock's reentrancy check (`lock_held`, `lock_owner` in
+  `src/node/runtime.c`), which reads the owner outside the mutex. Only the holder writes
+  its id and zeroes it before release, so the check is sound, but TSan fails the threaded
+  entries until those reads are atomic, which the platform layer offers only under `RANT_SHM`.
 - Coverage counters update atomically (`-fprofile-update=atomic`), or service threads
   corrupt them and gcovr refuses negative counts.
 - Clang's UBSan (the `linux-fuzz` tree) fails `bindings.cpp` and the C and C++ interop

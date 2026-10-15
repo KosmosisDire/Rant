@@ -1025,6 +1025,76 @@ static void varwait_checks(void){
     rant_allocator_reset(&aa); rant_allocator_reset(&ba);
 }
 
+/* SYNC CAPTURE: a blocking call's response capture runs under the caller's lock, so the
+   call sees it answered or still pending, never mid copy (spec/patterns.md) */
+#define SC_BIG 200000
+static RantNode *sc_caller;
+static long long sc_armed, sc_unlocked;
+static int sc_calls;
+/* the caller's page hook: a page call without the caller's lock is counted, and the first
+   stalls 300 ms, which once let a call time out while its capture still wrote its frame */
+static void *sc_pages(void *ptr, size_t size){
+    if (test_atomic_load(&sc_armed) && sc_caller
+        && !(sc_caller->lock_held && sc_caller->lock_owner == i_rant_plat_thread_id())
+        && test_atomic_add(&sc_unlocked, 1) == 1)
+        test_sleep_ms(300);
+    if (!size){ free(ptr); return NULL; }
+    return realloc(ptr, size);
+}
+/* answers the first call with SC_BIG bytes of 'A' and never answers a later one */
+static void sc_on_request(RantRequest *req, void *user){
+    static uint8_t payload[SC_BIG];
+    (void)user;
+    if (++sc_calls == 1){
+        memset(payload, 'A', sizeof payload);
+        rant_request_reply(req, rant_bytes(payload, sizeof payload));
+    } else (void)rant_request_defer(req);
+}
+static void sync_capture_checks(void){
+#ifndef RANT_THREADS
+    test_skip("needs service threads");
+#else
+    RantAllocator pa = rant_allocator_heap(0), ca = rant_allocator_dynamic(sc_pages, 0);
+    RantNodeOpts o; RantNode *p, *c; RantFunction *def = NULL, *fn = NULL;
+    RantResponse r1, r2; int rc1, rc2; uint64_t t1, t2;
+    memset(&o, 0, sizeof o);
+    o.domain = TEST_DOMAIN+40; o.disable_shm = 1; o.discovery.max_peers = 4;
+    o.net.multicast_interface = "127.0.0.1";
+    p = rant_node_open(&pa, "sc-provider", NULL, NULL, &o);
+    c = rant_node_open(&ca, "sc-caller", NULL, NULL, &o);
+    CHECK(p && c, "sync_capture: nodes open");
+    if (p && c){
+        def = rant_node_create_function_definition(p, "sc/fn", NULL, NULL, sc_on_request, NULL, NULL);
+        fn = rant_node_create_remote_function(c, "sc/fn", NULL, NULL, NULL);
+    }
+    CHECK(def && fn, "sync_capture: function pair created");
+    if (def && fn){
+        rant_node_start(p); rant_node_start(c);
+        WAIT_UNTIL(8000, rant_function_match_count(fn) > 0);
+        CHECK(rant_function_match_count(fn) > 0, "sync_capture: caller matched");
+        sc_caller = c; test_atomic_store(&sc_armed, 1);
+        rc1 = rant_function_call(fn, rant_bytes("1", 1), &r1, 100, NULL);
+        CHECK(rc1 == 1 ? r1.data.len == SC_BIG && r1.data.data[0] == 'A' : r1.status == RANT_CALL_TIMEOUT,
+                 "sync_capture: the first call is answered whole or times out (rc=%d len=%u)",
+                 rc1, (unsigned)r1.data.len);
+        t1 = i_rant_plat_now_us();
+        rc2 = rant_function_call(fn, rant_bytes("2", 1), &r2, 300, NULL);
+        t2 = i_rant_plat_now_us();
+        test_atomic_store(&sc_armed, 0);
+        CHECK(rc2 == 0 && r2.data.len == 0 && t2 - t1 >= 300000u,
+                 "sync_capture: an unanswered call runs its whole timeout (rc=%d len=%u after %.0f ms)",
+                 rc2, (unsigned)r2.data.len, (t2 - t1) / 1000.0);
+        CHECK(test_atomic_load(&sc_unlocked) == 0,
+                 "sync_capture: the caller never allocates with its lock released (%lld)",
+                 test_atomic_load(&sc_unlocked));
+    }
+    if (c) rant_node_close(c, 0);
+    if (p) rant_node_close(p, 0);
+    sc_caller = NULL;
+    rant_allocator_reset(&ca); rant_allocator_reset(&pa);
+#endif
+}
+
 static const TestCase cases[] = {
     { "patterns", patterns_checks },
     { "variable_wait", varwait_checks },
@@ -1032,6 +1102,7 @@ static const TestCase cases[] = {
     { "retire", retire_checks },
     { "reflect_reuse", reflect_reuse_checks },
     { "loud", loud_checks },
+    { "sync_capture", sync_capture_checks },
 };
 
 TEST_MAIN(cases)
