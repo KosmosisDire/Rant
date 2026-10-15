@@ -1662,6 +1662,55 @@ static void i_rant_node_log_flush(RantNode *n){
 #define RANT_RX_BUDGET_US 5000u
 #endif
 
+/* Routes one received datagram by family: an announce to discovery, the detail exchange to
+ * the node core and anything else to the transport, from a known peer only. */
+static void i_rant_node_rx_one(RantNode *n, i_RantSock fd, const uint8_t *buf, size_t len,
+                               const uint8_t src_ip[4], uint16_t src_port){
+    if (len>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
+        /* a unicast announce aimed at our data port goes to discovery with its
+           source port, so a translated peer's observed source can bind */
+        RantAddr src;
+        memset(&src, 0, sizeof src);
+        memcpy(src.ip, src_ip, 4); src.ip_len = 4; src.port = src_port;
+        i_rant_discovery_feed(n->discovery, &src, rant_bytes(buf, len));
+    } else if (len>=5 && buf[0]=='u' && buf[1]=='D' && buf[2]=='T' && buf[3]=='L'){
+        /* the pairwise detail exchange, stateless: a request is answered to its
+           source, a response feeds the pending match cycle. See spec/interest.md */
+        if (buf[4]==RANT_DETAIL_REQ){
+            RantBytes resp = i_rant_node_core_detail_respond(n->core, n->domain,
+                                                             rant_bytes(buf, len));
+            if (resp.len) i_rant_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+            {   /* the request names the version the peer applied: feed the rebind hold */
+                uint32_t from;
+                if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from)
+                    && i_rant_node_core_seen_version(n->core, from,
+                           i_rant_detail_meta_version(rant_bytes(buf, len))))
+                    n->match_epoch++;
+            }
+        } else if (buf[4]==RANT_DETAIL_RESP){
+            uint32_t from;
+            if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from))
+                i_rant_node_core_apply_details(n->core, n->domain, from,
+                                               rant_bytes(buf, len));
+        } else if (buf[4]==RANT_INTEREST_REQ){
+            /* interest paging: serve one page. Not a rebind hold confirmation, the
+               peer is still fetching that version */
+            RantBytes resp = i_rant_node_core_interest_respond(n->core, n->domain,
+                                                               rant_bytes(buf, len));
+            if (resp.len) i_rant_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+        } else if (buf[4]==RANT_INTEREST_RESP){
+            uint32_t from;
+            if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from))
+                i_rant_node_core_apply_interest_page(n->core, n->domain, from,
+                                                     rant_bytes(buf, len));
+        }
+    } else {
+        uint32_t from;
+        if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from))
+            i_rant_transport_on_datagram(n->transport, from, rant_bytes(buf, len), i_rant_plat_now_us());
+    }
+}
+
 /* Drains the socket into the transport until empty or past the deadline. A full drain
  * avoids NACK storms. Distinct from the public rant_topic_drain. */
 static void i_rant_node_rx_drain(RantNode *n, i_RantSock fd, uint64_t deadline){
@@ -1678,51 +1727,7 @@ static void i_rant_node_rx_drain(RantNode *n, i_RantSock fd, uint64_t deadline){
             }
             break;
         }
-        if (r>0){
-            if (r>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
-                /* a unicast announce aimed at our data port goes to discovery with its
-                   source port, so a translated peer's observed source can bind */
-                RantAddr src;
-                memset(&src, 0, sizeof src);
-                memcpy(src.ip, src_ip, 4); src.ip_len = 4; src.port = src_port;
-                i_rant_discovery_feed(n->discovery, &src, rant_bytes(buf, (size_t)r));
-            } else if (r>=5 && buf[0]=='u' && buf[1]=='D' && buf[2]=='T' && buf[3]=='L'){
-                /* the pairwise detail exchange, stateless: a request is answered to its
-                   source, a response feeds the pending match cycle. See spec/interest.md */
-                if (buf[4]==RANT_DETAIL_REQ){
-                    RantBytes resp = i_rant_node_core_detail_respond(n->core, n->domain,
-                                                                     rant_bytes(buf, (size_t)r));
-                    if (resp.len) i_rant_plat_send(fd, resp.data, resp.len, src_ip, src_port);
-                    {   /* the request names the version the peer applied: feed the rebind hold */
-                        uint32_t from;
-                        if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from)
-                            && i_rant_node_core_seen_version(n->core, from,
-                                   i_rant_detail_meta_version(rant_bytes(buf, (size_t)r))))
-                            n->match_epoch++;
-                    }
-                } else if (buf[4]==RANT_DETAIL_RESP){
-                    uint32_t from;
-                    if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from))
-                        i_rant_node_core_apply_details(n->core, n->domain, from,
-                                                       rant_bytes(buf, (size_t)r));
-                } else if (buf[4]==RANT_INTEREST_REQ){
-                    /* interest paging: serve one page. Not a rebind hold confirmation, the
-                       peer is still fetching that version */
-                    RantBytes resp = i_rant_node_core_interest_respond(n->core, n->domain,
-                                                                       rant_bytes(buf, (size_t)r));
-                    if (resp.len) i_rant_plat_send(fd, resp.data, resp.len, src_ip, src_port);
-                } else if (buf[4]==RANT_INTEREST_RESP){
-                    uint32_t from;
-                    if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from))
-                        i_rant_node_core_apply_interest_page(n->core, n->domain, from,
-                                                             rant_bytes(buf, (size_t)r));
-                }
-            } else {
-                uint32_t from;
-                if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from))
-                    i_rant_transport_on_datagram(n->transport, from, rant_bytes(buf, (size_t)r), i_rant_plat_now_us());
-            }
-        }
+        if (r>0) i_rant_node_rx_one(n, fd, buf, (size_t)r, src_ip, src_port);
         if (i_rant_plat_now_us() >= deadline) break;        /* yield to discovery and send */
     }
 }
