@@ -133,8 +133,8 @@ handle. The slot keeps identity, name, kind, qos, generation and next seqno for 
 compare, is announced as a hole run, and is invisible to identity lookups and detail
 answers. The node core keeps the schema hash as the binding fingerprint. The next create
 first scans for a retired slot (same identity and kind first, else any), so churn never
-grows the table, the announce or steady state memory. The `churn:` selftests assert byte
-exact plateaus.
+grows the table, the announce or steady state memory. The `churn` case of `e2e.entities`
+asserts byte exact plateaus.
 
 An identical re creation (same name, kind and schema hash) relinks with nothing changed:
 peers' cached verdicts stay valid and the slot's seqno line continues. A changed re
@@ -192,8 +192,8 @@ cannot block a send. A subscriber that joins later and wants what it missed uses
 A wait that cannot happen
 (disabled, or a reentrant send) or that times out proceeds and fires
 `RANT_E_UNMATCHED_SEND`. `rant_topic_ready` shares the exact predicate. A variable
-accessor's first write rides the same wait without the send and without the error. The
-`matchwait:` selftests pin it.
+accessor's first write rides the same wait without the send and without the error.
+`e2e.matchwait` pins it.
 
 Rejected: eager details as the default (the per peer name and schema cache is the full
 table cost hash only announces exist to avoid), core level TTL queueing, a blocking open,

@@ -50,11 +50,12 @@ is never automatic because a retire is visible to peers.
 
 A DROPPED peer stays in the peer walk and its last known entities are served as a ghost
 view, but the mesh fold skips it. Its cached entities are the dead incarnation's and would
-stand beside a restarted live one. The `ghost:` selftests pin it.
+stand beside a restarted live one. The `reflect_dropped` case of `e2e.entities` pins it.
 
 A peer reuses a retired index for any channel. A slot whose hash or kind moved drops its
 name, schema and attrs, so the observer fetches its details again. The fold compacts the
-names arena once dead names outweigh live ones. The `reuse:` selftests pin it.
+names arena once dead names outweigh live ones. The `reflect_reuse` case of `e2e.patterns`
+pins it.
 
 ## Limits
 

@@ -110,7 +110,7 @@ so a stale token is `RANT_ERR_STATE`, never undefined behavior. `rant_function_p
 cooperative and never acked: the terminal status is the answer. A CANCELLED completion may
 carry a partial result.
 
-Traps pinned by the `task:` and `taskx:` selftests:
+Traps pinned by `e2e.tasks`:
 
 - A send only commits. A poll pass transmits. Retire and close drain the CANCELLED
   replies through `i_rant_node_flush_tx` (a transmit only drain) before tearing lanes down,
@@ -186,7 +186,7 @@ from another thread waits for the observer to return. Writes absorbed while forc
 
 A fresh remote's first write rides the send path match wait, so `RANT_ERR_NO_TOPIC`
 means the owner is genuinely absent. A node younger than the post open gather window pays
-the gather once even for an orphan set. The `varwait:` selftests pin it.
+the gather once even for an orphan set. The `variable_wait` case of `e2e.patterns` pins it.
 
 `keep_last` is raised to `catch_up` so the ring holds what it replays. A set from inside an
 `on_change` or `on_write` callback commits first, so the outer set skips its own publish
@@ -250,7 +250,7 @@ with `RANT_E_NAME_COLLISION` recorded, `.peer` 0. Retire parks the predecessor, 
 pend its verdicts and re verify the name against the successor. The channel slots are
 released through the topic retire and reuse machinery, so a re created entity takes its
 old slots back. The same rule means a tool must go fully raw or fully through handles,
-never both. The `retire:` and `loud:` selftests pin it.
+never both. The `retire` and `loud` cases of `e2e.patterns` pin it.
 
 ## Progress reliability
 

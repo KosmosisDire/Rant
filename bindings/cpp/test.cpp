@@ -629,7 +629,7 @@ static bool stdtypes_leg() {
 
 /* the value_root leg: bare type roots with no RANT_SCHEMA, the type is the schema */
 /* The canonical wire of a bare type is its kind alone, so these hashes are the same in
- * every language binding (pinned in C by rant_test's schema-root phase). */
+ * every binding. tests/golden/schemas.txt holds them. */
 static const uint64_t HASH_BOOL   = golden_hash("bool");
 static const uint64_t HASH_F32ARR = golden_hash("f32[]");
 

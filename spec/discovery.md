@@ -197,10 +197,10 @@ it with no new wire kinds.
    sustains.
 
 Two NAT'd nodes are out of scope. Neither can receive first, so their matches stay
-pending. The `nat:` selftests pin these rules: `disc_core_checks` sections 10 to 13 cover
+pending. These rules are pinned twice: the `discovery_core` case of `unit.discovery` covers
 observed binding, eviction, introductions, the ghost gate, the published port forward and
-relay suppression, and the e2e phase has the NAT'd node advertise a black holed port yet
-carry reliable data that outlives the introducer.
+relay suppression, and the `nat` case of `e2e.relay` has the NAT'd node advertise a black
+holed port yet carry reliable data that outlives the introducer.
 
 ## Node names
 
@@ -220,6 +220,6 @@ The u16 domain rides every announce and every uDTL header, and a datagram from a
 domain is dropped. `RANT_DOMAIN` in the environment, read through `i_rant_plat_env` at
 open, sets the domain only when the code left `RantNodeOpts.domain` at 0. So a machine or a
 workspace puts every node on one domain, while a tool that picks its domain on purpose,
-like the selftest or the explorer, keeps it. A value that is not a decimal number from 0
+like a test program or the explorer, keeps it. A value that is not a decimal number from 0
 to 65535 refuses the open with `RANT_E_BAD_DOMAIN`, never a silent fall back to 0. An
 empty value counts as unset.

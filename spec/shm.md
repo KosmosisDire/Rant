@@ -109,7 +109,7 @@ skips every message: each descriptor's chunk is re stamped before the reader pol
 generation check fails, and best effort skips with no counter. Real cadences and reliable
 topics are fine. The reader attach cache is a growable array of stable states, so
 attachments survive a node grow. The module test suffixes segment names with the per
-process domain base so concurrent selftests do not collide.
+process domain base, so test programs running at once never collide.
 
 ## Build
 

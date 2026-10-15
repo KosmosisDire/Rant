@@ -120,7 +120,7 @@ names and type bytes, an index over it, and every schema handed out, one per sha
 wire compare. Both arrays grow through the node's allocator. A failed text rolls the
 arena and index back to where the compile started, so nothing is half kept.
 `rant_node_schema_parse` registers wire without defining a name, which is how a create
-and the bindings keep a peer's schema. The selftest compiles without a node through a
+and the bindings keep a peer's schema. `unit.schema` compiles without a node, through a
 throwaway registry on its own allocator.
 
 Gotcha: a `--` comment inside concatenated C string literals eats the rest of the schema

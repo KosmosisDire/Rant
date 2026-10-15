@@ -100,7 +100,7 @@ nothing delivered in between, the reader rejoins at the writer's head. The cache
 is given up (that one `RANT_MSG_LOST` covers it) and the next message arrives in order. A
 skip of a PARKED sample (the consumer refused it) is the consumer's stall, so it neither
 counts nor resets. Any delivery resets. Single fragment and shared memory paths never lap.
-The `lapped:` selftests pin it.
+The `lapped` case of `unit.transport` pins it.
 
 ## One sample held ahead
 
@@ -121,7 +121,7 @@ instead of one. An allocation failure for the hold just drops the fragment.
 Nothing ever moves the floor on arrival. Only a delivery, the writer's HB floor and the
 lapped rule do, so the hold can never outrun a repair. A repair request may span both
 slots when they are adjacent. `frags_ahead` counts only fragments beyond the hold. The
-`ahead:` selftests pin it.
+`ahead` case of `unit.transport` pins it.
 
 Known limits, by design: the hold covers a repair that finishes within one message period
 beyond the head. A round trip longer than the period plus a lost resend still cascades,
@@ -152,7 +152,7 @@ backstop (`qos.repair_delay_us` 0 = adaptive, a nonzero value pins it, 50 ms unt
 first sample) and the writer's tail heartbeat (`RANT_HB_TAIL_US` until the first sample).
 One lost resend then costs one round trip instead of 50 ms. Read it through
 `RantPeerInfo.rtt_*`, the `@rant/meta` peers section, or `i_rant_transport_peer_rtt`. The
-`rtt:` selftests pin it with a virtual clock.
+`rtt` case of `unit.transport` pins it with a virtual clock.
 
 ## Tail heartbeat
 
