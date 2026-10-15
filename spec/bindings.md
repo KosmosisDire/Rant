@@ -90,8 +90,11 @@ struct gains a field and the mirror does not, every node open crashes with an ac
 violation. `RantEvent` is returned by value by `rant_last_error`, so a missing trailing
 field is an out of bounds read by the C formatter. After any layout change to a public
 struct: update the C#, Unity and Python mirrors, rebuild the prebuilt native library, and
-run `bindings/csharp/test` and `bindings/python/test.py`. Import alone succeeds silently with a wrong
-struct. C++ is immune because it embeds the real header.
+run `ctest -L bindings`. Its layout legs compare every mirror's size and field offsets with
+`tests/support/layout.c`, which the build runs into `build/tests/layout.txt`, so a mirror
+that drifted fails there instead of crashing. A newly mirrored struct gets its lines in
+`layout.c` too. Import alone succeeds silently with a wrong struct. C++ is immune because
+it embeds the real header.
 
 ## C++
 

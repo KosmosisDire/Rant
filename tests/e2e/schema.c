@@ -276,8 +276,6 @@ static void schema_bigenum_checks(void){
 
 /* Primitive rooted schemas: one bare type, anonymous, addressed by the empty path,
    the same wire in any language (spec/testing.md). Every root kind is covered. */
-static const uint64_t SR_HASH_BOOL  = 0xee90234f61d2520bULL;   /* `bool`  canonical wire hash */
-static const uint64_t SR_HASH_F32ARR = 0x314844e3386a1fc4ULL;  /* `f32[]` canonical wire hash */
 
 /* one bare-type spelling: compiles, prints back to the identical text, recompiles to the
    same wire, and reflects as a single anonymous field with the expected layout */
@@ -406,9 +404,9 @@ static void schema_root_checks(void){
 
     /* THE canonical-hash pin: a bare type's wire is its kind alone, so every language's
        `bool` topic hashes to this and cross-language matching costs zero detail bytes. */
-    CHECK(rant_schema_hash(sb) == SR_HASH_BOOL,
+    CHECK(rant_schema_hash(sb) == test_golden_hash("bool"),
              "schema-root: `bool` canonical hash %016llx", (unsigned long long)rant_schema_hash(sb));
-    CHECK(rant_schema_hash(sarr) == SR_HASH_F32ARR,
+    CHECK(rant_schema_hash(sarr) == test_golden_hash("f32[]"),
              "schema-root: `f32[]` canonical hash %016llx", (unsigned long long)rant_schema_hash(sarr));
     CHECK(rant_schema_wire(sb).len == 3, "schema-root: `bool` wire is 3 bytes (%u)",
              (unsigned)rant_schema_wire(sb).len);
@@ -645,19 +643,22 @@ static void stdtypes_checks(void){
         CHECK(ok, "stdtypes: every standard type compiles from its name alone");
         CHECK(rec, "stdtypes: every standard type recognizes itself");
     }
-    /* GOLDEN BYTES: the canonical wire and hash every wrapper mirrors. Change these only
-       with a deliberate wire bump. */
+    /* GOLDEN: every line of tests/golden/schemas.txt, the canonical wire and hash every
+       binding mirrors. Change them only with a deliberate wire bump */
+    {   TestGolden g; int i;
+        for (i = 0; test_golden(i, &g); i++){
+            RantSchema *gs = test_compile(&ma, g.text, NULL);
+            RantBytes w = gs ? rant_schema_wire(gs) : rant_bytes(NULL, 0);
+            CHECK(gs && rant_schema_hash(gs) == g.hash, "golden: %s hash %016llx", g.text,
+                  gs ? (unsigned long long)rant_schema_hash(gs) : 0ull);
+            if (g.wire_len)
+                CHECK(gs && w.len == g.wire_len && memcmp(w.data, g.wire, g.wire_len) == 0,
+                      "golden: %s wire (%u bytes)", g.text, (unsigned)w.len);
+            if (gs) i_rant_schema_free(gs, rant_allocator_alloc, &ma);
+        }
+        CHECK(i >= 6, "golden: tests/golden/schemas.txt read (%d lines)", i);
+    }
     {   RantSchema *s = test_compile(&ma, "Float3", NULL);
-        static const uint8_t want[] = {
-            8, 6, 'F','l','o','a','t','3', 12, 3,
-            1, 'x', 8,  1, 'y', 8,  1, 'z', 8
-        };
-        RantBytes w = rant_schema_wire(s);
-        CHECK(s && w.len == sizeof want && memcmp(w.data, want, sizeof want) == 0,
-                 "stdtypes: Float3 golden wire (%u bytes)", (unsigned)w.len);
-        CHECK(s && rant_schema_hash(s) == 0x04aa9469cd08b1ddULL,
-                 "stdtypes: Float3 golden hash %016llx",
-                 (unsigned long long)rant_schema_hash(s));
         CHECK(s && rant_schema_size(s) == 12, "stdtypes: Float3 is 12 message bytes");
         if (s) i_rant_schema_free(s, rant_allocator_alloc, &ma);
     }

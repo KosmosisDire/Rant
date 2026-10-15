@@ -4,6 +4,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Rant;
@@ -619,22 +621,37 @@ static class Program
         return ok;
     }
 
+    // tests/golden/schemas.txt, copied next to the test: the hash every binding pins for each
+    // schema text
+    static readonly Dictionary<string, ulong> Golden = ReadGolden();
+    static Dictionary<string, ulong> ReadGolden()
+    {
+        var table = new Dictionary<string, ulong>();
+        foreach (var line in File.ReadAllLines(Path.Combine(AppContext.BaseDirectory, "schemas.txt")))
+        {
+            var parts = line.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 2 && !parts[0].StartsWith("#"))
+                table[parts[0]] = Convert.ToUInt64(parts[1], 16);
+        }
+        return table;
+    }
+
     // The canonical wire of a bare type is its kind alone, so these hashes are the same in
-    // every language binding (pinned in C by rant_test's schema-root phase).
-    const ulong HashBool = 0xee90234f61d2520bUL;
-    const ulong HashF32Arr = 0x314844e3386a1fc4UL;
+    // every language binding.
+    static readonly ulong HashBool = Golden["bool"];
+    static readonly ulong HashF32Arr = Golden["f32[]"];
 
     enum Mode : byte { Idle = 0, Run = 1, Fault = 2 }
 
-    // The Float3 schema is the shared cross-language golden vector: the same wire and the
-    // same hash from C, C++, C# and Python (pinned in C by rant_test's stdtypes phase).
-    const ulong HashFloat3 = 0x04aa9469cd08b1ddUL;
+    // The Float3 schema is the shared cross language golden vector: the same wire and the
+    // same hash from C, C++, C# and Python.
+    static readonly ulong HashFloat3 = Golden["Float3"];
 
-    // The video family, same golden vectors (pinned in bindings/cpp/test.cpp too). A mirror whose
-    // enum member names, values or order drifted would hash differently, so this catches it.
-    const ulong HashImage = 0x489841f99f392b85UL;
-    const ulong HashVideoFrame = 0xf677bd147b513fbcUL;
-    const ulong HashExternalVideoStream = 0xaae502077016ac13UL;
+    // The video family, the same golden vectors. A mirror whose enum member names, values or
+    // order drifted would hash differently, so this catches it.
+    static readonly ulong HashImage = Golden["Image"];
+    static readonly ulong HashVideoFrame = Golden["VideoFrame"];
+    static readonly ulong HashExternalVideoStream = Golden["ExternalVideoStream"];
 
     // Standard types as ordinary fields: an alias names a plain field's type, a composite is
     // a shipped mirror struct that names itself. Both narrow matching.
@@ -1313,6 +1330,56 @@ static class Program
         return ok;
     }
 
+    // Every interop mirror against the C layout the build writes: a stale mirror crashes every
+    // node open, so a size or offset that drifted fails here first.
+    static bool LayoutLeg()
+    {
+        string path = Environment.GetEnvironmentVariable("RANT_LAYOUT");
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+        {
+            Console.WriteLine($"FAIL: no C layout at '{path}', run through ctest");
+            return false;
+        }
+        var layout = new Dictionary<string, int>();
+        foreach (var line in File.ReadAllLines(path))
+        {
+            var parts = line.Split(' ');
+            if (parts.Length == 2) layout[parts[0]] = int.Parse(parts[1]);
+        }
+        bool ok = true;
+        foreach (var t in typeof(RantNode).Assembly.GetTypes())
+        {
+            if (t.Namespace != "Rant" || !t.IsValueType || t.IsEnum || t.IsPublic || t.IsNested
+                || !t.Name.StartsWith("Rant") || t.Name == "RantValueUnion") continue;
+            string c = t.Name == "RantStringView" ? "RantString"
+                     : t.Name.EndsWith("Native") ? t.Name.Substring(0, t.Name.Length - 6) : t.Name;
+            if (!layout.TryGetValue(c, out int size))
+            {
+                Console.WriteLine($"FAIL: {t.Name} has no C layout, add it to tests/support/layout.c");
+                ok = false;
+                continue;
+            }
+            if (Marshal.SizeOf(t) != size)
+            {
+                Console.WriteLine($"FAIL: {t.Name} is {Marshal.SizeOf(t)} bytes, C says {size}");
+                ok = false;
+            }
+            foreach (var f in t.GetFields(System.Reflection.BindingFlags.Instance
+                                          | System.Reflection.BindingFlags.Public
+                                          | System.Reflection.BindingFlags.NonPublic))
+            {
+                int at = (int)Marshal.OffsetOf(t, f.Name);
+                if (!layout.TryGetValue(c + "." + f.Name, out int want) || want != at)
+                {
+                    Console.WriteLine($"FAIL: {t.Name}.{f.Name} at {at}, C says {(layout.ContainsKey(c + "." + f.Name) ? want.ToString() : "nothing")}");
+                    ok = false;
+                }
+            }
+        }
+        Console.WriteLine(ok ? "layout: PASS\n" : "layout: FAIL\n");
+        return ok;
+    }
+
     // typed pub sub polled by hand, the over cap refusal, then the same over service threads
     static bool PoseLeg()
     {
@@ -1431,6 +1498,7 @@ static class Program
     static readonly (string Name, Func<bool> Run)[] Legs =
     {
         ("version", VersionLeg),
+        ("layout", LayoutLeg),
         ("round_trip", RoundTrip),
         ("value_roots", ValueRoots),
         ("std_types", StdTypes),

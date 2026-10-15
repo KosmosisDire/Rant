@@ -232,6 +232,40 @@ void test_pair_close(TestPair *p){
     memset(p, 0, sizeof *p);
 }
 
+int test_golden(int index, TestGolden *out){
+    char line[1024];
+    int at = 0, found = 0;
+    FILE *f = fopen(RANT_TEST_GOLDEN, "r");
+    if (!f) return 0;
+    while (!found && fgets(line, sizeof line, f)){
+        char hex[600] = "";
+        unsigned long long h;
+        size_t i;
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+        if (at++ != index) continue;
+        memset(out, 0, sizeof *out);
+        if (sscanf(line, "%63s %llx %599s", out->text, &h, hex) < 2) break;
+        out->hash = (uint64_t)h;
+        for (i = 0; hex[2*i] && hex[2*i+1] && i < sizeof out->wire; i++){
+            unsigned b;
+            if (sscanf(hex + 2*i, "%2x", &b) != 1) break;
+            out->wire[i] = (uint8_t)b;
+        }
+        out->wire_len = i;
+        found = 1;
+    }
+    fclose(f);
+    return found;
+}
+
+uint64_t test_golden_hash(const char *text){
+    TestGolden g;
+    int i;
+    for (i = 0; test_golden(i, &g); i++)
+        if (!strcmp(g.text, text)) return g.hash;
+    return 0;
+}
+
 void test_apply_verified(i_RantTransportState *dst, uint32_t src_id, i_RantTransportState *src){
     uint8_t ib[512], rq[512], rp[2048]; size_t il, rl, pl; uint16_t nw;
     i_RantDetailWant wl[16];

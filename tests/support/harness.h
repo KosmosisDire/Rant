@@ -81,6 +81,12 @@ typedef struct {
 int  test_pair_open(TestPair *p, const char *topic, RantQos wq, RantQos rq,
                     const i_RantTransportConfig *callbacks);
 void test_pair_close(TestPair *p);
+/* One line of tests/golden/schemas.txt, the schema wire every binding pins */
+typedef struct { char text[64]; uint64_t hash; uint8_t wire[256]; size_t wire_len; } TestGolden;
+/* Line index of the file, counting only schema lines. 0 past the last one */
+int      test_golden(int index, TestGolden *out);
+/* The golden hash of a schema text, 0 when no line has it */
+uint64_t test_golden_hash(const char *text);
 /* A one way link between raw transports: hands src's interest to dst and runs the pairwise
    detail exchange by hand, as the runtimes would */
 void test_apply_verified(i_RantTransportState *dst, uint32_t src_id, i_RantTransportState *src);

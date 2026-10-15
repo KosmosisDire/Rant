@@ -9,7 +9,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <fstream>
 #include <functional>
+#include <sstream>
 #include <thread>
 
 using namespace std::chrono_literals;
@@ -32,6 +34,17 @@ static uint16_t test_domain(uint16_t offset) {
     return (uint16_t)(base + offset);
 }
 
+/* tests/golden/schemas.txt: the hash every binding pins for a schema text, 0 when absent */
+static uint64_t golden_hash(const char* text) {
+    std::ifstream f(RANT_TEST_GOLDEN);
+    std::string line, name, hash;
+    while (std::getline(f, line)) {
+        std::istringstream in(line);
+        if (in >> name >> hash && name[0] != '#' && name == text) return std::stoull(hash, nullptr, 16);
+    }
+    return 0;
+}
+
 static bool wait_for(int timeout_ms, const std::function<bool()>& pred,
                      rant::Node* pump = nullptr) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -43,7 +56,7 @@ static bool wait_for(int timeout_ms, const std::function<bool()>& pred,
     return pred();
 }
 
-/* leg 1 and 2: the dynamic schema API */
+/* the dynamic leg: the dynamic schema API */
 
 static const char SCHEMA[] =
     "Sensor{ seq: u32, name: string<16>, note: string, samples: f32[], extras: map }";
@@ -137,7 +150,7 @@ static bool verify_dynamic() {
     return g_failures == 0;
 }
 
-/* leg 3: typed schemas for the patterns layer */
+/* the patterns leg: typed schemas for the patterns layer */
 
 struct AddReq { int32_t x; int32_t y; };
 RANT_SCHEMA(AddReq, x, y);
@@ -381,12 +394,12 @@ static bool patterns_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* leg 5: standard types. The mirrors carry a wire name, so a Transform field matches only
- * a Transform. The golden vectors are shared with the C, C# and Python bindings. */
-static const uint64_t HASH_FLOAT3    = 0x04aa9469cd08b1ddULL;   /* the `Float3` schema */
-static const uint64_t HASH_IMAGE     = 0x489841f99f392b85ULL;
-static const uint64_t HASH_VIDEO     = 0xf677bd147b513fbcULL;   /* `VideoFrame` */
-static const uint64_t HASH_EXTSTREAM = 0xaae502077016ac13ULL;   /* `ExternalVideoStream` */
+/* the stdtypes leg: the mirrors carry a wire name, so a Transform field matches only a
+ * Transform. The golden hashes come from tests/golden/schemas.txt like every binding's. */
+static const uint64_t HASH_FLOAT3    = golden_hash("Float3");
+static const uint64_t HASH_IMAGE     = golden_hash("Image");
+static const uint64_t HASH_VIDEO     = golden_hash("VideoFrame");
+static const uint64_t HASH_EXTSTREAM = golden_hash("ExternalVideoStream");
 
 struct Track {
     rant::types::Transform at;
@@ -614,11 +627,11 @@ static bool stdtypes_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* leg 4: bare type roots with no RANT_SCHEMA, the type is the schema */
+/* the value_root leg: bare type roots with no RANT_SCHEMA, the type is the schema */
 /* The canonical wire of a bare type is its kind alone, so these hashes are the same in
  * every language binding (pinned in C by rant_test's schema-root phase). */
-static const uint64_t HASH_BOOL   = 0xee90234f61d2520bULL;
-static const uint64_t HASH_F32ARR = 0x314844e3386a1fc4ULL;
+static const uint64_t HASH_BOOL   = golden_hash("bool");
+static const uint64_t HASH_F32ARR = golden_hash("f32[]");
 
 /* nested structs spell by name, as C# and Python do */
 struct Corner { float x, y; };
@@ -894,7 +907,7 @@ static bool value_root_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* leg 6: variable members, std::vector<E> and std::string, as tail frames */
+/* the tails leg: variable members, std::vector<E> and std::string, as tail frames */
 /* A RANT_SCHEMA struct may carry variable members: each rides the message tail as a
  * length framed section read by path, while the fixed fields keep the static table. */
 
@@ -1014,7 +1027,7 @@ static bool tails_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* leg 7: tasks, a function with progress and cancellation */
+/* the tasks leg: a function with progress and cancellation */
 
 struct MoveReq { double target; };
 RANT_SCHEMA(MoveReq, target);
@@ -1201,7 +1214,7 @@ static bool tasks_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* leg 8: what each codec path costs, run as `rant_cpp_test bench`. The codec alone first
+/* the bench: what each codec path costs, run as `rant_cpp_test bench`. The codec alone first
  * with no node, then one message at a time end to end on loopback with both nodes polled
  * from this thread, and a C node pair on the same footing as the reference. */
 

@@ -62,6 +62,8 @@ function(rant_c_test kind name)
     endif()
     add_executable(${_target} ${kind}/${name}.c support/harness.c)
     target_include_directories(${_target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_definitions(${_target} PRIVATE
+      RANT_TEST_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/schemas.txt")
     target_link_libraries(${_target} PRIVATE rant_wire_tap)
     add_dependencies(${_target} rant_dist)
     if(_flavour STREQUAL "noshm")
@@ -109,14 +111,27 @@ rant_c_test(e2e threads)
 add_test(NAME bench.memscale COMMAND rant_bench memscale)
 set_tests_properties(bench.memscale PROPERTIES LABELS bench TIMEOUT 120)
 
+# The layout of every public struct a binding mirrors, written at build time for the layout
+# legs of the C# and Python suites.
+add_executable(rant_layout support/layout.c)
+target_link_libraries(rant_layout PRIVATE rant)
+add_dependencies(rant_layout rant_dist)
+set(RANT_LAYOUT_FILE "${CMAKE_CURRENT_BINARY_DIR}/layout.txt")
+add_custom_command(OUTPUT "${RANT_LAYOUT_FILE}" COMMAND rant_layout "${RANT_LAYOUT_FILE}"
+                   DEPENDS rant_layout VERBATIM)
+add_custom_target(rant_layout_file ALL DEPENDS "${RANT_LAYOUT_FILE}")
+
 # The binding suites, one entry each. Every leg runs and the result names the failed ones.
 function(rant_binding_test test)
   set_tests_properties(${test} PROPERTIES LABELS bindings TIMEOUT 300)
+  set_property(TEST ${test} APPEND PROPERTY ENVIRONMENT "RANT_LAYOUT=${RANT_LAYOUT_FILE}")
   rant_test_domain(${test})
 endfunction()
 
 if(CMAKE_CXX_COMPILER)
   rant_cpp_program(rant_cpp_test "${PROJECT_SOURCE_DIR}/bindings/cpp/test.cpp")
+  target_compile_definitions(rant_cpp_test PRIVATE
+    RANT_TEST_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/schemas.txt")
   add_test(NAME bindings.cpp COMMAND rant_cpp_test)
   rant_binding_test(bindings.cpp)
 endif()

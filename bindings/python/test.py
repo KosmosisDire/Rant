@@ -1,7 +1,9 @@
 """The Python binding test: two nodes on one host over reliable typed pub sub, the
 patterns and the standard types. `test.py` runs every leg, `test.py name` one, `--list`
 lists them. Exit 0 = pass (spec/testing.md)."""
+import ctypes
 import enum as _enum
+import inspect
 import os
 import subprocess
 import sys
@@ -119,10 +121,23 @@ def round_trip():
     return ok
 
 
+def _golden():
+    """tests/golden/schemas.txt: the hash every binding pins for each schema text."""
+    table = {}
+    with open(os.path.join(_HERE, "..", "..", "tests", "golden", "schemas.txt")) as f:
+        for line in f:
+            parts = line.split()
+            if parts and not parts[0].startswith("#"):
+                table[parts[0]] = int(parts[1], 16)
+    return table
+
+
+GOLDEN = _golden()
+
 # The canonical wire of a bare type is its kind alone, so these hashes are the same in
-# every language binding (pinned in C by rant_test's schema-root phase).
-HASH_BOOL = 0xEE90234F61D2520B
-HASH_F32ARR = 0x314844E3386A1FC4
+# every language binding.
+HASH_BOOL = GOLDEN["bool"]
+HASH_F32ARR = GOLDEN["f32[]"]
 
 
 class Mode(_enum.IntEnum):
@@ -131,9 +146,9 @@ class Mode(_enum.IntEnum):
     FAULT = 2
 
 
-# The Float3 schema is the shared cross-language golden vector: the same wire and the
-# same hash from C, C++, C# and Python (pinned in C by rant_test's stdtypes phase).
-HASH_FLOAT3 = 0x04AA9469CD08B1DD
+# The Float3 schema is the shared cross language golden vector: the same wire and the
+# same hash from C, C++, C# and Python.
+HASH_FLOAT3 = GOLDEN["Float3"]
 
 
 @dataclass
@@ -224,11 +239,10 @@ def std_types():
     return ok
 
 
-# The video family: golden wire shared with the C, C++ and C# bindings (pinned in
-# bindings/cpp/test.cpp and by rant_test's stdtypes phase).
-HASH_IMAGE = 0x489841F99F392B85
-HASH_VIDEO_FRAME = 0xF677BD147B513FBC
-HASH_EXT_STREAM = 0xAAE502077016AC13
+# The video family, the same golden wire in every binding.
+HASH_IMAGE = GOLDEN["Image"]
+HASH_VIDEO_FRAME = GOLDEN["VideoFrame"]
+HASH_EXT_STREAM = GOLDEN["ExternalVideoStream"]
 
 
 @dataclass
@@ -1228,6 +1242,41 @@ def version_leg():
     return ok
 
 
+def layout_leg():
+    """Every ctypes mirror against the C layout the build writes: a stale mirror crashes
+    every node open, so a size or offset that drifted fails here first."""
+    path = os.environ.get("RANT_LAYOUT") or os.path.join(_HERE, "..", "..", "build", "tests", "layout.txt")
+    if not os.path.exists(path):
+        print("FAIL: no C layout at %s, build first" % path)
+        return False
+    layout = {}
+    with open(path) as f:
+        for line in f:
+            key, value = line.split()
+            layout[key] = int(value)
+    from rant import _native
+    ok = True
+    for name, cls in inspect.getmembers(_native, inspect.isclass):
+        if not issubclass(cls, ctypes.Structure) or cls is ctypes.Structure:
+            continue
+        c_name = {"RantStringView": "RantString"}.get(name, name)
+        if c_name not in layout:
+            print("FAIL: %s has no C layout, add it to tests/support/layout.c" % name)
+            ok = False
+            continue
+        if ctypes.sizeof(cls) != layout[c_name]:
+            print("FAIL: %s is %d bytes, C says %d" % (name, ctypes.sizeof(cls), layout[c_name]))
+            ok = False
+        for field_name, *_ in cls._fields_:
+            key = c_name + "." + field_name.rstrip("_")
+            offset = getattr(cls, field_name).offset
+            if layout.get(key) != offset:
+                print("FAIL: %s.%s at %d, C says %s" % (name, field_name, offset, layout.get(key)))
+                ok = False
+    print("layout: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
 def pose_leg():
     print("opening nodes...")
     sub = rant.Node("sub", on_event=on_event("sub"),
@@ -1283,6 +1332,7 @@ def pose_leg():
 
 LEGS = [
     ("version", version_leg),
+    ("layout", layout_leg),
     ("round_trip", round_trip),
     ("value_roots", value_roots),
     ("std_types", std_types),

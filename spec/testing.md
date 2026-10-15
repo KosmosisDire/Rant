@@ -360,8 +360,15 @@ reflection walks and meta calls. `rant_cpp_test bench` runs the cost of each cod
 (memcpy, loop, tails, dynamic) alone and end to end on loopback, next to a C node pair on
 the same footing, so a wrapper change is measured against the C floor.
 
-The C# and Python suites mirror the same ground, and the golden hash vectors are shared by
-every binding and pinned in C by the schema root phase.
+The C# and Python suites mirror the same ground. Two things every suite shares:
+
+- `tests/golden/schemas.txt` holds the canonical schema hashes, and the Float3 wire bytes,
+  that every binding pins. The C schema program checks every line, each binding checks its
+  own mirrors against them. A line changes only with a deliberate wire format bump.
+- The layout leg of the C# and Python suites compares every struct mirror's size and field
+  offsets with `build/tests/layout.txt`, which `tests/support/layout.c` writes at build
+  time. A mirror that drifted from the C struct fails there instead of crashing a node
+  open.
 
 ## Measurement traps
 
