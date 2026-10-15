@@ -1,8 +1,7 @@
 # Build Rant on every push and pull request, on the three desktop platforms.
 #
-# The test suites are deliberately not run here yet. The test rework lands first and the
-# suites (bin/rant_test selftest, bindings/cpp/test.cpp, bindings/csharp/test, bindings/python/test.py) get wired in
-# after it, so a red build here means a build broke, never a flaky network leg.
+# The test suites are deliberately not run here yet. The test rework lands first and ctest
+# gets wired in after it, so a red build here means a build broke, never a flaky network leg.
 name: build
 
 on:

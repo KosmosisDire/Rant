@@ -67,7 +67,7 @@ delivery so the publisher's send blocks on normal flow control, and dispatching 
 it. Size the ring to cover the writer's burst (at least `keep_last` times the message
 size), or a parked reader heals through the slow repair path. The extra copy costs about
 15% of peak goodput at small payloads and up to 35% at 1 MB. Measure with
-`rant_test queuebench`.
+`rant_bench queuebench`.
 
 ```c
 RantQueue *main_q = rant_node_create_queue(n);

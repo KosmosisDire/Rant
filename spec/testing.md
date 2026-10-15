@@ -1,7 +1,9 @@
 # Testing and measuring
 
-`tests/rant_test.c` holds the selftest phases, the sweep harness and the benches. The
-commands are in docs/building.md. This file holds what makes a test or a measurement
+`tests/rant_test.c` holds the selftest phases. `tests/bench/` is `rant_bench`: the sweep
+and the benches. `tests/support/wire_tap.c` wraps the platform's `sendto` and `recvfrom`
+for both, counting datagrams by type and injecting faults. The commands are in
+docs/building.md. This file holds what makes a test or a measurement
 trustworthy.
 
 ## Harness rules
@@ -10,8 +12,8 @@ trustworthy.
   call inside a check macro.
 - Launch paired processes in one shell command. The gap between two tool calls fakes a
   peer drop.
-- Both `rant_test selftest` and `rant_test_noshm selftest` must pass, plus a sweep for
-  transport changes. A comment only change must leave code byte identical.
+- Both `rant_test selftest` and `rant_test_noshm selftest` must pass, plus a
+  `rant_bench sweep` for transport changes. A comment only change must leave code byte identical.
 - The selftests use `"127.0.0.1"` as the discovery interface to stay off the LAN, and a
   per process domain base so concurrent runs and the SHM module test (segment names carry
   it) do not collide.
@@ -285,7 +287,8 @@ process base picked from the clock so concurrent runs never join each other.
   0 so stale commands never replay, the RES topic keeps catch_up at depth so results
   survive a control peer flap, entries are tagged with domain and run nonce, workers
   HELLO at startup, and both machines must share a subnet.
-- memscale: steady state must be alloc free and warm sends pay no allocation.
+- memscale: steady state must be alloc free and warm sends pay no allocation. The command
+  exits 1 when a steady state send allocated.
 - threadbench: keep_last 64 so the drain guard rather than ack flow control engages, and
   backpressure only ever engages flat out.
 - queuebench: inline callbacks against a 4 MB callback queue ring. The ring must cover the
@@ -312,7 +315,7 @@ golden hash vectors are shared by every binding and pinned in C by the schema ro
 ## Measurement traps
 
 - Never redirect a child's stdout through a PowerShell pipe. The pipe fills and an
-  unbuffered printf in the child blocks for seconds. `rant_test sweep` spawns children
+  unbuffered printf in the child blocks for seconds. `rant_bench sweep` spawns children
   itself and redirects to files.
 - A load generator that repays its backlog invents drops: a stall becomes one burst from
   every node, receive buffers overflow, and the drop percentage reads as stall over
@@ -334,7 +337,7 @@ sustains 50 kHz per node at zero drops and 0.26 ms round trip. Reliable is clean
 45 kHz per node, and 50 kHz hits the repair ceiling (the 32 seqno NACK window). Mesh
 datagrams grow as N squared times the rate. Idle topics cost nothing.
 
-Threaded (`rant_test threadbench`): flat out 688k msg/s UDP and 452k SHM on loopback with
+Threaded (`rant_bench threadbench`): flat out 688k msg/s UDP and 452k SHM on loopback with
 zero evictions. Queued delivery (`queuebench`) costs 14% at 1 KB up to 35% at 1 MB.
 Reliable same host SHM at keep_last 4 went from 92 to 2300 msg/s with the immediate in
 order ack. A zero subscriber send costs 52 ns. `rant_topic_match_count` costs 11 ns, so an
@@ -343,8 +346,9 @@ app that builds an expensive payload should gate on it.
 ## Live debugging
 
 A `probe.c` that defines `RANT_IMPLEMENTATION` against `dist/rant.h` can read every
-internal struct (discovery peer flags, observed sources) and wrap `sendto` and `recvfrom`
-with macros to log all discovery and detail traffic. Interest lines stuck at a fixed
+internal struct (discovery peer flags, observed sources). `tests/support/rant_impl.h` shows
+how to route `sendto` and `recvfrom` through wrappers to log all discovery and detail
+traffic. Interest lines stuck at a fixed
 publish count while liveness continues mean the peer's detail egress is black holed. Do
 not trust a peer down time at seconds granularity to tell a BYE from a timeout.
 

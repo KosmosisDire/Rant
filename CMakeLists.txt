@@ -163,23 +163,17 @@ if(RANT_BUILD_TOOLS OR NOT CMAKE_CROSSCOMPILING)
 endif()
 
 if(RANT_BUILD_TOOLS)
-  # One host program from one source file: link the core + platform libs and
-  # wait for dist/ to be (re)generated first.
-  # Each in tree program defines its own RANT_IMPLEMENTATION flavour (some want NO_SHM),
-  # so they take the headers and the OS libraries, never the built library.
+  # One host program from one source file: link the core and platform libs and wait for
+  # dist/ to be generated first. Each program compiles the implementation itself, so it
+  # takes the headers and the OS libraries, never the built library.
   function(rant_program name src)
     add_executable(${name} "${src}")
     target_link_libraries(${name} PRIVATE rant rant_platform)
     add_dependencies(${name} rant_dist)
   endfunction()
 
-  rant_program(rant_test        tests/rant_test.c)
-  rant_program(pubsub           tools/pubsub.c)
+  rant_program(pubsub         tools/pubsub.c)
   rant_program(if_probe_check tools/if_probe_check.c)
-
-  # SHM-disabled test build (matches the rant_test_noshm in the tree).
-  rant_program(rant_test_noshm tests/rant_test.c)
-  target_compile_definitions(rant_test_noshm PRIVATE RANT_NO_SHM)
 
   # The C++ wrapper test and example, when this machine has a C++ compiler. Each compiles
   # the C++ anchor itself, the way a consumer of the single header does.
@@ -197,13 +191,9 @@ if(RANT_BUILD_TOOLS)
     rant_cpp_program(rant_cpp_example bindings/cpp/example.cpp)
   endif()
 
-  # ctest runs the same checks CLAUDE.md asks for by hand.
+  # rant_bench, the test programs and every ctest entry.
   enable_testing()
-  add_test(NAME rant_test       COMMAND rant_test selftest)
-  add_test(NAME rant_test_noshm COMMAND rant_test_noshm selftest)
-  if(TARGET rant_cpp_test)
-    add_test(NAME rant_cpp_test COMMAND rant_cpp_test)
-  endif()
+  add_subdirectory(tests)
 endif()
 
 # 4. The packages, into dist/. unity_package needs nothing installed, nuget_package needs

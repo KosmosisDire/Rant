@@ -3,14 +3,6 @@ old
 /build/
 
 /Debug/
-# cross-compiled / native binaries (no extension), repo-root only so they do not
-# also match source dirs like src/node/
-/rant_test
-/rant_test_noshm
-/example
-/node
-/pack
-/pubsub
 *.png
 *.jpg
 *.pdb

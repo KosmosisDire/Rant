@@ -1,8 +1,9 @@
 # Building and testing
 
 CMake drives everything. It runs the amalgamation (`src/` to `dist/` through
-`tools/pack.cmake`, pure CMake with no compiler needed) and builds the tools and tests into
-`bin/`. Release and Debug share `bin/`, so switching overwrites in place. `dist/` is not
+`tools/pack.cmake`, pure CMake with no compiler needed), builds the programs into `bin/` and
+the tests into the build tree. Release and Debug share `bin/`, so switching overwrites in
+place. `dist/` is not
 committed: a build generates it, and each GitHub release attaches the packed headers.
 
 ```sh
@@ -18,9 +19,10 @@ cmake --build --preset windows         # Release
 cmake --build --preset windows-debug   # Debug, overwrites Release in bin/
 ```
 
-Targets: `rant_test`, `rant_test_noshm`, `pubsub`, `if_probe_check`, `rant_dist`
-(amalgamate only) and `rant_shared`, the shared library the C#, Unity and Python packages
-bundle, copied to `dist/native/<rid>/`. `pubsub --help` lists that tool's modes and flags.
+Programs: `rant_bench`, `pubsub` and `if_probe_check`. `pubsub --help` and `rant_bench`
+with no command list their modes and flags. `rant_dist` amalgamates only, and `rant_shared`
+is the shared library the C#, Unity and Python packages bundle, copied to
+`dist/native/<rid>/`.
 To regenerate `dist/` without CMake:
 
 ```sh
@@ -96,12 +98,9 @@ above. Linux needs `-lrt` for shared memory and
 neither. Windows threads are in kernel32.
 
 ```sh
-cc  -std=c99 -Wall -Idist tests/rant_test.c -o rant_test -lrt -lpthread
-gcc -std=c99 -Wall -Idist tests/rant_test.c -o rant_test.exe -lws2_32 -lbcrypt -lwinmm
+cc  -std=c99 -Wall -Idist tools/pubsub.c -o pubsub -lrt -lpthread
+gcc -std=c99 -Wall -Idist tools/pubsub.c -o pubsub.exe -lws2_32 -lbcrypt -lwinmm
 ```
-
-`rant_test.c` uses `rant.h` and needs the implementation in its own translation unit
-so its diagnostic `sendto` and `recvfrom` wrappers can intercept the transport's calls.
 
 ## Version and detection
 
@@ -120,33 +119,37 @@ grep -a -o "RANT-MAGIC [ -~]*" app.exe
 
 ## Testing
 
-All test tooling is one C program, `rant_test`.
+`ctest --test-dir build -C Release` runs every test. Run both `rant_test selftest` and
+`rant_test_noshm selftest` by hand from `build/tests/bin`. The phases cover loss events,
+backpressure, dynamic interest, relaying, NAT, the patterns, retire, churn, the lapped and
+ahead rules and the round trip estimator.
+
+## Measuring
+
+`rant_bench` holds the measurements.
 
 ```sh
-rant_test selftest                  # every selftest phase, exit 0 = pass
-rant_test sweep                     # full mesh RTT vs throughput sweep (10 nodes)
-rant_test sweep --nodes 10 --duration 8 --rates 0,5k,50k,200k
-rant_test sweep --rates 1k,10k --reliable --diag
-rant_test sweep --rates 20k --reliable --extra-ch 500            # 500 idle topics
-rant_test sweep --rates 20k --reliable --extra-ch 500 --spread # load across all of them
-rant_test node n0 11 50000 8        # a single node by hand (name domain hz duration)
-rant_test sendbench                 # UDP send cost microbench (Windows only)
-rant_test queuebench                # callback queue dispatch vs inline callback
+rant_bench sweep                     # full mesh RTT against throughput (10 nodes)
+rant_bench sweep --nodes 10 --duration 8 --rates 0,5k,50k,200k
+rant_bench sweep --rates 1k,10k --reliable --diag
+rant_bench sweep --rates 20k --reliable --extra-ch 500            # 500 idle topics
+rant_bench sweep --rates 20k --reliable --extra-ch 500 --spread   # load across all of them
+rant_bench node n0 11 50000 8        # one node by hand (name domain hz duration)
+rant_bench memscale                  # heap use per send, exit 1 if a steady send allocates
+rant_bench threadbench               # the threaded send path
+rant_bench queuebench                # callback queue dispatch against inline callbacks
+rant_bench sendbench                 # UDP send cost (Windows only)
 ```
 
-Run both `rant_test selftest` and `rant_test_noshm selftest`. The phases cover loss
-events, backpressure, dynamic interest, relaying, NAT, the patterns, retire, churn, the
-lapped and ahead rules and the round trip estimator.
-
-`sweep` spawns N `rant_test node` children per rate, waits for them to exit, and
+`sweep` spawns N `rant_bench node` children per rate, waits for them to exit, and
 aggregates their `SUMMARY` lines into a table. A nonzero `Stall ms` column means nodes
 lost the CPU mid run, so distrust that row.
 
 ## Two machines
 
 ```sh
-rant_test serve                             # on machine B
-rant_test sweep --remote --rates 5k,20k     # on machine A, B's nodes join every rate
+rant_bench serve                             # on machine B
+rant_bench sweep --remote --rates 5k,20k     # on machine A, B's nodes join every rate
 ```
 
 The control plane is Rant itself on its own domain (default 9, keep `--domain` away from

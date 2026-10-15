@@ -65,8 +65,8 @@ Linux and macOS. Unzip and run, nothing installs.
 ## Building from source
 
 Needs CMake 3.15+ and a C99 compiler. This packs `src/` into the `dist/` single-headers
-(not committed, so a checkout between releases generates them) and builds the tools and
-tests into `bin/`:
+(not committed, so a checkout between releases generates them) and builds the tools into
+`bin/`:
 
 ```sh
 cmake -S . -B build

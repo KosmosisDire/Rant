@@ -95,7 +95,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p out/rant
-          for p in rant_test rant_test_noshm pubsub if_probe_check; do
+          for p in rant_bench pubsub if_probe_check; do
             cp "bin/$p" out/rant/ 2>/dev/null || cp "bin/$p.exe" out/rant/
           done
           ls out/rant
