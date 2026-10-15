@@ -217,7 +217,11 @@ void i_rant_reader_data(i_RantTransportState *st, int topic_index, int peer_slot
     base = seqno - frag;
 
     if (!r || !r->used){ topic->repair_stats.frags_malformed++; return; }     /* not subscribed */
-    if (count==0 || frag>=count){ topic->repair_stats.frags_malformed++; return; }  /* malformed */
+    /* count fragments of the peer's size bound the sample, so a longer claim is malformed and
+       never sizes an allocation */
+    if (count==0 || frag>=count || (uint64_t)sample_len > (uint64_t)count*st->peer_frag[peer_slot]){
+        topic->repair_stats.frags_malformed++; return;
+    }
     switch (i_rant_reader_order_arrival(st, topic_index, peer_slot, r, base, seqno)){
         case RANT_ORDER_OLD:       topic->repair_stats.frags_old++;   return;   /* already seen */
         case RANT_ORDER_GAP:     /* a future sample: hold one ahead */
