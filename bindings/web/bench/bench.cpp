@@ -115,6 +115,7 @@ rant::Qos qos(const Args& a)
 {
     rant::Qos q;
     q.reliability = a.reliable ? rant::Reliability::Reliable : rant::Reliability::BestEffort;
+    q.keep_last = 64;     /* deeper than any window, so a burst evicts nothing unacked */
     if (a.size > 1350) q.max_message_bytes = (uint32_t)a.size;
     q.queue_bytes = 8u << 20;
     return q;
