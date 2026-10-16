@@ -1,0 +1,30 @@
+old
+*.exe
+/build/
+/build-asan/
+/build-tsan/
+/build-coverage/
+/build-fuzz/
+
+/Debug/
+*.png
+*.jpg
+*.pdb
+# C# / .NET wrapper build output (bindings/csharp/*/{bin,obj}); the wrapper source is bindings/csharp/Rant.cs
+[Bb]in/
+[Oo]bj/
+# The release workflow's staging folders
+/artifacts/
+/wheelhouse/
+/release/
+# dist/ is all build output: the single headers packed from src/, the shared library per
+# platform and the packages. Releases attach them. Never committed.
+/dist/
+# Python build/cache artifacts (pip build, bytecode)
+__pycache__/
+*.egg-info/
+# the examples restore the packed Rant package here, never the global cache
+/bindings/csharp/.packages/
+# Rust binding build output, and the C sources a crate package carries
+/bindings/rust/target/
+/bindings/rust/rant/csrc/
