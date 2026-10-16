@@ -1,74 +1,228 @@
 #include "internal.h"
 
-/* The roster: a name and the canonical spelling of its type. These strings are the one
- * definition, the DSL compiles them on demand. Order does not matter, resolution is recursive. */
+/* The one definition of each type, compiled by the DSL on demand in any order. The comment
+ * above a type describes it, and a comment after a field gives its [unit] and then a note. */
 typedef struct { const char *name, *text; } i_RantStdEntry;
 
 static const i_RantStdEntry i_rant_std_table[] = {
-    { "Float2",  "{ x: f32, y: f32 }" },
-    { "Float3",  "{ x: f32, y: f32, z: f32 }" },
-    { "Float4",  "{ x: f32, y: f32, z: f32, w: f32 }" },
-    { "Double2", "{ x: f64, y: f64 }" },
-    { "Double3", "{ x: f64, y: f64, z: f64 }" },
-    { "Double4", "{ x: f64, y: f64, z: f64, w: f64 }" },
-    { "Int2",    "{ x: i32, y: i32 }" },
-    { "Int3",    "{ x: i32, y: i32, z: i32 }" },
-    { "Int4",    "{ x: i32, y: i32, z: i32, w: i32 }" },
-    { "Quaternion", "{ x: f64, y: f64, z: f64, w: f64 }" },
-    { "Color",   "{ r: u8, g: u8, b: u8, a: u8 }" },
-    { "Pose",    "{ position: Double3, orientation: Quaternion }" },
-    { "Pose2D",  "{ position: Double2, angle: f64 }" },
-    { "Transform", "{ pose: Pose, parent: string<30> }" },
-    { "Transform2D", "{ pose: Pose2D, parent: string<30> }" },
-    { "Twist",   "{ linear: Double3, angular: Double3 }" },
-    { "Twist2D", "{ linear: Double2, angular: f64 }" },
-    { "Wrench",  "{ force: Double3, torque: Double3 }" },
-    { "Wrench2D", "{ force: Double2, torque: f64 }" },
-    { "GeoPoint","{ lat: f64, lon: f64, alt: f64 }" },
-    { "AlignedBox",    "{ min: Double3, max: Double3 }" },
-    { "AlignedBox2D",  "{ min: Double2, max: Double2 }" },
-    { "OrientedBox",   "{ pose: Pose, size: Double3 }" },
-    { "OrientedBox2D", "{ pose: Pose2D, size: Double2 }" },
-    { "Plane",     "{ position: Double3, normal: Double3 }" },
-    { "Segment",   "{ a: Double3, b: Double3 }" },
-    { "Sphere",    "{ center: Double3, radius: f64 }" },
-    { "Capsule",   "{ axis: Segment, radius: f64 }" },
-    { "Cylinder",  "{ axis: Segment, radius: f64 }" },
-    { "Cone",      "{ base: Double3, tip: Double3, radius: f64 }" },
-    { "Polygon",   "{ points: Double3[] }" },
-    { "Plane2D",   "{ position: Double2, normal: Double2 }" },
-    { "Segment2D", "{ a: Double2, b: Double2 }" },
-    { "Circle",    "{ center: Double2, radius: f64 }" },
-    { "Capsule2D", "{ axis: Segment2D, radius: f64 }" },
-    { "Polygon2D", "{ points: Double2[] }" },
-    { "Empty",   "{ }" },
-    { "Uuid",      "u8[16]" },
-    { "Timestamp", "i64" },
-    { "Duration",  "i64" },
-    { "Matrix3x3", "f32[9]" },
-    { "Matrix4x4", "f32[16]" },
-    { "Uri",       "string<256>" },
-    { "Image",   "{ width: u32, height: u32, stride: u32,"
-                 "  format: enum<u8> { Mono8 = 0, Mono16 = 1, Rgb8 = 2, Rgba8 = 3,"
-                 "                     Bgr8 = 4, Yuyv = 5, Nv12 = 6, Monof32 = 7,"
-                 "                     Jpeg = 16, Png = 17 },"
-                 "  data: u8[] }" },
-    { "VideoFrame", "{ codec: enum<u8> { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 },"
-                 "  width: u32, height: u32,"
-                 "  keyframe: bool, pts: Timestamp, data: u8[] }" },
+    { "Float2",  "-- A 2D vector of f32\n{ x: f32, y: f32 }" },
+    { "Float3",  "-- A 3D vector of f32\n{ x: f32, y: f32, z: f32 }" },
+    { "Float4",  "-- A 4D vector of f32\n{ x: f32, y: f32, z: f32, w: f32 }" },
+    { "Double2", "-- A 2D vector of f64\n{ x: f64, y: f64 }" },
+    { "Double3", "-- A 3D vector of f64\n{ x: f64, y: f64, z: f64 }" },
+    { "Double4", "-- A 4D vector of f64\n{ x: f64, y: f64, z: f64, w: f64 }" },
+    { "Int2",    "-- A 2D vector of i32, such as a pixel or a grid cell\n{ x: i32, y: i32 }" },
+    { "Int3",    "-- A 3D vector of i32\n{ x: i32, y: i32, z: i32 }" },
+    { "Int4",    "-- A 4D vector of i32\n{ x: i32, y: i32, z: i32, w: i32 }" },
+    { "Quaternion",
+                 "-- A 3D rotation as a unit quaternion, stored x, y, z, w\n"
+                 "{ x: f64, y: f64, z: f64, w: f64 }" },
+    { "Color",   "-- An sRGB color with straight alpha, not premultiplied\n"
+                 "{ r: u8\n"
+                 "  g: u8\n"
+                 "  b: u8\n"
+                 "  a: u8                    -- 255 is opaque\n"
+                 "}" },
+    { "Pose",    "-- A position and orientation in a 3D frame\n"
+                 "{ position: Double3        -- [m]\n"
+                 "  orientation: Quaternion\n"
+                 "}" },
+    { "Pose2D",  "-- A position and heading in a 2D frame, the top view of a Pose\n"
+                 "{ position: Double2        -- [m or px]\n"
+                 "  angle: f64               -- [rad] from +x toward +y\n"
+                 "}" },
+    { "Transform",
+                 "-- A Pose and the frame it is measured in\n"
+                 "{ pose: Pose\n"
+                 "  parent: string<30>       -- the parent frame, empty when unstated\n"
+                 "}" },
+    { "Transform2D",
+                 "-- A Pose2D and the frame it is measured in\n"
+                 "{ pose: Pose2D\n"
+                 "  parent: string<30>       -- the parent frame, empty when unstated\n"
+                 "}" },
+    { "Twist",   "-- Linear and angular velocity in 3D\n"
+                 "{ linear: Double3          -- [m/s]\n"
+                 "  angular: Double3         -- [rad/s] about each axis\n"
+                 "}" },
+    { "Twist2D", "-- Linear and angular velocity in 2D\n"
+                 "{ linear: Double2          -- [m/s]\n"
+                 "  angular: f64             -- [rad/s] from +x toward +y\n"
+                 "}" },
+    { "Wrench",  "-- A force and a torque in 3D\n"
+                 "{ force: Double3           -- [N]\n"
+                 "  torque: Double3          -- [N m] about the frame origin\n"
+                 "}" },
+    { "Wrench2D","-- A force and a torque in 2D\n"
+                 "{ force: Double2           -- [N]\n"
+                 "  torque: f64              -- [N m] from +x toward +y\n"
+                 "}" },
+    { "GeoPoint","-- A point on the Earth\n"
+                 "{ lat: f64                 -- [deg] latitude\n"
+                 "  lon: f64                 -- [deg] longitude\n"
+                 "  alt: f64                 -- [m] altitude\n"
+                 "}" },
+    { "AlignedBox",
+                 "-- A box along the frame axes\n"
+                 "{ min: Double3             -- [m] the corner with the lowest x, y and z\n"
+                 "  max: Double3             -- [m] the opposite corner\n"
+                 "}" },
+    { "AlignedBox2D",
+                 "-- A rectangle along the frame axes, also a region of an image\n"
+                 "{ min: Double2             -- [m or px] the corner with the lowest x and y\n"
+                 "  max: Double2             -- [m or px] the opposite corner\n"
+                 "}" },
+    { "OrientedBox",
+                 "-- A box at any orientation\n"
+                 "{ pose: Pose               -- the center and orientation\n"
+                 "  size: Double3            -- [m] the full edge lengths\n"
+                 "}" },
+    { "OrientedBox2D",
+                 "-- A rectangle at any angle\n"
+                 "{ pose: Pose2D             -- the center and angle\n"
+                 "  size: Double2            -- [m or px] the full edge lengths\n"
+                 "}" },
+    { "Plane",   "-- An endless flat plane\n"
+                 "{ position: Double3        -- [m] any point on the plane\n"
+                 "  normal: Double3          -- unit length\n"
+                 "}" },
+    { "Segment", "-- A straight line between two points\n"
+                 "{ a: Double3               -- [m]\n"
+                 "  b: Double3               -- [m]\n"
+                 "}" },
+    { "Sphere",  "-- A ball around a center point\n"
+                 "{ center: Double3          -- [m]\n"
+                 "  radius: f64              -- [m]\n"
+                 "}" },
+    { "Capsule", "-- A cylinder with rounded ends\n"
+                 "{ axis: Segment            -- the centers of the rounded ends\n"
+                 "  radius: f64              -- [m]\n"
+                 "}" },
+    { "Cylinder","-- A cylinder with flat ends\n"
+                 "{ axis: Segment            -- the centers of the flat ends\n"
+                 "  radius: f64              -- [m]\n"
+                 "}" },
+    { "Cone",    "-- A cone from a round base to a tip\n"
+                 "{ base: Double3            -- [m] the center of the base\n"
+                 "  tip: Double3             -- [m]\n"
+                 "  radius: f64              -- [m] at the base\n"
+                 "}" },
+    { "Polygon", "-- A closed flat polygon in 3D\n"
+                 "{ points: Double3[]        -- [m] the corners in order\n"
+                 "}" },
+    { "Plane2D", "-- An endless line, the 2D form of a Plane\n"
+                 "{ position: Double2        -- [m or px] any point on the line\n"
+                 "  normal: Double2          -- unit length\n"
+                 "}" },
+    { "Segment2D",
+                 "-- A straight line between two points in 2D\n"
+                 "{ a: Double2               -- [m or px]\n"
+                 "  b: Double2               -- [m or px]\n"
+                 "}" },
+    { "Circle",  "-- A circle around a center point\n"
+                 "{ center: Double2          -- [m or px]\n"
+                 "  radius: f64              -- [m or px]\n"
+                 "}" },
+    { "Capsule2D",
+                 "-- A rectangle with rounded ends\n"
+                 "{ axis: Segment2D          -- the centers of the rounded ends\n"
+                 "  radius: f64              -- [m or px]\n"
+                 "}" },
+    { "Polygon2D",
+                 "-- A closed polygon in 2D\n"
+                 "{ points: Double2[]        -- [m or px] the corners in order\n"
+                 "}" },
+    { "Empty",   "-- No data, for a signal such as a trigger\n{ }" },
+    { "Uuid",    "-- A 16 byte unique id\nu8[16]                     -- RFC 4122 byte order" },
+    { "Timestamp",
+                 "-- A moment in time, counted from the Unix epoch in UTC\ni64     -- [us]" },
+    { "Duration","-- A length of time\ni64                        -- [us]" },
+    { "Matrix3x3",
+                 "-- A 3 by 3 matrix, row major\nf32[9]" },
+    { "Matrix4x4",
+                 "-- A 4 by 4 matrix, row major\nf32[16]" },
+    { "Uri",     "-- A URL or other URI\nstring<256>" },
+    { "Image",   "-- A picture, as raw pixels or a compressed file\n"
+                 "{ width: u32               -- [px]\n"
+                 "  height: u32              -- [px]\n"
+                 "  stride: u32              -- [bytes] from one row to the next, 0 when rows are packed\n"
+                 "  format: enum<u8> {       -- how data is laid out\n"
+                 "    Mono8 = 0              -- one 8 bit channel\n"
+                 "    Mono16 = 1             -- one 16 bit channel\n"
+                 "    Rgb8 = 2               -- red, green and blue, 8 bits each\n"
+                 "    Rgba8 = 3              -- red, green, blue and alpha, 8 bits each\n"
+                 "    Bgr8 = 4               -- blue, green and red, 8 bits each\n"
+                 "    Yuyv = 5               -- YUV 4:2:2, two pixels in four bytes\n"
+                 "    Nv12 = 6               -- YUV 4:2:0, a Y plane then interleaved U and V\n"
+                 "    Monof32 = 7            -- one 32 bit float channel\n"
+                 "    Jpeg = 16              -- data is a JPEG file\n"
+                 "    Png = 17               -- data is a PNG file\n"
+                 "  }\n"
+                 "  data: u8[]               -- the pixels from the top row, or the file\n"
+                 "}" },
+    { "VideoFrame",
+                 "-- One encoded frame of a video stream\n"
+                 "{ codec: enum<u8> {        -- the bitstream format\n"
+                 "    Unknown = 0\n"
+                 "    Mjpeg = 1\n"
+                 "    H264 = 2\n"
+                 "    H265 = 3\n"
+                 "    Av1 = 4\n"
+                 "  }\n"
+                 "  width: u32               -- [px] the coded size, 0 when unstated\n"
+                 "  height: u32              -- [px] the coded size, 0 when unstated\n"
+                 "  keyframe: bool           -- decodes without earlier frames\n"
+                 "  pts: Timestamp           -- [us] when to show the frame\n"
+                 "  data: u8[]               -- the encoded bitstream\n"
+                 "}" },
     { "ExternalVideoStream",
-                 "{ kind: enum<u8> { Rtsp = 0, WebrtcWhep = 1, Hls = 2, Srt = 3,"
-                 "                   Rtp = 4, HttpMjpeg = 5, Other = 15 },"
-                 "  codec: enum<u8> { Unknown = 0, Mjpeg = 1, H264 = 2, H265 = 3, Av1 = 4 },"
-                 "  width: u32, height: u32,"
-                 "  url: Uri, name: string<32> }" },
+                 "-- Where to watch a video stream, so a viewer connects to it directly\n"
+                 "{ kind: enum<u8> {         -- the protocol of url\n"
+                 "    Rtsp = 0\n"
+                 "    WebrtcWhep = 1         -- WebRTC set up over WHEP\n"
+                 "    Hls = 2\n"
+                 "    Srt = 3\n"
+                 "    Rtp = 4\n"
+                 "    HttpMjpeg = 5          -- MJPEG over HTTP\n"
+                 "    Other = 15\n"
+                 "  }\n"
+                 "  codec: enum<u8> {        -- a hint, Unknown when unstated\n"
+                 "    Unknown = 0\n"
+                 "    Mjpeg = 1\n"
+                 "    H264 = 2\n"
+                 "    H265 = 3\n"
+                 "    Av1 = 4\n"
+                 "  }\n"
+                 "  width: u32               -- [px] a hint, 0 when unstated\n"
+                 "  height: u32              -- [px] a hint, 0 when unstated\n"
+                 "  url: Uri                 -- the stream address\n"
+                 "  name: string<32>         -- a label for the stream\n"
+                 "}" },
     { "CameraIntrinsics",
-                 "{ width: u32, height: u32,"
-                 "  fx: f64, fy: f64, cx: f64, cy: f64,"
-                 "  model: enum<u8> { None = 0, BrownConrady = 1, Fisheye = 2, Rational = 3 },"
-                 "  coeffs: f64[8] }" },
-    { "JointState", "{ position: f64[], velocity: f64[], effort: f64[] }" },
-    { "JointNames", "{ name: string<32>[] }" }
+                 "-- The pinhole model of a camera and its lens distortion\n"
+                 "{ width: u32               -- [px] the resolution these values hold for\n"
+                 "  height: u32              -- [px]\n"
+                 "  fx: f64                  -- [px] focal length along x\n"
+                 "  fy: f64                  -- [px] focal length along y\n"
+                 "  cx: f64                  -- [px] principal point x\n"
+                 "  cy: f64                  -- [px] principal point y\n"
+                 "  model: enum<u8> {        -- the lens distortion model\n"
+                 "    None = 0               -- an ideal pinhole\n"
+                 "    BrownConrady = 1\n"
+                 "    Fisheye = 2\n"
+                 "    Rational = 3\n"
+                 "  }\n"
+                 "  coeffs: f64[8]           -- the model coefficients, 0 past its count\n"
+                 "}" },
+    { "JointState",
+                 "-- The joints of a robot, in the order of its JointNames\n"
+                 "{ position: f64[]          -- [rad or m] rad for a turning joint, m for a sliding one\n"
+                 "  velocity: f64[]          -- [rad/s or m/s] may be empty\n"
+                 "  effort: f64[]            -- [N m or N] may be empty\n"
+                 "}" },
+    { "JointNames",
+                 "-- The joint names a JointState follows, published once\n"
+                 "{ name: string<32>[] }" }
 };
 
 /* the table is indexed by RantStdType minus 1, a mismatch would shift every name */

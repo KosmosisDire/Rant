@@ -35,8 +35,8 @@ typedef enum {
     RANT_STD_COUNT
 } RantStdType;
 
-/* The type's name and its canonical spelling, the two halves of the definition the DSL
- * knows. NULL for RANT_STD_NONE or an out of range value. */
+/* The type's name and its definition, whose comments describe it and give each field's
+ * [unit]. NULL for RANT_STD_NONE or an out of range value. */
 RANT_API const char *rant_std_name(RantStdType t);
 RANT_API const char *rant_std_text(RantStdType t);
 /* A name lookup only. rant_std_recognize (node/runtime.h) verifies a peer's shape too. */
