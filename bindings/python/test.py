@@ -818,6 +818,93 @@ def rebind():
     return ok
 
 
+def close_race():
+    """Calls on other threads while the node closes answer NO_TOPIC or their usual result and
+    never touch the freed node, and a close inside the node's own callback runs once it
+    returns. ctypes drops the GIL around every C call, so the threads really race."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    def until(seconds, done):
+        deadline = time.time() + seconds
+        while time.time() < deadline and not done():
+            time.sleep(0.002)
+        return done()
+
+    opts = dict(on_event=lambda e: None, domain=DOMAIN + 15, multicast_interface=IFACE)
+    refused_after = True
+    for _ in range(40):
+        n = rant.Node("CR", match_wait=None, **opts)   # a send with nobody matched drops at once
+        pub = n.publisher("cr/level", Level)
+        var = n.variable_definition("cr/var", Level, initial=Level())
+        stop = threading.Event()
+        calls = [0]
+
+        def sender():
+            for i in range(1 << 30):
+                if stop.is_set():
+                    return
+                pub.send(Level(value=i))
+                calls[0] += 1
+
+        def writer():
+            for i in range(1 << 30):
+                if stop.is_set():
+                    return
+                var.set(Level(value=i))
+                calls[0] += 1
+
+        def churn():
+            while not stop.is_set():
+                try:
+                    with n.publisher("cr/churn", Level) as p:
+                        p.send(Level(value=1))
+                except rant.Error:
+                    pass
+                calls[0] += 1
+
+        threads = [threading.Thread(target=f) for f in (sender, writer, churn)]
+        for t in threads:
+            t.start()
+        while calls[0] < 300:
+            time.sleep(0)
+        n.close()
+        refused_after = (refused_after and pub.send(Level()) == rant.SendStatus.NO_TOPIC
+                         and var.set(Level()) == rant.SendStatus.NO_TOPIC)
+        stop.set()
+        for t in threads:
+            t.join()
+    check("after close every call answers NO_TOPIC", refused_after)
+
+    src = rant.Node("CS", **opts)
+    me = rant.Node("CE", threading=rant.Threading.MANUAL, **opts)
+    try:
+        accepted = []
+        src_pub = src.publisher("cr/close", Level, reliable=True)
+        me.subscriber("cr/close", Level, lambda v: accepted.append(me.close()), reliable=True)
+        probe = me.publisher("cr/probe", Level)
+
+        def polled(cond):
+            me.poll(0.002)
+            return cond()
+        check("self closing node matched",
+              until(4, lambda: polled(lambda: src_pub.match_count > 0 and src_pub.ready)))
+        src_pub.send(Level(value=5))
+        check("a close inside its own callback is accepted",
+              until(3, lambda: polled(lambda: accepted == [True])))
+        me.close()   # waits for the close the callback started
+        check("the node closed once the callback returned",
+              probe.send(Level()) == rant.SendStatus.NO_TOPIC)
+    finally:
+        me.close()
+        src.close()
+    return ok
+
+
 def patterns():
     """Functions and variables between two nodes on an isolated domain."""
     print("patterns leg: two nodes, domain 43, loopback")
@@ -1409,6 +1496,7 @@ LEGS = [
     ("tasks", tasks),
     ("dispatch", dispatch_leg),
     ("rebind", rebind),
+    ("close_race", close_race),
 ]
 
 

@@ -49,13 +49,15 @@ response, log line and event on the node's queue until your thread calls `node.d
 the one liner for a frame paced app. `node.create_queue()` makes another `rant.Queue`,
 and a handle created with `queue=` set to it parks its callbacks there alone until
 `queue.dispatch()`. Same name topic handles must agree on the queue. From inside a handler,
-sends and read only queries are allowed, and poll, handle creation, close, drain and
-`settle` are refused with `SendStatus.STATE`, None or False.
+sends and read only queries are allowed, and poll, handle creation, drain and `settle`
+are refused with `SendStatus.STATE`, None or False.
 
-`settle()` blocks until discovery and matching converge. `close()` is refused from a handler and returns
-False. A node also closes at the end of a `with` block, when its last reference goes (a
-handle holds one) and at interpreter exit. A handle used after its node closed answers
-`NO_TOPIC`, None or False.
+`settle()` blocks until discovery and matching converge. `close()` first waits until the
+calls other threads are making on the node return, and inside one of the node's own
+handlers it runs once that handler returns. A node also closes at the end of a `with`
+block, when its last reference goes (a handle holds one) and at interpreter exit. A
+handle used after its node closed answers `NO_TOPIC`, None or False, and a schema raises
+`SchemaError`.
 
 A construction failure raises `rant.Error` with the C reason in the message and the
 `Event` behind it in `.event`. `SchemaError` and `CallError` derive from it. `stats` reads

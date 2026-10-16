@@ -9,6 +9,7 @@ import re as _re
 import struct as _struct
 import sys as _sys
 import threading as _threading
+import time as _time
 import traceback as _traceback
 import types as _pytypes
 import typing as _typing
@@ -726,8 +727,114 @@ def _dstr(s):
     return _c.string_at(s.data, s.len).decode("utf-8", "replace") if s.data and s.len else ""
 
 
+_SLICE_MS = 50              # one slice of a long wait, which bounds how long close waits behind it
+_RUNNING = _threading.local()   # .gates: the nodes whose callbacks this thread runs now
+
+
+class _Gate:
+    """Keeps a C node open while a call is inside it. rant_node_close frees everything and
+        assumes no other thread is in a call, so every call holds a pass and close waits for
+        them. ctypes releases the GIL around each C call, so the GIL alone never covers it."""
+    __slots__ = ("_cv", "_active", "_closing")
+
+    def __init__(self):
+        self._cv = _threading.Condition(_threading.Lock())
+        self._active = 0
+        self._closing = False
+
+    def use(self, handle):
+        """A pass for one call: `with gate.use(h) as h` gives h, or None once close began."""
+        return _Pass(self, handle)
+
+    def enter(self):
+        with self._cv:
+            if self._closing:
+                return False
+            self._active += 1
+            return True
+
+    def leave(self):
+        with self._cv:
+            self._active -= 1
+            if self._closing and not self._active:
+                self._cv.notify_all()
+
+    @property
+    def closing(self):
+        return self._closing
+
+    def close(self):
+        """Refuse new passes and wait until none is out."""
+        with self._cv:
+            self._closing = True
+            while self._active:
+                self._cv.wait(_SLICE_MS / 1000.0)
+
+    def reopen(self):
+        """The C refused the close, so the node stays open."""
+        with self._cv:
+            self._closing = False
+
+    def running(self):
+        """Marks this thread as running one of the node's callbacks for a with block."""
+        return _Running(self)
+
+    def is_running(self):
+        return self in getattr(_RUNNING, "gates", ())
+
+    def wait_sliced(self, timeout_ms, closed, handle, step):
+        """Runs step(h, ms) with C waits of at most one slice, each under its own pass, until it
+            answers nonzero or timeout_ms passes (negative = no end). closed once the node
+            closed or the handle is gone."""
+        end = None if timeout_ms < 0 else _time.monotonic() + timeout_ms / 1000.0
+        while True:
+            with self.use(handle) as h:
+                if not h:
+                    return closed
+                left = _SLICE_MS if end is None else int((end - _time.monotonic()) * 1000)
+                rc = step(h, max(0, min(_SLICE_MS, left)))
+            if rc != 0 or (end is not None and _time.monotonic() >= end):
+                return rc
+
+
+class _Pass:
+    """One call's hold on a node: the with block gets the handle, or None once close began."""
+    __slots__ = ("_gate", "_handle", "_held")
+
+    def __init__(self, gate, handle):
+        self._gate = gate
+        self._handle = handle
+        self._held = False
+
+    def __enter__(self):
+        self._held = self._gate.enter()
+        return self._handle if self._held else None
+
+    def __exit__(self, *exc):
+        if self._held:
+            self._gate.leave()
+
+
+class _Running:
+    """A callback mark from _Gate.running, cleared when the with block ends."""
+    __slots__ = ("_gate",)
+
+    def __init__(self, gate):
+        self._gate = gate
+
+    def __enter__(self):
+        gates = getattr(_RUNNING, "gates", None)
+        if gates is None:
+            gates = _RUNNING.gates = []
+        gates.append(self._gate)
+
+    def __exit__(self, *exc):
+        _RUNNING.gates.pop()
+
+
 def _compile_dsl(node, text):
-    s = node._lib.rant_node_schema(node._h, text.encode("utf-8"))
+    with node._gate.use(node._h) as h:
+        s = node._lib.rant_node_schema(h, text.encode("utf-8")) if h else None
     if not s:
         raise SchemaError(node.last_error.schema_detail or "schema compile failed")
     return s
@@ -736,7 +843,7 @@ def _compile_dsl(node, text):
 class Schema:
     """A compiled schema the node owns, from node.schema: DSL text, a schema class whose
         annotated fields are the wire fields, or a bare type whose message is that one value
-        (docs/python.md). Valid for the node's life."""
+        (docs/python.md). Valid for the node's life, and SchemaError after its close."""
 
     class FieldType(_pyenum.IntEnum):
         U8 = 0
@@ -775,11 +882,12 @@ class Schema:
         arr_parent: int = 0xFFFF   # flat index of the nearest enclosing struct ARRAY, 0xFFFF for none
         arr_depth: int = 0         # the struct arrays around the field, one index each
 
-    __slots__ = ("_s", "_spec", "_vroot")
+    __slots__ = ("_s", "_spec", "_vroot", "_gate")
 
     def __init__(self, node, source):
         self._spec = None
         self._vroot = None
+        self._gate = node._gate
         if isinstance(source, str):
             self._s = _compile_dsl(node, source)
             return
@@ -792,41 +900,52 @@ class Schema:
         self._s = _compile_dsl(node, _spec_text(self._spec))
 
     @classmethod
-    def _own(cls, handle):
+    def _own(cls, handle, gate):
         # wrap a schema the node holds, such as a mesh view registered through it
         s = cls.__new__(cls)
         s._spec = None
         s._vroot = None
         s._s = handle
+        s._gate = gate
         return s
+
+    def _use(self):
+        # a pass on the owning node: the node frees the schema at close, so a read after it
+        # raises instead of reading freed memory
+        return _SchemaPass(self)
 
     @property
     def name(self):
         """The root type name, "" for a bare type."""
-        return _dstr(_c.load().rant_schema_name(self._s))
+        with self._use() as sp:
+            return _dstr(_c.load().rant_schema_name(sp))
 
     @property
     def hash(self):
         """The 64 bit wire identity: equal hashes are the same type in every language."""
-        return _c.load().rant_schema_hash(self._s)
+        with self._use() as sp:
+            return _c.load().rant_schema_hash(sp)
 
     @property
     def dsl(self):
         """The schema's DSL text, reconstructed from the compiled form. Paste this
         into a C/C++ node's rant_node_schema for interop, or just print it."""
-        return _schema_dsl(_c.load(), self._s)
+        with self._use() as sp:
+            return _schema_dsl(_c.load(), sp)
 
     @property
     def _value_root(self):
         # a bare type: the message is one value, so encode takes and decode returns it
         if self._vroot is None:
-            self._vroot = _is_value_root(_c.load(), self._s)   # probed once
+            with self._use() as sp:
+                self._vroot = _is_value_root(_c.load(), sp)   # probed once
         return self._vroot
 
     def can_read(self, pub):
         """Can a reader declaring this schema read messages written with pub? Type names
                 narrow: an anonymous type reads a named one of the same shape, never the reverse."""
-        return bool(_c.load().rant_schema_subset(self._s, pub._s))
+        with self._use() as sp, pub._use() as pp:
+            return bool(_c.load().rant_schema_subset(sp, pp))
 
     @property
     def fields(self):
@@ -835,34 +954,52 @@ class Schema:
         lib = _c.load()
         out = []
         info = _c.RantSchemaFieldInfo()
-        for i in range(lib.rant_schema_field_count(self._s)):
-            if lib.rant_schema_field_at(self._s, i, _c.byref(info)):
-                out.append(Schema.Field(_dstr(info.name), Schema.FieldType(info.kind),
-                                        Schema.FieldType(info.elem), info.count, info.depth,
-                                 info.offset, info.size, info.str_cap,
-                                 _dstr(info.type_name), _dstr(info.elem_name),
-                                 info.elem_size, info.arr_parent, info.arr_depth))
+        with self._use() as sp:
+            for i in range(lib.rant_schema_field_count(sp)):
+                if lib.rant_schema_field_at(sp, i, _c.byref(info)):
+                    out.append(Schema.Field(_dstr(info.name), Schema.FieldType(info.kind),
+                                            Schema.FieldType(info.elem), info.count, info.depth,
+                                            info.offset, info.size, info.str_cap,
+                                            _dstr(info.type_name), _dstr(info.elem_name),
+                                            info.elem_size, info.arr_parent, info.arr_depth))
         return out
 
     def enum_variants(self, field):
         """The (name, value) options of the ENUM field at flat index field, [] otherwise."""
         lib = _c.load()
         out = []
-        for k in range(lib.rant_schema_enum_count(self._s, field)):
-            val = _c.c_int64()
-            nm = _c.RantStringView()
-            if lib.rant_schema_enum_variant(self._s, field, k, _c.byref(val), _c.byref(nm)):
-                out.append((_dstr(nm), val.value))
+        with self._use() as sp:
+            for k in range(lib.rant_schema_enum_count(sp, field)):
+                val = _c.c_int64()
+                nm = _c.RantStringView()
+                if lib.rant_schema_enum_variant(sp, field, k, _c.byref(val), _c.byref(nm)):
+                    out.append((_dstr(nm), val.value))
         return out
 
     def encode(self, value):
         """Encode a mapping or an object (attributes by field name) to message bytes."""
-        return _encode(_c.load(), self._s, value)
+        with self._use() as sp:
+            return _encode(_c.load(), sp, value)
 
     def decode(self, data):
         """Decode message bytes to a nested dict (any schema), the bare value (a bare-type
         schema), or a typed instance if this schema was built from a class."""
-        return _from_decoded(self._spec, _decode(_c.load(), self._s, bytes(data)))
+        with self._use() as sp:
+            return _from_decoded(self._spec, _decode(_c.load(), sp, bytes(data)))
+
+
+class _SchemaPass(_Pass):
+    """A pass whose with block gets the schema, raising SchemaError once its node closed."""
+    __slots__ = ()
+
+    def __init__(self, schema):
+        _Pass.__init__(self, schema._gate, schema._s)
+
+    def __enter__(self):
+        sp = _Pass.__enter__(self)
+        if not sp:
+            raise SchemaError("the node that owned this schema is closed")
+        return sp
 
 
 def _as_schema(node, schema_arg):
@@ -1646,22 +1783,28 @@ class Entity:
                    progress_schema_hash=e.progress_schema_hash, generation=e.generation)
 
 
-def _current_schema(ptr, local):
-    # the schema a handle uses now: its own, keeping its class, or the one it adopted
+def _current_schema(node, handle, read, local):
+    # the schema a handle uses now, read under a pass: its own, keeping its class, or the one
+    # it adopted. None once closed
+    with node._gate.use(handle) as h:
+        ptr = read(h) if h else None
     if not ptr:
         return None
     if local is not None and local._s == ptr:
         return local
-    return Schema._own(ptr)
+    return Schema._own(ptr, node._gate)
 
 
 def _own_schema(node, view):
     # the node's view is good only until the next poll, so it is registered in the node
     if not view:
         return None
-    w = node._lib.rant_schema_wire(view)
-    h = node._lib.rant_node_schema_parse(node._h, w.data, w.len)
-    return Schema._own(h) if h else None
+    with node._gate.use(node._h) as nh:
+        if not nh:
+            return None
+        w = node._lib.rant_schema_wire(view)
+        h = node._lib.rant_node_schema_parse(nh, w.data, w.len)
+    return Schema._own(h, node._gate) if h else None
 
 
 def _topic_opts(node, reliable=False, keep_last=0, catch_up=0, max_message_bytes=0,
@@ -1725,46 +1868,76 @@ class _Topic:
         self._h = node._acquire_topic(name, bit, sch, opts)
         self._open = True
 
-    def _ptr(self):
-        # NULL once closed or the node is gone, so the C answers NO_TOPIC instead of touching
-        # freed memory
-        return self._h if self._open and self._node._h else None
+    def _use(self):
+        # a pass on the node and the native topic, None once closed or the node closed, so
+        # the C answers NO_TOPIC instead of touching freed memory
+        return self._node._gate.use(self._h if self._open else None)
 
     @property
     def index(self):
-        return self._node._lib.rant_topic_index(self._ptr())
+        with self._use() as h:
+            return self._node._lib.rant_topic_index(h)
 
     def take(self, timeout, latest):
-        m = _c.RantMsg()
-        take = self._node._lib.rant_topic_take_latest if latest else self._node._lib.rant_topic_take
-        if take(self._ptr(), _c.byref(m), _ms(timeout)) != 1:
-            return None
-        return Message._from_c(m, self._node._topic_specs.get(m.topic_index))
+        node = self._node
+        take = node._lib.rant_topic_take_latest if latest else node._lib.rant_topic_take
+        got = []
+
+        def step(h, ms):
+            m = _c.RantMsg()
+            r = take(h, _c.byref(m), ms)
+            if r == 1:   # the view is the node's until the next take: copied under this pass
+                got.append(Message._from_c(m, node._topic_specs.get(m.topic_index)))
+            return r
+        node._gate.wait_sliced(_ms(timeout), 0, self._h if self._open else None, step)
+        return got[0] if got else None
 
     def send(self, value, capture_us):
-        b, buf = _c_view(_payload_bytes(self._schema, value))
-        o = _c.RantSendOpts(capture_us=int(capture_us or 0))
-        r = self._node._lib.rant_topic_send(self._ptr(), b, _c.byref(o))
+        with self._use() as h:
+            if not h:
+                return SendStatus.NO_TOPIC
+            b, buf = _c_view(_payload_bytes(self._schema, value))
+            o = _c.RantSendOpts(capture_us=int(capture_us or 0))
+            r = self._node._lib.rant_topic_send(h, b, _c.byref(o))
         del buf
         return _send_status(r)
 
     @property
     def counts(self):
         tm, tb, rm, rb = _c.c_uint64(), _c.c_uint64(), _c.c_uint64(), _c.c_uint64()
-        self._node._lib.rant_topic_counts(self._ptr(), _c.byref(tm), _c.byref(tb),
-                                          _c.byref(rm), _c.byref(rb))
+        with self._use() as h:
+            self._node._lib.rant_topic_counts(h, _c.byref(tm), _c.byref(tb),
+                                              _c.byref(rm), _c.byref(rb))
         return TopicCounts(tm.value, tb.value, rm.value, rb.value)
 
     @property
     def queue_stats(self):
         m, b, c, d = _c.c_uint32(), _c.c_uint32(), _c.c_uint32(), _c.c_uint32()
-        self._node._lib.rant_topic_queue_stats(self._ptr(), _c.byref(m), _c.byref(b),
-                                               _c.byref(c), _c.byref(d))
+        with self._use() as h:
+            self._node._lib.rant_topic_queue_stats(h, _c.byref(m), _c.byref(b),
+                                                   _c.byref(c), _c.byref(d))
         return QueueStats(m.value, b.value, c.value, d.value)
 
     def refresh(self):
-        p = self._ptr()
-        return p is not None and self._node._lib.rant_topic_refresh(p) == 1
+        with self._use() as h:
+            return h is not None and self._node._lib.rant_topic_refresh(h) == 1
+
+    def schema(self):
+        return _current_schema(self._node, self._h if self._open else None,
+                               self._node._lib.rant_topic_schema, self._schema)
+
+    def match_count(self):
+        with self._use() as h:
+            return self._node._lib.rant_topic_match_count(h)
+
+    def ready(self):
+        with self._use() as h:
+            return self._node._lib.rant_topic_ready(h) == 1
+
+    def drain(self, timeout):
+        drain = self._node._lib.rant_topic_drain
+        return self._node._gate.wait_sliced(_ms(timeout), 1, self._h if self._open else None,
+                                            lambda h, ms: drain(h, ms)) == 1
 
     def close(self):
         if not self._open:
@@ -1789,17 +1962,18 @@ class Queue:
         """Run the callbacks parked at entry, oldest first, up to max_callbacks (0 = all),
                 waiting up to timeout seconds for the first, None = forever. Returns the
                 count run, or STATE from a callback or while another thread dispatches it."""
-        if not self._node._h:
-            return int(SendStatus.STATE)
-        return self._node._lib.rant_queue_dispatch(self._q, max_callbacks, _ms(timeout))
+        dispatch = self._node._lib.rant_queue_dispatch
+        return self._node._gate.wait_sliced(_ms(timeout), int(SendStatus.STATE), self._q,
+                                            lambda q, ms: dispatch(q, max_callbacks, ms))
 
     @property
     def stats(self):
         """(waiting, dropped): callbacks parked now, and dropped since open."""
-        if not self._node._h:
-            return (0, 0)
-        w, d = _c.c_uint32(), _c.c_uint32()
-        self._node._lib.rant_queue_stats(self._q, _c.byref(w), _c.byref(d))
+        with self._node._gate.use(self._q) as q:
+            if not q:
+                return (0, 0)
+            w, d = _c.c_uint32(), _c.c_uint32()
+            self._node._lib.rant_queue_stats(q, _c.byref(w), _c.byref(d))
         return (w.value, d.value)
 
 
@@ -1808,13 +1982,13 @@ class Node:
     function, task and variable methods create the handles. The service thread runs from
     construction unless threading is MANUAL, and every call is thread safe. It closes on
     close(), at the end of a with block, when the last reference goes and at interpreter
-    exit."""
+    exit, once the calls other threads are making on it return."""
 
     # No attribute may point back at the node, so dropping the last reference closes it at once
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_evt", "_on_log", "_log_bound",
                  "_topic_specs", "_topics_by_name", "_create_lock",
                  "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock", "_name",
-                 "_threading", "_queue", "_pump", "__weakref__")
+                 "_threading", "_queue", "_pump", "_gate", "_close_lock", "__weakref__")
 
     def __init__(self, name=None, *, on_event=None, domain=0, prefix=None,
                  multicast_interface=None, max_topics=0, match_wait=0.0, disable_shm=False,
@@ -1830,6 +2004,8 @@ class Node:
                 match_wait None = off. seed_peers are "ip" or "ip:port" strings. The service
                 thread runs from here unless threading is MANUAL."""
         self._lib = None
+        self._gate = _Gate()                    # every call into the C holds a pass on it
+        self._close_lock = _threading.Lock()    # a later close waits until the first is done
         self._name = name or None
         self._threading = Threading(threading)
         self._queue = None
@@ -1938,7 +2114,8 @@ class Node:
         e.topic_name = (topic_name or "").encode("utf-8")
         e.schema_detail = detail.encode("utf-8")
         try:
-            (self._on_evt or self._print_event)(Event._from_c(e))
+            with self._gate.running():
+                (self._on_evt or self._print_event)(Event._from_c(e))
         except Exception:
             _traceback.print_exc()
 
@@ -2010,8 +2187,8 @@ class Node:
     def _acquire_topic(self, name, bit, sch, opts):
         if not name:
             raise ValueError("topic name required")
-        with self._create_lock:
-            if not self._h:
+        with self._gate.use(self._h) as live, self._create_lock:
+            if not live:
                 raise Error("node is closed")
             rec = self._topics_by_name.get(name)
             sh = sch.hash if sch else 0
@@ -2048,9 +2225,9 @@ class Node:
 
     def _release_topic(self, name, bit):
         """Drop one hold. False when the C refused from a callback, where the hold stays."""
-        with self._create_lock:
+        with self._gate.use(self._h) as live, self._create_lock:
             rec = self._topics_by_name.get(name)
-            if rec is None or not self._h:
+            if rec is None or not live:   # the node closed and freed the topic
                 return True
             old = rec.bits
             rec.hold(bit, -1)
@@ -2075,7 +2252,8 @@ class Node:
         """One loop tick of a MANUAL node: discovery, receive, timers and queued sends. Blocks up
                 to timeout seconds in the socket wait, 0 = non blocking, None = until something
                 happens. Returns STATE under the service thread."""
-        return self._lib.rant_node_poll(self._h, _ms(timeout))
+        with self._gate.use(self._h) as h:
+            return self._lib.rant_node_poll(h, _ms(timeout))
 
     def dispatch(self, max_callbacks=0, timeout=0.0):
         """Under Threading.DISPATCH: run every callback parked since the last call on the
@@ -2086,14 +2264,15 @@ class Node:
             raise Error("dispatch() needs Threading.DISPATCH, this node is %s"
                         % self._threading.name)
         if self._pump and timeout == 0:
-            self._lib.rant_node_poll(self._h, 0)
+            self.poll(0)
         return self._queue.dispatch(max_callbacks, timeout)
 
     def create_queue(self):
         """A callback queue of this node, for handles that want their callbacks on a thread of
                 their own: pass it as queue= when creating them. At most 8 per node, freed
                 with the node."""
-        q = self._lib.rant_node_create_queue(self._h)
+        with self._gate.use(self._h) as h:
+            q = self._lib.rant_node_create_queue(h) if h else None
         if not q:
             err = self.last_error
             raise Error("create_queue() failed: %s" % err, err)
@@ -2112,7 +2291,8 @@ class Node:
     def settle(self, timeout=None):
         """Block until discovery and matching settle, so everything sent now reaches everyone.
                 Call after creating the handles. timeout None = 3 announce intervals."""
-        return self._lib.rant_node_settle(self._h, _ms(timeout)) == 1
+        with self._gate.use(self._h) as h:
+            return h is not None and self._lib.rant_node_settle(h, _ms(timeout)) == 1
 
     # ---- logs, reflection, diagnostics ----
 
@@ -2120,7 +2300,8 @@ class Node:
         """Publish a log line at a LogLevel, truncated at RANT_LOG_MAX. Returns a SendStatus,
                 NOSYS when logs are disabled."""
         b = text.encode("utf-8") if isinstance(text, str) else bytes(text)
-        return _send_status(self._lib.rant_node_log_text(self._h, int(level), b, len(b)))
+        with self._gate.use(self._h) as h:
+            return _send_status(self._lib.rant_node_log_text(h, int(level), b, len(b)))
 
     def on_log(self, handler):
         """Deliver every other node's log lines at every level to handler as a LogLine, on the
@@ -2136,18 +2317,21 @@ class Node:
     def _bind_log(self):
         # one subscription per level topic for the node's life, fanning into the handler. The
         # queue goes first, so the catch up replay parks rather than landing inline
-        if self._queue is not None:
-            rc = self._lib.rant_node_set_log_queue(self._h, self._queue._q)
-            if rc != 0:
-                raise Error("on_log: log queue refused: %s" % _send_status(rc), self.last_error)
-        for level in (LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO):
-            h = self._lib.rant_node_log_topic(self._h, int(level))
-            if not h:
-                raise Error("on_log: logs are disabled on this node")
-            rc = self._lib.rant_topic_set_role(h, _ROLE_PUBSUB)
-            if rc != 0:
-                raise Error("on_log: subscribe refused: %s" % _send_status(rc), self.last_error)
-            self._add_sub_handler(self._lib.rant_topic_index(h), self._log_line(level))
+        with self._gate.use(self._h) as nh:
+            if not nh:
+                raise Error("on_log: node is closed")
+            if self._queue is not None:
+                rc = self._lib.rant_node_set_log_queue(nh, self._queue._q)
+                if rc != 0:
+                    raise Error("on_log: log queue refused: %s" % _send_status(rc), self.last_error)
+            for level in (LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO):
+                h = self._lib.rant_node_log_topic(nh, int(level))
+                if not h:
+                    raise Error("on_log: logs are disabled on this node")
+                rc = self._lib.rant_topic_set_role(h, _ROLE_PUBSUB)
+                if rc != 0:
+                    raise Error("on_log: subscribe refused: %s" % _send_status(rc), self.last_error)
+                self._add_sub_handler(self._lib.rant_topic_index(h), self._log_line(level))
 
     def _log_line(self, level):
         def deliver(m):
@@ -2171,10 +2355,12 @@ class Node:
     def stats(self):
         """The node's counters, read at the call, as a NodeStats."""
         in_use, peak, calls = _c.c_size_t(), _c.c_size_t(), _c.c_uint64()
-        self._lib.rant_node_mem_stats(self._h, _c.byref(in_use), _c.byref(peak), _c.byref(calls))
         us, n = _c.c_uint64(), _c.c_uint32()
-        self._lib.rant_node_backpressure_stats(self._h, _c.byref(us), _c.byref(n))
-        return NodeStats(evicted_unsent=self._lib.rant_node_evicted_unsent(self._h),
+        with self._gate.use(self._h) as h:
+            self._lib.rant_node_mem_stats(h, _c.byref(in_use), _c.byref(peak), _c.byref(calls))
+            self._lib.rant_node_backpressure_stats(h, _c.byref(us), _c.byref(n))
+            evicted = self._lib.rant_node_evicted_unsent(h)
+        return NodeStats(evicted_unsent=evicted,
                          mem_in_use=in_use.value, mem_peak=peak.value, alloc_calls=calls.value,
                          backpressure_waited_us=us.value, backpressure_waits=n.value)
 
@@ -2182,7 +2368,8 @@ class Node:
     def last_error(self):
         """The most recent error this node reported, as an Event (also delivered to on_event),
                 or an ERROR event whose error is NONE, printing "no error", before any."""
-        return Event._from_c(self._lib.rant_last_error(self._h))
+        with self._gate.use(self._h) as h:
+            return Event._from_c(self._lib.rant_last_error(h))
 
     def schema(self, source):
         """A compiled schema from DSL text, a schema class or a bare type, compiled in this
@@ -2215,10 +2402,21 @@ class Node:
                 handlers.remove(fn)
 
     def close(self, send_bye=True):
-        """Stop the service thread and tear the node down. Returns True, or False when refused
-                from inside a handler, where the node stays live."""
+        """Stop the service thread and tear the node down, once the calls other threads are
+                making on it return. Inside one of the node's own callbacks the close runs on
+                another thread once that callback returns, and a later close waits for it.
+                Returns True, or False when the C refused, where the node stays live."""
+        if self._gate.is_running():
+            _threading.Thread(target=self.close, args=(send_bye,), daemon=True).start()
+            return True
+        with self._close_lock:
+            return self._close_now(send_bye)
+
+    def _close_now(self, send_bye):
         if self._h:
+            self._gate.close()
             if self._lib.rant_node_close(self._h, 1 if send_bye else 0) != 0:
+                self._gate.reopen()
                 return False
             self._h = None
         with _REG_LOCK:
@@ -2249,9 +2447,7 @@ class Node:
 
     def __del__(self):
         try:
-            if not self.close():
-                # collected on a callback thread, where close is refused
-                _threading.Thread(target=self.close, daemon=True).start()
+            self.close()
         except Exception:
             pass
 
@@ -2266,19 +2462,20 @@ class Reflection:
 
     def _walk(self, step):
         node = self._node
-        if not node._h:
-            return []
         out = []
-        node._lib.rant_node_lock(node._h)
-        try:
-            it = _c.RantIter()
-            while True:
-                item = step(node, it)
-                if item is None:
-                    break
-                out.append(item)
-        finally:
-            node._lib.rant_node_unlock(node._h)
+        with node._gate.use(node._h) as h:
+            if not h:
+                return out
+            node._lib.rant_node_lock(h)
+            try:
+                it = _c.RantIter()
+                while True:
+                    item = step(node, it)
+                    if item is None:
+                        break
+                    out.append(item)
+            finally:
+                node._lib.rant_node_unlock(h)
         return out
 
     def peers(self):
@@ -2310,26 +2507,29 @@ class Reflection:
     def find(self, kind, name):
         """One folded Entity by EntityKind and name, None when the mesh has none."""
         node = self._node
-        if not node._h:
-            return None
-        node._lib.rant_node_lock(node._h)
-        try:
-            e = _c.RantEntityInfo()
-            if not node._lib.rant_node_mesh_find(node._h, int(kind), name.encode("utf-8"),
-                                                 _c.byref(e)):
+        with node._gate.use(node._h) as h:
+            if not h:
                 return None
-            return Entity._from_c(node, e)
-        finally:
-            node._lib.rant_node_unlock(node._h)
+            node._lib.rant_node_lock(h)
+            try:
+                e = _c.RantEntityInfo()
+                if not node._lib.rant_node_mesh_find(h, int(kind), name.encode("utf-8"),
+                                                     _c.byref(e)):
+                    return None
+                return Entity._from_c(node, e)
+            finally:
+                node._lib.rant_node_unlock(h)
 
     @property
     def epoch(self):
         """Bumps whenever the folded mesh view changed, so a tool knows when to walk again."""
-        return self._node._lib.rant_node_mesh_epoch(self._node._h)
+        with self._node._gate.use(self._node._h) as h:
+            return self._node._lib.rant_node_mesh_epoch(h)
 
     def _meta_function(self):
         # the local @rant/meta caller handle, None when meta is disabled
-        h = self._node._lib.rant_node_meta_function(self._node._h)
+        with self._node._gate.use(self._node._h) as nh:
+            h = self._node._lib.rant_node_meta_function(nh) if nh else None
         return RemoteFunction._from_handle(self._node, h) if h else None
 
     def meta(self, peer, sections=MetaSection.ALL, timeout=1.0):
@@ -2359,12 +2559,13 @@ class Reflection:
 class Request:
     """A function call as seen by the definition's two argument handler: the request metadata
         plus the reply surface, valid only while the handler runs (docs/python.md)."""
-    __slots__ = ("_ptr", "_fn", "_rsp_schema", "_done",
+    __slots__ = ("_ptr", "_fn", "_gate", "_rsp_schema", "_done",
                  "data", "caller", "caller_name", "function_name", "recv_us", "written_us")
 
-    def __init__(self, ptr, fn, rsp_schema, r, data):
+    def __init__(self, ptr, fn, gate, rsp_schema, r, data):
         self._ptr = ptr           # the exact native pointer, dropped at expiry
         self._fn = fn
+        self._gate = gate
         self._rsp_schema = rsp_schema
         self._done = False
         self.data = data
@@ -2406,7 +2607,7 @@ class Request:
         if not token:
             raise RuntimeError("defer failed")
         self._done = True
-        return Deferred(self._fn, self._rsp_schema, token)
+        return Deferred(self._fn, self._gate, self._rsp_schema, token)
 
     def _expire(self):
         self._ptr = None
@@ -2422,10 +2623,11 @@ class Request:
 class Deferred:
     """A parked function reply from Request.defer: complete or fail exactly once, from any
         thread. Dropping it leaves the caller to its timeout."""
-    __slots__ = ("_fn", "_rsp_schema", "_token", "_lock")
+    __slots__ = ("_fn", "_gate", "_rsp_schema", "_token", "_lock")
 
-    def __init__(self, fn, rsp_schema, token):
+    def __init__(self, fn, gate, rsp_schema, token):
         self._fn = fn
+        self._gate = gate
         self._rsp_schema = rsp_schema
         self._token = token
         self._lock = _threading.Lock()
@@ -2434,8 +2636,8 @@ class Deferred:
 
     @property
     def valid(self):
-        """False once completed."""
-        return self._token != 0
+        """False once completed, and once the node closed."""
+        return self._token != 0 and not self._gate.closing
 
     def complete(self, rsp=None, message=None):
         """Answer CallStatus.OK with rsp. True if the completion was accepted. message is
@@ -2451,9 +2653,12 @@ class Deferred:
             token, self._token = self._token, 0
         if not token:
             return False
-        b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
-        r = _c.load().rant_function_complete(self._fn, token, int(status),
-                                           message.encode("utf-8") if message else None, b)
+        with self._gate.use(self._fn) as fn:
+            if not fn:
+                return False
+            b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
+            r = _c.load().rant_function_complete(fn, token, int(status),
+                                               message.encode("utf-8") if message else None, b)
         del buf
         return r == 0
 
@@ -2540,29 +2745,33 @@ def _progress_cb(on_progress, prg_schema, node, name):
         must stay alive until the call's terminal outcome."""
     arity = _arity(on_progress)
 
+    def deliver(prg_ptr):
+        p = prg_ptr.contents
+        data = _c.string_at(p.data.data, p.data.len) if p.data.data and p.data.len else b""
+        if not data:
+            val = None       # the RUNNING ack
+        else:
+            val, ok = _decode_payload(p.schema, prg_schema, data)
+            if not ok:
+                node._report_decode(name, "a progress update did not decode into its type")
+                return
+        if arity == 1:
+            on_progress(val)
+        else:
+            info = Progress()
+            info.value = val
+            info.data = data
+            info.call_id = p.call_id
+            info.provider = p.provider
+            info.written_us = p.written_us
+            info.recv_us = p.recv_us
+            on_progress(val, info)
+
     @_c.PrgFn
     def cb(prg_ptr):
         try:
-            p = prg_ptr.contents
-            data = _c.string_at(p.data.data, p.data.len) if p.data.data and p.data.len else b""
-            if not data:
-                val = None       # the RUNNING ack
-            else:
-                val, ok = _decode_payload(p.schema, prg_schema, data)
-                if not ok:
-                    node._report_decode(name, "a progress update did not decode into its type")
-                    return
-            if arity == 1:
-                on_progress(val)
-            else:
-                info = Progress()
-                info.value = val
-                info.data = data
-                info.call_id = p.call_id
-                info.provider = p.provider
-                info.written_us = p.written_us
-                info.recv_us = p.recv_us
-                on_progress(val, info)
+            with node._gate.running():
+                deliver(prg_ptr)
         except Exception:
             _traceback.print_exc()
     return cb
@@ -2570,10 +2779,11 @@ def _progress_cb(on_progress, prg_schema, node, name):
 
 class _FnBox:
     """Handler side state for one function definition, alive until node close."""
-    __slots__ = ("fn", "handler", "arity", "req_schema", "rsp_schema")
+    __slots__ = ("fn", "gate", "handler", "arity", "req_schema", "rsp_schema")
 
-    def __init__(self, handler, req_schema, rsp_schema):
+    def __init__(self, gate, handler, req_schema, rsp_schema):
         self.fn = None            # set right after create (no callback before poll)
+        self.gate = gate          # the node's, never the node, which the registry must not hold
         self.handler = handler
         self.arity = _arity(handler)
         self.req_schema = req_schema
@@ -2582,7 +2792,7 @@ class _FnBox:
     def dispatch(self, req_ptr):
         r = req_ptr.contents
         data = _c.string_at(r.data.data, r.data.len) if r.data.data and r.data.len else b""
-        request = Request(req_ptr, self.fn, self.rsp_schema, r, data)
+        request = Request(req_ptr, self.fn, self.gate, self.rsp_schema, r, data)
         try:
             val, ok = _decode_payload(r.schema, self.req_schema, data)
             if not ok:
@@ -2611,11 +2821,12 @@ class TaskContext:
     """What a task handler works through, on its own worker thread: stream progress, observe
         cancellation and read who called. Returning completes OK, raising CancelledError
         completes CANCELLED, any other exception APP_ERROR."""
-    __slots__ = ("_fn", "_prg_schema", "_token", "cancel_event",
+    __slots__ = ("_fn", "_gate", "_prg_schema", "_token", "cancel_event",
                  "caller", "caller_name", "function_name", "recv_us", "written_us")
 
-    def __init__(self, fn, prg_schema, token, r):
+    def __init__(self, fn, gate, prg_schema, token, r):
         self._fn = fn
+        self._gate = gate
         self._prg_schema = prg_schema
         self._token = token
         self.cancel_event = _threading.Event()   # set the moment a cancel arrives
@@ -2630,8 +2841,11 @@ class TaskContext:
     def progress(self, value=None):
         """Broadcast a progress update, encoded via the progress schema. Returns a SendStatus,
                 STATE once the call completed."""
-        b, buf = _c_view(_payload_bytes(self._prg_schema, value))
-        r = _c.load().rant_function_progress(self._fn, self._token, b)
+        with self._gate.use(self._fn) as fn:
+            if not fn:
+                return SendStatus.STATE
+            b, buf = _c_view(_payload_bytes(self._prg_schema, value))
+            r = _c.load().rant_function_progress(fn, self._token, b)
         del buf
         return _send_status(r)
 
@@ -2641,7 +2855,9 @@ class TaskContext:
                 CancelledError, or run to completion. cancel_event is the same signal."""
         if self.cancel_event.is_set():
             return True
-        if _c.load().rant_function_cancelled(self._fn, self._token) == 1:
+        with self._gate.use(self._fn) as fn:
+            hit = bool(fn) and _c.load().rant_function_cancelled(fn, self._token) == 1
+        if hit:
             self.cancel_event.set()   # backstop: a cancel that beat the C slot
             return True
         return False
@@ -2650,11 +2866,12 @@ class TaskContext:
 class _TaskBox:
     """Definition side state for one task, alive until node close. The C callback on the poll
         thread defers and spawns a daemon worker per call, and on_cancel fans out to Events."""
-    __slots__ = ("fn", "handler", "arity", "req_schema", "prg_schema", "rsp_schema",
+    __slots__ = ("fn", "gate", "handler", "arity", "req_schema", "prg_schema", "rsp_schema",
                  "cancel_events", "lock")
 
-    def __init__(self, handler, req_schema, prg_schema, rsp_schema):
+    def __init__(self, gate, handler, req_schema, prg_schema, rsp_schema):
         self.fn = None            # set right after create (no callback before poll)
+        self.gate = gate          # the node's, never the node, which the registry must not hold
         self.handler = handler
         self.arity = _arity(handler)
         self.req_schema = req_schema
@@ -2675,7 +2892,7 @@ class _TaskBox:
         if not token:
             lib.rant_request_fail(req_ptr, b"defer failed", _c.RantBytes())
             return
-        ctx = TaskContext(self.fn, self.prg_schema, token, r)
+        ctx = TaskContext(self.fn, self.gate, self.prg_schema, token, r)
         with self.lock:
             self.cancel_events[token] = ctx.cancel_event
         _threading.Thread(target=self._run, args=(val, ctx), daemon=True).start()
@@ -2706,8 +2923,10 @@ class _TaskBox:
         b, buf = _c_view(payload)
         # a stale token (the definition closed or the node closed mid run) returns STATE:
         # swallowed, the caller already got its one CANCELLED outcome
-        _c.load().rant_function_complete(self.fn, ctx._token, int(status),
-                                       message.encode("utf-8") if message else None, b)
+        with self.gate.use(self.fn) as fn:
+            if fn:
+                _c.load().rant_function_complete(fn, ctx._token, int(status),
+                                               message.encode("utf-8") if message else None, b)
         del buf
 
 
@@ -2787,44 +3006,43 @@ class _Function:
     def name(self):
         return self._name
 
-    def _ptr(self):
-        # NULL once the node is closed, so the C answers NO_TOPIC instead of touching freed memory
-        return self._fn if self._node._h else None
+    def _use(self):
+        # a pass on the node and the native function, None once closed or the node closed, so
+        # the C answers NO_TOPIC instead of touching freed memory
+        return self._node._gate.use(self._fn)
 
     @property
     def match_count(self):
         """Handles matched on the other side: callers on a definition, definitions on a remote."""
-        return self._node._lib.rant_function_match_count(self._ptr())
+        with self._use() as fn:
+            return self._node._lib.rant_function_match_count(fn)
 
     @property
     def request_schema(self):
         """The request schema in use now, None when untyped. A reflect_from_mesh handle
                 reports what it adopted."""
-        p = self._ptr()
-        return _current_schema(p and self._node._lib.rant_function_request_schema(p), self._req_schema)
+        return _current_schema(self._node, self._fn, self._node._lib.rant_function_request_schema,
+                               self._req_schema)
 
     @property
     def response_schema(self):
         """The response schema in use now, as request_schema."""
-        p = self._ptr()
-        return _current_schema(p and self._node._lib.rant_function_response_schema(p), self._rsp_schema)
+        return _current_schema(self._node, self._fn, self._node._lib.rant_function_response_schema,
+                               self._rsp_schema)
 
     def refresh(self):
         """A reflect_from_mesh handle: re type in place when the mesh moved. True when it was
                 re typed (docs/reflection.md)."""
-        p = self._ptr()
-        return p is not None and self._node._lib.rant_function_refresh(p) == 1
+        with self._use() as fn:
+            return fn is not None and self._node._lib.rant_function_refresh(fn) == 1
 
     def close(self):
         """Retire the handle: park its channels and release the name, and every outstanding
                 call completes CANCELLED. Returns True, or False when refused from a callback,
                 where the handle stays live. A closed handle answers NO_TOPIC."""
-        p = self._ptr()
-        if p is None:
-            self._fn = None
-            return True
-        if self._node._lib.rant_function_retire(p) != 0:
-            return False
+        with self._use() as fn:
+            if fn is not None and self._node._lib.rant_function_retire(fn) != 0:
+                return False
         self._fn = None
         return True
 
@@ -2848,13 +3066,14 @@ class FunctionDefinition(_Function):
         if handler is None:
             raise ValueError("function_definition(%r): a definition needs a handler" % name)
         co = _function_opts(node, **opts)
-        box = _FnBox(handler, self._req_schema, self._rsp_schema)
+        box = _FnBox(node._gate, handler, self._req_schema, self._rsp_schema)
         box_id = _pbox_add(box)
-        h = node._lib.rant_node_create_function_definition(
-            node._h, name.encode("utf-8"),
-            self._req_schema._s if self._req_schema else None,
-            self._rsp_schema._s if self._rsp_schema else None,
-            _on_request, _c.c_void_p(box_id), _c.byref(co))
+        with node._gate.use(node._h) as nh:
+            h = nh and node._lib.rant_node_create_function_definition(
+                nh, name.encode("utf-8"),
+                self._req_schema._s if self._req_schema else None,
+                self._rsp_schema._s if self._rsp_schema else None,
+                _on_request, _c.c_void_p(box_id), _c.byref(co))
         if not h:
             _pbox_pop(box_id)
             err = node.last_error
@@ -2876,10 +3095,11 @@ class RemoteFunction(_Function):
         self._req_schema = _as_schema(node, req_schema)
         self._rsp_schema = _as_schema(node, rsp_schema)
         co = _function_opts(node, **opts)
-        h = node._lib.rant_node_create_remote_function(
-            node._h, name.encode("utf-8"),
-            self._req_schema._s if self._req_schema else None,
-            self._rsp_schema._s if self._rsp_schema else None, _c.byref(co))
+        with node._gate.use(node._h) as nh:
+            h = nh and node._lib.rant_node_create_remote_function(
+                nh, name.encode("utf-8"),
+                self._req_schema._s if self._req_schema else None,
+                self._rsp_schema._s if self._rsp_schema else None, _c.byref(co))
         if not h:
             err = node.last_error
             raise Error("remote_function(%r) failed: %s" % (name, err), err)
@@ -2904,19 +3124,24 @@ class RemoteFunction(_Function):
                 the service thread's progress, or driving a MANUAL node's loop. Refused from a
                 callback. Never raises. provider directs it at one definition by peer id, 0 =
                 undirected, first answer wins."""
-        b, buf = _c_view(_payload_bytes(self._req_schema, req))
         out = _c.RantResponse()
         co = _c.RantCallOpts(int(provider)) if provider else None
-        rc = self._node._lib.rant_function_call(self._ptr(), b, _c.byref(out), _ms(timeout),
-                                                _c.cast(_c.byref(co), _c.c_void_p) if co else None)
-        del buf
-        if rc == 1:
-            return Response._from_c(out, self._rsp_schema)
         r = Response()
-        if rc < 0:
-            r.send_status = _send_status(rc)   # never launched: message stays ""
-        else:
-            r.message = _dstr(out.message)     # timed out: the C fills "timeout"
+        # held through the copy of the outcome, which points into the node
+        with self._use() as fn:
+            if not fn:
+                r.send_status = SendStatus.NO_TOPIC
+                return r
+            b, buf = _c_view(_payload_bytes(self._req_schema, req))
+            rc = self._node._lib.rant_function_call(fn, b, _c.byref(out), _ms(timeout),
+                                                    _c.cast(_c.byref(co), _c.c_void_p) if co else None)
+            del buf
+            if rc == 1:
+                return Response._from_c(out, self._rsp_schema)
+            if rc < 0:
+                r.send_status = _send_status(rc)   # never launched: message stays ""
+            else:
+                r.message = _dstr(out.message)     # timed out: the C fills "timeout"
         return r
 
     def call_async(self, req, on_response, provider=0):
@@ -2928,11 +3153,12 @@ class RemoteFunction(_Function):
         box_id = _pbox_add(box)
         box.id = box_id
         self._node._register_async(box_id)
-        b, buf = _c_view(_payload_bytes(self._req_schema, req))
         co = _c.RantCallOpts(int(provider)) if provider else None
-        rc = self._node._lib.rant_function_call_async(self._ptr(), b, _on_response,
-                                                      _c.c_void_p(box_id),
-                                                      _c.cast(_c.byref(co), _c.c_void_p) if co else None)
+        with self._use() as fn:
+            b, buf = _c_view(_payload_bytes(self._req_schema, req) if fn else b"")
+            rc = self._node._lib.rant_function_call_async(fn, b, _on_response,
+                                                          _c.c_void_p(box_id),
+                                                          _c.cast(_c.byref(co), _c.c_void_p) if co else None)
         del buf
         st = _send_status(rc)
         if rc != 0:
@@ -2955,8 +3181,8 @@ class TaskDefinition(_Function):
     @property
     def progress_schema(self):
         """The progress schema in use now, as request_schema."""
-        p = self._ptr()
-        return _current_schema(p and self._node._lib.rant_function_progress_schema(p), self._prg_schema)
+        return _current_schema(self._node, self._fn, self._node._lib.rant_function_progress_schema,
+                               self._prg_schema)
 
     def __init__(self, node, name, handler, req_schema=None, prg_schema=None,
                  rsp_schema=None, **opts):
@@ -2968,14 +3194,18 @@ class TaskDefinition(_Function):
         if handler is None:
             raise ValueError("task_definition(%r): a definition needs a handler" % name)
         co = _task_opts(node, **opts)
-        box = _TaskBox(handler, self._req_schema, self._prg_schema, self._rsp_schema)
+        box = _TaskBox(node._gate, handler, self._req_schema, self._prg_schema, self._rsp_schema)
         box_id = _pbox_add(box)
-        h = node._lib.rant_node_create_task_definition(
-            node._h, name.encode("utf-8"),
-            self._req_schema._s if self._req_schema else None,
-            self._prg_schema._s if self._prg_schema else None,
-            self._rsp_schema._s if self._rsp_schema else None,
-            _on_request, _c.c_void_p(box_id), _c.byref(co))
+        with node._gate.use(node._h) as nh:
+            h = nh and node._lib.rant_node_create_task_definition(
+                nh, name.encode("utf-8"),
+                self._req_schema._s if self._req_schema else None,
+                self._prg_schema._s if self._prg_schema else None,
+                self._rsp_schema._s if self._rsp_schema else None,
+                _on_request, _c.c_void_p(box_id), _c.byref(co))
+            if h:
+                # the one C cancel slot: fans out to the per call cancel Events
+                node._lib.rant_function_on_cancel(h, _on_task_cancel, _c.c_void_p(box_id))
         if not h:
             _pbox_pop(box_id)
             err = node.last_error
@@ -2983,8 +3213,6 @@ class TaskDefinition(_Function):
         self._fn = h
         box.fn = h
         node._register_box(box_id)
-        # the one C cancel slot: fans out to the per call cancel Events
-        node._lib.rant_function_on_cancel(h, _on_task_cancel, _c.c_void_p(box_id))
 
     __class_getitem__ = classmethod(_generic)
 
@@ -2998,8 +3226,8 @@ class RemoteTask(_Function):
     @property
     def progress_schema(self):
         """The progress schema in use now, as request_schema."""
-        p = self._ptr()
-        return _current_schema(p and self._node._lib.rant_function_progress_schema(p), self._prg_schema)
+        return _current_schema(self._node, self._fn, self._node._lib.rant_function_progress_schema,
+                               self._prg_schema)
 
     def __init__(self, node, name, req_schema=None, prg_schema=None, rsp_schema=None,
                  *, progress_best_effort=False, progress_keep_last=0, timeout=0.0,
@@ -3013,11 +3241,12 @@ class RemoteTask(_Function):
                         progress_keep_last=progress_keep_last, timeout=timeout,
                         backpressure_wait=backpressure_wait, keep_last=keep_last,
                         reflect_from_mesh=reflect_from_mesh, queue=queue)
-        h = node._lib.rant_node_create_remote_task(
-            node._h, name.encode("utf-8"),
-            self._req_schema._s if self._req_schema else None,
-            self._prg_schema._s if self._prg_schema else None,
-            self._rsp_schema._s if self._rsp_schema else None, _c.byref(co))
+        with node._gate.use(node._h) as nh:
+            h = nh and node._lib.rant_node_create_remote_task(
+                nh, name.encode("utf-8"),
+                self._req_schema._s if self._req_schema else None,
+                self._prg_schema._s if self._prg_schema else None,
+                self._rsp_schema._s if self._rsp_schema else None, _c.byref(co))
         if not h:
             err = node.last_error
             raise Error("remote_task(%r) failed: %s" % (name, err), err)
@@ -3030,7 +3259,6 @@ class RemoteTask(_Function):
                 or driving a MANUAL node's loop. on_progress fires where the node's callbacks
                 run, so on this thread only under MANUAL. Refused from a callback. Never
                 raises."""
-        b, buf = _c_view(_payload_bytes(self._req_schema, req))
         out = _c.RantResponse()
         co = _c.RantCallOpts()
         co.provider = int(provider)
@@ -3039,16 +3267,22 @@ class RemoteTask(_Function):
             # fires only inside rant_function_call, so the local ref holds it
             keep_cb = _progress_cb(on_progress, self._prg_schema, self._node, self._name)
             co.on_progress = keep_cb
-        rc = self._node._lib.rant_function_call(self._ptr(), b, _c.byref(out), _ms(timeout),
-                                                _c.cast(_c.byref(co), _c.c_void_p))
-        del buf, keep_cb
-        if rc == 1:
-            return Response._from_c(out, self._rsp_schema)
         r = Response()
-        if rc < 0:
-            r.send_status = _send_status(rc)   # never launched: message stays ""
-        else:
-            r.message = _dstr(out.message)     # timed out: the C fills "timeout"
+        # held through the copy of the outcome, which points into the node
+        with self._use() as fn:
+            if not fn:
+                r.send_status = SendStatus.NO_TOPIC
+                return r
+            b, buf = _c_view(_payload_bytes(self._req_schema, req))
+            rc = self._node._lib.rant_function_call(fn, b, _c.byref(out), _ms(timeout),
+                                                    _c.cast(_c.byref(co), _c.c_void_p))
+            del buf, keep_cb
+            if rc == 1:
+                return Response._from_c(out, self._rsp_schema)
+            if rc < 0:
+                r.send_status = _send_status(rc)   # never launched: message stays ""
+            else:
+                r.message = _dstr(out.message)     # timed out: the C fills "timeout"
         return r
 
     def call_async(self, req, on_response, on_progress=None, provider=0):
@@ -3060,7 +3294,6 @@ class RemoteTask(_Function):
         box_id = _pbox_add(box)
         box.id = box_id
         self._node._register_async(box_id)
-        b, buf = _c_view(_payload_bytes(self._req_schema, req))
         call_id = _c.c_uint32(0)
         co = _c.RantCallOpts()
         co.provider = int(provider)
@@ -3068,9 +3301,11 @@ class RemoteTask(_Function):
         if on_progress is not None:
             box.progress_cb = _progress_cb(on_progress, self._prg_schema, self._node, self._name)
             co.on_progress = box.progress_cb
-        rc = self._node._lib.rant_function_call_async(self._ptr(), b, _on_response,
-                                                      _c.c_void_p(box_id),
-                                                      _c.cast(_c.byref(co), _c.c_void_p))
+        with self._use() as fn:
+            b, buf = _c_view(_payload_bytes(self._req_schema, req) if fn else b"")
+            rc = self._node._lib.rant_function_call_async(fn, b, _on_response,
+                                                          _c.c_void_p(box_id),
+                                                          _c.cast(_c.byref(co), _c.c_void_p))
         del buf
         if rc != 0:
             _pbox_pop(box_id)
@@ -3087,8 +3322,8 @@ class RemoteTask(_Function):
     def cancel(self, call_id):
         """Request cancellation of the call. Cooperative and never acked, the terminal status
                 answers. BAD_ROLE when the provider declared no_cancel, STATE when not pending."""
-        return _send_status(self._node._lib.rant_function_cancel(self._ptr(),
-                                                                 int(call_id)))
+        with self._use() as fn:
+            return _send_status(self._node._lib.rant_function_cancel(fn, int(call_id)))
 
 
 class Variable:
@@ -3103,7 +3338,8 @@ class Variable:
         sch = self._schema = _as_schema(node, schema)
         create = (node._lib.rant_node_create_remote_variable if remote
                   else node._lib.rant_node_create_variable_definition)
-        h = create(node._h, name.encode("utf-8"), sch._s if sch else None, _c.byref(co))
+        with node._gate.use(node._h) as nh:
+            h = nh and create(nh, name.encode("utf-8"), sch._s if sch else None, _c.byref(co))
         if not h:
             err = node.last_error
             raise Error("%s(%r) failed: %s" % ("remote_variable" if remote
@@ -3118,30 +3354,33 @@ class Variable:
     def schema(self):
         """The schema in use now, None when untyped. A reflect_from_mesh variable reports
                 what it adopted."""
-        p = self._ptr()
-        return _current_schema(p and self._node._lib.rant_variable_schema(p), self._schema)
+        return _current_schema(self._node, self._var, self._node._lib.rant_variable_schema,
+                               self._schema)
 
-    def _ptr(self):
-        # NULL once the node is closed, so the C answers NO_TOPIC instead of touching freed memory
-        return self._var if self._node._h else None
+    def _use(self):
+        # a pass on the node and the native variable, None once closed or the node closed, so
+        # the C answers NO_TOPIC instead of touching freed memory
+        return self._node._gate.use(self._var)
 
     def get(self):
         """The current value, the store or the cached latest, copied out under the node lock.
                 None when no value exists yet."""
-        lib = self._node._lib
-        if not self._node._h:
-            return None
-        lib.rant_node_lock(self._node._h)
-        try:
-            b = _c.RantBytes()
-            if lib.rant_variable_get(self._ptr(), _c.byref(b)) != 1:
+        node = self._node
+        lib = node._lib
+        with node._gate.use(node._h) as nh, self._use() as v:
+            if not nh or not v:
                 return None
-            data = _c.string_at(b.data, b.len) if b.data and b.len else b""
-        finally:
-            lib.rant_node_unlock(self._node._h)
-        if self._schema is None:
-            return data
-        val, ok = _decode_payload(None, self._schema, data)
+            lib.rant_node_lock(nh)
+            try:
+                b = _c.RantBytes()
+                if lib.rant_variable_get(v, _c.byref(b)) != 1:
+                    return None
+                data = _c.string_at(b.data, b.len) if b.data and b.len else b""
+            finally:
+                lib.rant_node_unlock(nh)
+            if self._schema is None:
+                return data
+            val, ok = _decode_payload(None, self._schema, data)
         if not ok:
             raise SchemaError("variable %r: the value did not decode into its type" % self._name)
         return val
@@ -3149,8 +3388,11 @@ class Variable:
     def set(self, value):
         """Set the value: apply and publish, or send over the set channel. NO_TOPIC = no owner
                 matched, BAD_ROLE = the owner advertises no set channel."""
-        b, buf = _c_view(_payload_bytes(self._schema, value))
-        r = self._node._lib.rant_variable_set(self._ptr(), b)
+        with self._use() as v:
+            if not v:
+                return SendStatus.NO_TOPIC
+            b, buf = _c_view(_payload_bytes(self._schema, value))
+            r = self._node._lib.rant_variable_set(v, b)
         del buf
         return _send_status(r)
 
@@ -3158,29 +3400,36 @@ class Variable:
         """Force the value: sets are absorbed into the shadow source until unforce restores the
                 latest absorbed set. Needs allow_force on the definition: STATE on the owner
                 without it, BAD_ROLE on a remote whose owner advertises none."""
-        b, buf = _c_view(_payload_bytes(self._schema, value))
-        r = self._node._lib.rant_variable_force(self._ptr(), b)
+        with self._use() as v:
+            if not v:
+                return SendStatus.NO_TOPIC
+            b, buf = _c_view(_payload_bytes(self._schema, value))
+            r = self._node._lib.rant_variable_force(v, b)
         del buf
         return _send_status(r)
 
     def unforce(self):
-        return _send_status(self._node._lib.rant_variable_unforce(self._ptr()))
+        with self._use() as v:
+            return _send_status(self._node._lib.rant_variable_unforce(v))
 
     @property
     def forced(self):
         """True while forced: authoritative on the definition, the last received flag on a
                 remote."""
-        return self._node._lib.rant_variable_forced(self._ptr()) == 1
+        with self._use() as v:
+            return self._node._lib.rant_variable_forced(v) == 1
 
     def wait(self, timeout):
         """Block until a value exists or timeout seconds elapse, on the service thread's
                 progress, or driving a MANUAL node's loop. Refused from a callback."""
-        return self._node._lib.rant_variable_wait(self._ptr(), _ms(timeout)) == 1
+        wait = self._node._lib.rant_variable_wait
+        return self._node._gate.wait_sliced(_ms(timeout), 0, self._var, wait) == 1
 
     @property
     def match_count(self):
         """The other side currently matched: remotes on a definition, owners on a remote."""
-        return self._node._lib.rant_variable_match_count(self._ptr())
+        with self._use() as v:
+            return self._node._lib.rant_variable_match_count(v)
 
     def on_change(self, handler):
         """Observe changes: fires on every state change and replays the current value at
@@ -3198,28 +3447,27 @@ class Variable:
         lib = self._node._lib
         reg = lib.rant_variable_on_change if change else lib.rant_variable_on_write
         if handler is None:
-            reg(self._ptr(), _c.NULL_VAR_FN, None)
+            with self._use() as v:
+                reg(v, _c.NULL_VAR_FN, None)
             return None
         box_id = _pbox_add(_VarBox(handler, self._schema, self._node, self._name))
         self._node._register_box(box_id)
-        reg(self._ptr(), _on_var_update, _c.c_void_p(box_id))
+        with self._use() as v:
+            reg(v, _on_var_update, _c.c_void_p(box_id))
         return handler
 
     def refresh(self):
         """A reflect_from_mesh handle: re type in place when the mesh moved. True when it was
                 re typed (docs/reflection.md)."""
-        p = self._ptr()
-        return p is not None and self._node._lib.rant_variable_refresh(p) == 1
+        with self._use() as v:
+            return v is not None and self._node._lib.rant_variable_refresh(v) == 1
 
     def close(self):
         """Retire the handle: park its channels and release the name for a successor. Returns
                 True, or False when refused from a callback, where the handle stays live."""
-        p = self._ptr()
-        if p is None:
-            self._var = None
-            return True
-        if self._node._lib.rant_variable_retire(p) != 0:
-            return False
+        with self._use() as v:
+            if v is not None and self._node._lib.rant_variable_retire(v) != 0:
+                return False
         self._var = None
         return True
 
@@ -3293,8 +3541,7 @@ class Publisher:
     def schema(self):
         """The schema in use now, None when untyped. A reflect_from_mesh topic reports what
                 it adopted."""
-        p = self._topic._ptr()
-        return _current_schema(p and self._topic._node._lib.rant_topic_schema(p), self._topic._schema)
+        return self._topic.schema()
 
     def send(self, value, capture_us=0):
         """Publish one message to every matched subscriber: a typed value, a mapping, or
@@ -3305,13 +3552,13 @@ class Publisher:
     @property
     def match_count(self):
         """Subscribers currently matched."""
-        return self._topic._node._lib.rant_topic_match_count(self._topic._ptr())
+        return self._topic.match_count()
 
     @property
     def ready(self):
         """True when a send would not wait on the match wait: a subscriber is matched, or
                 matching has converged. For a GUI: park payloads while False."""
-        return self._topic._node._lib.rant_topic_ready(self._topic._ptr()) == 1
+        return self._topic.ready()
 
     @property
     def counts(self):
@@ -3321,7 +3568,7 @@ class Publisher:
     def drain(self, timeout):
         """Pump until every subscriber has acked, or timeout seconds. Call before close so a
                 burst is not cut by the bye. Refused from a callback."""
-        return self._topic._node._lib.rant_topic_drain(self._topic._ptr(), _ms(timeout)) == 1
+        return self._topic.drain(timeout)
 
     def refresh(self):
         """A reflect_from_mesh topic: re read the mesh and re type in place when the provider
@@ -3374,8 +3621,7 @@ class Subscriber:
     def schema(self):
         """The schema in use now, None when untyped. A reflect_from_mesh topic reports what
                 it adopted."""
-        p = self._topic._ptr()
-        return _current_schema(p and self._topic._node._lib.rant_topic_schema(p), self._topic._schema)
+        return self._topic.schema()
 
     @property
     def counts(self):
@@ -3418,7 +3664,7 @@ class Subscriber:
                 or False when refused from a callback, where the handle stays live."""
         if not self._topic._open:
             return True
-        index = self._topic.index if self._fn is not None and self._topic._ptr() else None
+        index = self._topic.index if self._fn is not None else None
         if not self._topic.close():
             return False
         if index is not None:
@@ -3463,8 +3709,9 @@ def _on_message(msg_ptr):
             if msg._undecoded:
                 node._report_decode(msg.topic_name, "a message did not decode into the subscriber's type")
                 return
-            for fn in list(handlers):
-                fn(msg)
+            with node._gate.running():
+                for fn in list(handlers):
+                    fn(msg)
     except Exception:
         _traceback.print_exc()
 
@@ -3475,7 +3722,8 @@ def _on_event(ev_ptr):
         e = ev_ptr.contents
         node = _NODES.get(e.user)
         if node is not None:
-            (node._on_evt or node._print_event)(Event._from_c(e))
+            with node._gate.running():
+                (node._on_evt or node._print_event)(Event._from_c(e))
     except Exception:
         _traceback.print_exc()
 
@@ -3511,7 +3759,8 @@ def _on_request(req_ptr, user):
     try:
         box = _pbox_get(user)
         if box is not None:
-            box.dispatch(req_ptr)
+            with box.gate.running():
+                box.dispatch(req_ptr)
     except Exception:
         _traceback.print_exc()
 
@@ -3521,7 +3770,8 @@ def _on_task_cancel(token, user):
     try:
         box = _pbox_get(user)
         if box is not None:
-            box.cancel(token)
+            with box.gate.running():
+                box.cancel(token)
     except Exception:
         _traceback.print_exc()
 
@@ -3536,7 +3786,8 @@ def _on_response(rsp_ptr):
         box.node._drop_async(box.id)
         resp = Response._from_c(o, box.rsp_schema)
         try:
-            box.on_response(resp)
+            with box.node._gate.running():
+                box.on_response(resp)
         except Exception:
             _traceback.print_exc()
     except Exception:
@@ -3549,28 +3800,32 @@ def _on_var_update(upd_ptr, user):
         box = _pbox_get(user)
         if box is None:
             return
-        u = upd_ptr.contents
-        data = _c.string_at(u.value.data, u.value.len) if u.value.data and u.value.len else b""
-        val, ok = _decode_payload(u.schema, box.schema, data)
-        if not ok:
-            box.node._report_decode(box.name, "a variable update did not decode into its type")
-            return
-        if box.arity == 1:
-            box.handler(val)
-        else:
-            upd = VariableUpdate()
-            upd.name = _c.string_at(u.name.data, u.name.len).decode("utf-8", "replace") \
-                       if u.name.data and u.name.len else ""
-            upd.data = data
-            upd.value = val
-            upd.forced = u.forced != 0
-            upd.write_seq = u.write_seq
-            upd.source = u.source
-            upd.recv_us = u.recv_us
-            upd.written_us = u.written_us
-            box.handler(val, upd)
+        with box.node._gate.running():
+            _var_update(box, upd_ptr.contents)
     except Exception:
         _traceback.print_exc()
+
+
+def _var_update(box, u):
+    data = _c.string_at(u.value.data, u.value.len) if u.value.data and u.value.len else b""
+    val, ok = _decode_payload(u.schema, box.schema, data)
+    if not ok:
+        box.node._report_decode(box.name, "a variable update did not decode into its type")
+        return
+    if box.arity == 1:
+        box.handler(val)
+    else:
+        upd = VariableUpdate()
+        upd.name = _c.string_at(u.name.data, u.name.len).decode("utf-8", "replace") \
+                   if u.name.data and u.name.len else ""
+        upd.data = data
+        upd.value = val
+        upd.forced = u.forced != 0
+        upd.write_seq = u.write_seq
+        upd.source = u.source
+        upd.recv_us = u.recv_us
+        upd.written_us = u.written_us
+        box.handler(val, upd)
 
 
 from . import types   # noqa: E402  the standard type roster, rant.types.*
