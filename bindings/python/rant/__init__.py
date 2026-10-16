@@ -770,6 +770,14 @@ class _Gate:
             while self._active:
                 self._cv.wait(_SLICE_MS / 1000.0)
 
+    def try_close(self):
+        """Refuse new passes when none is out, without waiting. False leaves it open."""
+        with self._cv:
+            if self._active:
+                return False
+            self._closing = True
+            return True
+
     def reopen(self):
         """The C refused the close, so the node stays open."""
         with self._cv:
@@ -830,6 +838,70 @@ class _Running:
 
     def __exit__(self, *exc):
         _RUNNING.gates.pop()
+
+
+class _HandleState:
+    """A pattern handle's pointer plus its own gate. Retire assumes no call is inside the
+        handle, as node close does, so every call holds a pass and close waits for them."""
+    __slots__ = ("raw", "_gate", "_lock")
+
+    def __init__(self, raw):
+        self.raw = raw            # None once retired
+        self._gate = _Gate()
+        self._lock = _threading.Lock()
+
+    def use(self, node_gate):
+        """A pass on the node and this handle: the with block gets the pointer, or None once
+            either closed."""
+        return _HandlePass(node_gate, self)
+
+    def close(self, node_gate, retire):
+        """Retires the handle once the calls on it are out. Inside one of the node's callbacks
+            it never waits, as that callback's caller may hold a pass: False while one is out."""
+        if self.raw is None:
+            return True
+        with node_gate.use(True) as live:
+            if not live:
+                self.raw = None   # freed with the node
+                return True
+            if not node_gate.is_running():
+                self._gate.close()
+            elif not self._gate.try_close():
+                return False
+            with self._lock:      # one close retires
+                raw, self.raw = self.raw, None
+            if raw is None:
+                return True
+            if retire(raw) != 0:
+                self.raw = raw
+                self._gate.reopen()
+                return False
+            return True
+
+
+class _HandlePass:
+    """One call's hold on a node and one of its pattern handles, from _HandleState.use."""
+    __slots__ = ("_node", "_st", "_held")
+
+    def __init__(self, node_gate, st):
+        self._node = node_gate
+        self._st = st
+        self._held = 0
+
+    def __enter__(self):
+        if not self._node.enter():
+            return None
+        self._held = 1
+        if not self._st._gate.enter():
+            return None
+        self._held = 2
+        return self._st.raw
+
+    def __exit__(self, *exc):
+        if self._held == 2:
+            self._st._gate.leave()
+        if self._held:
+            self._node.leave()
 
 
 def _compile_dsl(node, text):
@@ -1783,10 +1855,10 @@ class Entity:
                    progress_schema_hash=e.progress_schema_hash, generation=e.generation)
 
 
-def _current_schema(node, handle, read, local):
+def _current_schema(node, st, read, local):
     # the schema a handle uses now, read under a pass: its own, keeping its class, or the one
     # it adopted. None once closed
-    with node._gate.use(handle) as h:
+    with st.use(node._gate) as h:
         ptr = read(h) if h else None
     if not ptr:
         return None
@@ -2559,12 +2631,12 @@ class Reflection:
 class Request:
     """A function call as seen by the definition's two argument handler: the request metadata
         plus the reply surface, valid only while the handler runs (docs/python.md)."""
-    __slots__ = ("_ptr", "_fn", "_gate", "_rsp_schema", "_done",
+    __slots__ = ("_ptr", "_st", "_gate", "_rsp_schema", "_done",
                  "data", "caller", "caller_name", "function_name", "recv_us", "written_us")
 
-    def __init__(self, ptr, fn, gate, rsp_schema, r, data):
+    def __init__(self, ptr, st, gate, rsp_schema, r, data):
         self._ptr = ptr           # the exact native pointer, dropped at expiry
-        self._fn = fn
+        self._st = st
         self._gate = gate
         self._rsp_schema = rsp_schema
         self._done = False
@@ -2607,7 +2679,7 @@ class Request:
         if not token:
             raise RuntimeError("defer failed")
         self._done = True
-        return Deferred(self._fn, self._gate, self._rsp_schema, token)
+        return Deferred(self._st, self._gate, self._rsp_schema, token)
 
     def _expire(self):
         self._ptr = None
@@ -2623,10 +2695,10 @@ class Request:
 class Deferred:
     """A parked function reply from Request.defer: complete or fail exactly once, from any
         thread. Dropping it leaves the caller to its timeout."""
-    __slots__ = ("_fn", "_gate", "_rsp_schema", "_token", "_lock")
+    __slots__ = ("_st", "_gate", "_rsp_schema", "_token", "_lock")
 
-    def __init__(self, fn, gate, rsp_schema, token):
-        self._fn = fn
+    def __init__(self, st, gate, rsp_schema, token):
+        self._st = st
         self._gate = gate
         self._rsp_schema = rsp_schema
         self._token = token
@@ -2653,7 +2725,7 @@ class Deferred:
             token, self._token = self._token, 0
         if not token:
             return False
-        with self._gate.use(self._fn) as fn:
+        with self._st.use(self._gate) as fn:
             if not fn:
                 return False
             b, buf = _c_view(_payload_bytes(self._rsp_schema, rsp))
@@ -2779,10 +2851,10 @@ def _progress_cb(on_progress, prg_schema, node, name):
 
 class _FnBox:
     """Handler side state for one function definition, alive until node close."""
-    __slots__ = ("fn", "gate", "handler", "arity", "req_schema", "rsp_schema")
+    __slots__ = ("st", "gate", "handler", "arity", "req_schema", "rsp_schema")
 
     def __init__(self, gate, handler, req_schema, rsp_schema):
-        self.fn = None            # set right after create (no callback before poll)
+        self.st = None            # set right after create (no callback before poll)
         self.gate = gate          # the node's, never the node, which the registry must not hold
         self.handler = handler
         self.arity = _arity(handler)
@@ -2792,7 +2864,7 @@ class _FnBox:
     def dispatch(self, req_ptr):
         r = req_ptr.contents
         data = _c.string_at(r.data.data, r.data.len) if r.data.data and r.data.len else b""
-        request = Request(req_ptr, self.fn, self.gate, self.rsp_schema, r, data)
+        request = Request(req_ptr, self.st, self.gate, self.rsp_schema, r, data)
         try:
             val, ok = _decode_payload(r.schema, self.req_schema, data)
             if not ok:
@@ -2821,11 +2893,11 @@ class TaskContext:
     """What a task handler works through, on its own worker thread: stream progress, observe
         cancellation and read who called. Returning completes OK, raising CancelledError
         completes CANCELLED, any other exception APP_ERROR."""
-    __slots__ = ("_fn", "_gate", "_prg_schema", "_token", "cancel_event",
+    __slots__ = ("_st", "_gate", "_prg_schema", "_token", "cancel_event",
                  "caller", "caller_name", "function_name", "recv_us", "written_us")
 
-    def __init__(self, fn, gate, prg_schema, token, r):
-        self._fn = fn
+    def __init__(self, st, gate, prg_schema, token, r):
+        self._st = st
         self._gate = gate
         self._prg_schema = prg_schema
         self._token = token
@@ -2841,7 +2913,7 @@ class TaskContext:
     def progress(self, value=None):
         """Broadcast a progress update, encoded via the progress schema. Returns a SendStatus,
                 STATE once the call completed."""
-        with self._gate.use(self._fn) as fn:
+        with self._st.use(self._gate) as fn:
             if not fn:
                 return SendStatus.STATE
             b, buf = _c_view(_payload_bytes(self._prg_schema, value))
@@ -2855,7 +2927,7 @@ class TaskContext:
                 CancelledError, or run to completion. cancel_event is the same signal."""
         if self.cancel_event.is_set():
             return True
-        with self._gate.use(self._fn) as fn:
+        with self._st.use(self._gate) as fn:
             hit = bool(fn) and _c.load().rant_function_cancelled(fn, self._token) == 1
         if hit:
             self.cancel_event.set()   # backstop: a cancel that beat the C slot
@@ -2866,11 +2938,11 @@ class TaskContext:
 class _TaskBox:
     """Definition side state for one task, alive until node close. The C callback on the poll
         thread defers and spawns a daemon worker per call, and on_cancel fans out to Events."""
-    __slots__ = ("fn", "gate", "handler", "arity", "req_schema", "prg_schema", "rsp_schema",
+    __slots__ = ("st", "gate", "handler", "arity", "req_schema", "prg_schema", "rsp_schema",
                  "cancel_events", "lock")
 
     def __init__(self, gate, handler, req_schema, prg_schema, rsp_schema):
-        self.fn = None            # set right after create (no callback before poll)
+        self.st = None            # set right after create (no callback before poll)
         self.gate = gate          # the node's, never the node, which the registry must not hold
         self.handler = handler
         self.arity = _arity(handler)
@@ -2892,7 +2964,7 @@ class _TaskBox:
         if not token:
             lib.rant_request_fail(req_ptr, b"defer failed", _c.RantBytes())
             return
-        ctx = TaskContext(self.fn, self.gate, self.prg_schema, token, r)
+        ctx = TaskContext(self.st, self.gate, self.prg_schema, token, r)
         with self.lock:
             self.cancel_events[token] = ctx.cancel_event
         _threading.Thread(target=self._run, args=(val, ctx), daemon=True).start()
@@ -2923,7 +2995,7 @@ class _TaskBox:
         b, buf = _c_view(payload)
         # a stale token (the definition closed or the node closed mid run) returns STATE:
         # swallowed, the caller already got its one CANCELLED outcome
-        with self.gate.use(self.fn) as fn:
+        with self.st.use(self.gate) as fn:
             if fn:
                 _c.load().rant_function_complete(fn, ctx._token, int(status),
                                                message.encode("utf-8") if message else None, b)
@@ -3000,7 +3072,7 @@ def _task_opts(node, progress_best_effort=False, progress_keep_last=0, no_cancel
 
 class _Function:
     """The surface shared by the four function and task handles: one native RantFunction."""
-    __slots__ = ("_node", "_fn", "_req_schema", "_rsp_schema", "_name")
+    __slots__ = ("_node", "_st", "_req_schema", "_rsp_schema", "_name")
 
     @property
     def name(self):
@@ -3009,7 +3081,7 @@ class _Function:
     def _use(self):
         # a pass on the node and the native function, None once closed or the node closed, so
         # the C answers NO_TOPIC instead of touching freed memory
-        return self._node._gate.use(self._fn)
+        return self._st.use(self._node._gate)
 
     @property
     def match_count(self):
@@ -3021,13 +3093,13 @@ class _Function:
     def request_schema(self):
         """The request schema in use now, None when untyped. A reflect_from_mesh handle
                 reports what it adopted."""
-        return _current_schema(self._node, self._fn, self._node._lib.rant_function_request_schema,
+        return _current_schema(self._node, self._st, self._node._lib.rant_function_request_schema,
                                self._req_schema)
 
     @property
     def response_schema(self):
         """The response schema in use now, as request_schema."""
-        return _current_schema(self._node, self._fn, self._node._lib.rant_function_response_schema,
+        return _current_schema(self._node, self._st, self._node._lib.rant_function_response_schema,
                                self._rsp_schema)
 
     def refresh(self):
@@ -3040,11 +3112,7 @@ class _Function:
         """Retire the handle: park its channels and release the name, and every outstanding
                 call completes CANCELLED. Returns True, or False when refused from a callback,
                 where the handle stays live. A closed handle answers NO_TOPIC."""
-        with self._use() as fn:
-            if fn is not None and self._node._lib.rant_function_retire(fn) != 0:
-                return False
-        self._fn = None
-        return True
+        return self._st.close(self._node._gate, self._node._lib.rant_function_retire)
 
     def __enter__(self):
         return self
@@ -3078,8 +3146,7 @@ class FunctionDefinition(_Function):
             _pbox_pop(box_id)
             err = node.last_error
             raise Error("function_definition(%r) failed: %s" % (name, err), err)
-        self._fn = h
-        box.fn = h
+        self._st = box.st = _HandleState(h)
         node._register_box(box_id)
 
     __class_getitem__ = classmethod(_generic)
@@ -3103,7 +3170,7 @@ class RemoteFunction(_Function):
         if not h:
             err = node.last_error
             raise Error("remote_function(%r) failed: %s" % (name, err), err)
-        self._fn = h
+        self._st = _HandleState(h)
 
     __class_getitem__ = classmethod(_generic)
 
@@ -3114,7 +3181,7 @@ class RemoteFunction(_Function):
         self = cls.__new__(cls)
         self._node = node
         self._name = None
-        self._fn = handle
+        self._st = _HandleState(handle)
         self._req_schema = req_schema
         self._rsp_schema = rsp_schema
         return self
@@ -3181,7 +3248,7 @@ class TaskDefinition(_Function):
     @property
     def progress_schema(self):
         """The progress schema in use now, as request_schema."""
-        return _current_schema(self._node, self._fn, self._node._lib.rant_function_progress_schema,
+        return _current_schema(self._node, self._st, self._node._lib.rant_function_progress_schema,
                                self._prg_schema)
 
     def __init__(self, node, name, handler, req_schema=None, prg_schema=None,
@@ -3210,8 +3277,7 @@ class TaskDefinition(_Function):
             _pbox_pop(box_id)
             err = node.last_error
             raise Error("task_definition(%r) failed: %s" % (name, err), err)
-        self._fn = h
-        box.fn = h
+        self._st = box.st = _HandleState(h)
         node._register_box(box_id)
 
     __class_getitem__ = classmethod(_generic)
@@ -3226,7 +3292,7 @@ class RemoteTask(_Function):
     @property
     def progress_schema(self):
         """The progress schema in use now, as request_schema."""
-        return _current_schema(self._node, self._fn, self._node._lib.rant_function_progress_schema,
+        return _current_schema(self._node, self._st, self._node._lib.rant_function_progress_schema,
                                self._prg_schema)
 
     def __init__(self, node, name, req_schema=None, prg_schema=None, rsp_schema=None,
@@ -3250,7 +3316,7 @@ class RemoteTask(_Function):
         if not h:
             err = node.last_error
             raise Error("remote_task(%r) failed: %s" % (name, err), err)
-        self._fn = h
+        self._st = _HandleState(h)
 
     __class_getitem__ = classmethod(_generic)
 
@@ -3330,7 +3396,7 @@ class Variable:
     """The surface shared by VariableDefinition and RemoteVariable: read the latest value,
         write, force and observe. Reads are local and status free, every write returns its
         SendStatus."""
-    __slots__ = ("_node", "_var", "_schema", "_name")
+    __slots__ = ("_node", "_st", "_schema", "_name")
 
     def _create(self, node, name, schema, co, remote):
         self._node = node
@@ -3344,7 +3410,7 @@ class Variable:
             err = node.last_error
             raise Error("%s(%r) failed: %s" % ("remote_variable" if remote
                                                else "variable_definition", name, err), err)
-        self._var = h
+        self._st = _HandleState(h)
 
     @property
     def name(self):
@@ -3354,13 +3420,13 @@ class Variable:
     def schema(self):
         """The schema in use now, None when untyped. A reflect_from_mesh variable reports
                 what it adopted."""
-        return _current_schema(self._node, self._var, self._node._lib.rant_variable_schema,
+        return _current_schema(self._node, self._st, self._node._lib.rant_variable_schema,
                                self._schema)
 
     def _use(self):
         # a pass on the node and the native variable, None once closed or the node closed, so
         # the C answers NO_TOPIC instead of touching freed memory
-        return self._node._gate.use(self._var)
+        return self._st.use(self._node._gate)
 
     def get(self):
         """The current value, the store or the cached latest, copied out under the node lock.
@@ -3422,8 +3488,13 @@ class Variable:
     def wait(self, timeout):
         """Block until a value exists or timeout seconds elapse, on the service thread's
                 progress, or driving a MANUAL node's loop. Refused from a callback."""
+        gate = self._node._gate
         wait = self._node._lib.rant_variable_wait
-        return self._node._gate.wait_sliced(_ms(timeout), 0, self._var, wait) == 1
+
+        def step(st, ms):
+            with st.use(gate) as v:   # a pass per slice, so close waits at most one
+                return wait(v, ms) if v else int(SendStatus.NO_TOPIC)
+        return gate.wait_sliced(_ms(timeout), 0, self._st, step) == 1
 
     @property
     def match_count(self):
@@ -3465,11 +3536,7 @@ class Variable:
     def close(self):
         """Retire the handle: park its channels and release the name for a successor. Returns
                 True, or False when refused from a callback, where the handle stays live."""
-        with self._use() as v:
-            if v is not None and self._node._lib.rant_variable_retire(v) != 0:
-                return False
-        self._var = None
-        return True
+        return self._st.close(self._node._gate, self._node._lib.rant_variable_retire)
 
     def __enter__(self):
         return self

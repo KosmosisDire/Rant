@@ -905,6 +905,82 @@ def close_race():
     return ok
 
 
+def handle_gate():
+    """A handle close waits for the calls inside it on other threads, is refused inside its
+    own call's callback, and a deferred answer after its definition closed is refused."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    def until(seconds, done):
+        deadline = time.time() + seconds
+        while time.time() < deadline and not done():
+            time.sleep(0.005)
+        return done()
+
+    opts = dict(on_event=lambda e: None, domain=DOMAIN + 16, multicast_interface=IFACE,
+                max_topics=32)
+    a = rant.Node("ga", **opts)
+    b = rant.Node("gb", **opts)
+    try:
+        def _slow(q):
+            time.sleep(0.3)
+            return AddRsp(sum=q.a + q.b)
+        a.function_definition("g/slow", _slow, AddReq, AddRsp)
+        rem = b.remote_function("g/slow", AddReq, AddRsp)
+        check("matched", until(8, lambda: rem.match_count > 0))
+        got = []
+        call_done = threading.Event()
+
+        def caller():
+            got.append(rem.call(AddReq(a=1, b=2), timeout=3.0))
+            call_done.set()
+        t = threading.Thread(target=caller)
+        t.start()
+        time.sleep(0.1)
+        rem.close()
+        done_first = call_done.is_set()
+        t.join()
+        check("a close waits for the blocking call on another thread", done_first)
+        check("which completed", got[0].status == rant.CallStatus.OK)
+        check("then the remote answers NO_TOPIC",
+              rem.call(AddReq(a=1, b=2), timeout=0.1).send_status == rant.SendStatus.NO_TOPIC)
+
+        def _job(q, task):
+            task.progress(JobPrg(done=1))
+            time.sleep(0.2)
+            return JobRsp(total=q.count)
+        a.task_definition("g/job", _job, JobReq, JobPrg, JobRsp)
+        jr = b.remote_task("g/job", JobReq, JobPrg, JobRsp)
+        check("task matched", until(8, lambda: jr.match_count > 0))
+        inside = []
+        r2 = jr.call(JobReq(count=3), on_progress=lambda v: inside.append(jr.close()),
+                     timeout=3.0)
+        check("a close inside the call's own callback is refused at once",
+              inside and not any(inside))
+        check("and the call still completes", r2.status == rant.CallStatus.OK)
+        check("a close after it retires the remote", jr.close()
+              and jr.call(JobReq(count=1), timeout=0.1).send_status == rant.SendStatus.NO_TOPIC)
+
+        parked = []
+        park = a.function_definition("g/park", lambda q, req: parked.append(req.defer()),
+                                     AddReq, AddRsp)
+        pr = b.remote_function("g/park", AddReq, AddRsp)
+        check("park matched", until(8, lambda: pr.match_count > 0))
+        pr.call_async(AddReq(a=1, b=1), lambda r: None)
+        check("the answer parked", until(8, lambda: len(parked) == 1))
+        park.close()
+        check("a deferred answer after its definition closed is refused",
+              not parked[0].complete(AddRsp(sum=2)))
+    finally:
+        a.close()
+        b.close()
+    return ok
+
+
 def patterns():
     """Functions and variables between two nodes on an isolated domain."""
     print("patterns leg: two nodes, domain 43, loopback")
@@ -1497,6 +1573,7 @@ LEGS = [
     ("dispatch", dispatch_leg),
     ("rebind", rebind),
     ("close_race", close_race),
+    ("handle_gate", handle_gate),
 ]
 
 

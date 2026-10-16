@@ -299,6 +299,11 @@ platform serves every interpreter.
 - The map body is built and parsed in pure Python.
 - Task handlers run on a daemon thread per call. Raising `rant.CancelledError` completes
   CANCELLED.
+- A function, task or variable handle keeps its C pointer in a `_HandleState` with a gate
+  of its own, shared with its definition box, `Request`, `Deferred` and `TaskContext`.
+  Every call holds a `_HandlePass` on the node and the handle, and `close()` waits for
+  them, takes the pointer under a lock so two closes retire once, and inside one of the
+  node's callbacks returns False while a pass is out instead of waiting on its own caller.
 - `node.reflection` carries the walks as `Peer` and `Entity` dataclasses whose schemas
   are registered in the node through `rant_node_schema_parse`.
 
