@@ -197,6 +197,12 @@ if(RANT_BUILD_TOOLS)
   add_subdirectory(tests)
 endif()
 
+# Rant in a page or in Node.js, from the web preset, and its bench, which a native build
+# makes too for the comparison.
+if(EMSCRIPTEN OR RANT_BUILD_TOOLS)
+  add_subdirectory(bindings/web)
+endif()
+
 # 4. The packages, into dist/. unity_package needs nothing installed, nuget_package needs
 #    dotnet and python_wheel needs Python, and packages is whichever of the three this
 #    machine can build. The release workflow runs the same three per platform.
