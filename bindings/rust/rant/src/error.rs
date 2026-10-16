@@ -7,7 +7,8 @@ use crate::ffi;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    /// No C fault: a refusal of this binding, or a handler that panicked.
+    /// No C fault: a refusal of this binding, a call that did not end Ok, or a handler that
+    /// panicked.
     None,
     /// A peer's topic name hashes to ours but differs, or a live same name entity exists.
     NameCollision,

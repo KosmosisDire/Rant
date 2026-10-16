@@ -217,6 +217,15 @@ impl Schema {
         })
     }
 
+    /// Reads `data` as a message of this schema, such as a raw call's response or a raw
+    /// variable's value. After the node closed every read answers 0 or empty.
+    pub fn view<'a>(&'a self, data: &'a [u8]) -> FieldView<'a> {
+        match self.inner.gate.enter() {
+            Some(pass) => FieldView { data, schema: self.raw, _pass: Some(pass) },
+            None => FieldView::new(data, null()),
+        }
+    }
+
     /// The schema spelled back as DSL text, every named type hoisted to a leading definition.
     pub fn to_dsl(&self) -> String {
         self.read(|s| {
@@ -274,11 +283,14 @@ impl fmt::Debug for Schema {
 pub struct FieldView<'a> {
     data: &'a [u8],
     schema: *const ffi::RantSchema,
+    // a view outside a callback holds the node open while it lives
+    _pass: Option<Pass<'a>>,
 }
 
 impl<'a> FieldView<'a> {
+    /// A view inside a callback, where the node is open.
     pub(crate) fn new(data: &'a [u8], schema: *const ffi::RantSchema) -> FieldView<'a> {
-        FieldView { data, schema }
+        FieldView { data, schema, _pass: None }
     }
 
     pub(crate) fn raw_schema(&self) -> *const ffi::RantSchema {
@@ -380,8 +392,6 @@ pub struct MessageView<'a> {
     recv_us: u64,
     written_us: u64,
     capture_us: u64,
-    // a taken view holds the node open while it lives
-    _pass: Option<Pass<'a>>,
 }
 
 impl<'a> MessageView<'a> {
@@ -397,12 +407,12 @@ impl<'a> MessageView<'a> {
             recv_us: msg.recv_us,
             written_us: msg.written_us,
             capture_us: msg.capture_us,
-            _pass: None,
         }
     }
 
+    /// A taken view holds the node open while it lives.
     pub(crate) fn hold(mut self, pass: Pass<'a>) -> MessageView<'a> {
-        self._pass = Some(pass);
+        self.fields._pass = Some(pass);
         self
     }
 
@@ -418,7 +428,6 @@ impl<'a> MessageView<'a> {
             recv_us: self.recv_us,
             written_us: self.written_us,
             capture_us: self.capture_us,
-            _pass: None,
         }
     }
 

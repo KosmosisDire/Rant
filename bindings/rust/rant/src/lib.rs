@@ -25,24 +25,30 @@ mod ffi;
 
 mod callback;
 mod error;
+mod function;
 mod gate;
 mod map;
 mod message;
 mod node;
 mod options;
+mod pattern;
 mod schema;
 mod string;
+mod task;
 mod topic;
 pub mod types;
 
 pub use error::{Error, ErrorKind, SendError};
+pub use function::{Deferred, FunctionDefinition, FunctionOptions, RemoteFunction, Request};
 pub use map::{MapItem, MapReader, MapValue, MapWriter};
 pub use message::{Bytes, Message, Payload};
 pub use node::{Event, EventKind, Node, NodeOptions, NodeStats, Queue, QueueStats, Threading};
 pub use options::Qos;
+pub use pattern::{CallError, CallOptions, CallStatus, IntoReply, PendingCall, Progress, Response, TaskCall};
 pub use rant_macros::{Enum, Message};
 pub use schema::{EnumVariant, Field, FieldType, FieldView, MessageBuilder, MessageView, Schema};
 pub use string::String;
+pub use task::{PendingTask, RemoteTask, TaskDefinition, TaskOptions, TaskRequest};
 pub use topic::{Publisher, Received, Subscriber, TopicCounts, TopicQueueStats};
 
 /// A timeout with no end.

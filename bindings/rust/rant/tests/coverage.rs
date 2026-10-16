@@ -33,20 +33,31 @@ const SKIPPED: &[(&str, &str)] = &[
     ("rant_std_recognize_elem", "as rant_std_by_name"),
 ];
 
-/// Bound by a later step of the binding: functions and tasks, variables, then reflection and logs.
+/// Bound by a later step of the binding: variables, then reflection and logs.
 const PENDING: &[&str] = &[
-    "rant_node_create_function_definition", "rant_node_create_remote_function", "rant_node_create_task_definition",
-    "rant_node_create_remote_task", "rant_function_call", "rant_function_call_async", "rant_function_cancel",
-    "rant_function_cancelled", "rant_function_complete", "rant_function_match_count", "rant_function_on_cancel",
-    "rant_function_progress", "rant_function_progress_schema", "rant_function_refresh", "rant_function_request_schema",
-    "rant_function_response_schema", "rant_function_retire", "rant_request_defer", "rant_request_fail",
-    "rant_request_reply", "rant_request_start", "rant_node_meta_function",
-    "rant_node_create_variable_definition", "rant_node_create_remote_variable", "rant_variable_force",
-    "rant_variable_forced", "rant_variable_get", "rant_variable_match_count", "rant_variable_on_change",
-    "rant_variable_on_write", "rant_variable_refresh", "rant_variable_retire", "rant_variable_schema",
-    "rant_variable_set", "rant_variable_unforce", "rant_variable_wait",
-    "rant_node_peers_next", "rant_node_entities_next", "rant_node_mesh_next", "rant_node_mesh_find",
-    "rant_node_mesh_epoch", "rant_node_lock", "rant_node_unlock", "rant_node_log_text", "rant_node_log_topic",
+    "rant_node_create_variable_definition",
+    "rant_node_create_remote_variable",
+    "rant_variable_force",
+    "rant_variable_forced",
+    "rant_variable_get",
+    "rant_variable_match_count",
+    "rant_variable_on_change",
+    "rant_variable_on_write",
+    "rant_variable_refresh",
+    "rant_variable_schema",
+    "rant_variable_set",
+    "rant_variable_unforce",
+    "rant_variable_wait",
+    "rant_node_lock",
+    "rant_node_unlock",
+    "rant_node_peers_next",
+    "rant_node_entities_next",
+    "rant_node_mesh_next",
+    "rant_node_mesh_find",
+    "rant_node_mesh_epoch",
+    "rant_node_meta_function",
+    "rant_node_log_text",
+    "rant_node_log_topic",
     "rant_node_set_log_queue",
 ];
 
@@ -69,7 +80,12 @@ fn every_c_function_is_bound_or_listed() {
         .filter(|p| p.file_name().unwrap() != "ffi.rs" && p.extension().is_some_and(|x| x == "rs"))
         .map(|p| std::fs::read_to_string(p).unwrap())
         .collect();
-    let called: BTreeSet<&str> = declared.iter().copied().filter(|f| code.contains(&format!("ffi::{f}("))).collect();
+    // called, or handed on by name to a helper that calls it
+    let used = |f: &str| {
+        let at = format!("ffi::{f}");
+        code.match_indices(&at).any(|(i, _)| !code[i + at.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+    };
+    let called: BTreeSet<&str> = declared.iter().copied().filter(|f| used(f)).collect();
     let listed: BTreeSet<&str> = SKIPPED.iter().map(|(f, _)| *f).chain(PENDING.iter().copied()).collect();
 
     let unbound: Vec<_> = declared.iter().filter(|f| !called.contains(*f) && !listed.contains(*f)).collect();

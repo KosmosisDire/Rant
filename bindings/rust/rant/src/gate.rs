@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
-/// Keeps a C node alive while any call is inside it. rant_node_close frees everything and
-/// assumes no other thread is in a call, so every call holds a Pass and close waits for none.
+/// Keeps a C node, or one of its pattern handles, alive while any call is inside it. A close
+/// frees it and assumes no other thread is in a call, so every call holds a Pass.
 pub(crate) struct Gate {
     active: AtomicUsize,
     closing: AtomicBool,
@@ -44,6 +44,11 @@ impl Gate {
             guard = self.idle.wait_timeout(guard, Duration::from_millis(50)).unwrap_or_else(PoisonError::into_inner).0;
         }
         true
+    }
+
+    /// Takes passes again after a close the C refused.
+    pub(crate) fn reopen(&self) {
+        self.closing.store(false, SeqCst);
     }
 
     fn leave(&self) {

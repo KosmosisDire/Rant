@@ -1,15 +1,14 @@
 use std::any::{TypeId, type_name};
+use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 
-use crate::error::{Error, ErrorKind, SendError};
+use crate::error::{Error, ErrorKind};
 use crate::ffi;
 use crate::node::{NodeInner, lock};
-use crate::options::Qos;
-use crate::schema::{MessageView, c_bytes, rbytes, rstring_bytes};
-use crate::topic::TopicCore;
+use crate::schema::{FieldView, MessageView, Schema, c_bytes, rbytes, rstring_bytes};
 
 /// The type argument of a raw handle, which sends any bytes and reads fields by name through
 /// a [`MessageView`]. Only a raw handle takes a schema or `reflect_from_mesh` in its options.
@@ -36,30 +35,44 @@ mod sealed {
 pub trait Payload: sealed::Sealed + Send + 'static {
     /// What a send takes: the value, or for [`Bytes`] a byte slice.
     type Input: ?Sized;
-    /// What a handler and a take see: the value, or for [`Bytes`] a [`MessageView`].
+    /// An owned value, as a reply, a call's response or a variable read holds it: the value,
+    /// or for [`Bytes`] the bytes.
+    type Owned: Borrow<Self::Input> + Send + 'static;
+    /// What a subscriber handler and a take see: the value, or for [`Bytes`] a [`MessageView`].
     type Value<'a>;
+    /// What a request, a progress update or a variable update holds inside its callback:
+    /// the value, or for [`Bytes`] a [`FieldView`].
+    type Data<'a>;
 
     #[doc(hidden)]
     #[allow(private_interfaces)]
-    fn __codec(inner: &Arc<NodeInner>, qos: &Qos, what: &str) -> Result<Option<Arc<Codec>>, Error>;
+    fn __codec(inner: &Arc<NodeInner>, schema: Option<&Schema>, reflect: bool, what: &str) -> Result<Option<Arc<Codec>>, Error>;
     #[doc(hidden)]
     #[allow(private_interfaces)]
-    fn __send(core: &TopicCore, codec: Option<&Codec>, value: &Self::Input, capture_us: u64) -> Result<(), SendError>;
+    fn __with_bytes<R>(codec: Option<&Codec>, value: &Self::Input, f: impl FnOnce(&[u8]) -> R) -> Result<R, String>;
     #[doc(hidden)]
     #[allow(private_interfaces)]
     fn __value<'a>(codec: Option<&Codec>, view: &MessageView<'a>) -> Result<Self::Value<'a>, String>;
     #[doc(hidden)]
     #[allow(private_interfaces)]
     fn __taken<'a>(codec: Option<&Codec>, view: MessageView<'a>) -> Result<Self::Value<'a>, String>;
+    #[doc(hidden)]
+    #[allow(private_interfaces)]
+    fn __data<'a>(codec: Option<&Codec>, data: &'a [u8], schema: *const ffi::RantSchema) -> Result<Self::Data<'a>, String>;
+    #[doc(hidden)]
+    #[allow(private_interfaces)]
+    fn __owned(codec: Option<&Codec>, data: &[u8], schema: *const ffi::RantSchema) -> Result<Self::Owned, String>;
 }
 
 impl<T: Message> Payload for T {
     type Input = T;
+    type Owned = T;
     type Value<'a> = T;
+    type Data<'a> = T;
 
     #[allow(private_interfaces)]
-    fn __codec(inner: &Arc<NodeInner>, qos: &Qos, what: &str) -> Result<Option<Arc<Codec>>, Error> {
-        if qos.schema.is_some() || qos.reflect_from_mesh {
+    fn __codec(inner: &Arc<NodeInner>, schema: Option<&Schema>, reflect: bool, what: &str) -> Result<Option<Arc<Codec>>, Error> {
+        if schema.is_some() || reflect {
             return Err(Error::new(
                 ErrorKind::State,
                 format!("{what}: a typed handle takes its schema from its type, use rant::Bytes for a schema or reflect_from_mesh"),
@@ -69,34 +82,45 @@ impl<T: Message> Payload for T {
     }
 
     #[allow(private_interfaces)]
-    fn __send(core: &TopicCore, codec: Option<&Codec>, value: &T, capture_us: u64) -> Result<(), SendError> {
-        let codec = codec.ok_or(SendError::Schema)?;
-        codec.encode(value, |bytes| core.send(bytes, capture_us)).map_err(|_| SendError::Schema)?
+    fn __with_bytes<R>(codec: Option<&Codec>, value: &T, f: impl FnOnce(&[u8]) -> R) -> Result<R, String> {
+        codec.ok_or("no codec")?.encode(value, f)
     }
 
     #[allow(private_interfaces)]
     fn __value<'a>(codec: Option<&Codec>, view: &MessageView<'a>) -> Result<T, String> {
-        codec.ok_or("no codec")?.decode(view.data(), view.raw_schema())
+        Self::__owned(codec, view.data(), view.raw_schema())
     }
 
     #[allow(private_interfaces)]
     fn __taken<'a>(codec: Option<&Codec>, view: MessageView<'a>) -> Result<T, String> {
         Self::__value(codec, &view)
     }
+
+    #[allow(private_interfaces)]
+    fn __data(codec: Option<&Codec>, data: &[u8], schema: *const ffi::RantSchema) -> Result<T, String> {
+        Self::__owned(codec, data, schema)
+    }
+
+    #[allow(private_interfaces)]
+    fn __owned(codec: Option<&Codec>, data: &[u8], schema: *const ffi::RantSchema) -> Result<T, String> {
+        codec.ok_or("no codec")?.decode(data, schema)
+    }
 }
 
 impl Payload for Bytes {
     type Input = [u8];
+    type Owned = Vec<u8>;
     type Value<'a> = MessageView<'a>;
+    type Data<'a> = FieldView<'a>;
 
     #[allow(private_interfaces)]
-    fn __codec(_: &Arc<NodeInner>, _: &Qos, _: &str) -> Result<Option<Arc<Codec>>, Error> {
+    fn __codec(_: &Arc<NodeInner>, _: Option<&Schema>, _: bool, _: &str) -> Result<Option<Arc<Codec>>, Error> {
         Ok(None)
     }
 
     #[allow(private_interfaces)]
-    fn __send(core: &TopicCore, _: Option<&Codec>, value: &[u8], capture_us: u64) -> Result<(), SendError> {
-        core.send(value, capture_us)
+    fn __with_bytes<R>(_: Option<&Codec>, value: &[u8], f: impl FnOnce(&[u8]) -> R) -> Result<R, String> {
+        Ok(f(value))
     }
 
     #[allow(private_interfaces)]
@@ -107,6 +131,16 @@ impl Payload for Bytes {
     #[allow(private_interfaces)]
     fn __taken<'a>(_: Option<&Codec>, view: MessageView<'a>) -> Result<MessageView<'a>, String> {
         Ok(view)
+    }
+
+    #[allow(private_interfaces)]
+    fn __data<'a>(_: Option<&Codec>, data: &'a [u8], schema: *const ffi::RantSchema) -> Result<FieldView<'a>, String> {
+        Ok(FieldView::new(data, schema))
+    }
+
+    #[allow(private_interfaces)]
+    fn __owned(_: Option<&Codec>, data: &[u8], _: *const ffi::RantSchema) -> Result<Vec<u8>, String> {
+        Ok(data.to_vec())
     }
 }
 
@@ -555,7 +589,7 @@ pub(crate) struct Codec {
     ops: Vec<Op>,
     own: Arc<Plan>,
     msg_min: usize,
-    /// plans per delivered schema address, cleared on every retire
+    /// plans per delivered schema address, which names one schema until the node closes
     plans: Mutex<HashMap<usize, Arc<Plan>>>,
 }
 
@@ -602,10 +636,6 @@ impl Codec {
         });
         codecs.insert(TypeId::of::<T>(), Arc::clone(&codec));
         Ok(codec)
-    }
-
-    pub(crate) fn clear_plans(&self) {
-        lock(&self.plans).clear();
     }
 
     fn plan(&self, s: *const ffi::RantSchema) -> Result<Arc<Plan>, String> {

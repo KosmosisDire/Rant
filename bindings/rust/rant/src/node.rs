@@ -1,4 +1,4 @@
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::fmt;
@@ -371,6 +371,8 @@ pub(crate) struct NodeInner {
     next_id: AtomicU64,
     /// the typed codecs, one per type
     pub(crate) codecs: Registry<HashMap<TypeId, Arc<Codec>>>,
+    /// the pattern handler boxes the C points at, by id, freed at retire or close
+    kept: Mutex<HashMap<u64, Box<dyn Any + Send + Sync>>>,
 }
 
 // SAFETY: the C node is thread safe under its own lock, and the gate orders close after every call
@@ -413,6 +415,19 @@ impl NodeInner {
 
     pub(crate) fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, SeqCst)
+    }
+
+    /// Holds `value` until [`NodeInner::release`] or close, for a box the C points at. Its id.
+    pub(crate) fn keep(&self, value: Box<dyn Any + Send + Sync>) -> u64 {
+        let id = self.next_id();
+        lock(&self.kept).insert(id, value);
+        id
+    }
+
+    /// Frees a kept box, outside the lock since its drop may run app code.
+    pub(crate) fn release(&self, id: u64) {
+        let value = lock(&self.kept).remove(&id);
+        drop(value);
     }
 
     /// An owned Arc of this node state. Safety: `self` lives inside an Arc, as every
@@ -480,16 +495,6 @@ impl NodeInner {
         self.emit(&Event::binding_error(ErrorKind::State, Some(topic_name), Some("a handle cannot close inside its own callback")));
     }
 
-    /// Forgets every cached decode plan. A retire frees the C's rebased schemas, so a plan
-    /// keyed by one could otherwise meet a new schema at the same address.
-    pub(crate) fn clear_decode_plans(&self) {
-        if let Some(codecs) = self.codecs.enter() {
-            for codec in codecs.values() {
-                codec.clear_plans();
-            }
-        }
-    }
-
     /// Closes the C node once. Refused from inside one of its callbacks.
     fn close(self: &Arc<Self>) -> Result<(), Error> {
         if in_callback_of(self.key()) {
@@ -513,8 +518,9 @@ impl NodeInner {
         // a handler holding a handle of this node is a cycle through this state, so the
         // handlers go now, dropped outside their locks
         let handlers = std::mem::take(&mut *lock(&self.handlers));
+        let kept = std::mem::take(&mut *lock(&self.kept));
         let on_event = lock(&self.on_event).take();
-        drop((handlers, on_event));
+        drop((handlers, kept, on_event));
         Ok(())
     }
 }
@@ -578,6 +584,7 @@ impl Node {
             handlers: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             codecs: Registry::new(HashMap::new()),
+            kept: Mutex::new(HashMap::new()),
         });
 
         let co = ffi::RantNodeOpts {
@@ -758,7 +765,7 @@ impl Node {
     /// The publishing side of a topic. `T` is a [`Message`](crate::Message) type, or
     /// [`Bytes`](crate::Bytes) for raw bytes, which alone takes a schema in its options.
     pub fn publisher<T: Payload>(&self, name: &str, qos: Qos) -> Result<Publisher<T>, Error> {
-        let codec = T::__codec(&self.inner, &qos, "rant::Node::publisher")?;
+        let codec = T::__codec(&self.inner, qos.schema.as_ref(), qos.reflect_from_mesh, "rant::Node::publisher")?;
         let core = TopicCore::open(&self.inner, name, TopicCore::PUB, codec.as_deref(), &qos, false)?;
         Ok(Publisher::new(core, codec))
     }
@@ -771,7 +778,7 @@ impl Node {
         qos: Qos,
         handler: impl for<'a> FnMut(Received<'a, T>) + Send + 'static,
     ) -> Result<Subscriber<T>, Error> {
-        let codec = T::__codec(&self.inner, &qos, "rant::Node::subscriber")?;
+        let codec = T::__codec(&self.inner, qos.schema.as_ref(), qos.reflect_from_mesh, "rant::Node::subscriber")?;
         let mut core = TopicCore::open(&self.inner, name, TopicCore::SUB, codec.as_deref(), &qos, false)?;
         core.add_handler(Received::<T>::adapt(handler, codec.clone(), name));
         Ok(Subscriber::new(core, codec))
@@ -780,7 +787,7 @@ impl Node {
     /// A pulled subscriber: no handler, messages wait until [`Subscriber::take`] reads them.
     /// A name has one pulled subscriber per node.
     pub fn pulled_subscriber<T: Payload>(&self, name: &str, qos: Qos) -> Result<Subscriber<T>, Error> {
-        let codec = T::__codec(&self.inner, &qos, "rant::Node::pulled_subscriber")?;
+        let codec = T::__codec(&self.inner, qos.schema.as_ref(), qos.reflect_from_mesh, "rant::Node::pulled_subscriber")?;
         let core = TopicCore::open(&self.inner, name, TopicCore::SUB, codec.as_deref(), &qos, true)?;
         Ok(Subscriber::new(core, codec))
     }

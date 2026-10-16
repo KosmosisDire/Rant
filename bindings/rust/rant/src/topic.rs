@@ -125,12 +125,7 @@ impl TopicCore {
         let Ok((_pass, _)) = self.inner.enter() else { return };
         // SAFETY: the pass keeps the topic alive
         let index = unsafe { ffi::rant_topic_index(self.raw) };
-        self.handler = self.inner.next_id();
-        let h = SubHandler { id: self.handler, name: self.name.clone(), cb: Arc::new(Callback::new(f)) };
-        let mut handlers = lock(&self.inner.handlers);
-        let mut list: Vec<SubHandler> = handlers.get(&index).map(|l| l.iter().map(SubHandler::share).collect()).unwrap_or_default();
-        list.push(h);
-        handlers.insert(index, list.into());
+        self.handler = self.inner.add_handler(index, &self.name, f);
     }
 
     /// Drops this handle's side of the name. The last handle retires the topic.
@@ -167,8 +162,6 @@ impl TopicCore {
             }
             topics.remove(&self.name);
             lock(&self.inner.handlers).remove(&index);
-            drop(topics);
-            self.inner.clear_decode_plans();
             return Ok(());
         }
         let narrowed = u8::from(rec.pubs > 0) | (u8::from(rec.subs > 0) << 1);
@@ -236,17 +229,27 @@ impl TopicCore {
     fn refresh(&self) -> Result<bool, SendError> {
         let (_pass, _) = self.inner.enter()?;
         // SAFETY: the pass keeps the topic alive
-        let rc = SendError::check(unsafe { ffi::rant_topic_refresh(self.raw) })?;
-        if rc == 1 {
-            self.inner.clear_decode_plans();
-        }
-        Ok(rc == 1)
+        Ok(SendError::check(unsafe { ffi::rant_topic_refresh(self.raw) })? == 1)
     }
 }
 
 impl SubHandler {
     fn share(&self) -> SubHandler {
         SubHandler { id: self.id, name: self.name.clone(), cb: Arc::clone(&self.cb) }
+    }
+}
+
+impl NodeInner {
+    /// Runs `f` for every message on the topic at `index`, beside its other handlers. The
+    /// handler's id, which removes it.
+    pub(crate) fn add_handler(&self, index: u16, name: &str, f: Box<MsgFn>) -> u64 {
+        let id = self.next_id();
+        let h = SubHandler { id, name: name.to_owned(), cb: Arc::new(Callback::new(f)) };
+        let mut handlers = lock(&self.handlers);
+        let mut list: Vec<SubHandler> = handlers.get(&index).map(|l| l.iter().map(SubHandler::share).collect()).unwrap_or_default();
+        list.push(h);
+        handlers.insert(index, list.into());
+        id
     }
 }
 
@@ -286,12 +289,18 @@ impl<T: Payload> Publisher<T> {
     /// Sends `value` to every matched subscriber. Schema when it does not encode, NoTopic
     /// when nobody matched within the match wait.
     pub fn send(&self, value: &T::Input) -> Result<(), SendError> {
-        T::__send(&self.core, self.codec.as_deref(), value, 0)
+        self.send_at(value, 0)
     }
 
     /// The same, stating when the data was true as against when it is sent.
     pub fn send_captured(&self, value: &T::Input, capture: Timestamp) -> Result<(), SendError> {
-        T::__send(&self.core, self.codec.as_deref(), value, capture.us.max(0) as u64)
+        self.send_at(value, capture.us.max(0) as u64)
+    }
+
+    fn send_at(&self, value: &T::Input, capture_us: u64) -> Result<(), SendError> {
+        // the encode reads the codec's schema, which lives in the node
+        let (_pass, _) = self.core.inner.enter()?;
+        T::__with_bytes(self.codec.as_deref(), value, |bytes| self.core.send(bytes, capture_us)).map_err(|_| SendError::Schema)?
     }
 
     /// The subscribers matched now.

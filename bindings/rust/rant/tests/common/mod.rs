@@ -44,6 +44,26 @@ pub fn wait_for(ms: u64, pump: Option<&Node>, mut pred: impl FnMut() -> bool) ->
     pred()
 }
 
+/// Runs a future to its end on this thread, the smallest executor, so the tests need no
+/// runtime crate.
+pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::sync::Arc::new(Unpark(std::thread::current())).into();
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut f = std::pin::pin!(f);
+    loop {
+        if let std::task::Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+            return v;
+        }
+        std::thread::park_timeout(Duration::from_millis(100));
+    }
+}
+
 /// tests/golden/schemas.txt: the hash every binding pins for a schema text.
 pub fn golden(text: &str) -> u64 {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../tests/golden/schemas.txt");
