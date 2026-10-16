@@ -242,6 +242,11 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   `dist/native/<rid>/`, which the `rant_shared` target overwrites on every build.
 - Task handlers are async delegates with a real `CancellationToken`. They run on the poll
   thread until their first await, so CPU work belongs in `Task.Run`.
+- A function, task or variable core keeps its C pointer in a `HandleState` with a gate of
+  its own, shared with its request box, `DeferredCore` and `TaskContextCore`. Every call
+  holds a `HandlePass` on the node and the handle, and `Dispose` waits for them, zeroes the
+  pointer in place with one exchange, and inside one of the node's callbacks throws `State`
+  while a pass is out instead of waiting on its own caller.
 - Unity (`bindings/csharp/unity/`) is a subset. `tools/unity.cmake` assembles the package into
   `dist/com.rant.rant/`: `bindings/csharp/Rant.cs`, `bindings/csharp/unity/Runtime/`, the `dist/native/`
   libraries for win-x64, linux-x64 and osx, a `package.json` stamped from `VERSION`, and

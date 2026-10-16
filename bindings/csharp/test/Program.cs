@@ -1616,6 +1616,94 @@ static class Program
         return ok;
     }
 
+    // Reports on the thread that delivers the update, where Progress<T> would post it away.
+    sealed class InlineProgress<T> : IProgress<T>
+    {
+        private readonly Action<T> _report;
+        public InlineProgress(Action<T> report) { _report = report; }
+        public void Report(T value) => _report(value);
+    }
+
+    // The handle gate: a remote's Dispose waits for a blocking call on another thread, a Dispose
+    // inside the call's own callback is refused at once, and a deferred answer after its
+    // definition closed is refused.
+    static bool HandleGateLeg()
+    {
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+        bool WaitFor(Func<bool> cond)
+        {
+            var end = DateTime.UtcNow.AddSeconds(8);
+            while (DateTime.UtcNow < end && !cond()) Thread.Sleep(5);
+            return cond();
+        }
+
+        var a = new RantNode("ga", Local(15));
+        var b = new RantNode("gb", Local(15));
+        try
+        {
+            var slow = a.FunctionDefinition<AddReq, AddRsp>("g/slow", q =>
+            {
+                Thread.Sleep(300);
+                return new AddRsp { Sum = q.A + q.B };
+            });
+            var rem = b.RemoteFunction<AddReq, AddRsp>("g/slow");
+            Check("matched", WaitFor(() => rem.MatchCount > 0));
+            var callDone = new ManualResetEventSlim(false);
+            CallStatus status = CallStatus.Timeout;
+            var caller = new Thread(() =>
+            {
+                status = rem.TryCall(new AddReq { A = 1, B = 2 }, 3000).Status;
+                callDone.Set();
+            });
+            caller.Start();
+            Thread.Sleep(100);
+            rem.Dispose();
+            bool doneFirst = callDone.IsSet;
+            caller.Join();
+            Check("a Dispose waits for the blocking call on another thread", doneFirst);
+            Check("which completed", status == CallStatus.Ok);
+            Check("then the remote answers NoTopic", rem.TryCall(new AddReq { A = 1, B = 2 }, 100).SendStatus == SendStatus.NoTopic);
+
+            var job = a.TaskDefinition<XferReq, XferPrg, XferRsp>("g/job", async (q, ctx) =>
+            {
+                ctx.Progress(new XferPrg { Done = 1 });
+                await Task.Delay(200);
+                return new XferRsp { Total = q.Chunks };
+            });
+            var jr = b.RemoteTask<XferReq, XferPrg, XferRsp>("g/job");
+            Check("task matched", WaitFor(() => jr.MatchCount > 0));
+            SendStatus inside = SendStatus.Ok;
+            bool tried = false;
+            var r2 = jr.TryCall(new XferReq { Chunks = 3 }, new InlineProgress<XferPrg>(_ =>
+            {
+                tried = true;
+                try { jr.Dispose(); }
+                catch (RantException e) { inside = e.SendStatus; }
+            }), 3000);
+            Check("a Dispose inside the call's own callback is refused at once", tried && inside == SendStatus.State);
+            Check("and the call still completes", r2.Status == CallStatus.Ok);
+            jr.Dispose();
+            Check("a Dispose after it retires the remote", jr.TryCall(new XferReq { Chunks = 1 }, null, 100).SendStatus == SendStatus.NoTopic);
+
+            Deferred<AddRsp> parked = null;
+            var park = a.FunctionDefinition<AddReq, AddRsp>("g/park", (q, req) => { Volatile.Write(ref parked, req.Defer()); });
+            var pr = b.RemoteFunction<AddReq, AddRsp>("g/park");
+            Check("park matched", WaitFor(() => pr.MatchCount > 0));
+            _ = pr.TryCallAsync(new AddReq { A = 1, B = 1 });
+            Check("the answer parked", WaitFor(() => Volatile.Read(ref parked) != null));
+            park.Dispose();
+            Check("a deferred answer after its definition closed is refused", !parked.Complete(new AddRsp { Sum = 2 }));
+        }
+        finally
+        {
+            a.Close();
+            b.Close();
+        }
+        Console.WriteLine(ok ? "handle_gate: PASS\n" : "handle_gate: FAIL\n");
+        return ok;
+    }
+
     static readonly (string Name, Func<bool> Run)[] Legs =
     {
         ("version", VersionLeg),
@@ -1635,6 +1723,7 @@ static class Program
         ("dispose", DisposeLeg),
         ("rebind", RebindLeg),
         ("close_race", CloseRaceLeg),
+        ("handle_gate", HandleGateLeg),
     };
 
     // Every leg runs, so one failure never hides the rest. A throw fails that leg.
