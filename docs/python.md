@@ -172,7 +172,8 @@ handles. The options are the C opts as keywords: `timeout`, `backpressure_wait`,
 `allow_force`, `catch_up`, `keep_last`, `backpressure_wait` and `reflect_from_mesh` on
 variables. `match_count` on any handle counts the other side: callers on a definition,
 providers on a remote, remotes on a variable definition, owners on a remote variable.
-`close()` retires the handle and answers every outstanding call CANCELLED.
+`close()` first waits until the calls other threads are making on the handle return, then
+retires it and answers every outstanding call CANCELLED.
 
 Handlers are arity dispatched. A one argument function handler returns the reply and is
 acknowledged OK, and raising answers APP_ERROR with the exception text. The two argument

@@ -195,7 +195,8 @@ remote.set(2.0f);
 ## Lifetime
 
 - Handles are move only. Scope end or `close()` releases the name.
-- Closing a remote cancels its open calls.
+- `close()` first waits until the calls other threads are making on the handle return.
+  Closing a remote then cancels its async calls.
 - A handle cannot close itself from inside its own callback.
 - A handle that outlives its node is safe. Its calls just fail.
 

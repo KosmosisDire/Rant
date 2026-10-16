@@ -85,6 +85,14 @@ Where anything else disagrees about a wrapper API, this file wins.
   that callback returns. A later close waits until the first is done. Anything that
   reads a node owned schema later (an encode, a lazy decode, a pulled message) holds a
   pass for it, and a schema read after close refuses loudly.
+- `rant_function_retire` and `rant_variable_retire` free the handle and assume the same,
+  so every function, task and variable handle has a gate of its own too, shared with the
+  deferred answers and task contexts that outlive their callback. A call holds a pass on
+  the node, then on the handle. Close refuses new handle passes, waits until none is out,
+  takes the pointer once so two closes retire once, then retires, and a refused retire
+  reopens the gate. Inside one of the node's callbacks close never waits, since that
+  callback's own caller may hold a pass: it answers `State` while one is out. Rust needs
+  no wait, since a call borrows the handle that `close` consumes.
 - JS: the client class is `RantNode` (`await RantNode.connect(url)`). Handles come from
   async factory methods. The schema is a positional argument, never inside an opts object.
   A null schema means raw or payload less.

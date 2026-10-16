@@ -43,7 +43,7 @@ its options object, `FunctionOptions`, `TaskOptions` or `VariableOptions`. Every
 `IDisposable`: `Dispose()` retires it and releases the name. Closing the node invalidates
 every handle it gave out, so a call on one that outlived its node returns `NoTopic`
 rather than reading freed memory. `Close()` first waits until the calls other threads are
-making on the node return.
+making on the node return, and a pattern handle's `Dispose()` until those on it return.
 
 Every call is thread safe. `NodeOptions.Threading` says where every callback runs:
 subscriber handlers, OnEvent, OnLog, function and task handlers, progress, OnChange,
