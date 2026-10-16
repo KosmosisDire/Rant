@@ -1,0 +1,67 @@
+# Build and test Rant on every push and pull request, on the three desktop platforms.
+# Fuzzing stays local: ctest only replays each fuzz target's seeds and saved crashes.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux }
+          - { os: windows-latest, name: windows }
+          - { os: macos-latest,   name: macos }
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Before the configure, which registers the C# and Python suites only when it finds them
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel 4
+
+      # The tests discover on loopback multicast, which a Linux runner leaves off
+      - name: Loopback multicast
+        if: runner.os == 'Linux'
+        run: sudo ip link set lo multicast on
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure --parallel 4
+
+      # The CPM and FetchContent path: a consumer writes no anchor and defines nothing.
+      - name: A consumer builds from source
+        run: |
+          cmake -S tools/consumer -B build/consumer -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/consumer --config Release
+
+      - name: A consumer builds from an install
+        run: |
+          cmake --install build --prefix "${{ runner.temp }}/prefix"
+          cmake -S tools/consumer -B build/findpkg -DCMAKE_BUILD_TYPE=Release -DRANT_CONSUMER_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH="${{ runner.temp }}/prefix"
+          cmake --build build/findpkg --config Release
+
+      # The build above already made the shared library. This is where the packages read it.
+      - name: Shared library
+        shell: bash
+        run: ls -l dist/native/*/
+
+      - name: NuGet package
+        run: dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
+
+      - name: Python wheel
+        run: python -m pip wheel . --no-deps -w dist
