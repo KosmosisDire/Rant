@@ -6,7 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering::SeqCst};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -599,8 +599,6 @@ struct CallSlot {
     name: String,
     progress: Option<Callback<ProgressFn>>,
     on_response: Mutex<Option<Box<ResponseFn>>>,
-    inflight: Mutex<u32>,
-    idle: Condvar,
 }
 
 // SAFETY: node is read only and outlives every call of its node
@@ -625,24 +623,12 @@ fn register(slot: CallSlot) -> usize {
     id
 }
 
-/// Ends a call's registration, then waits for a progress callback still running elsewhere.
-fn settle(id: usize) {
-    let slot = calls().remove(&id);
-    if let Some(s) = slot {
-        let mut n = lock(&s.inflight);
-        while *n > 0 {
-            n = s.idle.wait(n).unwrap_or_else(PoisonError::into_inner);
-        }
-    }
-}
-
 unsafe extern "C" fn on_progress(p: *const ffi::RantProgress) {
     // SAFETY: the C hands an update valid for this call
     let p = unsafe { &*p };
     let slot = {
         let calls = calls();
         let Some(s) = calls.get(&(p.user as usize)) else { return };
-        *lock(&s.inflight) += 1;
         Arc::clone(s)
     };
     // SAFETY: a call's node outlives its callbacks
@@ -651,11 +637,6 @@ unsafe extern "C" fn on_progress(p: *const ffi::RantProgress) {
         if let Err(refused) = cb.run(inner.key(), |f| f(inner, p)) {
             inner.report_refused(Some(&slot.name), refused);
         }
-    }
-    let mut n = lock(&slot.inflight);
-    *n -= 1;
-    if *n == 0 {
-        slot.idle.notify_all();
     }
 }
 
@@ -733,8 +714,8 @@ pub(crate) fn progress_adapter<Prg: Payload>(
     }
 }
 
-/// A progress handler borrowed from a blocking call's stack. The call settles its slot
-/// before it returns, so the borrow never outlives the frame.
+/// A progress handler borrowed from a blocking call's stack. The C returns the call only
+/// after its last progress callback, so the borrow never outlives the frame.
 struct Borrowed(*mut ProgressFn);
 
 // SAFETY: the target is Send, and is called only while its call is in flight
@@ -760,7 +741,7 @@ pub(crate) fn blocking_call<Req: Payload, Rsp: Payload>(
     let mut co = ffi::RantCallOpts { provider: options.provider, ..Default::default() };
     let slot = progress.map(|f| {
         let raw: *mut BorrowedProgress<'_> = f;
-        // SAFETY: only the lifetime is erased, and settle ends every use before the frame does
+        // SAFETY: only the lifetime is erased, and the call returns after every use
         let raw: *mut ProgressFn = unsafe { std::mem::transmute(raw) };
         let target = Borrowed(raw);
         register(CallSlot {
@@ -768,8 +749,6 @@ pub(crate) fn blocking_call<Req: Payload, Rsp: Payload>(
             name: shared.name.clone(),
             progress: Some(Callback::new(Box::new(move |i: &NodeInner, p: &ffi::RantProgress| target.call(i, p)))),
             on_response: Mutex::new(None),
-            inflight: Mutex::new(0),
-            idle: Condvar::new(),
         })
     });
     if let Some(id) = slot {
@@ -781,7 +760,7 @@ pub(crate) fn blocking_call<Req: Payload, Rsp: Payload>(
     // SAFETY: the pass keeps the handle alive, and out and co outlive the call
     let rc = Req::__with_bytes(shared.req.as_deref(), req, |b| unsafe { ffi::rant_function_call(p.raw, c_bytes(b), &mut out, timeout, &co) });
     if let Some(id) = slot {
-        settle(id);
+        calls().remove(&id);
     }
     let rc = rc.map_err(|_| SendError::Schema)?;
     if rc < 0 {
@@ -846,8 +825,6 @@ pub(crate) fn async_call<Req: Payload, Rsp: Payload>(
         name: shared.name.clone(),
         progress: progress.map(Callback::new),
         on_response: Mutex::new(Some(done)),
-        inflight: Mutex::new(0),
-        idle: Condvar::new(),
     });
     let mut call_id = 0u32;
     let co = ffi::RantCallOpts {

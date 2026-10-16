@@ -346,8 +346,8 @@ needs no DLL and no cmake.
   thread. A closure that holds a handle of its node is a cycle, which close breaks.
 - An in flight call's callbacks are found through a process wide registry by an id the C
   carries as its user pointer, so a progress callback racing the call's end finds nothing
-  instead of freed memory. A blocking call waits for a progress callback still running
-  elsewhere before it returns, which lets that handler borrow the caller's stack.
+  instead of freed memory. The C returns a blocking call only after its last progress
+  callback, which lets that handler borrow the caller's stack.
 - `call` blocks through `rant_function_call`, and `call_async` returns a Future woken from
   the response callback, which needs no runtime. Dropping an unfinished `TaskCall` cancels
   the task, as dropping a future stops its work, and `detach()` keeps it running. Dropping a
