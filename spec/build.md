@@ -71,7 +71,9 @@ Rant as a subproject or finds the installed package.
   package answers a version request with `SameMinorVersion` compatibility, `Rant.csproj`
   reads it through an MSBuild property function, `pyproject.toml` through the
   scikit-build-core regex provider, and the Unity packer stamps it into `package.json`.
-  A release is a tag `v` plus that number, and the workflow refuses any other tag.
+  A release is a tag `v` plus that number, and the workflow refuses any other tag. Cargo
+  cannot read a file, so `bindings/rust/Cargo.toml` repeats the number, and both the Rust
+  suite and the workflow refuse a mismatch.
 - The packer reads `VERSION` too and writes `#define RANT_VERSION` at the top of
   `dist/rant.h`, so a consumer that compiles the header gets the version with no build
   define. `VERSION` is a dependency of the pack command, so a bump re packs.
@@ -132,6 +134,11 @@ Rant as a subproject or finds the installed package.
   package, attaches
   everything to a GitHub Release, pushes the upm branch, and publishes to nuget.org and
   PyPI when the `NUGET_API_KEY` and `PYPI_API_TOKEN` secrets exist.
+- The Rust crate ships as a git dependency on the tag `crate-v<VERSION>`: a parentless
+  commit of the release tree plus `bindings/rust/rant/csrc/`, the packed `rant.h` and
+  `rant.c`, so cargo fetches one snapshot and never needs cmake. `build.rs` compiles
+  `csrc/` when present, else packs `src/` with `tools/pack.cmake`, which a checkout does.
+  The tag is never moved, since packages pin it.
 - `tools/consumer` is a throwaway project that consumes Rant the way a user does, from the
   source tree by default and from an install with `RANT_CONSUMER_FIND_PACKAGE=ON`. It is
   the only thing that notices when external consumption breaks, which the normal build

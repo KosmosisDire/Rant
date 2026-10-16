@@ -1,6 +1,5 @@
-# Cut a release when a tag v<VERSION> is pushed: every package and every program on every
-# platform attached to a GitHub Release, the Unity package pushed to the upm branch, and
-# the NuGet and the wheels published wherever an API key is set (spec/build.md).
+# Cut a release on a tag v<VERSION>: every package and program attached to a GitHub Release,
+# the upm branch, the Rust crate tag, and NuGet and wheels where a key is set (spec/build.md).
 name: release
 
 on:
@@ -27,9 +26,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Cargo cannot read VERSION, so the Rust workspace repeats it
       - name: The tag matches VERSION
         shell: bash
-        run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+        run: |
+          test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+          grep -q "^version = \"$(tr -d '\r' < VERSION)\"" bindings/rust/Cargo.toml
 
       # aarch64 wheels build under emulation, since no arm runner is free on a private repo.
       - uses: docker/setup-qemu-action@v4
@@ -176,6 +178,21 @@ jobs:
           git add -A
           git commit -q -m "upm $(cat "$GITHUB_WORKSPACE/VERSION")"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" upm
+
+      # The Rust crate as a git dependency, tag = "crate-vVERSION": the release tree plus the
+      # packed C in csrc/, as a commit with no parents so cargo fetches one snapshot. Never moved.
+      - name: Publish the crate tag
+        run: |
+          tag="crate-v$(cat VERSION)"
+          mkdir -p bindings/rust/rant/csrc
+          cp dist/rant.h dist/rant.c bindings/rust/rant/csrc/
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan crate
+          git add -f bindings/rust/rant/csrc
+          git commit -q -m "$tag"
+          git tag "$tag"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag"
 
       # Set NUGET_API_KEY and PYPI_API_TOKEN as repository secrets and the next tag
       # publishes. Without them the release is the GitHub page alone.

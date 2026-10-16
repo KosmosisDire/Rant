@@ -12,12 +12,14 @@ fn main() -> ExitCode {
     let check = std::env::args().any(|a| a == "--check");
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let crate_dir = here.parent().expect("ffigen sits in the workspace").join("rant");
-    let header = dist_dir(&crate_dir).join("rant.h");
     let target = crate_dir.join("src/ffi.rs");
-    if !header.exists() {
-        eprintln!("ffigen: {} is missing, build Rant with CMake first", header.display());
-        return ExitCode::FAILURE;
-    }
+    let header = match amalgamate(&crate_dir, &std::env::temp_dir().join("rant-ffigen")) {
+        Ok(dir) => dir.join("rant.h"),
+        Err(e) => {
+            eprintln!("ffigen: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     // bindgen panics when it cannot load libclang, the one failure that skips
     let generated = match std::panic::catch_unwind(|| generate(&header, &here.join("include"))) {
         Ok(Ok(text)) => text,

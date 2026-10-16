@@ -4,15 +4,13 @@ include!("dist.rs");
 
 fn main() {
     let crate_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let dist = dist_dir(&crate_dir);
-    let source = dist.join("rant.c");
-    if !source.exists() {
-        panic!("rant: {} is missing. Build Rant with CMake first, or set RANT_DIST", source.display());
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("dist");
+    let dist = amalgamate(&crate_dir, &out).unwrap_or_else(|e| panic!("rant: {e}"));
+    let root = crate_dir.ancestors().nth(3).unwrap_or(&crate_dir).to_path_buf();
+    for watched in [crate_dir.join("csrc"), root.join("src"), root.join("tools").join("pack.cmake"), root.join("VERSION")] {
+        println!("cargo:rerun-if-changed={}", watched.display());
     }
-    println!("cargo:rerun-if-env-changed=RANT_DIST");
-    println!("cargo:rerun-if-changed={}", source.display());
-    println!("cargo:rerun-if-changed={}", dist.join("rant.h").display());
-    cc::Build::new().file(&source).include(&dist).warnings(false).compile("rant");
+    cc::Build::new().file(dist.join("rant.c")).include(&dist).warnings(false).compile("rant");
 
     // the OS libraries tools/rant_platform.cmake names
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
