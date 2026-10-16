@@ -172,5 +172,5 @@ Internal `RANT_ERROR` events are mirrored to the error level unless
 
 Every node also hosts the `@rant/meta` function, which answers a snapshot of its peers,
 topics and counters for tools like the explorer. `opts.disable_meta` strips it.
-`rant_topic_counts` reads the per topic message and byte counters directly. Builtins are
-hidden from every reflection walk.
+`rant_topic_counts` reads the per topic message and byte counters directly. The reflection
+walks list the builtins like any entity, under their `@rant/` names.

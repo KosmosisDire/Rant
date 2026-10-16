@@ -358,11 +358,13 @@ What each phase pins, grouped by layer.
 ## Binding tests
 
 Each binding suite is one ctest entry under the `bindings` label: `bindings.cpp`
-(`rant_cpp_test`), `bindings.python` (`bindings/python/test.py`) and `bindings.csharp`
+(`rant_cpp_test`), `bindings.python` (`bindings/python/test.py`), `bindings.csharp`
 (`bindings/csharp/test`, which the `bindings.csharp.build` fixture builds with dotnet when
-ctest runs). Each runs two nodes in one process on loopback, takes a leg name to run one
-and `--list` to list them, runs every leg even after a failure, and reads its domains from
-`RANT_TEST_DOMAIN` like the C programs.
+ctest runs) and `bindings.rust` (`cargo test` over `bindings/rust/rant`, beside
+`bindings.rust.ffi`, which checks the generated FFI is current). Each runs two nodes in one
+process on loopback, takes a leg name to run one and `--list` to list them, runs every leg
+even after a failure, and reads its domains from `RANT_TEST_DOMAIN` like the C programs.
+Rust's legs are cargo's test functions, so a name filter runs one.
 
 The C++ legs: dynamic covers the dynamic schema API direct and over service threads,
 patterns the patterns layer with the memcpy, loop and rebase codec paths plus entity
@@ -379,7 +381,7 @@ calls. `rant_cpp_test bench` runs the cost of each codec path
 (memcpy, loop, tails, dynamic) alone and end to end on loopback, next to a C node pair on
 the same footing, so a wrapper change is measured against the C floor.
 
-The C# and Python suites mirror the same ground. Two things every suite shares:
+The C#, Python and Rust suites mirror the same ground. Two things every suite shares:
 
 - `tests/golden/schemas.txt` holds the canonical schema hashes, and the Float3 wire bytes,
   that every binding pins. The C schema program checks every line, each binding checks its

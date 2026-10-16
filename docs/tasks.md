@@ -177,6 +177,12 @@ No wrapper spawns threads except Python (one daemon thread per running call).
   completes OK, raising `rant.CancelledError(msg)` completes CANCELLED, any other
   exception APP_ERROR. Caller: `call(req, on_progress=...)` blocking, `call_async(...)`
   returning the id, `cancel(id)`.
+- Rust: `TaskDefinition<Req, Prg, Rsp>` and `RemoteTask<Req, Prg, Rsp>`. The handler gets
+  a `TaskRequest` and returns the answer, or calls `defer()` for a `PendingTask` to move to
+  the app's own thread, whose `complete`, `fail` and `complete_cancelled` consume it and
+  whose drop answers APP_ERROR. Caller: `call(req, options, on_progress)` blocking,
+  `call_async` returning a `TaskCall` Future with its id, which cancels the task when
+  dropped early, and `cancel(id)`.
 - JS and bridge: handler `async (req, ctx)` with `ctx.progress(v)` and `ctx.signal` (an
   AbortSignal, where `throwIfAborted` completes CANCELLED). Caller: `const run =
   task.call(req)`, then `run.onProgress(cb)` (null = the RUNNING ack), `await run.result`,

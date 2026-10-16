@@ -1,9 +1,9 @@
 # Bindings
 
-Five API surfaces share one C core: C, C++ (`bindings/cpp/rant.hpp`), C# (`bindings/csharp/Rant.cs` plus
-the Unity copy), Python (`bindings/python/rant/__init__.py`) and JS through the bridge. The cross
-language rules below were argued once and apply everywhere. Where anything else disagrees
-about a wrapper API, this file wins.
+Six API surfaces share one C core: C, C++ (`bindings/cpp/rant.hpp`), C# (`bindings/csharp/Rant.cs` plus
+the Unity copy), Python (`bindings/python/rant/__init__.py`), Rust (`bindings/rust/`) and JS
+through the bridge. The cross language rules below were argued once and apply everywhere.
+Where anything else disagrees about a wrapper API, this file wins.
 
 ## Cross language rules
 
@@ -16,17 +16,18 @@ about a wrapper API, this file wins.
   count on the subscribing side. C keeps its generic primitives.
 - A call outcome is a value, never a fault. Its value reads whatever payload came back,
   whatever the status, so a cancelled task's partial result and an AppError's failure data
-  are readable: C++ `value()` is a `std::optional`, and C# `Value` and Python `.value`
-  throw only when the call did not end OK and nothing came back. JS `call()` rejects only
-  on connection loss. C# is the exception: `Call` and `CallAsync` return the response
-  itself and throw `CallException` off OK, and `TryCall` and `TryCallAsync` are the value
-  forms.
+  are readable: C++ `value()` and Rust `value()` are optional, and C# `Value` and Python
+  `.value` throw only when the call did not end OK and nothing came back. Rust's
+  `into_result()` is the `?` form. JS `call()` rejects only on connection loss. C# is the
+  exception: `Call` and `CallAsync` return the response itself and throw `CallException`
+  off OK, and `TryCall` and `TryCallAsync` are the value forms.
 - A payload that does not decode into a handle's type raises an Error event of kind
   SchemaMismatch naming the topic in every binding, and the handler does not run. A pull
   or a variable read of one throws.
 - Durations follow the language: `std::chrono` in C++ (a timeout in milliseconds,
   `rant::forever` for no end, option fields without a unit suffix), int milliseconds in
-  C#, float seconds in Python. Timestamps stay integer microseconds everywhere.
+  C#, float seconds in Python, `std::time::Duration` in Rust (`rant::FOREVER` for no end).
+  Timestamps stay integer microseconds everywhere.
 - Every handle reports its name and the schema it uses now, the adopted one on a
   reflect_from_mesh handle, through `rant_topic_schema`, `rant_function_request_schema`,
   `rant_function_response_schema`, `rant_function_progress_schema` and
@@ -40,9 +41,12 @@ about a wrapper API, this file wins.
   schema, after its options, and `reflect_from_mesh` is an option field.
 - Construction failures throw or reject. Data path outcomes are statuses and events. A C++
   node has a constructor, not `open`, and it and every factory throw `rant::Error`.
-  `-fno-exceptions` degrades to an empty handle, `valid()` and `node.last_error()`.
+  `-fno-exceptions` degrades to an empty handle, `valid()` and `node.last_error()`. Rust
+  returns `Result` with `rant::Error` from the node and every factory, and the data path
+  returns `Result` with `SendError`.
 - Node open takes a name and options only: `rant::Node(name, NodeOptions)`, `new
-  RantNode(name, NodeOptions)`, `Node(name, **options)`. There is no node level message
+  RantNode(name, NodeOptions)`, `Node(name, **options)`, `Node::new(name,
+  NodeOptions::new())`. There is no node level message
   handler, subscribers carry every one. The service thread runs from open unless the
   `threading` option is manual, and dispatch parks every callback on the node's queue
   for `dispatch()`. The event handler is optional and attaches after open (`on_event(h)`,
@@ -53,7 +57,10 @@ about a wrapper API, this file wins.
   without one is pulled: `take` and `latest` in Python, `TryTake` and `TryTakeLatest` in
   C#, `take` and `take_latest` in C++. C# node and variable handlers are events
   (`OnChange`, `OnWrite`, `OnEvent`, `OnLog`) whose delegate takes the value and the
-  envelope, discarded with `_` when unwanted.
+  envelope, discarded with `_` when unwanted. Rust has one form that is both, a value
+  that reads as the payload through `Deref` and carries the envelope, since a closure's
+  type cannot be inferred across two, and its pulled subscriber has a factory of its own,
+  `pulled_subscriber`, with `take` and `take_latest`.
 - An owning message copies its payload, since the transport buffer is reused after the
   callback, but decodes only when the fields or the typed value are read. A handler that
   wants the bytes must not pay for the topic's schema. The decode outlives the callback,
@@ -90,7 +97,8 @@ about a wrapper API, this file wins.
   point is reachable from every binding the moment it is declared. Bindings format log
   text in their own runtime and call `rant_node_log_text`, never the variadic
   `rant_node_log` over FFI.
-- A thrown handler in C++, C#, Python or JS answers APP_ERROR with the exception text.
+- A thrown handler in C++, C#, Python or JS, or a panicking one in Rust, answers APP_ERROR
+  with its text.
 - Every wait is a probe plus an event plus a bounded block. No blocking only APIs.
 
 Deferred, confirmed: a C reflection macro (`serialize/reflect.h` over C11 `_Generic`),
@@ -108,7 +116,7 @@ run `ctest -L bindings`. Its layout legs compare every mirror's size and field o
 `tests/support/layout.c`, which the build runs into `build/tests/layout.txt`, so a mirror
 that drifted fails there instead of crashing. A newly mirrored struct gets its lines in
 `layout.c` too. Import alone succeeds silently with a wrong struct. C++ is immune because
-it embeds the real header.
+it embeds the real header, and Rust because bindgen generates its declarations from it.
 
 ## C++
 
@@ -282,3 +290,46 @@ platform serves every interpreter.
   CANCELLED.
 - `node.reflection` carries the walks as `Peer` and `Entity` dataclasses whose schemas
   are registered in the node through `rant_node_schema_parse`.
+
+## Rust
+
+`bindings/rust/` is a Cargo workspace: `rant-middleware` (imported as `rant`, since `rant` on
+crates.io is taken), `rant-macros` (the derives), `ffigen` (the FFI generator) and the
+interop tick. `build.rs` compiles the amalgamated C into the crate with `cc`, so a program
+needs no DLL and no cmake.
+
+- `src/ffi.rs` is generated by bindgen from `dist/rant.h` for one canonical target and
+  checked in. `cargo run -p rant-ffigen` regenerates it, and ctest `bindings.rust.ffi`
+  runs it with `--check`. `RANT_VERSION` is left out, so a version bump leaves it alone.
+  `tests/coverage.rs` fails while a declared `rant_*` function is neither used nor
+  skipped with a reason.
+- Options are setters on the options value, `Qos::new().reliable(true)`, never a builder.
+- `#[derive(rant::Message)]` and `#[derive(rant::Enum)]` spell DSL text and compile it
+  through `rant_node_schema`, once per node and type, as `RANT_SCHEMA` does. The codec
+  resolves the type's flat ops against a schema into a plan, one per delivered schema
+  pointer.
+- `Payload` is sealed: a `Message` type, or `Bytes` for raw bytes, which alone takes a
+  schema or `reflect_from_mesh`. A typed and a raw side may mix on one pattern handle.
+- The node gate is the one above. Every function, task and variable handle has a gate of
+  its own as well, since a retire frees the C handle while a `Deferred` or `PendingTask` on
+  another thread may still use it. Every encode and decode holds a pass, and a value read
+  outside a callback holds one in its `FieldView`.
+- Every app callback runs through one guard: it marks the thread, catches a panic, and
+  refuses a re entry, which a `FnMut` cannot allow. A panic becomes stderr text and an Error
+  event, and in a function or task handler an AppError answer with the panic text.
+- The C points at handler boxes the node keeps until the handle retires or the node
+  closes, replaced ones included, since the C may still run a replaced handler on another
+  thread. A closure that holds a handle of its node is a cycle, which close breaks.
+- An in flight call's callbacks are found through a process wide registry by an id the C
+  carries as its user pointer, so a progress callback racing the call's end finds nothing
+  instead of freed memory. A blocking call waits for a progress callback still running
+  elsewhere before it returns, which lets that handler borrow the caller's stack.
+- `call` blocks through `rant_function_call`, and `call_async` returns a Future woken from
+  the response callback, which needs no runtime. Dropping an unfinished `TaskCall` cancels
+  the task, as dropping a future stops its work, and `detach()` keeps it running. Dropping a
+  `Deferred` or `PendingTask` unanswered answers AppError.
+- A handler's return value is its answer through `IntoReply`: a value answers Ok, an `Err`
+  AppError with its text, and `()` leaves the answer to its defer.
+- Static mode runs in one block the node allocates at open, through a copy of
+  `rant_allocator_static`, which the C keeps inline.
+- The crate ships as a git dependency on the tag `crate-v<VERSION>` (spec/build.md).

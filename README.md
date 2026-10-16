@@ -5,7 +5,7 @@ A small, dependency-free C99 pub-sub middleware:
 - realtime optionally-reliable UDP transport
 - high-throughput shared-memory communication on localhost
 
-Wrappers for C, C++, Python, C# / .NET, and Unity share one core.
+Wrappers for C, C++, Python, C# / .NET, Unity and Rust share one core.
 
 ## Install
 
@@ -49,6 +49,14 @@ dotnet add package Rant
 ```
 Before the package is on nuget.org, download the `.nupkg` from the release and register
 its folder first: `dotnet nuget add source <folder> -n rant`.
+
+### Rust
+```toml
+[dependencies]
+rant-middleware = { git = "https://github.com/KosmosisDire/Rant.git", tag = "crate-v0.0.26" }
+```
+The crate compiles the C library into your program and is used as `rant`. See
+[docs/rust.md](docs/rust.md).
 
 ### Unity
 Add it in the Package Manager (`+`, then "Add package from git URL"):

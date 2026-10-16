@@ -122,8 +122,8 @@ Complete or abandon outstanding defer tokens before retiring a definition.
 
 ## Wrappers
 
-C++, C#, Python and the JS bridge expose all three patterns. A thrown handler in C#,
-Python or JS answers APP_ERROR with the exception text. C++ `defer()` returns a movable
-`PendingTask`, C# handlers are async with a real `CancellationToken`, JS handlers get
-`ctx.progress` and an `AbortSignal`. Only Python spawns threads (one daemon thread per
-running call).
+C++, C#, Python, Rust and the JS bridge expose all three patterns. A thrown handler in
+C#, Python or JS, and a panicking one in Rust, answers APP_ERROR with its text. C++ and
+Rust `defer()` return a `PendingTask` made to move to the app's own thread, C# handlers are
+async with a real `CancellationToken`, JS handlers get `ctx.progress` and an
+`AbortSignal`. Only Python spawns threads (one daemon thread per running call).
