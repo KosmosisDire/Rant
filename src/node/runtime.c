@@ -267,13 +267,15 @@ static void i_rant_node_unlock(RantNode *n, int acquired){
 }
 /* Brackets user code: mu is released while it runs, so a send on another thread never
    waits for a handler. mark = 1 stamps the thread as a callback thread (inline delivery),
-   0 leaves it a plain thread (a queue dispatch, full API). Nesting saves and restores. */
-static void i_rant_node_callback_begin(RantNode *n, i_RantCallbackScope *s, int mark){
+   0 leaves it a plain thread (a queue dispatch, full API). Nesting saves and restores.
+   out counts the handle's callbacks out only when mu is released, as end uncounts them. */
+static void i_rant_node_callback_begin(RantNode *n, i_RantCallbackScope *s, int mark, volatile uint32_t *out){
     uint64_t self = i_rant_plat_thread_id();
     memset(s, 0, sizeof *s);
     if (!(n->lock_held && n->lock_owner == self) || n->user_locked) return;
     s->prev_thread = n->cb_thread; s->prev_depth = n->cb_depth;
     if (mark){ n->cb_thread = self; n->cb_depth = 0; n->cb_out++; s->marked = 1; }
+    if (out) (*out)++;
     i_rant_node_unlock_raw(n);
     s->released = 1;
 }
@@ -318,8 +320,9 @@ static void i_rant_node_callbacks_settle(RantNode *n){ i_rant_node_settle_on(n, 
 static int  i_rant_node_lock(RantNode *n){ (void)n; return 1; }
 static void i_rant_node_unlock(RantNode *n, int acquired){ (void)n; (void)acquired; }
 static void i_rant_node_kick(RantNode *n){ (void)n; }
-static void i_rant_node_callback_begin(RantNode *n, i_RantCallbackScope *s, int mark){
+static void i_rant_node_callback_begin(RantNode *n, i_RantCallbackScope *s, int mark, volatile uint32_t *out){
     memset(s, 0, sizeof *s); s->marked = (uint8_t)mark; if (mark) n->cb_out++;
+    if (out) (*out)++;
 }
 static void i_rant_node_callback_end(RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out){
     if (out) (*out)--;
@@ -724,7 +727,7 @@ static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from,
     if (h && h->sys_on_message) h->sys_on_message(h->sys_msg_user, &m);    /* the patterns layer */
     else {
         i_RantCallbackScope cs;
-        i_rant_node_callback_begin(n, &cs, 1);
+        i_rant_node_callback_begin(n, &cs, 1, NULL);
         n->user_on_message(&m);
         i_rant_node_callback_end(n, &cs, NULL);
     }
@@ -2282,8 +2285,7 @@ void i_rant_node_sys_unlock(RantNode *n, int acquired){ i_rant_node_unlock(n, ac
 /* the handle count rises before the release and falls after the retake, so a settle on
    it wakes to a settled state */
 void i_rant_node_sys_callback_begin(RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out){
-    if (out) (*out)++;
-    i_rant_node_callback_begin(n, s, 1);
+    i_rant_node_callback_begin(n, s, 1, out);
 }
 void i_rant_node_sys_callback_end(RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out){
     i_rant_node_callback_end(n, s, out);
@@ -3119,7 +3121,7 @@ int rant_queue_dispatch(RantQueue *g, int max_callbacks, int timeout_ms){
         q->viewing = 1; q->busy = 1;           /* busy: retire of this handle is refused meanwhile */
         if (run){
             {   i_RantCallbackScope cs;
-                i_rant_node_callback_begin(n, &cs, 0);
+                i_rant_node_callback_begin(n, &cs, 0, NULL);
                 if (!h) n->on_event(&e); else if (sys) sys(h->sys_msg_user, &m, kind); else n->user_on_message(&m);
                 i_rant_node_callback_end(n, &cs, NULL);
             }

@@ -91,8 +91,10 @@ strict prefix of it.
   `i_rant_node_sys_callback_begin` and `end` (request, response, progress and cancel
   handlers, `on_write` and `on_change`), each handle counting its own callbacks out, so
   its retire waits on that count and a variable's store writers wait on it too, since the
-  update the observer holds views the store. Synthesized outcomes at retire, close and
-  timeout, and `on_event`, still run under the lock.
+  update the observer holds views the store. A handle counts a callback only when the
+  bracket released the lock itself, so a handler a queue dispatch runs, with the lock
+  already released, counts nothing, and the topic's busy flag guards its retire instead.
+  Synthesized outcomes at retire, close and timeout, and `on_event`, still run under the lock.
   A queue dispatch releases the lock through the same bracket unmarked, so a dispatch
   thread keeps the full API.
 - Reentrancy is the callback thread stamp above, and the owner thread id for a nested

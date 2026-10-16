@@ -584,11 +584,67 @@ static void callback_pattern_checks(void){
     rant_node_close(P, 1);
 }
 
+/* A definition on a callback queue retires once its handler ran at dispatch, where the lock
+ * is already released and the handler bracket must leave no count behind */
+static void qr_inc(RantRequest *req, void *user){
+    uint8_t out[4];
+    (void)user;
+    i_rant_le_w32(out, (req->data.len == 4 ? i_rant_le_r32(req->data.data) : 0u) + 1u);
+    rant_request_reply(req, rant_bytes(out, 4));
+}
+static volatile int qr_answers, qr_retired;
+static int qr_rc;
+static void qr_on_reply(const RantResponse *r){ if (r->status == RANT_CALL_OK) qr_answers++; }
+static void qr_retire(void *arg){ qr_rc = rant_function_retire((RantFunction*)arg); qr_retired = 1; }
+
+static void queued_retire_checks(void){
+    RantAllocator pa = rant_allocator_heap(0), ca = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *P, *C; RantAddr seed; RantQueue *q;
+    RantFunction *fdef, *tdef, *frem, *trem, *defs[2];
+    uint8_t req[4]; int i, t;
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=(uint16_t)(TEST_DOMAIN+44); o.discovery.max_peers=4;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    P = rant_node_open(&pa, "qr-prov", NULL, NULL, &o);
+    C = rant_node_open(&ca, "qr-call", NULL, NULL, &o);
+    CHECK(P && C, "qretire: nodes open");
+    if (!(P && C)){ if(P)rant_node_close(P,0); if(C)rant_node_close(C,0); return; }
+    q    = rant_node_create_queue(P);
+    fdef = rant_node_create_function_definition(P, "qr/fn", NULL, NULL, qr_inc, NULL, &(RantFunctionOpts){ .queue = q });
+    tdef = rant_node_create_task_definition(P, "qr/task", NULL, NULL, NULL, qr_inc, NULL, &(RantTaskOpts){ .queue = q });
+    frem = rant_node_create_remote_function(C, "qr/fn", NULL, NULL, NULL);
+    trem = rant_node_create_remote_task(C, "qr/task", NULL, NULL, NULL, NULL);
+    CHECK(q && fdef && tdef && frem && trem, "qretire: handles created");
+    if (!(q && fdef && tdef && frem && trem)){ rant_node_close(C,0); rant_node_close(P,0); return; }
+    rant_node_start(P); rant_node_start(C);
+    WAIT_UNTIL(4000, rant_function_match_count(frem) > 0 && rant_function_match_count(trem) > 0);
+    i_rant_le_w32(req, 41); qr_answers = 0;
+    rant_function_call_async(frem, rant_bytes(req, 4), qr_on_reply, NULL, NULL);
+    rant_function_call_async(trem, rant_bytes(req, 4), qr_on_reply, NULL, NULL);
+    for (t = 0; t < 400 && qr_answers < 2; t++) (void)rant_queue_dispatch(q, 0, 10);
+    CHECK(qr_answers == 2, "qretire: both handlers ran at dispatch and answered (%d)", qr_answers);
+    defs[0] = fdef; defs[1] = tdef;
+    for (i = 0; i < 2; i++){
+        i_RantThread th;
+        qr_retired = 0;
+        i_rant_plat_thread_start(&th, qr_retire, defs[i]);
+        WAIT_UNTIL(3000, qr_retired);
+        CHECK(qr_retired && qr_rc == RANT_OK, "qretire: the %s definition retires after a dispatched request (rc=%d)",
+              i ? "task" : "function", qr_retired ? qr_rc : 0);
+        if (!qr_retired) exit(1);   /* a retire that never returns: nothing after it can run */
+        i_rant_plat_thread_join(&th);
+    }
+    rant_node_close(C, 1);
+    rant_node_close(P, 1);
+}
+
 static const TestCase cases[] = {
     { "queue", queue_checks },
     { "pull", pull_checks },
     { "callback_queue", callback_queue_checks },
     { "callback_pattern", callback_pattern_checks },
+    { "queued_retire", queued_retire_checks },
 };
 
 TEST_MAIN(cases)
