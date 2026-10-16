@@ -968,19 +968,23 @@ namespace Rant
         /// <summary>Run the callbacks parked at entry, oldest first, up to maxCallbacks (0 =
         /// all). timeoutMs 0 returns at once when empty, positive waits that long for the
         /// first record, negative waits forever. Returns the count run, or State from an
-        /// inline callback or while another thread dispatches this queue.</summary>
+        /// inline callback, while another thread dispatches this queue, or once the node
+        /// closed.</summary>
         public int Dispatch(int maxCallbacks = 0, int timeoutMs = 0)
-            => Node.Handle == IntPtr.Zero ? (int)SendStatus.State
-                                          : Native.rant_queue_dispatch(Handle, maxCallbacks, timeoutMs);
+            => Node.Gate.WaitSliced(timeoutMs, (int)SendStatus.State, (q: Handle, max: maxCallbacks),
+                                    (s, ms) => Native.rant_queue_dispatch(s.q, s.max, ms));
 
         /// <summary>Records parked, and records dropped since open.</summary>
         public (uint Waiting, uint Dropped) Stats
         {
             get
             {
-                if (Node.Handle == IntPtr.Zero) return (0u, 0u);
-                Native.rant_queue_stats(Handle, out uint w, out uint d);
-                return (w, d);
+                using (Pass p = Node.Gate.Enter())
+                {
+                    if (!p.Ok) return (0u, 0u);
+                    Native.rant_queue_stats(Handle, out uint w, out uint d);
+                    return (w, d);
+                }
             }
         }
     }
@@ -1761,12 +1765,20 @@ namespace Rant
     {
         internal IntPtr Handle;   // zeroed when the owning node closes
         internal Type ClrType;    // set for reflection-built schemas (decode target)
+        internal readonly Gate Gate;   // the owning node's, held across every read of Handle
 
-        internal Schema(IntPtr handle, Type clrType) { Handle = handle; ClrType = clrType; }
+        internal Schema(IntPtr handle, Type clrType, Gate gate) { Handle = handle; ClrType = clrType; Gate = gate; }
 
-        // The node freed it at Close: refuse loudly instead of reading freed memory.
-        private IntPtr Live => Handle != IntPtr.Zero ? Handle
-            : throw new SchemaException("the node that owned this schema is closed");
+        // A pass on the owning node and the handle. The node frees it at Close, so a read after
+        // that refuses loudly instead of reading freed memory.
+        internal Pass Use(out IntPtr h)
+        {
+            Pass p = Gate.Enter();
+            h = p.Ok ? Handle : IntPtr.Zero;
+            if (h != IntPtr.Zero) return p;
+            p.Dispose();
+            throw new SchemaException("the node that owned this schema is closed");
+        }
 
         // The schema a typed handle uses: the given one bound to T, else T reflected under the
         // handle's name when T has none of its own. A byte[] T carries the encoded message as
@@ -1778,17 +1790,22 @@ namespace Rant
         }
 
         /// <summary>The wire type name, "" for an anonymous root.</summary>
-        public string Name => Codec.Str(Native.rant_schema_name(Live));
+        public string Name { get { using (Use(out IntPtr h)) return Codec.Str(Native.rant_schema_name(h)); } }
         /// <summary>The identity of the wire shape, the same value in every language.</summary>
-        public ulong Hash => Native.rant_schema_hash(Live);
+        public ulong Hash { get { using (Use(out IntPtr h)) return Native.rant_schema_hash(h); } }
 
         /// <summary>The DSL text reconstructed from the compiled schema (works for any
         /// schema, including one parsed from a peer). Paste into a C node for interop.</summary>
-        public string Dsl => Codec.SchemaDsl(Live);
+        public string Dsl { get { using (Use(out IntPtr h)) return Codec.SchemaDsl(h); } }
 
         /// <summary>Can a reader declaring this schema read messages written with pub? Type
         /// names narrow: an anonymous type reads a named one, never the reverse.</summary>
-        public bool CanRead(Schema pub) => Native.rant_schema_subset(Live, pub.Live) != 0;
+        public bool CanRead(Schema pub)
+        {
+            using (Use(out IntPtr h))
+            using (pub.Use(out IntPtr hp))
+                return Native.rant_schema_subset(h, hp) != 0;
+        }
 
         /// <summary>The flat depth first field table (<see href="https://github.com/KosmosisDire/Rant/blob/main/spec/schema.md">spec/schema.md</see>). A struct's members
         /// follow it one level deeper, a struct array's element template likewise with
@@ -1797,55 +1814,64 @@ namespace Rant
         {
             get
             {
-                IntPtr h = Live;
-                ushort n = Native.rant_schema_field_count(h);
-                var fields = new SchemaField[n];
-                for (ushort i = 0; i < n; i++)
-                {
-                    RantSchemaFieldInfo info;
-                    if (Native.rant_schema_field_at(h, i, out info) == 0)
-                        throw new SchemaException("field " + i + " unreadable");
-                    fields[i] = new SchemaField
-                    {
-                        Index = i, Name = Codec.Str(info.name), TypeName = Codec.Str(info.type_name),
-                        ElemName = Codec.Str(info.elem_name), Kind = (FieldType)info.kind,
-                        Elem = (FieldType)info.elem, Count = info.count, Depth = info.depth,
-                        StrCap = info.str_cap,
-                        ArrayParent = info.arr_parent == 0xFFFF ? -1 : info.arr_parent,
-                        ArrayDepth = info.arr_depth,
-                        Offset = info.offset, Size = info.size, ElemSize = info.elem_size,
-                    };
-                }
-                return fields;
+                using (Use(out IntPtr h))
+                    return FieldsOf(h);
             }
+        }
+
+        private static SchemaField[] FieldsOf(IntPtr h)
+        {
+            ushort n = Native.rant_schema_field_count(h);
+            var fields = new SchemaField[n];
+            for (ushort i = 0; i < n; i++)
+            {
+                RantSchemaFieldInfo info;
+                if (Native.rant_schema_field_at(h, i, out info) == 0)
+                    throw new SchemaException("field " + i + " unreadable");
+                fields[i] = new SchemaField
+                {
+                    Index = i, Name = Codec.Str(info.name), TypeName = Codec.Str(info.type_name),
+                    ElemName = Codec.Str(info.elem_name), Kind = (FieldType)info.kind,
+                    Elem = (FieldType)info.elem, Count = info.count, Depth = info.depth,
+                    StrCap = info.str_cap,
+                    ArrayParent = info.arr_parent == 0xFFFF ? -1 : info.arr_parent,
+                    ArrayDepth = info.arr_depth,
+                    Offset = info.offset, Size = info.size, ElemSize = info.elem_size,
+                };
+            }
+            return fields;
         }
 
         /// <summary>An enum field's options by flat index, empty for any other field.</summary>
         public SchemaEnumVariant[] EnumVariants(int field)
         {
-            IntPtr h = Live;
-            ushort n = Native.rant_schema_enum_count(h, (ushort)field);
-            var list = new SchemaEnumVariant[n];
-            for (ushort i = 0; i < n; i++)
+            using (Use(out IntPtr h))
             {
-                long value; RantStringView name;
-                if (Native.rant_schema_enum_variant(h, (ushort)field, i, out value, out name) == 0)
-                    throw new SchemaException("enum variant " + i + " unreadable");
-                list[i] = new SchemaEnumVariant { Name = Codec.Str(name), Value = value };
+                ushort n = Native.rant_schema_enum_count(h, (ushort)field);
+                var list = new SchemaEnumVariant[n];
+                for (ushort i = 0; i < n; i++)
+                {
+                    long value; RantStringView name;
+                    if (Native.rant_schema_enum_variant(h, (ushort)field, i, out value, out name) == 0)
+                        throw new SchemaException("enum variant " + i + " unreadable");
+                    list[i] = new SchemaEnumVariant { Name = Codec.Str(name), Value = value };
+                }
+                return list;
             }
-            return list;
         }
 
         /// <summary>Encode a value: an instance of the reflected type, or a Dictionary by field
         /// name against any schema. A field left null keeps the zero default.</summary>
-        public byte[] Encode(object value) => Codec.Encode(Live, value);
+        public byte[] Encode(object value) { using (Use(out IntPtr h)) return Codec.Encode(h, value); }
         /// <summary>Decode message bytes: an instance of the reflected type, the one value of a
         /// bare type, else the fields by name as a Dictionary.</summary>
         public object Decode(byte[] data)
         {
-            IntPtr h = Live;
-            var d = Codec.DecodeDict(h, data);
-            return ClrType != null ? Codec.ToObject(ClrType, d) : Codec.RootOrFields(h, d);
+            using (Use(out IntPtr h))
+            {
+                var d = Codec.DecodeDict(h, data);
+                return ClrType != null ? Codec.ToObject(ClrType, d) : Codec.RootOrFields(h, d);
+            }
         }
     }
 
@@ -1938,14 +1964,18 @@ namespace Rant
         {
             if (_decoded) return;
             _decoded = true;
-            if (_schema == null || _schema.Handle == IntPtr.Zero) return;
-            try
+            if (_schema == null) return;
+            using (Pass p = _schema.Gate.Enter())
             {
-                _fields = Codec.DecodeDict(_schema.Handle, Data);
-                _value = _clrType != null ? Codec.ToObject(_clrType, _fields)
-                                          : Codec.RootOrFields(_schema.Handle, _fields);
+                IntPtr h = p.Ok ? _schema.Handle : IntPtr.Zero;
+                if (h == IntPtr.Zero) return;   // the node closed and freed the schema
+                try
+                {
+                    _fields = Codec.DecodeDict(h, Data);
+                    _value = _clrType != null ? Codec.ToObject(_clrType, _fields) : Codec.RootOrFields(h, _fields);
+                }
+                catch (Exception e) { Console.Error.WriteLine("rant decode: " + e); }
             }
-            catch (Exception e) { Console.Error.WriteLine("rant decode: " + e); }
         }
 
         internal static RantMessage FromNative(ref RantMsg m, Type clrType, Schema ownedSchema)
@@ -2185,6 +2215,116 @@ namespace Rant
     // reading freed memory.
     internal interface INodeHandle { void Invalidate(); }
 
+    // Keeps a C node open while a call is inside it. rant_node_close frees everything and
+    // assumes no other thread is in a call, so every call holds a Pass and close waits for them.
+    internal sealed class Gate
+    {
+        // how long one slice of a wait lasts, which bounds how long close waits behind it
+        internal const int SliceMs = 50;
+
+        private int _active, _closing;
+        private readonly object _idle = new object();
+        // the gates whose callbacks this thread runs now, innermost last
+        [ThreadStatic] private static List<Gate> t_running;
+
+        // A pass for one call, not Ok once close began. Never blocks.
+        internal Pass Enter()
+        {
+            Interlocked.Increment(ref _active);   // count first, then check, so close never misses a call
+            if (Volatile.Read(ref _closing) != 0) { Leave(); return default(Pass); }
+            return new Pass(this);
+        }
+
+        internal void Leave()
+        {
+            if (Interlocked.Decrement(ref _active) == 0 && Volatile.Read(ref _closing) != 0)
+                lock (_idle) Monitor.PulseAll(_idle);
+        }
+
+        internal bool Closing => Volatile.Read(ref _closing) != 0;
+
+        // A pass and the handle to use under it, zero once close began.
+        internal Pass Use(IntPtr handle, out IntPtr live)
+        {
+            Pass p = Enter();
+            live = p.Ok ? handle : IntPtr.Zero;
+            return p;
+        }
+
+        // Refuse new passes and wait until none is out.
+        internal void Close()
+        {
+            Interlocked.Exchange(ref _closing, 1);
+            lock (_idle)
+                while (Volatile.Read(ref _active) != 0) Monitor.Wait(_idle, SliceMs);
+        }
+
+        // The C refused the close, so the node stays open.
+        internal void Reopen() => Interlocked.Exchange(ref _closing, 0);
+
+        // Marks this thread as running one of the node's callbacks until disposed.
+        internal Mark Running()
+        {
+            if (t_running == null) t_running = new List<Gate>();
+            t_running.Add(this);
+            return new Mark(t_running);
+        }
+
+        internal bool IsRunning => t_running != null && t_running.Contains(this);
+
+        // The next C wait of a sliced wait begun at start: at most one slice, 0 once timeoutMs
+        // passed, a whole slice when negative (no end).
+        internal static int Slice(long start, int timeoutMs)
+            => timeoutMs < 0 ? SliceMs : (int)Math.Max(0, Math.Min(SliceMs, timeoutMs - ElapsedMs(start)));
+
+        internal static bool Expired(long start, int timeoutMs) => timeoutMs >= 0 && ElapsedMs(start) >= timeoutMs;
+
+        // The start of a sliced wait.
+        internal static long Now() => System.Diagnostics.Stopwatch.GetTimestamp();
+
+        private static long ElapsedMs(long start)
+            => (Now() - start) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+
+        // Runs step with C waits of at most one slice, each under its own pass, until it answers
+        // nonzero or timeoutMs passes (negative = no end). closed is the answer once the node closed.
+        internal int WaitSliced<TState>(int timeoutMs, int closed, TState state, Func<TState, int, int> step)
+        {
+            long start = Now();
+            for (;;)
+            {
+                int rc;
+                using (Pass p = Enter())
+                {
+                    if (!p.Ok) return closed;
+                    rc = step(state, Slice(start, timeoutMs));
+                }
+                if (rc != 0 || Expired(start, timeoutMs)) return rc;
+            }
+        }
+    }
+
+    // One call's hold on the C node, released at Dispose.
+    internal struct Pass : IDisposable
+    {
+        private Gate _gate;
+        internal Pass(Gate gate) { _gate = gate; }
+        internal bool Ok => _gate != null;
+        public void Dispose()
+        {
+            if (_gate == null) return;
+            _gate.Leave();
+            _gate = null;
+        }
+    }
+
+    // A callback mark from Gate.Running, cleared at Dispose.
+    internal struct Mark : IDisposable
+    {
+        private readonly List<Gate> _running;
+        internal Mark(List<Gate> running) { _running = running; }
+        public void Dispose() => _running.RemoveAt(_running.Count - 1);
+    }
+
     // ---- reflection snapshots (docs/reflection.md) ----------------------------
 
     /// <summary>A discovered peer, copied out of the node so it outlives the walk. A dropped
@@ -2324,43 +2464,57 @@ namespace Rant
             node.RegisterHandle(this);
         }
 
+        // A pass on the node and the native topic, zero once released or the node closed.
+        internal Pass Use(out IntPtr h)
+        {
+            Pass p = _node.Gate.Enter();
+            h = p.Ok ? _handle : IntPtr.Zero;
+            return p;
+        }
+
         internal SendStatus Send(byte[] data, long captureUs)
         {
-            int r;
-            var h = GCHandle.Alloc(data, GCHandleType.Pinned);
-            try
+            using (Use(out IntPtr t))
             {
-                var b = new RantBytes
+                if (t == IntPtr.Zero) return SendStatus.NoTopic;
+                using (var p = new PinnedBytes(data))
                 {
-                    data = data != null && data.Length > 0 ? h.AddrOfPinnedObject() : IntPtr.Zero,
-                    len = (UIntPtr)(data?.Length ?? 0)
-                };
-                var o = new RantSendOpts { capture_us = (ulong)captureUs };
-                r = Native.rant_topic_send(_handle, b, ref o);
+                    var o = new RantSendOpts { capture_us = (ulong)captureUs };
+                    return (SendStatus)Native.rant_topic_send(t, p.B, ref o);
+                }
             }
-            finally { h.Free(); }
-            return (SendStatus)r;
         }
 
         // Drop this handle's hold on the slot. The native topic is retired with the last one.
         internal void Release() => _node.ReleaseTopic(this);
-        internal bool Refresh() => _handle != IntPtr.Zero && Native.rant_topic_refresh(_handle) == 1;
-        internal ushort Index => Native.rant_topic_index(_handle);
-        internal int MatchCount => Native.rant_topic_match_count(_handle);
-        internal bool Ready => Native.rant_topic_ready(_handle) == 1;
-        internal bool Drain(int timeoutMs) => _handle == IntPtr.Zero || Native.rant_topic_drain(_handle, timeoutMs) == 1;
+        internal bool Refresh() { using (Use(out IntPtr t)) return t != IntPtr.Zero && Native.rant_topic_refresh(t) == 1; }
+        internal ushort Index { get { using (Use(out IntPtr t)) return Native.rant_topic_index(t); } }
+        internal int MatchCount { get { using (Use(out IntPtr t)) return Native.rant_topic_match_count(t); } }
+        internal bool Ready { get { using (Use(out IntPtr t)) return Native.rant_topic_ready(t) == 1; } }
+        internal bool Drain(int timeoutMs)
+            => _node.Gate.WaitSliced(timeoutMs, 1, this, (c, ms) => c._handle == IntPtr.Zero ? 1 : Native.rant_topic_drain(c._handle, ms)) == 1;
 
         internal (uint Messages, uint Bytes, uint Capacity, uint Dropped) QueueStats()
         {
-            Native.rant_topic_queue_stats(_handle, out uint m, out uint b, out uint c, out uint d);
-            return (m, b, c, d);
+            using (Use(out IntPtr t))
+            {
+                Native.rant_topic_queue_stats(t, out uint m, out uint b, out uint c, out uint d);
+                return (m, b, c, d);
+            }
         }
 
         internal (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts()
         {
-            Native.rant_topic_counts(_handle, out ulong tm, out ulong tb, out ulong rm, out ulong rb);
-            return (tm, tb, rm, rb);
+            using (Use(out IntPtr t))
+            {
+                Native.rant_topic_counts(t, out ulong tm, out ulong tb, out ulong rm, out ulong rb);
+                return (tm, tb, rm, rb);
+            }
         }
+
+        // The schema the topic uses now, wrapped by the node, null once closed.
+        internal Schema Current()
+            => _node.CurrentSchema(this, c => c._handle == IntPtr.Zero ? IntPtr.Zero : Native.rant_topic_schema(c._handle), Schema);
     }
 
     // ---- node -------------------------------------------------------------------
@@ -2401,6 +2555,10 @@ namespace Rant
         private readonly List<WeakReference<INodeHandle>> _handles = new List<WeakReference<INodeHandle>>();
         private readonly HashSet<long> _asyncLive = new HashSet<long>();
         internal readonly object PatternLock = new object();
+        // every call into the C holds a pass, and Close waits for them
+        internal readonly Gate Gate = new Gate();
+        // held across Close, so a second close returns once the first is done
+        private readonly object _closeLock = new object();
 
         // rooted so the GC never collects the trampolines handed to native code.
         private static readonly RantMsgFn s_onMsg = OnMessageTramp;
@@ -2522,9 +2680,12 @@ namespace Rant
         /// RANT_QUEUES_MAX (8) per node, freed with the node.</summary>
         public RantQueue CreateQueue()
         {
-            IntPtr q = Native.rant_node_create_queue(_handle);
-            if (q == IntPtr.Zero) throw new RantException("queue create failed", LastError);
-            return new RantQueue(this, q);
+            using (Pass p = Gate.Enter())
+            {
+                IntPtr q = p.Ok ? Native.rant_node_create_queue(_handle) : IntPtr.Zero;
+                if (q == IntPtr.Zero) throw new RantException("queue create failed", LastError);
+                return new RantQueue(this, q);
+            }
         }
 
         // The native queue a handle is created with: the named one, else the node's default.
@@ -2570,8 +2731,10 @@ namespace Rant
             if (string.IsNullOrEmpty(name)) throw new ArgumentException("topic name required", nameof(name));
             if (pull && qos != null && qos.Queue != null)
                 throw new ArgumentException("a subscriber without a handler is pulled, it takes no Queue");
+            using (Pass p = Gate.Enter())
             lock (_createLock)
             {
+                if (!p.Ok) throw new RantException(SendStatus.State, "topic '" + name + "' create failed: the node is closed");
                 TopicRec rec;
                 ulong sh = schema != null ? schema.Hash : 0;
                 IntPtr wantQueue = pull ? IntPtr.Zero : QueueHandle(qos != null ? qos.Queue : null);
@@ -2618,8 +2781,10 @@ namespace Rant
         // a reused slot may carry a different topic.
         internal void ReleaseTopic(TopicCore t)
         {
+            using (Pass p = Gate.Enter())
             lock (_createLock)
             {
+                if (!p.Ok) t._handle = IntPtr.Zero;   // the node closed and freed the topic
                 if (t._handle == IntPtr.Zero) return;
                 string name = null;
                 TopicRec rec = null;
@@ -2747,13 +2912,19 @@ namespace Rant
         /// service thread.</summary>
         public int Poll(int timeoutMs = 0)
         {
-            return Native.rant_node_poll(_handle, timeoutMs);
+            using (Pass p = Gate.Enter())
+                return p.Ok ? Native.rant_node_poll(_handle, timeoutMs) : (int)SendStatus.State;
         }
 
         /// <summary>Block until discovery and matching settle, so everything sent now reaches
         /// everyone. Call after creating the topics. timeoutMs &lt; 0 = 3 intervals.</summary>
-        public bool Settle(int timeoutMs = -1) => Native.rant_node_settle(_handle, timeoutMs) == 1;
+        public bool Settle(int timeoutMs = -1)
+        {
+            using (Pass p = Gate.Enter())
+                return p.Ok && Native.rant_node_settle(_handle, timeoutMs) == 1;
+        }
 
+        // The C node: only read under a pass, which keeps it open.
         internal IntPtr Handle => _handle;
 
         /// <summary>Under Threading.Dispatch: run every callback parked since the last call
@@ -2763,7 +2934,7 @@ namespace Rant
         {
             if (_queue == null)
                 throw new InvalidOperationException("Dispatch() needs Threading.Dispatch, this node is " + Threading);
-            if (_pumpInDispatch && timeoutMs == 0) Native.rant_node_poll(_handle, 0);
+            if (_pumpInDispatch && timeoutMs == 0) Poll(0);
             return _queue.Dispatch(maxCallbacks, timeoutMs);
         }
 
@@ -2858,7 +3029,8 @@ namespace Rant
         public SendStatus Log(LogLevel level, string text)
         {
             byte[] b = Encoding.UTF8.GetBytes(text ?? "");
-            return (SendStatus)Native.rant_node_log_text(_handle, (int)level, b, b.Length);
+            using (Pass p = Gate.Enter())
+                return p.Ok ? (SendStatus)Native.rant_node_log_text(_handle, (int)level, b, b.Length) : SendStatus.State;
         }
 
         private Action<RantLogLine> _onLog;
@@ -2890,6 +3062,15 @@ namespace Rant
 
         // One subscription per level topic for the node's life, fanning into the event.
         private void BindLog()
+        {
+            using (Pass p = Gate.Enter())
+            {
+                if (!p.Ok) throw new RantException(SendStatus.State, "OnLog: the node is closed");
+                BindLogTopics();
+            }
+        }
+
+        private void BindLogTopics()
         {
             // the queue goes first, so the catch up replay parks rather than landing inline
             if (_queue != null)
@@ -2942,7 +3123,9 @@ namespace Rant
         {
             get
             {
-                RantEvent e = RantEvent.FromValue(Native.rant_last_error(_handle));
+                RantEvent e;
+                using (Pass p = Gate.Enter())
+                    e = RantEvent.FromValue(Native.rant_last_error(p.Ok ? _handle : IntPtr.Zero));
                 return e.Error == ErrorKind.None ? null : e;
             }
         }
@@ -2963,14 +3146,18 @@ namespace Rant
         /// options PascalCase. A refusal throws SchemaException saying why and where.</remarks>
         public Schema Schema(string text)
         {
-            IntPtr h = Native.rant_node_schema(_handle, Codec.CStr(text));
-            if (h == IntPtr.Zero)
+            using (Pass p = Gate.Enter())
             {
-                RantEvent e = LastError;
-                throw new SchemaException(e != null && e.SchemaDetail != null ? e.SchemaDetail
-                                          : "schema compile failed");
+                if (!p.Ok) throw new SchemaException("schema compile failed: the node is closed");
+                IntPtr h = Native.rant_node_schema(_handle, Codec.CStr(text));
+                if (h == IntPtr.Zero)
+                {
+                    RantEvent e = LastError;
+                    throw new SchemaException(e != null && e.SchemaDetail != null ? e.SchemaDetail
+                                              : "schema compile failed");
+                }
+                return Wrap(h, null);
             }
-            return Wrap(h, null);
         }
 
         /// <summary>Reflect a type into a schema: public fields become the wire fields. A bare
@@ -2989,7 +3176,8 @@ namespace Rant
         // Registers any schema's wire in this node, so one from another node serves too.
         internal Schema Keep(Schema given, Type t)
         {
-            Schema s = KeepView(given.Handle);
+            Schema s;
+            using (given.Use(out IntPtr h)) s = KeepView(h);
             if (s == null) throw new SchemaException("schema registration failed");
             s.ClrType = t;
             return s;
@@ -2999,28 +3187,36 @@ namespace Rant
         internal Schema KeepView(IntPtr view)
         {
             if (view == IntPtr.Zero) return null;
-            RantBytes w = Native.rant_schema_wire(view);
-            IntPtr h = Native.rant_node_schema_parse(_handle, w.data, w.len);
-            return h == IntPtr.Zero ? null : Wrap(h, null);
+            using (Pass p = Gate.Enter())
+            {
+                if (!p.Ok) return null;
+                RantBytes w = Native.rant_schema_wire(view);
+                IntPtr h = Native.rant_node_schema_parse(_handle, w.data, w.len);
+                return h == IntPtr.Zero ? null : Wrap(h, null);
+            }
         }
 
-        // The schema a handle uses now: its own when unchanged, else this node's wrapper of the
-        // one it adopted, made once.
-        internal Schema CurrentSchema(IntPtr h, Schema local)
+        // The schema a handle uses now, read from the handle under a pass: its own when
+        // unchanged, else this node's wrapper of the one it adopted, made once. Null once closed.
+        internal Schema CurrentSchema<TState>(TState state, Func<TState, IntPtr> read, Schema local)
         {
-            if (h == IntPtr.Zero) return null;
-            if (local != null && local.Handle == h) return local;
-            lock (_msgSchemaLock)
-                foreach (Schema s in _schemas)
-                    if (s.Handle == h) return s;
-            return Wrap(h, null);
+            using (Pass p = Gate.Enter())
+            {
+                IntPtr h = p.Ok ? read(state) : IntPtr.Zero;
+                if (h == IntPtr.Zero) return null;
+                if (local != null && local.Handle == h) return local;
+                lock (_msgSchemaLock)
+                    foreach (Schema s in _schemas)
+                        if (s.Handle == h) return s;
+                return Wrap(h, null);
+            }
         }
 
         // Every wrapper goes on the list Close invalidates. Under the leaf lock, since the
         // delivery path reaches here with the node lock held.
         private Schema Wrap(IntPtr h, Type t)
         {
-            var s = new Schema(h, t);
+            var s = new Schema(h, t, Gate);
             lock (_msgSchemaLock) _schemas.Add(s);
             return s;
         }
@@ -3031,24 +3227,47 @@ namespace Rant
             get
             {
                 UIntPtr u, p; ulong c, us; uint n;
-                Native.rant_node_mem_stats(_handle, out u, out p, out c);
-                Native.rant_node_backpressure_stats(_handle, out us, out n);
-                return new NodeStats
+                using (Pass pass = Gate.Enter())
                 {
-                    EvictedUnsent = Native.rant_node_evicted_unsent(_handle),
-                    MemInUse = (ulong)u, MemPeak = (ulong)p, AllocCalls = c,
-                    BackpressureWaitedUs = us, BackpressureWaits = n,
-                };
+                    if (!pass.Ok) return new NodeStats();
+                    Native.rant_node_mem_stats(_handle, out u, out p, out c);
+                    Native.rant_node_backpressure_stats(_handle, out us, out n);
+                    return new NodeStats
+                    {
+                        EvictedUnsent = Native.rant_node_evicted_unsent(_handle),
+                        MemInUse = (ulong)u, MemPeak = (ulong)p, AllocCalls = c,
+                        BackpressureWaitedUs = us, BackpressureWaits = n,
+                    };
+                }
             }
         }
 
-        /// <summary>Stop the service thread and tear the node down. False when refused from a
-        /// handler, where the node stays live: close from another thread.</summary>
+        /// <summary>Stop the service thread and tear the node down, once the calls other
+        /// threads are making on it return. Inside one of the node's own callbacks the close
+        /// runs on another thread once that callback returns. A later Close returns once the
+        /// first is done. False only when the C refused, and the node stays live then.</summary>
         public bool Close(bool sendBye = true)
+        {
+            if (Gate.IsRunning)
+            {
+                var t = new Thread(() => Close(sendBye)) { IsBackground = true, Name = "rant close" };
+                t.Start();
+                return true;
+            }
+            lock (_closeLock)
+                return CloseNow(sendBye);
+        }
+
+        private bool CloseNow(bool sendBye)
         {
             if (_handle != IntPtr.Zero)
             {
-                if (Native.rant_node_close(_handle, sendBye ? 1 : 0) != 0) return false;
+                Gate.Close();
+                if (Native.rant_node_close(_handle, sendBye ? 1 : 0) != 0)
+                {
+                    Gate.Reopen();
+                    return false;
+                }
                 _handle = IntPtr.Zero;
             }
             lock (s_reg) { var next = new Dictionary<long, RantNode>(s_nodes); next.Remove(_id); s_nodes = next; }
@@ -3099,7 +3318,8 @@ namespace Rant
                 node._topicTypes.TryGetValue(m.topic_index, out clr);
                 // the payload is copied and the schema is ours, so a later decode is safe
                 var msg = RantMessage.FromNative(ref m, clr, node.OwnedSchema(m.schema));
-                foreach (var h in hs) h(msg);
+                using (node.Gate.Running())
+                    foreach (var h in hs) h(msg);
             }
             catch (Exception e) { Console.Error.WriteLine("rant on_message: " + e); }
         }
@@ -3128,8 +3348,11 @@ namespace Rant
                 if (ev.IsError) Console.Error.WriteLine("rant: " + ev);
                 return;
             }
-            try { fn(ev); }
-            catch (Exception ex) { Console.Error.WriteLine("rant on_event: " + ex); }
+            using (Gate.Running())
+            {
+                try { fn(ev); }
+                catch (Exception ex) { Console.Error.WriteLine("rant on_event: " + ex); }
+            }
         }
 
         // A payload that did not decode into the handle's type: an Error event of kind
@@ -3168,14 +3391,18 @@ namespace Rant
         public List<RantPeer> Peers()
         {
             var list = new List<RantPeer>();
-            Native.rant_node_lock(_node.Handle);
-            try
+            using (Pass pass = _node.Gate.Enter())
             {
-                var it = new RantIter();
-                RantPeerInfoNative p;
-                while (Native.rant_node_peers_next(_node.Handle, ref it, out p) != 0) list.Add(RantPeer.Read(ref p));
+                if (!pass.Ok) return list;
+                Native.rant_node_lock(_node.Handle);
+                try
+                {
+                    var it = new RantIter();
+                    RantPeerInfoNative p;
+                    while (Native.rant_node_peers_next(_node.Handle, ref it, out p) != 0) list.Add(RantPeer.Read(ref p));
+                }
+                finally { Native.rant_node_unlock(_node.Handle); }
             }
-            finally { Native.rant_node_unlock(_node.Handle); }
             return list;
         }
 
@@ -3185,15 +3412,19 @@ namespace Rant
         public List<RantEntity> Entities(uint peer = 0)
         {
             var list = new List<RantEntity>();
-            Native.rant_node_lock(_node.Handle);
-            try
+            using (Pass pass = _node.Gate.Enter())
             {
-                var it = new RantIter();
-                RantEntityInfoNative e;
-                while (Native.rant_node_entities_next(_node.Handle, peer, ref it, out e) != 0)
-                    list.Add(RantEntity.Read(_node, ref e));
+                if (!pass.Ok) return list;
+                Native.rant_node_lock(_node.Handle);
+                try
+                {
+                    var it = new RantIter();
+                    RantEntityInfoNative e;
+                    while (Native.rant_node_entities_next(_node.Handle, peer, ref it, out e) != 0)
+                        list.Add(RantEntity.Read(_node, ref e));
+                }
+                finally { Native.rant_node_unlock(_node.Handle); }
             }
-            finally { Native.rant_node_unlock(_node.Handle); }
             return list;
         }
 
@@ -3203,14 +3434,18 @@ namespace Rant
         public List<RantEntity> Mesh()
         {
             var list = new List<RantEntity>();
-            Native.rant_node_lock(_node.Handle);
-            try
+            using (Pass pass = _node.Gate.Enter())
             {
-                var it = new RantIter();
-                RantEntityInfoNative e;
-                while (Native.rant_node_mesh_next(_node.Handle, ref it, out e) != 0) list.Add(RantEntity.Read(_node, ref e));
+                if (!pass.Ok) return list;
+                Native.rant_node_lock(_node.Handle);
+                try
+                {
+                    var it = new RantIter();
+                    RantEntityInfoNative e;
+                    while (Native.rant_node_mesh_next(_node.Handle, ref it, out e) != 0) list.Add(RantEntity.Read(_node, ref e));
+                }
+                finally { Native.rant_node_unlock(_node.Handle); }
             }
-            finally { Native.rant_node_unlock(_node.Handle); }
             return list;
         }
 
@@ -3218,19 +3453,26 @@ namespace Rant
         /// by name hash, so it answers before the details arrive.</summary>
         public RantEntity Find(EntityKind kind, string name)
         {
-            Native.rant_node_lock(_node.Handle);
-            try
+            using (Pass pass = _node.Gate.Enter())
             {
-                RantEntityInfoNative e;
-                if (Native.rant_node_mesh_find(_node.Handle, (int)kind, Codec.CStr(name), out e) == 0) return null;
-                return RantEntity.Read(_node, ref e);
+                if (!pass.Ok) return null;
+                Native.rant_node_lock(_node.Handle);
+                try
+                {
+                    RantEntityInfoNative e;
+                    if (Native.rant_node_mesh_find(_node.Handle, (int)kind, Codec.CStr(name), out e) == 0) return null;
+                    return RantEntity.Read(_node, ref e);
+                }
+                finally { Native.rant_node_unlock(_node.Handle); }
             }
-            finally { Native.rant_node_unlock(_node.Handle); }
         }
 
         /// <summary>Bumps whenever the folded mesh view changed, so a tool knows when to walk
         /// again.</summary>
-        public uint Epoch => Native.rant_node_mesh_epoch(_node.Handle);
+        public uint Epoch
+        {
+            get { using (Pass p = _node.Gate.Enter()) return p.Ok ? Native.rant_node_mesh_epoch(_node.Handle) : 0u; }
+        }
 
         /// <summary>Fetch a peer's snapshot: a directed @rant/meta call decoded into a
         /// RantMetaSnapshot. Throws CallException when the peer did not answer Ok. sections is
@@ -3250,7 +3492,8 @@ namespace Rant
         // here, and absent when meta is disabled
         private RemoteFunctionCore MetaFunction()
         {
-            IntPtr fn = Native.rant_node_meta_function(_node.Handle);
+            IntPtr fn;
+            using (Pass p = _node.Gate.Enter()) fn = p.Ok ? Native.rant_node_meta_function(_node.Handle) : IntPtr.Zero;
             if (fn == IntPtr.Zero)
                 throw new CallException(CallStatus.NoHandler, "call '@rant/meta' failed: meta is disabled on this node");
             return new RemoteFunctionCore(_node, fn);
@@ -3315,6 +3558,8 @@ namespace Rant
         {
             private readonly Dictionary<ulong, CancellationTokenSource> _live =
                 new Dictionary<ulong, CancellationTokenSource>();
+            internal readonly RantNode Node;
+            internal TaskCancelBox(RantNode node) { Node = node; }
 
             public void Add(ulong token, CancellationTokenSource cts)
             {
@@ -3392,8 +3637,8 @@ namespace Rant
             {
                 var box = GetBox((long)user) as RequestBox;
                 if (box == null) return;
-                var r = new RequestCore(reqPtr, box.Fn);
-                try { box.Handler(r); }
+                var r = new RequestCore(reqPtr, box.Fn, box.Node);
+                try { using (box.Node.Gate.Running()) box.Handler(r); }
                 catch (Exception e)
                 {
                     // a thrown handler answers AppError with the exception's text, which never
@@ -3424,7 +3669,7 @@ namespace Rant
                     Data = Codec.Bytes(o.data),   // copied out: the view dies with the callback
                     Message = Codec.Str(o.message),
                 };
-                call.Tcs.TrySetResult(r);
+                using (call.RantNode.Gate.Running()) call.Tcs.TrySetResult(r);
             }
             catch (Exception e) { Console.Error.WriteLine("rant on_response: " + e); }
         }
@@ -3446,7 +3691,7 @@ namespace Rant
                     RecvUs = p.recv_us,
                     SchemaPtr = p.schema,
                 };
-                call.OnProgress(prg);
+                using (call.RantNode.Gate.Running()) call.OnProgress(prg);
             }
             catch (Exception e) { Console.Error.WriteLine("rant on_progress: " + e); }
         }
@@ -3457,7 +3702,8 @@ namespace Rant
             try
             {
                 var box = GetBox((long)user) as TaskCancelBox;
-                if (box != null) box.Cancel(token);
+                if (box == null) return;
+                using (box.Node.Gate.Running()) box.Cancel(token);
             }
             catch (Exception e) { Console.Error.WriteLine("rant on_cancel: " + e); }
         }
@@ -3481,7 +3727,7 @@ namespace Rant
                     WrittenUs = u.written_us,
                     SchemaPtr = u.schema,
                 };
-                box.Handler(vu);
+                using (box.Node.Gate.Running()) box.Handler(vu);
             }
             catch (Exception e) { Console.Error.WriteLine("rant on_variable_update: " + e); }
         }
@@ -3491,9 +3737,12 @@ namespace Rant
         internal static byte[] Encode<T>(Schema s, T value)
         {
             if (Codec.IsRaw(typeof(T))) return (byte[])(object)value ?? Array.Empty<byte>();
-            // the node closed: the handle refuses the call right after, so nothing to encode
-            if (s.Handle == IntPtr.Zero) return Array.Empty<byte>();
-            return s.Encode(value);
+            using (Pass p = s.Gate.Enter())
+            {
+                // the node closed: the handle refuses the call right after, so nothing to encode
+                IntPtr h = p.Ok ? s.Handle : IntPtr.Zero;
+                return h == IntPtr.Zero ? Array.Empty<byte>() : Codec.Encode(h, value);
+            }
         }
 
         // A delivered message as T: the decoded value, or the bytes as is for a byte[] T.
@@ -3505,21 +3754,25 @@ namespace Rant
             return false;
         }
 
-        // Decode wire bytes to a typed value: prefer the wire schema (the publisher's
-        // layout bound to ours), fall back to the local one. A byte[] target takes the bytes.
+        // Decode wire bytes to a typed value: prefer the wire schema (the publisher's layout
+        // bound to ours, kept by the node until close), fall back to the local one. A byte[]
+        // target takes the bytes. False once the node closed.
         internal static bool TryDecode(Schema local, IntPtr wireSchema, byte[] data, Type t, out object v)
         {
             v = null;
             if (Codec.IsRaw(t)) { v = data; return true; }
-            IntPtr sp = wireSchema != IntPtr.Zero ? wireSchema
-                      : local != null ? local.Handle : IntPtr.Zero;
-            if (sp == IntPtr.Zero) return false;
-            try
+            if (local == null) return false;
+            using (Pass p = local.Gate.Enter())
             {
-                v = Codec.ToObject(t, Codec.DecodeDict(sp, data));
-                return true;
+                IntPtr sp = !p.Ok ? IntPtr.Zero : wireSchema != IntPtr.Zero ? wireSchema : local.Handle;
+                if (sp == IntPtr.Zero) return false;
+                try
+                {
+                    v = Codec.ToObject(t, Codec.DecodeDict(sp, data));
+                    return true;
+                }
+                catch (Exception) { return false; }
             }
-            catch (Exception) { return false; }
         }
     }
 
@@ -3531,6 +3784,7 @@ namespace Rant
     {
         private IntPtr _ptr;          // the exact native pointer, zeroed when the callback returns
         private readonly IntPtr _fn;
+        internal readonly RantNode Node;
         private DeferredCore _deferred;   // set when the reply was parked for another thread
         private bool _done;
         internal readonly IntPtr SchemaPtr;
@@ -3545,10 +3799,11 @@ namespace Rant
         /// <summary>True once Reply/Fail/Defer has been called.</summary>
         public bool Answered => _done;
 
-        internal RequestCore(IntPtr ptr, IntPtr fn)
+        internal RequestCore(IntPtr ptr, IntPtr fn, RantNode node)
         {
             _ptr = ptr;
             _fn = fn;
+            Node = node;
             var r = Marshal.PtrToStructure<RantRequestNative>(ptr);
             Data = Codec.Bytes(r.data);
             Caller = r.caller;
@@ -3587,7 +3842,7 @@ namespace Rant
             _done = true;
             if (_deferred != null) return _deferred;
             ulong token = Native.rant_request_defer(_ptr);
-            return new DeferredCore(_fn, token);
+            return new DeferredCore(_fn, token, Node);
         }
 
         // The reply is parked so the handler can run on another thread. Every field is already
@@ -3614,10 +3869,11 @@ namespace Rant
     {
         private readonly IntPtr _fn;
         private long _token;
+        private readonly RantNode _node;
 
-        internal DeferredCore(IntPtr fn, ulong token) { _fn = fn; _token = (long)token; }
+        internal DeferredCore(IntPtr fn, ulong token, RantNode node) { _fn = fn; _token = (long)token; _node = node; }
 
-        public bool Valid => _fn != IntPtr.Zero && Interlocked.Read(ref _token) != 0;
+        public bool Valid => _fn != IntPtr.Zero && Interlocked.Read(ref _token) != 0 && !_node.Gate.Closing;
 
         /// <summary>message as in RequestCore.Fail, also carried on Ok as debug text.</summary>
         public bool Complete(byte[] rsp = null, string message = null) => Finish(CallStatus.Ok, message, rsp);
@@ -3632,8 +3888,9 @@ namespace Rant
         {
             long token = Interlocked.Exchange(ref _token, 0);   // single-shot
             if (_fn == IntPtr.Zero || token == 0) return false;
+            using (Pass pass = _node.Gate.Enter())
             using (var p = new PinnedBytes(rsp))
-                return Native.rant_function_complete(_fn, (ulong)token, (int)status,
+                return pass.Ok && Native.rant_function_complete(_fn, (ulong)token, (int)status,
                     string.IsNullOrEmpty(message) ? null : Codec.CStr(message), p.B) == 0;
         }
     }
@@ -3662,7 +3919,8 @@ namespace Rant
                 box = new Patterns.RequestBox { Handler = handler, Node = node };
                 id = Patterns.AddBox(box);
             }
-            Fn = Native.rant_node_create_function_definition(node.Handle, Codec.CStr(name),
+            using (Pass pass = node.Gate.Enter())
+                Fn = !pass.Ok ? IntPtr.Zero : Native.rant_node_create_function_definition(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero,
                 box != null ? Patterns.OnRequest : null, (IntPtr)id, ref co);
@@ -3702,19 +3960,24 @@ namespace Rant
             catch (Exception e) { d.Fail(Patterns.FailText(e)); }
         }
 
-        public int MatchCount => Native.rant_function_match_count(Fn);
+        public int MatchCount { get { using (RantNode.Gate.Use(Fn, out IntPtr f)) return Native.rant_function_match_count(f); } }
 
         // Retire the handle: park its channels and release the name. No op once dead.
         public void Dispose()
         {
-            if (Fn == IntPtr.Zero) return;
-            var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc != SendStatus.Ok)
-                throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
-            Fn = IntPtr.Zero;
+            using (RantNode.Gate.Use(Fn, out IntPtr f))
+            {
+                if (f != IntPtr.Zero)   // zero once the node closed and freed it
+                {
+                    var rc = (SendStatus)Native.rant_function_retire(f);
+                    if (rc != SendStatus.Ok)
+                        throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
+                }
+                Fn = IntPtr.Zero;
+            }
         }
 
-        public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
+        public bool Refresh() { using (RantNode.Gate.Use(Fn, out IntPtr f)) return f != IntPtr.Zero && Native.rant_function_refresh(f) == 1; }
     }
 
     // An owning call outcome, the payload copied out. SendStatus carries a synchronous
@@ -3765,7 +4028,8 @@ namespace Rant
             FunctionOptions opt = options ?? new FunctionOptions();
             RantFunctionOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
             Queued = co.queue != IntPtr.Zero;
-            Fn = Native.rant_node_create_remote_function(node.Handle, Codec.CStr(name),
+            using (Pass pass = node.Gate.Enter())
+                Fn = !pass.Ok ? IntPtr.Zero : Native.rant_node_create_remote_function(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
             if (Fn == IntPtr.Zero)
@@ -3797,29 +4061,33 @@ namespace Rant
         public ResponseCore Call(byte[] request, int timeoutMs = -1, uint provider = 0)
         {
             var r = new ResponseCore();
-            RantResponseNative o;
-            int rc;
-            GCHandle og = OptsHandle(provider, out IntPtr optp);
-            try
+            using (RantNode.Gate.Use(Fn, out IntPtr fn))
             {
-                using (var p = new PinnedBytes(request))
-                    rc = Native.rant_function_call(Fn, p.B, out o, timeoutMs, optp);
+                if (fn == IntPtr.Zero) { r.SendStatus = SendStatus.NoTopic; return r; }
+                RantResponseNative o;
+                int rc;
+                GCHandle og = OptsHandle(provider, out IntPtr optp);
+                try
+                {
+                    using (var p = new PinnedBytes(request))
+                        rc = Native.rant_function_call(fn, p.B, out o, timeoutMs, optp);
+                }
+                finally { if (og.IsAllocated) og.Free(); }
+                if (rc == 1)
+                {
+                    r.Status = (CallStatus)o.status;
+                    r.Provider = o.provider;
+                    r.WrittenUs = o.written_us;
+                    r.SchemaPtr = o.schema;
+                    r.Data = Codec.Bytes(o.data);   // the view lasts until the next call, copy now
+                }
+                else if (rc < 0)
+                {
+                    r.SendStatus = (SendStatus)rc;  // Status stays Timeout: never answered
+                }
+                if (rc >= 0)                        // answered or timed out: the outcome text is filled
+                    r.Message = Codec.Str(o.message);
             }
-            finally { if (og.IsAllocated) og.Free(); }
-            if (rc == 1)
-            {
-                r.Status = (CallStatus)o.status;
-                r.Provider = o.provider;
-                r.WrittenUs = o.written_us;
-                r.SchemaPtr = o.schema;
-                r.Data = Codec.Bytes(o.data);   // the view lasts until the next call, copy now
-            }
-            else if (rc < 0)
-            {
-                r.SendStatus = (SendStatus)rc;  // Status stays Timeout: never answered
-            }
-            if (rc >= 0)                        // answered or timed out: the outcome text is filled
-                r.Message = Codec.Str(o.message);
             return r;
         }
 
@@ -3837,8 +4105,10 @@ namespace Rant
             GCHandle og = OptsHandle(provider, out IntPtr optp);
             try
             {
+                using (RantNode.Gate.Use(Fn, out IntPtr fn))
                 using (var p = new PinnedBytes(request))
-                    rc = Native.rant_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id, optp);
+                    rc = fn == IntPtr.Zero ? (int)SendStatus.NoTopic
+                       : Native.rant_function_call_async(fn, p.B, Patterns.OnResponse, (IntPtr)id, optp);
             }
             finally { if (og.IsAllocated) og.Free(); }
             if (rc != 0)
@@ -3850,19 +4120,24 @@ namespace Rant
             return tcs.Task;
         }
 
-        public int MatchCount => Native.rant_function_match_count(Fn);
+        public int MatchCount { get { using (RantNode.Gate.Use(Fn, out IntPtr f)) return Native.rant_function_match_count(f); } }
 
         // Retire the handle: park its channels and release the name. No op once dead.
         public void Dispose()
         {
-            if (Fn == IntPtr.Zero) return;
-            var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc != SendStatus.Ok)
-                throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
-            Fn = IntPtr.Zero;
+            using (RantNode.Gate.Use(Fn, out IntPtr f))
+            {
+                if (f != IntPtr.Zero)   // zero once the node closed and freed it
+                {
+                    var rc = (SendStatus)Native.rant_function_retire(f);
+                    if (rc != SendStatus.Ok)
+                        throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
+                }
+                Fn = IntPtr.Zero;
+            }
         }
 
-        public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
+        public bool Refresh() { using (RantNode.Gate.Use(Fn, out IntPtr f)) return f != IntPtr.Zero && Native.rant_function_refresh(f) == 1; }
     }
 
     // ---- patterns: tasks --------------------------------------------------------
@@ -3873,6 +4148,7 @@ namespace Rant
     {
         private readonly IntPtr _fn;
         private readonly ulong _token;
+        private readonly RantNode _node;
 
         /// <summary>Cancelled the moment a cancel arrives. Honor it by throwing
         /// OperationCanceledException, or run to completion anyway.</summary>
@@ -3884,7 +4160,7 @@ namespace Rant
 
         internal TaskContextCore(IntPtr fn, ulong token, CancellationToken ct, RequestCore r)
         {
-            _fn = fn; _token = token;
+            _fn = fn; _token = token; _node = r.Node;
             CancellationToken = ct;
             Caller = r.Caller; CallerName = r.CallerName;
             RecvUs = r.RecvUs; WrittenUs = r.WrittenUs;
@@ -3894,14 +4170,22 @@ namespace Rant
         /// subscriber backpressures end to end.</summary>
         public SendStatus Progress(byte[] value)
         {
+            using (Pass pass = _node.Gate.Enter())
             using (var p = new PinnedBytes(value))
-                return (SendStatus)Native.rant_function_progress(_fn, _token, p.B);
+                return pass.Ok ? (SendStatus)Native.rant_function_progress(_fn, _token, p.B) : SendStatus.State;
         }
 
         /// <summary>Convenience view of CancellationToken (with the native flag as a
         /// backstop).</summary>
-        public bool Cancelled => CancellationToken.IsCancellationRequested
-            || Native.rant_function_cancelled(_fn, _token) == 1;
+        public bool Cancelled
+        {
+            get
+            {
+                if (CancellationToken.IsCancellationRequested) return true;
+                using (Pass p = _node.Gate.Enter())
+                    return p.Ok && Native.rant_function_cancelled(_fn, _token) == 1;
+            }
+        }
     }
 
     // The engine of TaskDefinition<TReq, TPrg, TRsp>. The handler is an async delegate whose
@@ -3927,14 +4211,15 @@ namespace Rant
             Patterns.TaskCancelBox cancels = null;
             if (handler != null)
             {
-                cancels = new Patterns.TaskCancelBox();
+                cancels = new Patterns.TaskCancelBox(node);
                 cancelId = Patterns.AddBox(cancels);
                 var b = box = new Patterns.RequestBox { Node = node };
                 var c = cancels;
                 box.Handler = r => RunCall(b, c, handler, r);
                 id = Patterns.AddBox(box);
             }
-            Fn = Native.rant_node_create_task_definition(node.Handle, Codec.CStr(name),
+            using (Pass pass = node.Gate.Enter())
+                Fn = !pass.Ok ? IntPtr.Zero : Native.rant_node_create_task_definition(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 progressSchema != null ? progressSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero,
@@ -3950,7 +4235,8 @@ namespace Rant
                 node.RegisterPatternBox(id);
                 node.RegisterPatternBox(cancelId);
                 // the definition's ONE native cancel slot fans out to the per-call CTSes
-                Native.rant_function_on_cancel(Fn, Patterns.OnCancel, (IntPtr)cancelId);
+                using (node.Gate.Use(Fn, out IntPtr fn))
+                    if (fn != IntPtr.Zero) Native.rant_function_on_cancel(fn, Patterns.OnCancel, (IntPtr)cancelId);
             }
             node.RegisterHandle(this);
         }
@@ -3983,19 +4269,24 @@ namespace Rant
             finally { cancels.Drop(token); }
         }
 
-        public int MatchCount => Native.rant_function_match_count(Fn);
+        public int MatchCount { get { using (RantNode.Gate.Use(Fn, out IntPtr f)) return Native.rant_function_match_count(f); } }
 
         // Retire the handle: park its channels and release the name. No op once dead.
         public void Dispose()
         {
-            if (Fn == IntPtr.Zero) return;
-            var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc != SendStatus.Ok)
-                throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
-            Fn = IntPtr.Zero;
+            using (RantNode.Gate.Use(Fn, out IntPtr f))
+            {
+                if (f != IntPtr.Zero)   // zero once the node closed and freed it
+                {
+                    var rc = (SendStatus)Native.rant_function_retire(f);
+                    if (rc != SendStatus.Ok)
+                        throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
+                }
+                Fn = IntPtr.Zero;
+            }
         }
 
-        public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
+        public bool Refresh() { using (RantNode.Gate.Use(Fn, out IntPtr f)) return f != IntPtr.Zero && Native.rant_function_refresh(f) == 1; }
     }
 
     // One task progress update as delivered. Value is the payload copied out, null = the
@@ -4032,7 +4323,8 @@ namespace Rant
             TaskOptions opt = options ?? new TaskOptions();
             RantTaskOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
             Queued = co.queue != IntPtr.Zero;
-            Fn = Native.rant_node_create_remote_task(node.Handle, Codec.CStr(name),
+            using (Pass pass = node.Gate.Enter())
+                Fn = !pass.Ok ? IntPtr.Zero : Native.rant_node_create_remote_task(node.Handle, Codec.CStr(name),
                 requestSchema != null ? requestSchema.Handle : IntPtr.Zero,
                 progressSchema != null ? progressSchema.Handle : IntPtr.Zero,
                 responseSchema != null ? responseSchema.Handle : IntPtr.Zero, ref co);
@@ -4069,8 +4361,10 @@ namespace Rant
             try
             {
                 opts[0].id_out = idHandle.AddrOfPinnedObject();   // filled at commit
+                using (RantNode.Gate.Use(Fn, out IntPtr fn))
                 using (var p = new PinnedBytes(request))
-                    rc = Native.rant_function_call_async(Fn, p.B, Patterns.OnResponse, (IntPtr)id,
+                    rc = fn == IntPtr.Zero ? (int)SendStatus.NoTopic
+                       : Native.rant_function_call_async(fn, p.B, Patterns.OnResponse, (IntPtr)id,
                                                          optsHandle.AddrOfPinnedObject());
             }
             finally
@@ -4124,54 +4418,67 @@ namespace Rant
                     uint cid = Volatile.Read(ref idBox[0]);   // 0 until the request committed
                     if (cid != 0) Cancel(cid);
                 });
-            RantResponseNative o;
+            RantResponseNative o = default(RantResponseNative);
             int rc;
+            // held through the copy of the outcome, which points into the node
+            Pass pass = RantNode.Gate.Use(Fn, out IntPtr fn);
             try
             {
                 opts[0].id_out = idHandle.AddrOfPinnedObject();
                 using (var p = new PinnedBytes(request))
-                    rc = Native.rant_function_call(Fn, p.B, out o, timeoutMs, optsHandle.AddrOfPinnedObject());
+                    rc = fn == IntPtr.Zero ? (int)SendStatus.NoTopic
+                       : Native.rant_function_call(fn, p.B, out o, timeoutMs, optsHandle.AddrOfPinnedObject());
+                if (rc == 1)
+                {
+                    r.Status = (CallStatus)o.status;
+                    r.Provider = o.provider;
+                    r.WrittenUs = o.written_us;
+                    r.SchemaPtr = o.schema;
+                    r.Data = Codec.Bytes(o.data);   // the view lasts until the next call, copy now
+                }
+                else if (rc < 0)
+                {
+                    r.SendStatus = (SendStatus)rc;  // Status stays Timeout: never answered
+                }
+                if (rc >= 0) r.Message = Codec.Str(o.message);
             }
             finally
             {
+                pass.Dispose();
                 reg.Dispose();
                 optsHandle.Free();
                 idHandle.Free();
                 if (id != 0) Patterns.TakeAsync(id);
             }
-            if (rc == 1)
-            {
-                r.Status = (CallStatus)o.status;
-                r.Provider = o.provider;
-                r.WrittenUs = o.written_us;
-                r.SchemaPtr = o.schema;
-                r.Data = Codec.Bytes(o.data);   // the view lasts until the next call, copy now
-            }
-            else if (rc < 0)
-            {
-                r.SendStatus = (SendStatus)rc;  // Status stays Timeout: never answered
-            }
-            if (rc >= 0) r.Message = Codec.Str(o.message);
             return r;
         }
 
         // Cooperative and never acked, the terminal status answers. BadRole when the provider
         // declared noCancel, State if done.
-        public SendStatus Cancel(uint callId) => (SendStatus)Native.rant_function_cancel(Fn, callId);
+        public SendStatus Cancel(uint callId)
+        {
+            using (RantNode.Gate.Use(Fn, out IntPtr fn))
+                return fn == IntPtr.Zero ? SendStatus.NoTopic : (SendStatus)Native.rant_function_cancel(fn, callId);
+        }
 
-        public int MatchCount => Native.rant_function_match_count(Fn);
+        public int MatchCount { get { using (RantNode.Gate.Use(Fn, out IntPtr f)) return Native.rant_function_match_count(f); } }
 
         // Retire the handle: park its channels and release the name. No op once dead.
         public void Dispose()
         {
-            if (Fn == IntPtr.Zero) return;
-            var rc = (SendStatus)Native.rant_function_retire(Fn);
-            if (rc != SendStatus.Ok)
-                throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
-            Fn = IntPtr.Zero;
+            using (RantNode.Gate.Use(Fn, out IntPtr f))
+            {
+                if (f != IntPtr.Zero)   // zero once the node closed and freed it
+                {
+                    var rc = (SendStatus)Native.rant_function_retire(f);
+                    if (rc != SendStatus.Ok)
+                        throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
+                }
+                Fn = IntPtr.Zero;
+            }
         }
 
-        public bool Refresh() => Fn != IntPtr.Zero && Native.rant_function_refresh(Fn) == 1;
+        public bool Refresh() { using (RantNode.Gate.Use(Fn, out IntPtr f)) return f != IntPtr.Zero && Native.rant_function_refresh(f) == 1; }
     }
 
     // ---- patterns: variables ----------------------------------------------------
@@ -4214,10 +4521,11 @@ namespace Rant
             Name = name;
             VariableOptions opt = options ?? new VariableOptions();
             RantVariableOpts co = opt.ToNative(node.QueueHandle(opt.Queue));
+            using (Pass pass = node.Gate.Enter())
             using (var p = new PinnedBytes(initial))
             {
                 co.initial = p.B;
-                Var = definition
+                Var = !pass.Ok ? IntPtr.Zero : definition
                     ? Native.rant_node_create_variable_definition(node.Handle, Codec.CStr(name),
                           schema != null ? schema.Handle : IntPtr.Zero, ref co)
                     : Native.rant_node_create_remote_variable(node.Handle, Codec.CStr(name),
@@ -4234,23 +4542,29 @@ namespace Rant
         public bool TryGet(out byte[] value)
         {
             value = null;
-            // the returned view is valid only until the next poll: copy under the node lock
-            Native.rant_node_lock(RantNode.Handle);
-            try
+            using (RantNode.Gate.Use(Var, out IntPtr v))
             {
-                RantBytes b;
-                if (Native.rant_variable_get(Var, out b) != 1) return false;
-                value = Codec.Bytes(b);
-                return true;
+                if (v == IntPtr.Zero) return false;
+                // the returned view is valid only until the next poll: copy under the node lock
+                Native.rant_node_lock(RantNode.Handle);
+                try
+                {
+                    RantBytes b;
+                    if (Native.rant_variable_get(v, out b) != 1) return false;
+                    value = Codec.Bytes(b);
+                    return true;
+                }
+                finally { Native.rant_node_unlock(RantNode.Handle); }
             }
-            finally { Native.rant_node_unlock(RantNode.Handle); }
         }
 
         /// <summary>Set the value: apply and publish, or send over the set channel. BadRole =
         /// the owner advertises no set channel.</summary>
         public SendStatus Set(byte[] value)
         {
-            using (var p = new PinnedBytes(value)) return (SendStatus)Native.rant_variable_set(Var, p.B);
+            using (RantNode.Gate.Use(Var, out IntPtr v))
+            using (var p = new PinnedBytes(value))
+                return v == IntPtr.Zero ? SendStatus.NoTopic : (SendStatus)Native.rant_variable_set(v, p.B);
         }
 
         /// <summary>Force the value: writes are absorbed into the shadow source until Unforce
@@ -4258,16 +4572,23 @@ namespace Rant
         /// owner without it, BadRole on a remote whose owner advertises none.</summary>
         public SendStatus Force(byte[] value)
         {
-            using (var p = new PinnedBytes(value)) return (SendStatus)Native.rant_variable_force(Var, p.B);
+            using (RantNode.Gate.Use(Var, out IntPtr v))
+            using (var p = new PinnedBytes(value))
+                return v == IntPtr.Zero ? SendStatus.NoTopic : (SendStatus)Native.rant_variable_force(v, p.B);
         }
-        public SendStatus Unforce() => (SendStatus)Native.rant_variable_unforce(Var);
-        public bool Forced => Native.rant_variable_forced(Var) == 1;
+        public SendStatus Unforce()
+        {
+            using (RantNode.Gate.Use(Var, out IntPtr v))
+                return v == IntPtr.Zero ? SendStatus.NoTopic : (SendStatus)Native.rant_variable_unforce(v);
+        }
+        public bool Forced { get { using (RantNode.Gate.Use(Var, out IntPtr v)) return Native.rant_variable_forced(v) == 1; } }
 
-        public int MatchCount => Native.rant_variable_match_count(Var);
+        public int MatchCount { get { using (RantNode.Gate.Use(Var, out IntPtr v)) return Native.rant_variable_match_count(v); } }
 
         /// <summary>Block until a value exists or timeoutMs elapses, on the service thread's
         /// progress under Start() and driving the loop otherwise. Refused from a callback.</summary>
-        public bool Wait(int timeoutMs) => Native.rant_variable_wait(Var, timeoutMs) == 1;
+        public bool Wait(int timeoutMs)
+            => RantNode.Gate.WaitSliced(timeoutMs, 0, this, (c, ms) => c.Var == IntPtr.Zero ? 0 : Native.rant_variable_wait(c.Var, ms)) == 1;
 
         private bool _changeBound, _writeBound;
         // the last change delivered, replayed to a handler added after the first
@@ -4282,24 +4603,33 @@ namespace Rant
             Action<VariableUpdate> h = change ? (u => { LastChange = u; fan(u); }) : fan;
             long id = Patterns.AddBox(new Patterns.VarBox { Handler = h, Node = RantNode });
             RantNode.RegisterPatternBox(id);
-            if (change) { Native.rant_variable_on_change(Var, Patterns.OnVarUpdate, (IntPtr)id); _changeBound = true; }
-            else { Native.rant_variable_on_write(Var, Patterns.OnVarUpdate, (IntPtr)id); _writeBound = true; }
+            using (RantNode.Gate.Use(Var, out IntPtr v))
+            {
+                if (v == IntPtr.Zero) return false;
+                if (change) { Native.rant_variable_on_change(v, Patterns.OnVarUpdate, (IntPtr)id); _changeBound = true; }
+                else { Native.rant_variable_on_write(v, Patterns.OnVarUpdate, (IntPtr)id); _writeBound = true; }
+            }
             return true;
         }
 
         // Retire the handle: park its channels and release the name. No op once dead.
         public void Dispose()
         {
-            if (Var == IntPtr.Zero) return;
-            var rc = (SendStatus)Native.rant_variable_retire(Var);
-            if (rc != SendStatus.Ok)
-                throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
-            Var = IntPtr.Zero;
+            using (RantNode.Gate.Use(Var, out IntPtr v))
+            {
+                if (v != IntPtr.Zero)   // zero once the node closed and freed it
+                {
+                    var rc = (SendStatus)Native.rant_variable_retire(v);
+                    if (rc != SendStatus.Ok)
+                        throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
+                }
+                Var = IntPtr.Zero;
+            }
         }
 
         /// <summary>A reflectFromMesh handle: re type every channel in place when the mesh
         /// moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
-        public bool Refresh() => Var != IntPtr.Zero && Native.rant_variable_refresh(Var) == 1;
+        public bool Refresh() { using (RantNode.Gate.Use(Var, out IntPtr v)) return v != IntPtr.Zero && Native.rant_variable_refresh(v) == 1; }
     }
 
     // ---- the typed handles --------------------------------------------------------
@@ -4421,14 +4751,14 @@ namespace Rant
             _core = new FunctionDefinitionCore(node, name, _req, _rsp, h, options);
         }
 
-        /// <summary>Callers currently matched to this definition.</summary>
         /// <summary>The handle's name.</summary>
         public string Name => _core.Name;
         /// <summary>The request schema in use now, null when untyped. A ReflectFromMesh handle
         /// reports what it adopted.</summary>
-        public Schema RequestSchema => _core.RantNode.CurrentSchema(Native.rant_function_request_schema(_core.Fn), _req);
+        public Schema RequestSchema => _core.RantNode.CurrentSchema(_core, c => c.Fn == IntPtr.Zero ? IntPtr.Zero : Native.rant_function_request_schema(c.Fn), _req);
         /// <summary>The response schema in use now, as RequestSchema.</summary>
-        public Schema ResponseSchema => _core.RantNode.CurrentSchema(Native.rant_function_response_schema(_core.Fn), _rsp);
+        public Schema ResponseSchema => _core.RantNode.CurrentSchema(_core, c => c.Fn == IntPtr.Zero ? IntPtr.Zero : Native.rant_function_response_schema(c.Fn), _rsp);
+        /// <summary>Callers currently matched to this definition.</summary>
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
@@ -4524,14 +4854,14 @@ namespace Rant
             return new RantResponse<TRsp> { Core = core, RspSchema = _rsp, Name = _name };
         }
 
-        /// <summary>Definitions currently matched, 0 = no provider present.</summary>
         /// <summary>The handle's name.</summary>
         public string Name => _core.Name;
         /// <summary>The request schema in use now, null when untyped. A ReflectFromMesh handle
         /// reports what it adopted.</summary>
-        public Schema RequestSchema => _core.RantNode.CurrentSchema(Native.rant_function_request_schema(_core.Fn), _req);
+        public Schema RequestSchema => _core.RantNode.CurrentSchema(_core, c => c.Fn == IntPtr.Zero ? IntPtr.Zero : Native.rant_function_request_schema(c.Fn), _req);
         /// <summary>The response schema in use now, as RequestSchema.</summary>
-        public Schema ResponseSchema => _core.RantNode.CurrentSchema(Native.rant_function_response_schema(_core.Fn), _rsp);
+        public Schema ResponseSchema => _core.RantNode.CurrentSchema(_core, c => c.Fn == IntPtr.Zero ? IntPtr.Zero : Native.rant_function_response_schema(c.Fn), _rsp);
+        /// <summary>Definitions currently matched, 0 = no provider present.</summary>
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
@@ -4601,16 +4931,16 @@ namespace Rant
             _core = new TaskDefinitionCore(node, name, _req, _prg, _rsp, h, options);
         }
 
-        /// <summary>Callers currently matched to this definition.</summary>
         /// <summary>The handle's name.</summary>
         public string Name => _core.Name;
         /// <summary>The request schema in use now, null when untyped. A ReflectFromMesh handle
         /// reports what it adopted.</summary>
-        public Schema RequestSchema => _core.RantNode.CurrentSchema(Native.rant_function_request_schema(_core.Fn), _req);
+        public Schema RequestSchema => _core.RantNode.CurrentSchema(_core, c => c.Fn == IntPtr.Zero ? IntPtr.Zero : Native.rant_function_request_schema(c.Fn), _req);
         /// <summary>The response schema in use now, as RequestSchema.</summary>
-        public Schema ResponseSchema => _core.RantNode.CurrentSchema(Native.rant_function_response_schema(_core.Fn), _rsp);
+        public Schema ResponseSchema => _core.RantNode.CurrentSchema(_core, c => c.Fn == IntPtr.Zero ? IntPtr.Zero : Native.rant_function_response_schema(c.Fn), _rsp);
         /// <summary>The progress schema in use now, as RequestSchema.</summary>
-        public Schema ProgressSchema => _core.RantNode.CurrentSchema(Native.rant_function_progress_schema(_core.Fn), _prg);
+        public Schema ProgressSchema => _core.RantNode.CurrentSchema(_core, c => c.Fn == IntPtr.Zero ? IntPtr.Zero : Native.rant_function_progress_schema(c.Fn), _prg);
+        /// <summary>Callers currently matched to this definition.</summary>
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
@@ -4713,16 +5043,16 @@ namespace Rant
         private async Task<RantResponse<TRsp>> Wrap(Task<ResponseCore> core)
             => new RantResponse<TRsp> { Core = await core.ConfigureAwait(false), RspSchema = _rsp, Name = _name };
 
-        /// <summary>Definitions currently matched, 0 = no provider present.</summary>
         /// <summary>The handle's name.</summary>
         public string Name => _core.Name;
         /// <summary>The request schema in use now, null when untyped. A ReflectFromMesh handle
         /// reports what it adopted.</summary>
-        public Schema RequestSchema => _core.RantNode.CurrentSchema(Native.rant_function_request_schema(_core.Fn), _req);
+        public Schema RequestSchema => _core.RantNode.CurrentSchema(_core, c => c.Fn == IntPtr.Zero ? IntPtr.Zero : Native.rant_function_request_schema(c.Fn), _req);
         /// <summary>The response schema in use now, as RequestSchema.</summary>
-        public Schema ResponseSchema => _core.RantNode.CurrentSchema(Native.rant_function_response_schema(_core.Fn), _rsp);
+        public Schema ResponseSchema => _core.RantNode.CurrentSchema(_core, c => c.Fn == IntPtr.Zero ? IntPtr.Zero : Native.rant_function_response_schema(c.Fn), _rsp);
         /// <summary>The progress schema in use now, as RequestSchema.</summary>
-        public Schema ProgressSchema => _core.RantNode.CurrentSchema(Native.rant_function_progress_schema(_core.Fn), _prg);
+        public Schema ProgressSchema => _core.RantNode.CurrentSchema(_core, c => c.Fn == IntPtr.Zero ? IntPtr.Zero : Native.rant_function_progress_schema(c.Fn), _prg);
+        /// <summary>Definitions currently matched, 0 = no provider present.</summary>
         public int MatchCount => _core.MatchCount;
         /// <summary>A ReflectFromMesh handle: re type in place when the mesh moved. True when
         /// it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
@@ -4785,13 +5115,13 @@ namespace Rant
         public SendStatus Unforce() => _core.Unforce();
         /// <summary>True while the value is forced.</summary>
         public bool Forced => _core.Forced;
-        /// <summary>Handles matched on the other side: remotes for a definition, owners for a
-        /// remote, 0 = no owner present.</summary>
         /// <summary>The variable's name.</summary>
         public string Name => _core.Name;
         /// <summary>The schema in use now, null when untyped. A ReflectFromMesh handle reports
         /// what it adopted.</summary>
-        public Schema Schema => _core.RantNode.CurrentSchema(Native.rant_variable_schema(_core.Var), _schema);
+        public Schema Schema => _core.RantNode.CurrentSchema(_core, c => c.Var == IntPtr.Zero ? IntPtr.Zero : Native.rant_variable_schema(c.Var), _schema);
+        /// <summary>Handles matched on the other side: remotes for a definition, owners for a
+        /// remote, 0 = no owner present.</summary>
         public int MatchCount => _core.MatchCount;
         /// <summary>Block until a value exists or timeoutMs elapses, on the service thread's
         /// progress or driving a Manual node's loop. Refused from a callback.</summary>
@@ -4907,13 +5237,13 @@ namespace Rant
         /// <summary>The cumulative traffic this node committed to the topic and delivered from
         /// it.</summary>
         public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts() => _topic.Counts();
-        /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
-        /// provider moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         /// <summary>The topic's name.</summary>
         public string Name => _topic.Name;
         /// <summary>The schema in use now, null when untyped. A ReflectFromMesh topic reports
         /// what it adopted.</summary>
-        public Schema Schema => _topic._node.CurrentSchema(Native.rant_topic_schema(_topic._handle), _topic.Schema);
+        public Schema Schema => _topic.Current();
+        /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
+        /// provider moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => _topic.Refresh();
         /// <summary>Stop publishing. The node stops advertising the role no handle holds, and
         /// the last handle on the name retires the topic. Refused from a callback.</summary>
@@ -4968,14 +5298,24 @@ namespace Rant
             value = default(T);
             if (!_pull)
                 throw new InvalidOperationException("TryTake needs a subscriber created without a handler");
-            IntPtr h = _topic._handle;
-            if (h == IntPtr.Zero) return false;
-            RantMsg m;
-            int r = latest ? Native.rant_topic_take_latest(h, out m, timeoutMs)
-                           : Native.rant_topic_take(h, out m, timeoutMs);
-            if (r != 1) return false;
             RantNode node = _topic._node;
-            var msg = RantMessage.FromNative(ref m, node.ClrTypeOf(m.topic_index), node.OwnedSchema(m.schema));
+            RantMessage msg = null;
+            long start = Gate.Now();
+            while (msg == null)
+            {
+                // one slice per pass, so a close waits at most a slice behind this take
+                using (_topic.Use(out IntPtr h))
+                {
+                    if (h == IntPtr.Zero) return false;
+                    RantMsg m;
+                    int ms = Gate.Slice(start, timeoutMs);
+                    int r = latest ? Native.rant_topic_take_latest(h, out m, ms) : Native.rant_topic_take(h, out m, ms);
+                    if (r < 0) return false;
+                    // the view is the node's until the next take, so it is copied under this pass
+                    if (r == 1) msg = RantMessage.FromNative(ref m, node.ClrTypeOf(m.topic_index), node.OwnedSchema(m.schema));
+                }
+                if (msg == null && Gate.Expired(start, timeoutMs)) return false;
+            }
             if (!Patterns.TryValue(msg, out value))
                 throw new RantException(SendStatus.Schema,
                     "a message on '" + msg.TopicName + "' did not decode as " + typeof(T).Name);
@@ -4987,13 +5327,13 @@ namespace Rant
         /// <summary>The cumulative traffic this node committed to the topic and delivered from
         /// it.</summary>
         public (ulong TxMsgs, ulong TxBytes, ulong RxMsgs, ulong RxBytes) Counts() => _topic.Counts();
-        /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
-        /// provider moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         /// <summary>The topic's name.</summary>
         public string Name => _topic.Name;
         /// <summary>The schema in use now, null when untyped. A ReflectFromMesh topic reports
         /// what it adopted.</summary>
-        public Schema Schema => _topic._node.CurrentSchema(Native.rant_topic_schema(_topic._handle), _topic.Schema);
+        public Schema Schema => _topic.Current();
+        /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
+        /// provider moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => _topic.Refresh();
         /// <summary>Stop receiving: the handlers are dropped, the node stops advertising the
         /// role no handle holds, and the last handle on the name retires the topic. Refused

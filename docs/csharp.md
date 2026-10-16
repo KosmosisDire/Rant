@@ -42,7 +42,8 @@ Every handle comes from the node method named after it: `Publisher<T>`, `Subscri
 its options object, `FunctionOptions`, `TaskOptions` or `VariableOptions`. Every handle is
 `IDisposable`: `Dispose()` retires it and releases the name. Closing the node invalidates
 every handle it gave out, so a call on one that outlived its node returns `NoTopic`
-rather than reading freed memory.
+rather than reading freed memory. `Close()` first waits until the calls other threads are
+making on the node return.
 
 Every call is thread safe. `NodeOptions.Threading` says where every callback runs:
 subscriber handlers, OnEvent, OnLog, function and task handlers, progress, OnChange,
@@ -50,8 +51,8 @@ OnWrite and awaited call results.
 
 - `ServiceThread`, the default: the service thread runs the loop from construction and
   every callback fires on it, one at a time. From inside one, `Send` and read only
-  queries work, while `Poll`, handle creation, `Dispose` and `Close` are refused with
-  `SendStatus.State` or an exception. `Close()` returns false from a callback.
+  queries work, while `Poll`, handle creation and `Dispose` are refused with
+  `SendStatus.State` or an exception. `Close()` there runs once the callback returns.
 - `Manual`: your thread calls `Poll()` and callbacks fire there, under the same rules.
 - `Dispatch`: the service thread runs the loop, every callback waits, and `Dispatch()`
   runs the waiting ones on the calling thread with the whole API available. Call it once

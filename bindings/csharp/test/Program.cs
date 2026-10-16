@@ -1317,6 +1317,84 @@ static class Program
         return ok;
     }
 
+    // Calls on other threads while the node closes answer NoTopic or their usual result and
+    // never touch the freed node, and a close inside the node's own callback runs once it
+    // returns. Only a sanitizer build of the native library sees every miss.
+    static bool CloseRaceLeg()
+    {
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+        bool Until(int ms, Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddMilliseconds(ms);
+            while (DateTime.UtcNow < deadline && !done()) Thread.Sleep(2);
+            return done();
+        }
+
+        bool refusedAfter = true;
+        for (int round = 0; round < 40; round++)
+        {
+            NodeOptions o = Local(14);
+            o.MatchWaitMs = -1;   // a send with nobody matched drops at once, so the loops spin
+            var n = new RantNode("cr", o);
+            n.OnEvent += e => { };
+            var pub = n.Publisher<Level>("cr/level");
+            var v = n.VariableDefinition<Level>("cr/var", new Level());
+            int stop = 0;
+            long calls = 0;
+            var threads = new[]
+            {
+                new Thread(() =>
+                {
+                    for (int i = 0; Volatile.Read(ref stop) == 0; i++) { pub.Send(new Level { Value = i }); Interlocked.Increment(ref calls); }
+                }),
+                new Thread(() =>
+                {
+                    for (int i = 0; Volatile.Read(ref stop) == 0; i++) { v.Set(new Level { Value = i }); Interlocked.Increment(ref calls); }
+                }),
+                new Thread(() =>
+                {
+                    while (Volatile.Read(ref stop) == 0)
+                    {
+                        try { using (var p = n.Publisher<Level>("cr/churn")) p.Send(new Level { Value = 1 }); }
+                        catch (RantException) { }
+                        Interlocked.Increment(ref calls);
+                    }
+                }),
+            };
+            foreach (var t in threads) t.Start();
+            while (Interlocked.Read(ref calls) < 300) Thread.Yield();
+            n.Close();
+            refusedAfter &= pub.Send(new Level()) == SendStatus.NoTopic && v.Set(new Level()) == SendStatus.NoTopic;
+            Volatile.Write(ref stop, 1);
+            foreach (var t in threads) t.Join();
+        }
+        Check("after close every call answers NoTopic", refusedAfter);
+
+        var src = new RantNode("cs", Local(14));
+        var self = new RantNode("ce", Local(14, Threading.Manual));
+        try
+        {
+            var qos = new Qos { Reliability = Reliability.Reliable };
+            var srcPub = src.Publisher<Level>("cr/close", qos);
+            bool accepted = false;
+            self.Subscriber<Level>("cr/close", _ => accepted = self.Close(), qos);
+            var probe = self.Publisher<Level>("cr/probe");
+            Check("self closing node matched",
+                  Until(4000, () => { self.Poll(2); return srcPub.MatchCount > 0 && srcPub.Ready; }));
+            srcPub.Send(new Level { Value = 5 });
+            Check("a close inside its own callback is accepted", Until(3000, () => { self.Poll(2); return accepted; }));
+            self.Close();   // waits for the close the callback started
+            Check("the node closed once the callback returned", probe.Send(new Level()) == SendStatus.NoTopic);
+        }
+        finally
+        {
+            self.Close();
+            src.Close();
+        }
+        return ok;
+    }
+
     static bool DisposeTwice(IDisposable d)
     {
         try { d.Dispose(); d.Dispose(); return true; }
@@ -1512,6 +1590,7 @@ static class Program
         ("pull", PullLeg),
         ("reflect", ReflectLeg),
         ("dispose", DisposeLeg),
+        ("close_race", CloseRaceLeg),
     };
 
     // Every leg runs, so one failure never hides the rest. A throw fails that leg.
