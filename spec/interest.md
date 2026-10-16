@@ -140,7 +140,8 @@ An identical re creation (same name, kind and schema hash) relinks with nothing 
 peers' cached verdicts stay valid and the slot's seqno line continues. A changed re
 creation bumps the slot's u8 generation, sets `rebind_version` to the announce version the
 advertise will stamp, severs our own maps bound to the slot, and purges the node core's
-binds for the topic. The generation rides the third sparse section
+delivery map for the topic. The rebased reader views stay, shared per schema pair until
+close (spec/schema.md). The generation rides the third sparse section
 `[u16 n][(u16 index)(u8 gen)]*`. Apply compares the announced generation against the one
 stored per (peer, entry), re pends the verdict and severs the map on mismatch, and always
 updates the stored generation (before the INACTIVE skip, so parked entries track too). A

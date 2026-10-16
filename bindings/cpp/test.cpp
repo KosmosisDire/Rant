@@ -184,6 +184,14 @@ RANT_SCHEMA(pubside::Telemetry, seq, volts, flags);
 namespace subside { struct Telemetry { uint16_t flags; uint32_t seq; }; }
 RANT_SCHEMA(subside::Telemetry, flags, seq);
 
+/* one wire name in three layouts: each writer puts the reader's fields elsewhere */
+namespace readside { struct Sample { uint32_t a; uint32_t b; }; }
+RANT_SCHEMA(readside::Sample, a, b);
+namespace firstside { struct Sample { uint32_t b; uint32_t a; }; }
+RANT_SCHEMA(firstside::Sample, b, a);
+namespace secondside { struct Sample { uint32_t a; uint32_t x; uint32_t b; }; }
+RANT_SCHEMA(secondside::Sample, a, x, b);
+
 static rant::Deferred<AddRsp> g_deferred;
 static std::mutex               g_deferred_mu;
 static std::atomic<bool>        g_deferred_ready{ false };
@@ -1443,6 +1451,41 @@ static bool lifetime_leg() {
     self_pub.send(Speed{ 4 });
     chk("life: the refused close raises a State event",
         wait_for(3000, [&] { return state_seen.load(); }, &d) && !self_sub);
+
+    return g_failures == fails_at_entry;
+}
+
+/* a rebase, then another after the reader's retired slot goes to another name: each writer's
+ * layout decodes with its own offsets, never those cached for an earlier one */
+static bool rebind_leg() {
+    int fails_at_entry = g_failures;
+    rant::NodeOptions opts;
+    opts.domain = test_domain(12);
+    opts.multicast_interface = "127.0.0.1";
+    rant::Node r("RR", opts), w1("RW1", opts), w2("RW2", opts);
+    chk("rebind: nodes constructed", r.valid() && w1.valid() && w2.valid());
+    if (!r.valid() || !w1.valid() || !w2.valid()) return false;
+    rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
+    std::atomic<int> got{ 0 };
+    std::atomic<uint32_t> a{ 0 }, b{ 0 };
+    auto on_sample = [&](const readside::Sample& s) { a = s.a; b = s.b; got++; };
+
+    {
+        auto pub = w1.publisher<firstside::Sample>("rb/first", rel);
+        auto sub = r.subscriber<readside::Sample>("rb/first", on_sample, rel);
+        chk("rebind: first pair matched",
+            wait_for(4000, [&] { return pub.match_count() > 0 && pub.ready(); }));
+        pub.send(firstside::Sample{ 2, 1 });
+        chk("rebind: the first layout decodes",
+            wait_for(3000, [&] { return got.load() == 1; }) && a == 1 && b == 2);
+    }
+    auto pub = w2.publisher<secondside::Sample>("rb/second", rel);
+    auto sub = r.subscriber<readside::Sample>("rb/second", on_sample, rel);
+    chk("rebind: second pair matched",
+        wait_for(4000, [&] { return pub.match_count() > 0 && pub.ready(); }));
+    pub.send(secondside::Sample{ 1, 99, 2 });
+    chk("rebind: the second layout decodes with its own offsets",
+        wait_for(3000, [&] { return got.load() == 2; }) && a == 1 && b == 2);
     return g_failures == fails_at_entry;
 }
 
@@ -1848,6 +1891,7 @@ static const Leg LEGS[] = {
     { "tasks",      tasks_leg },
     { "queue",      queue_leg },
     { "lifetime",   lifetime_leg },
+    { "rebind",     rebind_leg },
     { "failure",    failure_leg },
     { "factory",    factory_leg },
     { "version",    version_leg },

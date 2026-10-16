@@ -238,9 +238,10 @@ typedef struct {
 } i_RantNodePeerExtra;
 
 /* The schema state for the gate and delivery: schemas interned by hash, reader views per
-   (schema, topic), the decode map per (peer, topic). Flat, hook allocated, kept until close. */
+   (writer, reader) schema pair, the decode map per (peer, topic). Flat, hook allocated, kept
+   until close, so a schema a message carries lives as long as the node. */
 typedef struct { uint64_t hash; RantSchema *parsed; } i_RantNodeSchemaIntern;
-typedef struct { uint64_t hash; uint16_t topic; RantSchema *rebased; } i_RantNodeSchemaBind;
+typedef struct { uint64_t writer, reader; RantSchema *rebased; } i_RantNodeSchemaBind;
 typedef struct { uint32_t peer; uint16_t topic; const RantSchema *schema; } i_RantNodePeerSchema;
 #ifndef RANT_NO_DIAG
 /* why the gate refused (peer, topic, direction), recorded at detail intake for the event */
@@ -425,12 +426,12 @@ static RantSchema *i_rant_node_core_intern(i_RantNodeCore *c, uint64_t hash, Ran
     return p;
 }
 
-/* the reader view for (writer schema, topic): our fields on their layout, cached */
-static RantSchema *i_rant_node_core_bind(i_RantNodeCore *c, uint64_t hash, uint16_t topic_index,
+/* the reader view for (writer schema, reader schema): our fields on their layout, cached */
+static RantSchema *i_rant_node_core_bind(i_RantNodeCore *c, uint64_t hash,
                                          const RantSchema *ours, const RantSchema *pub){
-    uint32_t i; RantSchema *rb;
+    uint32_t i; RantSchema *rb; uint64_t reader = rant_schema_hash(ours);
     for (i = 0; i < c->n_binds; i++)
-        if (c->binds[i].hash == hash && c->binds[i].topic == topic_index) return c->binds[i].rebased;
+        if (c->binds[i].writer == hash && c->binds[i].reader == reader) return c->binds[i].rebased;
     rb = i_rant_schema_rebase(ours, pub, c->alloc, c->alloc_user);
     if (!rb) return NULL;
     if (!i_rant_node_core_array_reserve(c, (void**)&c->binds, &c->cap_binds,
@@ -438,8 +439,8 @@ static RantSchema *i_rant_node_core_bind(i_RantNodeCore *c, uint64_t hash, uint1
         i_rant_schema_free(rb, c->alloc, c->alloc_user);
         return NULL;
     }
-    c->binds[c->n_binds].hash = hash;
-    c->binds[c->n_binds].topic = topic_index;
+    c->binds[c->n_binds].writer = hash;
+    c->binds[c->n_binds].reader = reader;
     c->binds[c->n_binds].rebased = rb;
     c->n_binds++;
     return rb;
@@ -562,8 +563,8 @@ const RantSchema *i_rant_node_core_msg_schema(i_RantNodeCore *c, uint32_t peer, 
     return NULL;
 }
 
-/* The slot was rebound with a retype: every binding, view and refusal reason recorded for
- * the old occupant is stale. The verdicts re pended in the transport, so they re derive. */
+/* The slot was rebound with a retype: the decode map and refusal reasons recorded for the old
+ * occupant are stale. The verdicts re pended in the transport, so they re derive. */
 void i_rant_node_core_topic_rebound(i_RantNodeCore *c, uint16_t topic_index){
     uint32_t i;
     if (!c) return;
@@ -572,13 +573,6 @@ void i_rant_node_core_topic_rebound(i_RantNodeCore *c, uint16_t topic_index){
         if (c->peer_schemas[i].topic == topic_index)
             c->peer_schemas[i] = c->peer_schemas[--c->n_peer_schemas];   /* swap remove */
         else i++;
-    }
-    i = 0;
-    while (i < c->n_binds){
-        if (c->binds[i].topic == topic_index){
-            if (c->binds[i].rebased) i_rant_schema_free(c->binds[i].rebased, c->alloc, c->alloc_user);
-            c->binds[i] = c->binds[--c->n_binds];
-        } else i++;
     }
 #ifndef RANT_NO_DIAG
     i = 0;
@@ -1339,7 +1333,7 @@ static int i_rant_node_core_schema_verdict(i_RantNodeCore *c, uint32_t peer, uin
                 *p = '\0'; return 0;
             }
             if (!rant_schema_subset_why(ours, pub, p, (size_t)(end - p) + 1u)) return 0;
-            view = i_rant_node_core_bind(c, hash, topic_index, ours, pub);
+            view = i_rant_node_core_bind(c, hash, ours, pub);
             if (!view){                                 /* OOM: refuse rather than misdecode */
                 p = i_rant_event_append_str(p, end, "out of memory binding the reader view");
                 *p = '\0'; return 0;

@@ -131,7 +131,8 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   wire truth. It builds a flat codec table and uses memcpy only when the type is
   trivially copyable, little endian and padding free. The decode cache is keyed per
   incoming schema pointer, not per hash, because a rebased schema keeps our hash with the
-  publisher's offsets.
+  publisher's offsets. The node keeps every delivered schema until close
+  (spec/schema.md), so a pointer never names two schemas.
 - Encoding is strict. `priv::encode` returns `std::optional<Bytes>` into a thread local
   scratch buffer, empty when the value does not fit, such as an over long `String<N>`.
   A send or set then answers `SendStatus::Schema` and a reply answers AppError, never a

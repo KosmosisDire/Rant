@@ -110,7 +110,7 @@ void            i_rant_node_core_set_topic_schema(i_RantNodeCore *c, uint16_t to
                                                     const RantSchema *schema);
 
 /* Topic slot lifecycle. retire drops the live schema pointers but keeps the hash as the
- * slot's fingerprint, topic_rebound purges the old occupant's bindings. See spec/interest.md. */
+ * slot's fingerprint, topic_rebound purges the old occupant's decode map. See spec/interest.md. */
 void     i_rant_node_core_retire_topic_schema(i_RantNodeCore *c, uint16_t topic_index);
 uint64_t i_rant_node_core_topic_schema_hash(i_RantNodeCore *c, uint16_t topic_index);
 void     i_rant_node_core_topic_rebound(i_RantNodeCore *c, uint16_t topic_index);

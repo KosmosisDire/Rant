@@ -71,8 +71,9 @@ typedef struct {
     RantBytes        header;           /* pattern header bytes in front of the payload, {NULL,0} on a
                                         plain topic */
     RantBytes        data;             /* the payload after the header */
-    const RantSchema *schema;          /* the schema data decodes with, validated before delivery.
-                                        NULL on a raw topic or an untyped publisher */
+    const RantSchema *schema;          /* the schema data decodes with, validated before delivery,
+                                        valid until the node closes. NULL on a raw topic or an
+                                        untyped publisher */
     uint64_t       recv_us;          /* the monotonic clock at receive, or at enqueue */
     uint64_t       written_us;       /* the writer's wall clock at commit, UTC microseconds. 0 = the
                                         publisher opted out. Never mix it with recv_us */

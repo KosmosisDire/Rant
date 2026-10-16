@@ -90,7 +90,11 @@ rules (`rant_schema_subset`). Subset applies at the top level only. Nested struc
 exactly and recursively. Delivery uses the writer's layout through a rebased schema
 (`i_rant_schema_rebase`: the reader's fields, order and indices with the writer's offsets
 and size), surfaced as `RantMsg.schema`, so reader code keeps its own indices. Rebase walks
-both subtrees in lockstep, which handles nested frames and struct arrays.
+both subtrees in lockstep, which handles nested frames and struct arrays. A rebased schema
+keeps the reader's hash and wire bytes, so only its pointer tells it apart. The node keeps
+one per (writer, reader) schema pair until close, never freed at a retire or a rebind, so
+every schema a message carries lives as long as the node and a binding may key a decode
+cache by its pointer.
 
 A raw reader accepts anything. A typed reader refuses an untyped or unverifiable writer.
 An identical hash skips the parse. A peer schema is interned once per hash, and the claimed hash must equal the parsed wire's hash, or a lying peer could poison the intern for every honest one. Both directions advertise and run the same gate, so a

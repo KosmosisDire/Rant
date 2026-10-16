@@ -756,6 +756,68 @@ class Level:
     value: rant.i32 = 0
 
 
+@dataclass
+class ProbeRead:
+    __rant_name__ = "Probe"   # one wire name in three layouts, each writer puts a and b elsewhere
+    a: rant.u32 = 0
+    b: rant.u32 = 0
+
+
+@dataclass
+class ProbeFirst:
+    __rant_name__ = "Probe"
+    b: rant.u32 = 0
+    a: rant.u32 = 0
+
+
+@dataclass
+class ProbeSecond:
+    __rant_name__ = "Probe"
+    a: rant.u32 = 0
+    x: rant.u32 = 0
+    b: rant.u32 = 0
+
+
+def rebind():
+    """A rebase, then another after the reader's retired slot goes to another name: each
+    writer's layout decodes with its own offsets, never those cached for an earlier one."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    def until(seconds, done):
+        deadline = time.time() + seconds
+        while time.time() < deadline and not done():
+            time.sleep(0.002)
+        return done()
+
+    opts = dict(on_event=lambda e: None, domain=DOMAIN + 14, multicast_interface=IFACE)
+    r, w1, w2 = rant.Node("RR", **opts), rant.Node("RW1", **opts), rant.Node("RW2", **opts)
+    got = []
+    try:
+        pub = w1.publisher("rb/first", ProbeFirst, reliable=True)
+        sub = r.subscriber("rb/first", ProbeRead, got.append, reliable=True)
+        check("first pair matched", until(4, lambda: pub.match_count > 0 and pub.ready))
+        pub.send(ProbeFirst(b=2, a=1))
+        check("the first layout decodes",
+              until(3, lambda: len(got) == 1) and (got[0].a, got[0].b) == (1, 2))
+        sub.close()
+        pub.close()
+        pub = w2.publisher("rb/second", ProbeSecond, reliable=True)
+        r.subscriber("rb/second", ProbeRead, got.append, reliable=True)
+        check("second pair matched", until(4, lambda: pub.match_count > 0 and pub.ready))
+        pub.send(ProbeSecond(a=1, x=99, b=2))
+        check("the second layout decodes with its own offsets",
+              until(3, lambda: len(got) == 2) and (got[1].a, got[1].b) == (1, 2))
+    finally:
+        for n in (w2, w1, r):
+            n.close()
+    return ok
+
+
 def patterns():
     """Functions and variables between two nodes on an isolated domain."""
     print("patterns leg: two nodes, domain 43, loopback")
@@ -1346,6 +1408,7 @@ LEGS = [
     ("patterns", patterns),
     ("tasks", tasks),
     ("dispatch", dispatch_leg),
+    ("rebind", rebind),
 ]
 
 
