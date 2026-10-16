@@ -270,6 +270,8 @@ struct Idle {
     explicit Idle(const Args& args) : a(args), node("bench-idle", options(args, "idle")), start_us(now_us()), cpu_start(cpu_ms())
     {
         sub = node.subscriber<rant::Bytes>("bench/idle", [](const rant::MessageView&) {}, qos(a));
+        std::printf("{\"phase\":\"start\"}\n");
+        std::fflush(stdout);
     }
 
     int step()
