@@ -370,10 +370,12 @@ reflection, value_root bare type roots and the cross language hashes, stdtypes t
 types including the video family, tails variable members as tail frames, tasks defer,
 progress, cancel, no_cancel and a retire mid run, queue dispatch threading, a handle on its
 own queue and pulled subscribers, lifetime shared name holds, moves, the last close
-retiring a name, handles and deferred replies outliving their node and a close refused in a
-callback, rebind a rebase decode after the reader's retired slot goes to another name,
-factory the node factories and their refusals, `reflect_from_mesh`, and the reflection
-walks and meta calls. `rant_cpp_test bench` runs the cost of each codec path
+retiring a name, handles and deferred replies outliving their node, a handle close refused
+in its callback and a node close inside its own callback, rebind a rebase decode after the
+reader's retired slot goes to another name, close_race sends, writes and creates on other
+threads while the node closes (a sanitizer build sees every miss), factory the node
+factories and their refusals, `reflect_from_mesh`, and the reflection walks and meta
+calls. `rant_cpp_test bench` runs the cost of each codec path
 (memcpy, loop, tails, dynamic) alone and end to end on loopback, next to a C node pair on
 the same footing, so a wrapper change is measured against the C floor.
 

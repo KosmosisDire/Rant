@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -26,6 +27,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -237,6 +239,70 @@ inline Role role_from_bits(uint8_t b) {
 /* base for the type-erased handler boxes the Node's Impl keeps alive until close */
 struct HandlerBox { virtual ~HandlerBox() = default; };
 
+/* Keeps a C node open while a call is inside it. rant_node_close frees everything and
+ * assumes no other thread is in a call, so every call holds a Pass and close waits for them. */
+class Gate {
+public:
+    /* false once close began, never blocks */
+    bool enter() noexcept {
+        active_.fetch_add(1);   /* count first, then check, so close never misses a call */
+        if (closing_.load()) { leave(); return false; }
+        return true;
+    }
+    void leave() noexcept {
+        if (active_.fetch_sub(1) == 1 && closing_.load()) {
+            std::lock_guard<std::mutex> g(mu_);
+            idle_.notify_all();
+        }
+    }
+    bool closing() const noexcept { return closing_.load(); }
+    /* Refuse new passes and wait until none is out. */
+    void close() {
+        closing_.store(true);
+        std::unique_lock<std::mutex> g(mu_);
+        while (active_.load() != 0) idle_.wait_for(g, std::chrono::milliseconds(50));
+    }
+
+private:
+    std::atomic<size_t>     active_{ 0 };
+    std::atomic<bool>       closing_{ false };
+    std::mutex              mu_;
+    std::condition_variable idle_;
+};
+
+struct NodeImpl;
+
+/* One call's hold on the C node, released at scope end. False when empty or once close began. */
+class Pass {
+public:
+    explicit Pass(NodeImpl* impl) noexcept;
+    ~Pass();
+    Pass(const Pass&) = delete;
+    Pass& operator=(const Pass&) = delete;
+    explicit operator bool() const noexcept { return impl_ != nullptr; }
+
+private:
+    NodeImpl* impl_;
+};
+
+/* Marks this thread as running one of a node's callbacks, so a close there can run elsewhere. */
+class InCallback {
+public:
+    explicit InCallback(const NodeImpl* node) noexcept : node_(node), outer_(top_) { top_ = this; }
+    ~InCallback() { top_ = outer_; }
+    InCallback(const InCallback&) = delete;
+    InCallback& operator=(const InCallback&) = delete;
+    static bool of(const NodeImpl* node) noexcept {
+        for (const InCallback* m = top_; m; m = m->outer_) if (m->node_ == node) return true;
+        return false;
+    }
+
+private:
+    const NodeImpl*   node_;
+    const InCallback* outer_;
+    static inline thread_local const InCallback* top_ = nullptr;
+};
+
 }   /* namespace priv */
 
 /* A view of bytes it does not own, valid while its source lives. It takes a string_view,
@@ -313,33 +379,27 @@ inline uint32_t to_us(std::chrono::microseconds d) {
 
 /* A callback queue from Node::create_queue, for handles that need a thread of their own. A
  * handle whose options name it parks its callbacks until dispatch() runs them on the
- * calling thread. Non owning, valid while its node lives. */
+ * calling thread. Valid while its node lives. */
 class Queue {
 public:
     Queue() = default;
-    bool valid() const noexcept { return q_ != nullptr; }
+    bool valid() const noexcept;
     explicit operator bool() const noexcept { return valid(); }
     /* Run the callbacks parked at entry, oldest first, up to max_callbacks (0 = all), waiting
      * up to timeout for the first (rant::forever = no end). The count run, or State from a
-     * callback or while another thread dispatches this queue. */
-    int dispatch(int max_callbacks = 0, std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
-        return q_ ? detail::rant_queue_dispatch(q_, max_callbacks, priv::to_ms(timeout))
-                  : static_cast<int>(SendStatus::State);
-    }
+     * callback, while another thread dispatches this queue, or once the node closed. */
+    int dispatch(int max_callbacks = 0, std::chrono::milliseconds timeout = std::chrono::milliseconds(0));
     /* waiting: callbacks parked now. dropped: best effort ones overwritten since open. */
     struct Stats { uint32_t waiting = 0; uint32_t dropped = 0; };
     /* The queue's counters, read now. */
-    Stats stats() const {
-        Stats s;
-        if (q_) detail::rant_queue_stats(q_, &s.waiting, &s.dropped);
-        return s;
-    }
+    Stats stats() const;
     /* The C queue, for a call into the C API. */
     detail::RantQueue* raw() const noexcept { return q_; }
 private:
     friend class Node;
-    explicit Queue(detail::RantQueue* q) : q_(q) {}
-    detail::RantQueue* q_ = nullptr;
+    Queue(detail::RantQueue* q, std::shared_ptr<priv::NodeImpl> impl) : q_(q), impl_(std::move(impl)) {}
+    detail::RantQueue*              q_ = nullptr;
+    std::shared_ptr<priv::NodeImpl> impl_;
 };
 
 namespace priv {
@@ -2096,12 +2156,14 @@ struct TopicRec {
 /* A subscriber handler and the id its handle removes it by, 0 for the node's own. */
 struct SubHandler { uint64_t id; MessageHandler fn; };
 
-/* The state behind a Node. Handles share it, so one that outlives its node reads
- * node == nullptr instead of freed memory. */
-struct NodeImpl {
-    detail::RantNode*          node = nullptr;
+/* The state behind a Node. Handles share it, so one that outlives its node finds the gate
+ * closed instead of freed memory. */
+struct NodeImpl : std::enable_shared_from_this<NodeImpl> {
+    Gate                       gate;
+    std::once_flag             closed;
+    detail::RantNode*          node = nullptr;    /* read under a Pass, set at open and close */
     Threading                  threading = Threading::ServiceThread;
-    detail::RantQueue*         queue = nullptr;   /* the node queue under Dispatch */
+    detail::RantQueue*         queue = nullptr;   /* the node queue under Dispatch, set at open */
     /* read on the loop thread, swapped whole under reg_mu */
     std::shared_ptr<const EventHandler> on_event;
     std::shared_ptr<const LogHandler>   on_log;
@@ -2141,6 +2203,7 @@ struct NodeImpl {
             if (ev.is_error()) std::fprintf(stderr, "rant: %s\n", ev.to_string().c_str());
             return;
         }
+        InCallback mark(this);
 #if defined(__cpp_exceptions)
         /* the event handler is where a throw would be reported, so it prints instead */
         try { (*h)(ev); }
@@ -2175,10 +2238,42 @@ struct NodeImpl {
         emit_error(detail::RANT_E_STATE, name.empty() ? nullptr : name.c_str());
     }
 
-    /* Close the C node once: stop the loop, leave with a bye, reap the async calls. */
+    /* Close the C node once: refuse new calls, wait for those inside, then close_node. */
     void shutdown();
-    ~NodeImpl() { shutdown(); }
+    /* Stop the loop, leave with a bye, reap the async calls. Nonzero when the C refused. */
+    int close_node();
+    ~NodeImpl() { if (node) (void)close_node(); }   /* only an open that failed midway */
 };
+
+inline Pass::Pass(NodeImpl* impl) noexcept : impl_(impl && impl->gate.enter() ? impl : nullptr) {}
+inline Pass::~Pass() { if (impl_) impl_->gate.leave(); }
+
+/* how long one slice of a wait lasts, which bounds how long close waits behind it */
+inline constexpr int wait_slice_ms = 50;
+
+/* Runs step(ms) with C waits of at most one slice, each under its own pass, until it answers
+ * nonzero or timeout_ms passes (negative = no end). closed is the answer once the node closed. */
+template <class F> int wait_sliced(NodeImpl* impl, int timeout_ms, int closed, F&& step) {
+    using clock = std::chrono::steady_clock;
+    const auto end = clock::now() + std::chrono::milliseconds(timeout_ms < 0 ? 0 : timeout_ms);
+    for (;;) {
+        int slice = wait_slice_ms;
+        if (timeout_ms >= 0) {
+            auto left = std::chrono::duration_cast<std::chrono::milliseconds>(end - clock::now()).count();
+            slice = left <= 0 ? 0 : static_cast<int>(left < wait_slice_ms ? left : wait_slice_ms);
+        }
+        int rc;
+        {
+            Pass p(impl);
+            if (!p) return closed;
+            rc = step(slice);
+        }
+        if (rc != 0 || (timeout_ms >= 0 && clock::now() >= end)) return rc;
+    }
+}
+
+/* true while the node is open: a handle with it may take a pass */
+inline bool node_open(const std::shared_ptr<NodeImpl>& impl) noexcept { return impl && !impl->gate.closing(); }
 
 /* The name slot under Publisher<Bytes> and Subscriber<Bytes>: one C topic per name, its
  * role following the live handles. Each handle holds one side, and the last close retires
@@ -2206,29 +2301,34 @@ public:
     }
 
     /* The oldest waiting message of a pulled topic, or with latest the newest. 1 got one,
-     * 0 none, negative the C refusal. The view lives until the next take. */
+     * 0 none, negative the C refusal. The view lives until the next take or the node's close. */
     int take(detail::RantMsg* out, int timeout_ms, bool latest) {
-        detail::RantTopic* c = live();
-        if (!c) return static_cast<int>(SendStatus::NoTopic);
-        return latest ? detail::rant_topic_take_latest(c, out, timeout_ms)
-                      : detail::rant_topic_take(c, out, timeout_ms);
+        detail::RantTopic* c = ch_;
+        return wait_sliced(impl_.get(), timeout_ms, static_cast<int>(SendStatus::NoTopic), [&](int ms) {
+            return latest ? detail::rant_topic_take_latest(c, out, ms) : detail::rant_topic_take(c, out, ms);
+        });
     }
 
-    bool valid() const noexcept { return live() != nullptr; }
+    bool valid() const noexcept { return node_open(impl_); }
     /* A reflect_from_mesh topic: re read the mesh and re type in place if what it took has
      * moved. true = re typed, false = current or not a reflect handle. */
-    bool refresh() { detail::RantTopic* c = live(); return c && detail::rant_topic_refresh(c) == 1; }
+    bool refresh() { Pass p = pass(); return p && detail::rant_topic_refresh(ch_) == 1; }
     explicit operator bool() const noexcept { return valid(); }
+    /* a hold on the node for a call that spans several steps */
+    Pass pass() const noexcept { return Pass(impl_.get()); }
 
     /* capture is when the data was true, as against when it was sent. The default is
      * unstated, which costs no wire bytes. */
     SendStatus send(Bytes data, types::Timestamp capture = {}) {
+        Pass p = pass();
+        return p ? send_held(data, capture) : SendStatus::NoTopic;
+    }
+    /* the send itself, under a pass the caller holds */
+    SendStatus send_held(Bytes data, types::Timestamp capture) {
         detail::RantSendOpts o;
-        detail::RantTopic* c = live();
-        if (!c) return SendStatus::NoTopic;
         o.capture_us = static_cast<uint64_t>(capture.us);
         return static_cast<SendStatus>(
-            detail::rant_topic_send(c, detail::rant_bytes(data.data(), data.size()), &o));
+            detail::rant_topic_send(ch_, detail::rant_bytes(data.data(), data.size()), &o));
     }
     /* Drop this handle's side of the name. The last handle on a name retires the topic, so
      * the name can be created again with another schema. State from the topic's own inline
@@ -2239,30 +2339,31 @@ public:
     /* The schema the topic uses now, empty when untyped. A reflect_from_mesh topic reports
      * what it adopted. */
     Schema schema() const {
-        detail::RantTopic* c = live();
-        return Schema(c ? detail::rant_topic_schema(c) : nullptr);
+        Pass p = pass();
+        return Schema(p ? detail::rant_topic_schema(ch_) : nullptr);
     }
     /* The topic's name, empty once closed. */
     std::string name() const;
     uint16_t index() const {
-        detail::RantTopic* c = live();
-        return c ? detail::rant_topic_index(c) : 0xffff;
+        Pass p = pass();
+        return p ? detail::rant_topic_index(ch_) : 0xffff;
     }
     int match_count() const {
-        detail::RantTopic* c = live();
-        return c ? detail::rant_topic_match_count(c) : 0;
+        Pass p = pass();
+        return p ? detail::rant_topic_match_count(ch_) : 0;
     }
     /* 1 when a send would not wait: a subscriber is matched, or matching has converged
      * so there is nobody to wait for. The async form of the send-path match wait. */
     bool ready() const {
-        detail::RantTopic* c = live();
-        return c && detail::rant_topic_ready(c) == 1;
+        Pass p = pass();
+        return p && detail::rant_topic_ready(ch_) == 1;
     }
     /* Pump until every reader has acked, or timeout elapses. Call before
      * closing so a final burst is not cut off by the BYE. */
     bool drain(std::chrono::milliseconds timeout) {
-        detail::RantTopic* c = live();
-        return !c || detail::rant_topic_drain(c, priv::to_ms(timeout)) == 1;
+        detail::RantTopic* c = ch_;
+        return wait_sliced(impl_.get(), priv::to_ms(timeout), 1,
+                           [&](int ms) { return detail::rant_topic_drain(c, ms); }) == 1;
     }
 
     /* Cumulative traffic counters (always on): messages/bytes this node committed to the
@@ -2270,16 +2371,14 @@ public:
     struct Counts { uint64_t tx_msgs = 0, tx_bytes = 0, rx_msgs = 0, rx_bytes = 0; };
     Counts counts() const {
         Counts c;
-        if (detail::RantTopic* t = live())
-            detail::rant_topic_counts(t, &c.tx_msgs, &c.tx_bytes, &c.rx_msgs, &c.rx_bytes);
+        if (Pass p = pass())
+            detail::rant_topic_counts(ch_, &c.tx_msgs, &c.tx_bytes, &c.rx_msgs, &c.rx_bytes);
         return c;
     }
 
 private:
     TopicCore(Node& node, std::string_view name, Role role, const Schema* schema, const Qos& qos,
               bool pull);
-    /* the C topic while the node lives, else null */
-    detail::RantTopic* live() const noexcept { return impl_ && impl_->node ? ch_ : nullptr; }
     void move_from(TopicCore& o) noexcept {
         ch_ = o.ch_; impl_ = std::move(o.impl_); bits_ = o.bits_; handler_id_ = o.handler_id_;
         o.ch_ = nullptr; o.bits_ = 0; o.handler_id_ = 0;
@@ -2315,7 +2414,7 @@ public:
     Deferred& operator=(const Deferred&) = delete;
 
     /* false once completed, and once the node closed */
-    bool valid() const noexcept { return fn_ != nullptr && token_ != 0 && impl_ && impl_->node; }
+    bool valid() const noexcept { return fn_ != nullptr && token_ != 0 && priv::node_open(impl_); }
     explicit operator bool() const noexcept { return valid(); }
 
     /* Answer Ok with rsp. message is optional text the caller reads as message(), cut at
@@ -2332,7 +2431,8 @@ private:
     Deferred(detail::RantFunction* fn, uint64_t token, std::shared_ptr<priv::NodeImpl> impl)
         : fn_(fn), token_(token), impl_(std::move(impl)) {}
     bool finish(int status, std::string_view message, Bytes rsp) {
-        if (!valid()) return false;
+        priv::Pass p(impl_.get());
+        if (!p || !fn_ || !token_) return false;
         std::string m(message);   /* the C API takes a NUL-terminated string */
         int r = detail::rant_function_complete(fn_, token_,
                     static_cast<detail::RantCallStatus>(status),
@@ -2344,6 +2444,7 @@ private:
     uint64_t                token_ = 0;
     std::shared_ptr<priv::NodeImpl> impl_;
     template <class R> friend class Request;
+    template <class R> friend class Deferred;
 };
 
 /* The request a raw function handler receives, valid for the callback only. Reply once, or
@@ -2398,17 +2499,19 @@ public:
     PendingTask& operator=(const PendingTask&) = delete;
 
     /* false once completed, and once the node closed */
-    bool valid() const noexcept { return fn_ != nullptr && token_ != 0 && impl_ && impl_->node; }
+    bool valid() const noexcept { return fn_ != nullptr && token_ != 0 && priv::node_open(impl_); }
     explicit operator bool() const noexcept { return valid(); }
 
     /* one progress update, broadcast on the progress channel (any observer may watch) */
     SendStatus progress(Bytes update) {
-        if (!valid()) return SendStatus::State;
+        priv::Pass p(impl_.get());
+        if (!p || !fn_ || !token_) return SendStatus::State;
         return static_cast<SendStatus>(detail::rant_function_progress(fn_, token_, priv::to_c(update)));
     }
     /* true the moment a cancel for this call arrived (false on an emptied handle) */
     bool cancelled() const {
-        return valid() && detail::rant_function_cancelled(fn_, token_) == 1;
+        priv::Pass p(impl_.get());
+        return p && fn_ && token_ && detail::rant_function_cancelled(fn_, token_) == 1;
     }
     /* Answer Ok with rsp. message is optional text the caller reads as message(). */
     SendStatus complete(Bytes rsp = Bytes(), std::string_view message = {}) {
@@ -2428,7 +2531,8 @@ private:
     PendingTask(detail::RantFunction* fn, uint64_t token, std::shared_ptr<priv::NodeImpl> impl)
         : fn_(fn), token_(token), impl_(std::move(impl)) {}
     SendStatus finish(int status, std::string_view message, Bytes rsp) {
-        if (!valid()) return SendStatus::State;
+        priv::Pass p(impl_.get());
+        if (!p || !fn_ || !token_) return SendStatus::State;
         std::string m(message);   /* the C API takes a NUL-terminated string */
         int r = detail::rant_function_complete(fn_, token_,
                     static_cast<detail::RantCallStatus>(status),
@@ -2440,6 +2544,7 @@ private:
     uint64_t                token_ = 0;
     std::shared_ptr<priv::NodeImpl> impl_;
     template <class A, class B> friend class TaskRequest;
+    template <class A, class B> friend class PendingTask;
 };
 
 /* The request a raw task handler receives, valid for the callback only. Answer inline, or
@@ -2699,14 +2804,38 @@ std::optional<T> decode_payload(TypeCodec& c, Bytes data, const detail::RantSche
 }   /* namespace priv */
 
 inline void priv::NodeImpl::shutdown() {
-    if (!node) return;
-    detail::rant_node_close(node, /*send_bye=*/1);
+    std::call_once(closed, [this] {   /* a later close waits here until the first is done */
+        gate.close();
+        if (node && close_node() != 0) {
+            /* the C node lives on and its callbacks point here, so this state is never freed */
+            new std::shared_ptr<NodeImpl>(shared_from_this());
+            emit_error(detail::RANT_E_STATE, nullptr, "the C refused the close, the node is leaked");
+        }
+    });
+}
+
+inline int priv::NodeImpl::close_node() {
+    int rc = detail::rant_node_close(node, /*send_bye=*/1);
+    if (rc != 0) return rc;
     node = nullptr;
 #ifndef RANT_NO_PATTERNS
     /* the C never fires pending async callbacks at close, so reap the boxes */
     for (void* b : async_live) delete static_cast<AsyncBox*>(b);
     async_live.clear();
 #endif
+    return 0;
+}
+
+inline bool Queue::valid() const noexcept { return q_ && priv::node_open(impl_); }
+inline int Queue::dispatch(int max_callbacks, std::chrono::milliseconds timeout) {
+    detail::RantQueue* q = q_;
+    return priv::wait_sliced(impl_.get(), priv::to_ms(timeout), static_cast<int>(SendStatus::State),
+                             [&](int ms) { return detail::rant_queue_dispatch(q, max_callbacks, ms); });
+}
+inline Queue::Stats Queue::stats() const {
+    Stats s;
+    if (priv::Pass p{ impl_.get() }) detail::rant_queue_stats(q_, &s.waiting, &s.dropped);
+    return s;
 }
 
 namespace priv {
@@ -2800,7 +2929,7 @@ public:
     }
 
     /* false when the open failed under -fno-exceptions, or after close() */
-    bool valid() const noexcept { return impl_ != nullptr && impl_->node != nullptr; }
+    bool valid() const noexcept { return priv::node_open(impl_); }
     explicit operator bool() const noexcept { return valid(); }
 
     Node(Node&&) noexcept = default;
@@ -2812,11 +2941,17 @@ public:
     Node& operator=(const Node&) = delete;
     ~Node() { close(); }
 
-    /* Stop the loop, leave the mesh with a bye and free the node. A handle that outlives it
-     * answers NoTopic. Close before the state its handlers capture goes out of scope. */
+    /* Stop the loop, leave the mesh with a bye and free the node, once the calls other
+     * threads are making on it return. A handle that outlives it answers NoTopic. Inside
+     * one of the node's own callbacks the close runs on another thread once that callback
+     * returns. Close before the state its handlers capture goes out of scope. */
     void close() {
-        if (impl_) impl_->shutdown();
-        impl_.reset();
+        if (!impl_) return;
+        if (priv::InCallback::of(impl_.get())) {
+            std::thread([impl = impl_] { impl->shutdown(); }).detach();
+            return;
+        }
+        impl_->shutdown();
     }
 
     /* Who runs the loop, as opened. */
@@ -2825,7 +2960,8 @@ public:
     /* Manual threading: one loop tick of discovery, receive, timers and queued sends, where
      * callbacks fire. Blocks up to timeout, 0 = non blocking. State on another threading. */
     int poll(std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
-        if (!valid()) return (int)SendStatus::State;
+        priv::Pass p = pass();
+        if (!p) return (int)SendStatus::State;
         return detail::rant_node_poll(impl_->node, priv::to_ms(timeout));
     }
 
@@ -2833,8 +2969,8 @@ public:
      * (0 = all), waiting up to timeout for the first (rant::forever = no end). The count
      * run, or State on another threading. */
     int dispatch(int max_callbacks = 0, std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
-        if (!valid() || !impl_->queue) return (int)SendStatus::State;
-        return detail::rant_queue_dispatch(impl_->queue, max_callbacks, priv::to_ms(timeout));
+        if (!impl_ || !impl_->queue) return (int)SendStatus::State;
+        return Queue(impl_->queue, impl_).dispatch(max_callbacks, timeout);
     }
 
     /* Peer, loss and error events, where the node's callbacks run. Optional: with none set
@@ -2851,7 +2987,8 @@ public:
     /* Block until discovery and matching settle, so everything sent now reaches everyone on
      * the network. Call after creating the topics. No timeout = 3 announce intervals. */
     bool settle(std::optional<std::chrono::milliseconds> timeout = std::nullopt) {
-        return valid() && detail::rant_node_settle(impl_->node, priv::to_ms(timeout)) == 1;
+        priv::Pass p = pass();
+        return p && detail::rant_node_settle(impl_->node, priv::to_ms(timeout)) == 1;
     }
 
     /* The mesh as this node sees it: peers, entities, the folded mesh and meta snapshots. */
@@ -2869,7 +3006,8 @@ public:
     /* The counters, read now. */
     Stats stats() const {
         Stats s;
-        if (!valid()) return s;
+        priv::Pass p = pass();
+        if (!p) return s;
         detail::rant_node_mem_stats(impl_->node, &s.memory_in_use, &s.memory_peak, &s.alloc_calls);
         detail::rant_node_backpressure_stats(impl_->node, &s.backpressure_waited_us, &s.backpressure_waited_sends);
         s.evicted_unsent = detail::rant_node_evicted_unsent(impl_->node);
@@ -2879,11 +3017,13 @@ public:
     /* The most recent error this node reported, as one line of text, whether or not an
      * on_event handler saw it. last_error_kind() is the same error's kind. */
     std::string last_error() const {
-        detail::RantEvent e = detail::rant_last_error(valid() ? impl_->node : nullptr);
+        priv::Pass p = pass();
+        detail::RantEvent e = detail::rant_last_error(p ? impl_->node : nullptr);
         char b[192]; return detail::rant_event_str(&e, b, sizeof b);
     }
     ErrorKind last_error_kind() const {
-        return static_cast<ErrorKind>(detail::rant_last_error(valid() ? impl_->node : nullptr).error);
+        priv::Pass p = pass();
+        return static_cast<ErrorKind>(detail::rant_last_error(p ? impl_->node : nullptr).error);
     }
 
     /* Compiles schema text in this node's registry: every definition stays in scope for the
@@ -2892,22 +3032,25 @@ public:
      * empty Schema, with last_error() saying where. */
     Schema schema(std::string_view text) {
         std::string t(text);
-        const detail::RantSchema* s = valid() ? detail::rant_node_schema(impl_->node, t.c_str()) : nullptr;
-        if (!s) priv::raise_last(valid() ? impl_->node : nullptr, "rant::Node::schema");
+        priv::Pass p = pass();
+        const detail::RantSchema* s = p ? detail::rant_node_schema(impl_->node, t.c_str()) : nullptr;
+        if (!s) priv::raise_last(p ? impl_->node : nullptr, "rant::Node::schema");
         return Schema(s);
     }
     /* The same from a schema's wire bytes, such as a peer's. */
     Schema schema_from_wire(Bytes wire) {
-        const detail::RantSchema* s = valid()
+        priv::Pass p = pass();
+        const detail::RantSchema* s = p
             ? detail::rant_node_schema_parse(impl_->node, wire.data(), wire.size()) : nullptr;
-        if (!s) priv::raise_last(valid() ? impl_->node : nullptr, "rant::Node::schema_from_wire");
+        if (!s) priv::raise_last(p ? impl_->node : nullptr, "rant::Node::schema_from_wire");
         return Schema(s);
     }
 
     /* Publish an already formatted line on a level's built in log topic, truncated at
      * RANT_LOG_MAX. SendStatus::NoSys when logs are disabled. */
     SendStatus log(LogLevel level, std::string_view text) {
-        if (!valid()) return SendStatus::State;
+        priv::Pass p = pass();
+        if (!p) return SendStatus::State;
         return static_cast<SendStatus>(detail::rant_node_log_text(
             impl_->node, static_cast<detail::RantLogLevel>(level),
             text.data(), static_cast<int>(text.size())));
@@ -2929,10 +3072,11 @@ public:
     /* A callback queue of this node, for handles that want their callbacks on a thread of
      * their own: name it in their options. At most 8 per node, freed with the node. */
     Queue create_queue() {
-        if (!valid()) { priv::raise_msg("rant::Node::create_queue: node is not valid"); return {}; }
+        priv::Pass p = pass();
+        if (!p) { priv::raise_msg("rant::Node::create_queue: node is not valid"); return {}; }
         detail::RantQueue* q = detail::rant_node_create_queue(impl_->node);
         if (!q) { priv::raise_last(impl_->node, "rant::Node::create_queue"); return {}; }
-        return Queue(q);
+        return Queue(q, impl_);
     }
     /* Every other node's log lines at every level, decoded to a LogLine, where the node's
      * callbacks run. One handler: a later call replaces it and {} clears it. Throws, or
@@ -2945,6 +3089,8 @@ public:
             std::lock_guard<std::mutex> g(impl_->reg_mu);
             impl_->on_log = std::move(p);
         }
+        priv::Pass hold = pass();
+        if (!hold) return false;
         std::lock_guard<std::mutex> g(impl_->create_mu);
         if (impl_->log_bound || !impl_->on_log) return true;
         /* the queue first, so the catch up replay parks too */
@@ -3041,6 +3187,8 @@ private:
     using Impl = priv::NodeImpl;
     std::shared_ptr<Impl> impl_;
 
+    priv::Pass pass() const noexcept { return priv::Pass(impl_.get()); }
+
     struct LockGuard {
         detail::RantNode* n;
         explicit LockGuard(detail::RantNode* node) : n(node) { detail::rant_node_lock(n); }
@@ -3050,6 +3198,7 @@ private:
     static void on_msg_tramp(const detail::RantMsg* m) {
         Impl* impl = static_cast<Impl*>(m->user);
         if (!impl) return;
+        priv::InCallback mark(impl);
         std::shared_ptr<const std::vector<priv::SubHandler>> hs;
         {
             std::lock_guard<std::mutex> g(impl->reg_mu);
@@ -3169,7 +3318,8 @@ public:
     /* Every discovered peer, dropped ones included, so check active. */
     std::vector<Peer> peers() const {
         std::vector<Peer> out;
-        if (!impl_ || !impl_->node) return out;
+        priv::Pass hold(impl_.get());
+        if (!hold) return out;
         Node::LockGuard guard(impl_->node);
         detail::RantIter it; std::memset(&it, 0, sizeof it);
         detail::RantPeerInfo p;
@@ -3195,7 +3345,8 @@ public:
     /* The entities one node advertises, peer 0 for this one. It copies every schema. */
     std::vector<Entity> entities(uint32_t peer = 0) const {
         std::vector<Entity> out;
-        if (!impl_ || !impl_->node) return out;
+        priv::Pass hold(impl_.get());
+        if (!hold) return out;
         Node::LockGuard guard(impl_->node);
         detail::RantIter it; std::memset(&it, 0, sizeof it);
         detail::RantEntityInfo ei;
@@ -3207,7 +3358,8 @@ public:
      * node, schemas from the provider, conflict when the endpoints disagree. */
     std::vector<Entity> mesh() const {
         std::vector<Entity> out;
-        if (!impl_ || !impl_->node) return out;
+        priv::Pass hold(impl_.get());
+        if (!hold) return out;
         Node::LockGuard guard(impl_->node);
         detail::RantIter it; std::memset(&it, 0, sizeof it);
         detail::RantEntityInfo ei;
@@ -3217,7 +3369,8 @@ public:
     }
     /* One folded entity by kind and name, or nullopt. */
     std::optional<Entity> find(EntityKind kind, std::string_view name) const {
-        if (!impl_ || !impl_->node) return std::nullopt;
+        priv::Pass hold(impl_.get());
+        if (!hold) return std::nullopt;
         Node::LockGuard guard(impl_->node);
         detail::RantEntityInfo ei;
         std::string nm(name);
@@ -3227,7 +3380,8 @@ public:
     }
     /* Moves on every reflected change anywhere in the mesh: re walk only when it moved. */
     uint32_t epoch() const {
-        return impl_ && impl_->node ? detail::rant_node_mesh_epoch(impl_->node) : 0;
+        priv::Pass hold(impl_.get());
+        return hold ? detail::rant_node_mesh_epoch(impl_->node) : 0;
     }
 #ifndef RANT_NO_PATTERNS
     /* A peer's runtime snapshot through a directed @rant/meta call, blocking up to timeout.
@@ -3260,7 +3414,8 @@ template <class T> inline const char codec_key = 0;   /* one address per T, the 
 }
 template <class T> priv::TypeCodec* priv::type_codec(Node& n) {
     Node::Impl* impl = n.impl_.get();
-    if (!impl) return nullptr;
+    Pass p(impl);
+    if (!p) return nullptr;
     std::lock_guard<std::mutex> g(impl->codec_mu);
     auto it = impl->codecs.find(&codec_key<T>);
     if (it != impl->codecs.end()) return it->second.get();
@@ -3270,8 +3425,9 @@ template <class T> priv::TypeCodec* priv::type_codec(Node& n) {
 
 inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
                                   const Schema* schema, const Qos& qos, bool pull) {
-    if (!node.valid()) { priv::raise_msg("rant topic create: node is not valid"); return; }
     const std::shared_ptr<NodeImpl>& impl = node.impl_;
+    Pass p(impl.get());
+    if (!p) { priv::raise_msg("rant topic create: node is not valid"); return; }
     std::lock_guard<std::mutex> g(impl->create_mu);
     std::string nm(name);
     uint64_t sh = schema ? schema->hash() : 0;
@@ -3324,7 +3480,8 @@ inline std::string priv::TopicCore::name() const {
 }
 
 inline void priv::TopicCore::add_handler(MessageHandler h) {
-    if (!live()) return;
+    Pass p = pass();
+    if (!p) return;
     uint16_t idx = detail::rant_topic_index(ch_);
     std::lock_guard<std::mutex> g(impl_->reg_mu);
     handler_id_ = impl_->next_handler_id++;
@@ -3339,11 +3496,13 @@ inline void priv::TopicCore::add_handler(MessageHandler h) {
  * be reused by another name. Otherwise the role narrows to the sides still held. */
 inline SendStatus priv::TopicCore::close() {
     if (!ch_) return SendStatus::NoTopic;
-    if (!impl_->node) {   /* the node closed and freed the topic */
+    std::shared_ptr<NodeImpl> keep = impl_;   /* outlives the pass and the lock below */
+    Pass p(keep.get());
+    if (!p) {   /* the node closed and freed the topic */
         ch_ = nullptr; bits_ = 0; handler_id_ = 0; impl_.reset();
         return SendStatus::Ok;
     }
-    NodeImpl& impl = *impl_;
+    NodeImpl& impl = *keep;
     std::lock_guard<std::mutex> g(impl.create_mu);
     uint16_t idx = detail::rant_topic_index(ch_);
     auto it = impl.topics.begin();
@@ -3388,7 +3547,7 @@ namespace priv {
  * handle made by the node for its own endpoint is never retired. */
 inline SendStatus close_function(detail::RantFunction*& fn, std::shared_ptr<NodeImpl>& impl, bool owned) {
     if (!fn) return SendStatus::NoTopic;
-    if (owned && impl && impl->node) {
+    if (Pass p{ owned ? impl.get() : nullptr }) {
         int rc = detail::rant_function_retire(fn);
         if (rc != 0) return static_cast<SendStatus>(rc);
     }
@@ -3418,12 +3577,13 @@ public:
         if (close() == SendStatus::State && impl_) impl_->report_close_refused(name_);
     }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
-    bool refresh() { return live() && detail::rant_function_refresh(fn_) == 1; }
+    bool refresh() { priv::Pass p = pass(); return p && detail::rant_function_refresh(fn_) == 1; }
 
 private:
     FunctionDefinition(Node& n, std::string_view name, const Schema* req_schema,
                        const Schema* rsp_schema, Handler handler, const FunctionOptions& o) {
-        if (!n.valid()) { priv::raise_msg("rant::FunctionDefinition: node is not valid"); return; }
+        priv::Pass p(n.impl_.get());
+        if (!p) { priv::raise_msg("rant::FunctionDefinition: node is not valid"); return; }
         if (!handler) { priv::raise_msg("rant::FunctionDefinition: a definition needs a handler"); return; }
         std::string nm(name);
         impl_ = n.impl_;
@@ -3453,10 +3613,10 @@ private:
     }
 public:
 
-    bool valid() const noexcept { return live() != nullptr; }
+    bool valid() const noexcept { return fn_ != nullptr && priv::node_open(impl_); }
     explicit operator bool() const noexcept { return valid(); }
     /* callers currently matched to this definition */
-    int match_count() const { return live() ? detail::rant_function_match_count(fn_) : 0; }
+    int match_count() const { priv::Pass p = pass(); return p ? detail::rant_function_match_count(fn_) : 0; }
     /* Retire the definition and release the name for a successor. The handle is empty after. State
      * from its own inline callback, and the handle stays valid then. */
     SendStatus close() { return priv::close_function(fn_, impl_, owned_); }
@@ -3464,12 +3624,12 @@ public:
     /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
      * it adopted. */
     Schema request_schema() const {
-        detail::RantFunction* f = live();
-        return Schema(f ? detail::rant_function_request_schema(f) : nullptr);
+        priv::Pass p = pass();
+        return Schema(p ? detail::rant_function_request_schema(fn_) : nullptr);
     }
     Schema response_schema() const {
-        detail::RantFunction* f = live();
-        return Schema(f ? detail::rant_function_response_schema(f) : nullptr);
+        priv::Pass p = pass();
+        return Schema(p ? detail::rant_function_response_schema(fn_) : nullptr);
     }
 
 private:
@@ -3480,10 +3640,12 @@ private:
     };
     static void tramp(detail::RantRequest* rq, void* user) {
         Box* b = static_cast<Box*>(user);
-        Request<Bytes> r(rq, b->fn.load(), b->impl.lock());
+        std::shared_ptr<priv::NodeImpl> impl = b->impl.lock();
+        priv::InCallback mark(impl.get());
+        Request<Bytes> r(rq, b->fn.load(), impl);
         priv::answered(rq, [&] { b->h(r); });
     }
-    detail::RantFunction* live() const noexcept { return impl_ && impl_->node ? fn_ : nullptr; }
+    priv::Pass pass() const noexcept { return priv::Pass(fn_ ? impl_.get() : nullptr); }
     void move_from(FunctionDefinition& o) noexcept {
         fn_ = o.fn_; impl_ = std::move(o.impl_); name_ = std::move(o.name_); owned_ = o.owned_;
         o.fn_ = nullptr;
@@ -3512,12 +3674,13 @@ public:
     }
     /* A reflect_from_mesh handle: re type in place when the mesh moved. true = re typed, and
      * outstanding calls are answered Cancelled first. */
-    bool refresh() { return live() && detail::rant_function_refresh(fn_) == 1; }
+    bool refresh() { priv::Pass p = pass(); return p && detail::rant_function_refresh(fn_) == 1; }
 
 private:
     RemoteFunction(Node& n, std::string_view name, const Schema* req_schema,
                    const Schema* rsp_schema, const FunctionOptions& o) {
-        if (!n.valid()) { priv::raise_msg("rant::RemoteFunction: node is not valid"); return; }
+        priv::Pass p(n.impl_.get());
+        if (!p) { priv::raise_msg("rant::RemoteFunction: node is not valid"); return; }
         std::string nm(name);
         impl_ = n.impl_;
         name_ = nm;
@@ -3535,7 +3698,7 @@ private:
     }
 public:
 
-    bool valid() const noexcept { return live() != nullptr; }
+    bool valid() const noexcept { return fn_ != nullptr && priv::node_open(impl_); }
     explicit operator bool() const noexcept { return valid(); }
 
     /* Call and wait for the answer, up to timeout, else the options' timeout. It waits on
@@ -3543,7 +3706,8 @@ public:
      * stall that loop, so it throws there: use call_async() or put the handle on a queue. */
     Response<Bytes> call(Bytes req, std::optional<std::chrono::milliseconds> timeout = std::nullopt, const CallOptions& opts = {}) {
         Response<Bytes> r;
-        if (!live()) { r.ss_ = SendStatus::NoTopic; return r; }
+        priv::Pass p = pass();
+        if (!p) { r.ss_ = SendStatus::NoTopic; return r; }
         detail::RantResponse out;
         std::memset(&out, 0, sizeof out);
         detail::RantCallOpts co; std::memset(&co, 0, sizeof co);
@@ -3568,7 +3732,8 @@ public:
      * outcome on the polling thread. */
     SendStatus call_async(Bytes req, std::function<void(const ResponseView<Bytes>&)> on_response,
                           const CallOptions& opts = {}) {
-        if (!live()) return SendStatus::NoTopic;
+        priv::Pass p = pass();
+        if (!p) return SendStatus::NoTopic;
         priv::AsyncBox* box = new priv::AsyncBox{ std::move(on_response),
                                                   &impl_->reg_mu, &impl_->async_live, {}, impl_.get() };
         {
@@ -3588,7 +3753,7 @@ public:
     }
 
     /* definitions currently matched, 0 = nobody provides the name yet */
-    int  match_count()    const { return live() ? detail::rant_function_match_count(fn_) : 0; }
+    int  match_count()    const { priv::Pass p = pass(); return p ? detail::rant_function_match_count(fn_) : 0; }
     /* Retire the remote and release the name. Every outstanding call completes Cancelled.
      * The handle is empty after. State from its own inline callback, and it stays valid then. */
     SendStatus close() { return priv::close_function(fn_, impl_, owned_); }
@@ -3596,12 +3761,12 @@ public:
     /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
      * it adopted. */
     Schema request_schema() const {
-        detail::RantFunction* f = live();
-        return Schema(f ? detail::rant_function_request_schema(f) : nullptr);
+        priv::Pass p = pass();
+        return Schema(p ? detail::rant_function_request_schema(fn_) : nullptr);
     }
     Schema response_schema() const {
-        detail::RantFunction* f = live();
-        return Schema(f ? detail::rant_function_response_schema(f) : nullptr);
+        priv::Pass p = pass();
+        return Schema(p ? detail::rant_function_response_schema(fn_) : nullptr);
     }
 
 private:
@@ -3611,6 +3776,7 @@ private:
         : fn_(fn), impl_(std::move(impl)), owned_(false) {}
     static void async_tramp(const detail::RantResponse* r) {
         priv::AsyncBox* box = static_cast<priv::AsyncBox*>(r->user);
+        priv::InCallback mark(box->impl);
         {
             std::lock_guard<std::mutex> g(*box->mu);
             box->live->erase(box);
@@ -3621,7 +3787,7 @@ private:
         }
         delete box;
     }
-    detail::RantFunction* live() const noexcept { return impl_ && impl_->node ? fn_ : nullptr; }
+    priv::Pass pass() const noexcept { return priv::Pass(fn_ ? impl_.get() : nullptr); }
     void move_from(RemoteFunction& o) noexcept {
         fn_ = o.fn_; impl_ = std::move(o.impl_); name_ = std::move(o.name_); owned_ = o.owned_;
         o.fn_ = nullptr;
@@ -3637,7 +3803,8 @@ private:
 
 /* Reflection's meta calls: out of line so RemoteFunction<Bytes, Bytes> is complete here. */
 inline RemoteFunction<Bytes, Bytes> Reflection::meta_fn() {
-    if (!impl_ || !impl_->node) return RemoteFunction<Bytes, Bytes>();
+    priv::Pass p(impl_.get());
+    if (!p) return RemoteFunction<Bytes, Bytes>();
     return RemoteFunction<Bytes, Bytes>(detail::rant_node_meta_function(impl_->node), impl_);
 }
 inline Bytes Reflection::sections_req(uint32_t sections, uint8_t* buf) {
@@ -3690,12 +3857,13 @@ public:
         if (close() == SendStatus::State && impl_) impl_->report_close_refused(name_);
     }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
-    bool refresh() { return live() && detail::rant_function_refresh(fn_) == 1; }
+    bool refresh() { priv::Pass p = pass(); return p && detail::rant_function_refresh(fn_) == 1; }
 
 private:
     TaskDefinition(Node& n, std::string_view name, const Schema* req_schema, const Schema* prg_schema,
                    const Schema* rsp_schema, Handler handler, const TaskOptions& o) {
-        if (!n.valid()) { priv::raise_msg("rant::TaskDefinition: node is not valid"); return; }
+        priv::Pass p(n.impl_.get());
+        if (!p) { priv::raise_msg("rant::TaskDefinition: node is not valid"); return; }
         if (!handler) { priv::raise_msg("rant::TaskDefinition: a definition needs a handler"); return; }
         std::string nm(name);
         impl_ = n.impl_;
@@ -3731,15 +3899,16 @@ private:
     }
 public:
 
-    bool valid() const noexcept { return live() != nullptr; }
+    bool valid() const noexcept { return fn_ != nullptr && priv::node_open(impl_); }
     explicit operator bool() const noexcept { return valid(); }
     /* callers currently matched to this definition */
-    int match_count() const { return live() ? detail::rant_function_match_count(fn_) : 0; }
+    int match_count() const { priv::Pass p = pass(); return p ? detail::rant_function_match_count(fn_) : 0; }
 
     /* Cancel notification, one slot, {} clears. Fires on the poll thread with the cancelled
      * call's defer token. Optional, since polling PendingTask::cancelled is complete alone. */
     void on_cancel(std::function<void(uint64_t token)> h) {
-        if (!live()) return;
+        priv::Pass p = pass();
+        if (!p) return;
         CancelBox* box = nullptr;
         if (h) { box = new CancelBox(); box->h = std::move(h); box->impl = impl_.get(); }
         detail::rant_function_on_cancel(fn_, box ? &TaskDefinition::cancel_tramp : nullptr, box);
@@ -3756,16 +3925,16 @@ public:
     /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
      * it adopted. */
     Schema request_schema() const {
-        detail::RantFunction* f = live();
-        return Schema(f ? detail::rant_function_request_schema(f) : nullptr);
+        priv::Pass p = pass();
+        return Schema(p ? detail::rant_function_request_schema(fn_) : nullptr);
     }
     Schema response_schema() const {
-        detail::RantFunction* f = live();
-        return Schema(f ? detail::rant_function_response_schema(f) : nullptr);
+        priv::Pass p = pass();
+        return Schema(p ? detail::rant_function_response_schema(fn_) : nullptr);
     }
     Schema progress_schema() const {
-        detail::RantFunction* f = live();
-        return Schema(f ? detail::rant_function_progress_schema(f) : nullptr);
+        priv::Pass p = pass();
+        return Schema(p ? detail::rant_function_progress_schema(fn_) : nullptr);
     }
 
 private:
@@ -3780,14 +3949,17 @@ private:
     };
     static void tramp(detail::RantRequest* rq, void* user) {
         Box* b = static_cast<Box*>(user);
-        TaskRequest<Bytes, Bytes> r(rq, b->fn.load(), b->impl.lock());
+        std::shared_ptr<priv::NodeImpl> impl = b->impl.lock();
+        priv::InCallback mark(impl.get());
+        TaskRequest<Bytes, Bytes> r(rq, b->fn.load(), impl);
         priv::answered(rq, [&] { b->h(r); });
     }
     static void cancel_tramp(uint64_t token, void* user) {
         CancelBox* b = static_cast<CancelBox*>(user);
+        priv::InCallback mark(b->impl);
         priv::guarded(b->impl, [&] { b->h(token); });
     }
-    detail::RantFunction* live() const noexcept { return impl_ && impl_->node ? fn_ : nullptr; }
+    priv::Pass pass() const noexcept { return priv::Pass(fn_ ? impl_.get() : nullptr); }
     void move_from(TaskDefinition& o) noexcept {
         fn_ = o.fn_; impl_ = std::move(o.impl_); name_ = std::move(o.name_); owned_ = o.owned_;
         o.fn_ = nullptr;
@@ -3819,12 +3991,13 @@ public:
     }
     /* A reflect_from_mesh handle: re type in place when the mesh moved. true = re typed, and
      * outstanding calls are answered Cancelled first. */
-    bool refresh() { return live() && detail::rant_function_refresh(fn_) == 1; }
+    bool refresh() { priv::Pass p = pass(); return p && detail::rant_function_refresh(fn_) == 1; }
 
 private:
     RemoteTask(Node& n, std::string_view name, const Schema* req_schema, const Schema* prg_schema,
                const Schema* rsp_schema, const TaskOptions& o) {
-        if (!n.valid()) { priv::raise_msg("rant::RemoteTask: node is not valid"); return; }
+        priv::Pass p(n.impl_.get());
+        if (!p) { priv::raise_msg("rant::RemoteTask: node is not valid"); return; }
         std::string nm(name);
         impl_ = n.impl_;
         name_ = nm;
@@ -3845,7 +4018,7 @@ private:
     }
 public:
 
-    bool valid() const noexcept { return live() != nullptr; }
+    bool valid() const noexcept { return fn_ != nullptr && priv::node_open(impl_); }
     explicit operator bool() const noexcept { return valid(); }
 
     /* Run the task and wait for its outcome. on_progress fires where the node's callbacks
@@ -3854,7 +4027,8 @@ public:
     Response<Bytes> call(Bytes req, ProgressHandler on_progress = {}, std::optional<std::chrono::milliseconds> timeout = std::nullopt,
                     const CallOptions& opts = {}) {
         Response<Bytes> r;
-        if (!live()) { r.ss_ = SendStatus::NoTopic; return r; }
+        priv::Pass p = pass();
+        if (!p) { r.ss_ = SendStatus::NoTopic; return r; }
         detail::RantResponse out;
         std::memset(&out, 0, sizeof out);
         detail::RantCallOpts co; std::memset(&co, 0, sizeof co);
@@ -3886,7 +4060,8 @@ public:
                         std::function<void(const ResponseView<Bytes>&)> on_response,
                         const CallOptions& opts = {}) {
         TaskCall tc;
-        if (!live()) return tc;
+        priv::Pass p = pass();
+        if (!p) return tc;
         priv::AsyncBox* box = new priv::AsyncBox{ std::move(on_response),
                                                   &impl_->reg_mu, &impl_->async_live,
                                                   std::move(on_progress), impl_.get() };
@@ -3917,12 +4092,13 @@ public:
     /* Request cancellation of the call. Cooperative and never acked: the terminal status is
      * the answer. BadRole when the provider declared no_cancel, State when not pending. */
     SendStatus cancel(uint32_t call_id) {
-        if (!live()) return SendStatus::NoTopic;
+        priv::Pass p = pass();
+        if (!p) return SendStatus::NoTopic;
         return static_cast<SendStatus>(detail::rant_function_cancel(fn_, call_id));
     }
 
     /* definitions currently matched, 0 = nobody provides the name yet */
-    int  match_count()    const { return live() ? detail::rant_function_match_count(fn_) : 0; }
+    int  match_count()    const { priv::Pass p = pass(); return p ? detail::rant_function_match_count(fn_) : 0; }
     /* Retire the remote. Every outstanding call completes Cancelled. The handle is empty
      * after. State from its own inline callback, and it stays valid then. */
     SendStatus close() { return priv::close_function(fn_, impl_, owned_); }
@@ -3930,16 +4106,16 @@ public:
     /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
      * it adopted. */
     Schema request_schema() const {
-        detail::RantFunction* f = live();
-        return Schema(f ? detail::rant_function_request_schema(f) : nullptr);
+        priv::Pass p = pass();
+        return Schema(p ? detail::rant_function_request_schema(fn_) : nullptr);
     }
     Schema response_schema() const {
-        detail::RantFunction* f = live();
-        return Schema(f ? detail::rant_function_response_schema(f) : nullptr);
+        priv::Pass p = pass();
+        return Schema(p ? detail::rant_function_response_schema(fn_) : nullptr);
     }
     Schema progress_schema() const {
-        detail::RantFunction* f = live();
-        return Schema(f ? detail::rant_function_progress_schema(f) : nullptr);
+        priv::Pass p = pass();
+        return Schema(p ? detail::rant_function_progress_schema(fn_) : nullptr);
     }
 
 private:
@@ -3947,16 +4123,19 @@ private:
     struct BlockingProgress { ProgressHandler* h; priv::NodeImpl* impl; };
     static void blocking_progress_tramp(const detail::RantProgress* p) {
         BlockingProgress* b = static_cast<BlockingProgress*>(p->user);
+        priv::InCallback mark(b->impl);
         ProgressView<Bytes> pv(p);
         priv::guarded(b->impl, [&] { (*b->h)(pv); });
     }
     static void async_progress_tramp(const detail::RantProgress* p) {
         priv::AsyncBox* box = static_cast<priv::AsyncBox*>(p->user);
+        priv::InCallback mark(box->impl);
         ProgressView<Bytes> pv(p);
         priv::guarded(box->impl, [&] { box->on_progress(pv); });
     }
     static void async_response_tramp(const detail::RantResponse* r) {
         priv::AsyncBox* box = static_cast<priv::AsyncBox*>(r->user);
+        priv::InCallback mark(box->impl);
         {
             std::lock_guard<std::mutex> g(*box->mu);
             box->live->erase(box);
@@ -3967,7 +4146,7 @@ private:
         }
         delete box;
     }
-    detail::RantFunction* live() const noexcept { return impl_ && impl_->node ? fn_ : nullptr; }
+    priv::Pass pass() const noexcept { return priv::Pass(fn_ ? impl_.get() : nullptr); }
     void move_from(RemoteTask& o) noexcept {
         fn_ = o.fn_; impl_ = std::move(o.impl_); name_ = std::move(o.name_); owned_ = o.owned_;
         o.fn_ = nullptr;
@@ -4019,14 +4198,15 @@ public:
         if (close() == SendStatus::State && impl_) impl_->report_close_refused(name_);
     }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
-    bool refresh() { return live() && detail::rant_variable_refresh(var_) == 1; }
+    bool refresh() { priv::Pass p = pass(); return p && detail::rant_variable_refresh(var_) == 1; }
 
-    bool valid() const noexcept { return live() != nullptr; }
+    bool valid() const noexcept { return var_ != nullptr && priv::node_open(impl_); }
     explicit operator bool() const noexcept { return valid(); }
 
     /* the current value, copied out under the node lock (nullopt = none yet) */
     std::optional<std::vector<uint8_t>> get() const {
-        if (!live()) return std::nullopt;
+        priv::Pass p = pass();
+        if (!p) return std::nullopt;
         detail::rant_node_lock(node_);
         detail::RantBytes b;
         std::optional<std::vector<uint8_t>> out;
@@ -4038,23 +4218,26 @@ public:
         return out;
     }
     SendStatus set(Bytes value) {
-        if (!live()) return SendStatus::NoTopic;
+        priv::Pass p = pass();
+        if (!p) return SendStatus::NoTopic;
         return static_cast<SendStatus>(detail::rant_variable_set(var_, priv::to_c(value)));
     }
     /* Force the value: writes are absorbed into the shadow source until unforce, which
      * restores the latest absorbed set. Requires VariableOptions::allow_force: State on the
      * owner without it, BadRole on a remote whose owner advertises none. */
     SendStatus force(Bytes value) {
-        if (!live()) return SendStatus::NoTopic;
+        priv::Pass p = pass();
+        if (!p) return SendStatus::NoTopic;
         return static_cast<SendStatus>(detail::rant_variable_force(var_, priv::to_c(value)));
     }
     SendStatus unforce() {
-        if (!live()) return SendStatus::NoTopic;
+        priv::Pass p = pass();
+        if (!p) return SendStatus::NoTopic;
         return static_cast<SendStatus>(detail::rant_variable_unforce(var_));
     }
-    bool forced() const { return live() && detail::rant_variable_forced(var_) == 1; }
+    bool forced() const { priv::Pass p = pass(); return p && detail::rant_variable_forced(var_) == 1; }
     /* the handles matched to this one: remotes at a definition, the definition at a remote */
-    int match_count() const { return live() ? detail::rant_variable_match_count(var_) : 0; }
+    int match_count() const { priv::Pass p = pass(); return p ? detail::rant_variable_match_count(var_) : 0; }
 
     /* Observe. on_change replays the current value at registration and fires on every state
      * change, on_write on every applied write, both inline on the applying thread. {} clears. */
@@ -4065,7 +4248,7 @@ public:
      * State from its own inline callback, and the handle stays valid then. */
     SendStatus close() {
         if (!var_) return SendStatus::NoTopic;
-        if (impl_ && impl_->node) {
+        if (priv::Pass p = pass()) {
             int rc = detail::rant_variable_retire(var_);
             if (rc != 0) return static_cast<SendStatus>(rc);
         }
@@ -4077,14 +4260,15 @@ public:
     /* The schema in use now, empty when untyped. A reflect_from_mesh handle reports what it
      * adopted. */
     Schema schema() const {
-        detail::RantVariable* v = live();
-        return Schema(v ? detail::rant_variable_schema(v) : nullptr);
+        priv::Pass p = pass();
+        return Schema(p ? detail::rant_variable_schema(var_) : nullptr);
     }
 
 protected:
     VariableDefinition(Node& n, std::string_view name, const Schema* schema,
                        const VariableOptions<Bytes>& o) {
-        if (!n.valid()) { priv::raise_msg("rant::VariableDefinition: node is not valid"); return; }
+        priv::Pass p(n.impl_.get());
+        if (!p) { priv::raise_msg("rant::VariableDefinition: node is not valid"); return; }
         create(n, name, schema, o, /*definition=*/true);
     }
     struct UBox : priv::HandlerBox {
@@ -4093,11 +4277,13 @@ protected:
     };
     static void utramp(const detail::RantVariableUpdate* u, void* user) {
         UBox* b = static_cast<UBox*>(user);
+        priv::InCallback mark(b->impl);
         VariableUpdate up(u);
         priv::guarded(b->impl, [&] { b->h(up); });
     }
     void observe(std::function<void(const VariableUpdate&)> h, bool change) {
-        if (!live()) return;
+        priv::Pass p = pass();
+        if (!p) return;
         UBox* box = nullptr;
         if (h) { box = new UBox(); box->h = std::move(h); box->impl = impl_.get(); }
         (void)(change ? detail::rant_variable_on_change(var_, box ? &VariableDefinition::utramp : nullptr, box)
@@ -4131,7 +4317,7 @@ protected:
         if (!var_) priv::raise_last(node_, definition ? "rant::VariableDefinition create"
                                                       : "rant::RemoteVariable create");
     }
-    detail::RantVariable* live() const noexcept { return impl_ && impl_->node ? var_ : nullptr; }
+    priv::Pass pass() const noexcept { return priv::Pass(var_ ? impl_.get() : nullptr); }
     void move_from(VariableDefinition& o) noexcept {
         var_ = o.var_; node_ = o.node_; impl_ = std::move(o.impl_); name_ = std::move(o.name_);
         o.var_ = nullptr;
@@ -4151,13 +4337,16 @@ public:
     RemoteVariable() = default;
     /* Wait until a value exists, up to timeout. false when timeout passed first. */
     bool wait(std::chrono::milliseconds timeout) {
-        return live() && detail::rant_variable_wait(var_, priv::to_ms(timeout)) == 1;
+        detail::RantVariable* v = var_;
+        return priv::wait_sliced(var_ ? impl_.get() : nullptr, priv::to_ms(timeout), 0,
+                                 [&](int ms) { return detail::rant_variable_wait(v, ms); }) == 1;
     }
 
 private:
     RemoteVariable(Node& n, std::string_view name, const Schema* schema,
                    const VariableOptions<Bytes>& o) {
-        if (!n.valid()) { priv::raise_msg("rant::RemoteVariable: node is not valid"); return; }
+        priv::Pass p(n.impl_.get());
+        if (!p) { priv::raise_msg("rant::RemoteVariable: node is not valid"); return; }
         create(n, name, schema, o, /*definition=*/false);
     }
     template <class A> friend class RemoteVariable;
@@ -4212,12 +4401,12 @@ public:
     Subscriber() = default;
 
     /* The oldest waiting message of a pulled subscriber, or nullopt when none arrived within
-     * timeout (0 = check, rant::forever = no end). The view lives until the next take. */
+     * timeout (0 = check, rant::forever = no end). The view lives until the next take or close. */
     std::optional<MessageView> take(std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
         return pull(timeout, false);
     }
     /* The newest waiting message of a pulled subscriber, dropping the older ones, or nullopt
-     * when none arrived within timeout. The view lives until the next take. */
+     * when none arrived within timeout. The view lives until the next take or close. */
     std::optional<MessageView> take_latest(std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
         return pull(timeout, true);
     }
@@ -4311,6 +4500,8 @@ public:
     /* Answer Ok with v and optional text. A value that does not encode answers AppError
      * instead. false when already answered or the node closed. */
     bool complete(const Rsp& v, std::string_view message = {}) {
+        priv::Pass p(core_.impl_.get());   /* the codec's schema lives in the node */
+        if (!p) return false;
         std::vector<uint8_t> s;
         auto b = priv::encode(*rsp_, v, s);
         if (!b) { (void)core_.fail("the reply did not encode into the response schema"); return false; }
@@ -4457,6 +4648,8 @@ public:
     Response<Rsp> call(const Req& req, std::optional<std::chrono::milliseconds> timeout = std::nullopt, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
         Response<Rsp> r;
+        priv::Pass p = core_.pass();   /* through the decode, whose schema lives in the node */
+        if (!p) { r.ss_ = SendStatus::NoTopic; return r; }
         auto b = priv::encode(*cq_, req, s);
         if (!b) { r.ss_ = SendStatus::Schema; r.message_ = "the request did not encode"; return r; }
         Response<Bytes> ur = core_.call(*b, timeout, opts);
@@ -4471,6 +4664,8 @@ public:
      * run. Ok when the request left, else the reason it did not. */
     SendStatus call_async(const Req& req, std::function<void(const ResponseView<Rsp>&)> cb,
                           const CallOptions& opts = {}) {
+        priv::Pass p = core_.pass();
+        if (!p) return SendStatus::NoTopic;
         std::vector<uint8_t> s;
         auto b = priv::encode(*cq_, req, s);
         if (!b) return SendStatus::Schema;
@@ -4563,6 +4758,8 @@ public:
 
     /* One progress update to the caller and any observer. Schema when v does not encode. */
     SendStatus progress(const Prg& v) {
+        priv::Pass p(core_.impl_.get());   /* the codec's schema lives in the node */
+        if (!p) return SendStatus::State;
         std::vector<uint8_t> s;
         auto b = priv::encode(*prg_, v, s);
         return b ? core_.progress(*b) : SendStatus::Schema;
@@ -4572,6 +4769,8 @@ public:
     /* Answer Ok with v. A result that does not encode answers AppError, so the caller is
      * not left waiting, and returns Schema. */
     SendStatus complete(const Rsp& v, std::string_view message = {}) {
+        priv::Pass p(core_.impl_.get());
+        if (!p) return SendStatus::State;
         std::vector<uint8_t> s;
         auto b = priv::encode(*rsp_, v, s);
         if (!b) { (void)core_.fail("the result did not encode into the response schema"); return SendStatus::Schema; }
@@ -4583,6 +4782,8 @@ public:
     SendStatus complete_cancelled(std::string_view message = {}) { return core_.complete_cancelled(message); }
     /* Honor a cancel and hand the caller what got done, which it reads as value(). */
     SendStatus complete_cancelled(std::string_view message, const Rsp& partial) {
+        priv::Pass p(core_.impl_.get());
+        if (!p) return SendStatus::State;
         std::vector<uint8_t> s;
         auto b = priv::encode(*rsp_, partial, s);
         if (!b) { (void)core_.complete_cancelled(message); return SendStatus::Schema; }
@@ -4687,6 +4888,8 @@ public:
                        std::optional<std::chrono::milliseconds> timeout = std::nullopt, const CallOptions& opts = {}) {
         std::vector<uint8_t> s;
         Response<Rsp> r;
+        priv::Pass p = core_.pass();   /* through the decode, whose schema lives in the node */
+        if (!p) { r.ss_ = SendStatus::NoTopic; return r; }
         auto b = priv::encode(*cq_, req, s);
         if (!b) { r.ss_ = SendStatus::Schema; r.message_ = "the request did not encode"; return r; }
         Response<Bytes> ur = core_.call(*b, adapt_progress(std::move(on_progress)), timeout, opts);
@@ -4702,6 +4905,8 @@ public:
     TaskCall call_async(const Req& req, ProgressHandler on_progress,
                         std::function<void(const ResponseView<Rsp>&)> on_response,
                         const CallOptions& opts = {}) {
+        priv::Pass p = core_.pass();
+        if (!p) return TaskCall{};
         std::vector<uint8_t> s;
         auto b = priv::encode(*cq_, req, s);
         if (!b) return TaskCall{ SendStatus::Schema, 0 };
@@ -4772,6 +4977,8 @@ public:
 
     /* The current value, copied out, nullopt while none exists. */
     std::optional<T> get() const {
+        priv::Pass p = core_.pass();   /* through the decode, whose schema lives in the node */
+        if (!p) return std::nullopt;
         auto b = core_.get();
         if (!b) return std::nullopt;
         return priv::decode_payload<T>(*c_, Bytes(b->data(), b->size()), nullptr, core_.impl_.get(),
@@ -4781,6 +4988,8 @@ public:
     /* A write: Ok when applied here or sent to the owner, NoTopic when no owner matched,
      * BadRole when the owner is read only, Schema when v does not encode. */
     SendStatus set(const T& v) {
+        priv::Pass p = core_.pass();   /* the codec's schema lives in the node */
+        if (!p) return SendStatus::NoTopic;
         thread_local std::vector<uint8_t> s;
         auto b = priv::encode(*c_, v, s);
         return b ? core_.set(*b) : SendStatus::Schema;
@@ -4788,6 +4997,8 @@ public:
     /* Override the value until unforce(). Writes meanwhile are held back, and unforce()
      * restores the latest. Needs allow_force on the definition. */
     SendStatus force(const T& v) {
+        priv::Pass p = core_.pass();
+        if (!p) return SendStatus::NoTopic;
         thread_local std::vector<uint8_t> s;
         auto b = priv::encode(*c_, v, s);
         return b ? core_.force(*b) : SendStatus::Schema;
@@ -4866,6 +5077,8 @@ public:
 
     /* The latest value, copied out, nullopt while none arrived. */
     std::optional<T> get() const {
+        priv::Pass p = core_.pass();   /* through the decode, whose schema lives in the node */
+        if (!p) return std::nullopt;
         auto b = core_.get();
         if (!b) return std::nullopt;
         return priv::decode_payload<T>(*c_, Bytes(b->data(), b->size()), nullptr, core_.impl_.get(),
@@ -4877,6 +5090,8 @@ public:
     /* A write: Ok when applied here or sent to the owner, NoTopic when no owner matched,
      * BadRole when the owner is read only, Schema when v does not encode. */
     SendStatus set(const T& v) {
+        priv::Pass p = core_.pass();   /* the codec's schema lives in the node */
+        if (!p) return SendStatus::NoTopic;
         thread_local std::vector<uint8_t> s;
         auto b = priv::encode(*c_, v, s);
         return b ? core_.set(*b) : SendStatus::Schema;
@@ -4884,6 +5099,8 @@ public:
     /* Override the value until unforce(). Writes meanwhile are held back, and unforce()
      * restores the latest. Needs allow_force on the definition. */
     SendStatus force(const T& v) {
+        priv::Pass p = core_.pass();
+        if (!p) return SendStatus::NoTopic;
         thread_local std::vector<uint8_t> s;
         auto b = priv::encode(*c_, v, s);
         return b ? core_.force(*b) : SendStatus::Schema;
@@ -4958,9 +5175,11 @@ public:
     /* Send v to every matched subscriber. capture is when the data was true, as against
      * when it was sent. Schema when v does not encode, NoTopic when nobody matched in time. */
     SendStatus send(const T& v, types::Timestamp capture = {}) {
+        priv::Pass p = core_.t_.pass();   /* the codec's schema lives in the node */
+        if (!p) return SendStatus::NoTopic;
         thread_local std::vector<uint8_t> s;   /* reused: only the non memcpy path fills it */
         auto b = priv::encode(*c_, v, s);
-        return b ? core_.send(*b, capture) : SendStatus::Schema;
+        return b ? core_.t_.send_held(*b, capture) : SendStatus::Schema;
     }
     /* The subscribers matched now. */
     int  match_count()   const { return core_.match_count(); }
@@ -5036,6 +5255,8 @@ private:
     friend class Node;
     std::optional<T> decoded(const std::optional<MessageView>& m) {
         if (!m) return std::nullopt;
+        priv::Pass p = core_.t_.pass();   /* the view is the node's until the next take or close */
+        if (!p) return std::nullopt;
         T v{};
         if (!priv::decode(*c_, v, m->data(), m->raw_schema())) {
             priv::raise_msg("rant::Subscriber::take: the message did not decode as T");

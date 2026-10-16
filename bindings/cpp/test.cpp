@@ -1351,8 +1351,8 @@ static bool queue_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* handle lifetime: holds per side on a shared name, moves, the last close retiring the
- * name, handles and deferred replies that outlive their node, a close refused in a callback */
+/* handle lifetime: holds per side on a shared name, moves, the last close retiring the name,
+ * handles and deferred replies that outlive their node, closes inside their own callbacks */
 static bool lifetime_leg() {
     int fails_at_entry = g_failures;
     rant::NodeOptions opts;
@@ -1452,6 +1452,17 @@ static bool lifetime_leg() {
     chk("life: the refused close raises a State event",
         wait_for(3000, [&] { return state_seen.load(); }, &d) && !self_sub);
 
+    /* a node closed inside its own callback, which runs inside poll, closes once it returns */
+    rant::Node e("LE", mopts);
+    auto close_pub = a.publisher<Speed>("l/close", rel);
+    auto close_sub = e.subscriber<Speed>("l/close", [&](const Speed&) { e.close(); }, rel);
+    chk("life: self closing node matched",
+        wait_for(4000, [&] { return close_pub.match_count() > 0 && close_pub.ready(); }, &e));
+    close_pub.send(Speed{ 5 });
+    chk("life: a node closed in its own callback closes after it",
+        wait_for(3000, [&] { return !e.valid(); }, &e));
+    e.close();   /* waits for the close the callback started */
+    chk("life: its handles answer as closed", !close_sub.valid());
     return g_failures == fails_at_entry;
 }
 
@@ -1486,6 +1497,56 @@ static bool rebind_leg() {
     pub.send(secondside::Sample{ 1, 99, 2 });
     chk("rebind: the second layout decodes with its own offsets",
         wait_for(3000, [&] { return got.load() == 2; }) && a == 1 && b == 2);
+    return g_failures == fails_at_entry;
+}
+
+/* calls on other threads while the node closes answer NoTopic or their usual result and
+ * never touch the freed node. Only a sanitizer build sees every miss */
+static bool close_race_leg() {
+    int fails_at_entry = g_failures;
+    rant::NodeOptions opts;
+    opts.domain = test_domain(13);
+    opts.multicast_interface = "127.0.0.1";
+    opts.match_wait = -1ms;   /* a send with nobody matched drops at once, so the loops spin */
+    bool refused_after = true;
+    for (int round = 0; round < 40; round++) {
+        rant::Node n("CR", opts);
+        if (!n.valid()) { chk("race: node constructed", false); return false; }
+        n.on_event([](const rant::Event&) {});
+        auto pub = n.publisher<Speed>("cr/speed");
+        rant::VariableOptions<Speed> vo;
+        vo.initial = Speed{ 0 };
+        auto var = n.variable_definition<Speed>("cr/var", vo);
+        std::atomic<bool> stop{ false };
+        std::atomic<uint64_t> calls{ 0 };
+        std::thread sender([&] {
+            for (int32_t i = 0; !stop.load(); i++) { (void)pub.send(Speed{ i }); calls++; }
+        });
+        std::thread writer([&] {
+            for (int32_t i = 0; !stop.load(); i++) { (void)var.set(Speed{ i }); calls++; }
+        });
+        std::thread churn([&] {
+            while (!stop.load()) {
+#if defined(__cpp_exceptions)
+                try { auto p = n.publisher<Speed>("cr/churn"); (void)p.send(Speed{ 1 }); }
+                catch (const rant::Error&) {}
+#else
+                auto p = n.publisher<Speed>("cr/churn");
+                (void)p.send(Speed{ 1 });
+#endif
+                calls++;
+            }
+        });
+        while (calls.load() < 300) std::this_thread::yield();
+        n.close();
+        refused_after = refused_after && pub.send(Speed{ 0 }) == rant::SendStatus::NoTopic
+                        && var.set(Speed{ 0 }) == rant::SendStatus::NoTopic;
+        stop = true;
+        sender.join();
+        writer.join();
+        churn.join();
+    }
+    chk("race: after close every call answers NoTopic", refused_after);
     return g_failures == fails_at_entry;
 }
 
@@ -1892,6 +1953,7 @@ static const Leg LEGS[] = {
     { "queue",      queue_leg },
     { "lifetime",   lifetime_leg },
     { "rebind",     rebind_leg },
+    { "close_race", close_race_leg },
     { "failure",    failure_leg },
     { "factory",    factory_leg },
     { "version",    version_leg },

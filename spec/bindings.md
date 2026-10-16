@@ -64,6 +64,18 @@ about a wrapper API, this file wins.
 - `Peer::entities` replaces any `Peer::topics`. No dual surfaces.
 - A pending call at close gets exactly one synthesized outcome, `RANT_CALL_CANCELLED`,
   fixed in C so every binding inherits it.
+- `rant_node_close` frees everything and assumes no other thread is inside a call, so
+  every binding holds a pass on a per node gate across each call into the C, and close
+  refuses new passes, waits until none is out, then closes. A handle that outlives its
+  node or races its close answers `NoTopic`. A wait that can be long (dispatch, take,
+  drain, a variable wait) takes one pass per 50 ms slice, so close waits at most a slice
+  behind it. A poll, a settle and a blocking call hold theirs to the end, so close waits
+  for a function call up to its timeout and for a running task call until it ends, the
+  user's choice over a C step that cancels them first. Every callback entry marks its
+  thread, and a close inside one of the node's own callbacks runs on a new thread once
+  that callback returns. A later close waits until the first is done. Anything that
+  reads a node owned schema later (an encode, a lazy decode, a pulled message) holds a
+  pass for it, and a schema read after close refuses loudly.
 - JS: the client class is `RantNode` (`await RantNode.connect(url)`). Handles come from
   async factory methods. The schema is a positional argument, never inside an opts object.
   A null schema means raw or payload less.
@@ -164,8 +176,9 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   stay `const char*` on purpose.
 - The node's state is `priv::NodeImpl`, shared by the node and every handle through a
   `shared_ptr`. The node closes the C node at `close()` or destruction whatever handles
-  remain, and a handle checks `impl->node` before touching its C pointer, so one that
-  outlives the node answers `NoTopic`. Handles are move only and `close()` or scope end
+  remain, through the gate above (`priv::Gate`, `priv::Pass`, `priv::InCallback`). A
+  typed handle holds one pass across encode, call and decode, since its codec's schema
+  lives in the node. Handles are move only and `close()` or scope end
   retires them. A topic name keeps a hold count per side, the role follows the live
   holds and the last close retires the topic. A close refused inside the handle's own
   callback raises a `State` event. Pattern handler boxes hold the state weakly, since the

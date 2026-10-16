@@ -34,7 +34,9 @@ rant::Node node("robot", { .domain = 7 });
 - `on_event(handler)` gets peer, loss and error events. With no handler, errors print
   to stderr.
 - `settle()` waits until discovery is done. Call it after creating your handles.
-- `close()` or the destructor shuts the node down.
+- `close()` or the destructor shuts the node down. It first waits until the calls other
+  threads are making on the node return. Inside one of the node's own callbacks it runs
+  once that callback returns.
 - `rant::version()` is the library's version, such as `"0.0.17"`.
 
 Durations are `std::chrono`: write `500ms` or `2s`. `rant::forever` waits with no end.
