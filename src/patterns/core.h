@@ -132,7 +132,8 @@ RANT_API int    rant_function_call_async(RantFunction *fn, RantBytes req, RantRe
 /* Providers matched at a remote, callers matched at a definition. */
 RANT_API int    rant_function_match_count(RantFunction *fn);
 /* Parks both channels, cancels every outstanding call with one CANCELLED outcome and frees
- * the handle. RANT_ERR_STATE from a callback, the handle then stays valid. */
+ * the handle. RANT_ERR_STATE from a callback, the handle then stays valid. Like close for
+ * the node, it assumes no other thread is inside a call on the handle. */
 RANT_API int    rant_function_retire(RantFunction *fn);
 /* A reflect_from_mesh handle: re types every channel in place when the generation moved.
  * 1 re typed, 0 current, negative on error, RANT_ERR_ROLE without the flag. */

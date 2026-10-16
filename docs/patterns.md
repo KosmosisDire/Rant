@@ -120,6 +120,11 @@ same name handle while the first lives is refused: the create returns `NULL` and
 `rant_last_error` says `RANT_E_NAME_COLLISION`. Retire the first.
 Complete or abandon outstanding defer tokens before retiring a definition.
 
+Like `rant_node_close` for the node, a retire assumes no other thread is inside a call on
+that handle, since it frees the handle. A blocking `rant_function_call` on another thread
+must return first: cancel it or let it time out. Every binding holds each handle open
+across its calls, so its close waits for them.
+
 ## Wrappers
 
 C++, C#, Python, Rust and the JS bridge expose all three patterns. A thrown handler in

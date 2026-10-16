@@ -240,6 +240,10 @@ Retire parks the channels (`RANT_INACTIVE`, re advertised), answers every outsta
 call CANCELLED (a definition answers its live deferred calls on the wire first), silences
 callbacks, unlinks the handle and frees it. It is refused with `RANT_ERR_STATE` from
 inside a callback and the handle then stays valid. The builtin meta handle refuses retire.
+Like `rant_node_close`, it assumes no other thread is inside a call on the handle: a
+blocking call woken by its CANCELLED still reads the handle on its way out. The C cannot
+guard a handle it frees, so each binding holds a pass on a per handle gate across every
+call into it and its close waits for them (spec/bindings.md).
 
 Retire runs in three phases: park the channels before taking the lock (`set_role` refuses
 from a callback with nothing mutated, so the primary's verdict is the whole retire's),
