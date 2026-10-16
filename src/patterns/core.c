@@ -185,7 +185,9 @@ typedef struct i_RantPending {
     RantProgressFn    on_progress; /* task: per progress update */
     void           *progress_user;
     uint8_t         running;     /* a non terminal response arrived, the deadline is dropped */
-    uint8_t         sync;        /* the blocking call's entry: its outcome completes inline */
+    uint8_t         sync;        /* the blocking call's entry: its outcome completes inline, and
+                                    only that call frees it */
+    volatile uint32_t cb_out;    /* sync: its progress callbacks out, the call returns at 0 */
     uint8_t        *queued_req;
     uint32_t        queued_len;
 } i_RantPending;
@@ -419,6 +421,18 @@ static void i_rant_func_flush_queued(RantFunction *fn){
     }
 }
 
+/* Runs a progress callback inline, the lock held on entry and on exit. A blocking call's
+ * entry counts it out, so the call never returns while it runs. */
+static void i_rant_func_progress_inline(RantFunction *fn, i_RantPending *p, const RantProgress *pr){
+    RantProgressFn cb = p->on_progress; i_RantCallbackScope cs;
+    volatile uint32_t *own = p->sync ? &p->cb_out : NULL;
+    if (own) (*own)++;
+    i_rant_node_sys_callback_begin(fn->n, &cs, &fn->cb_out);
+    cb(pr);
+    i_rant_node_sys_callback_end(fn->n, &cs, &fn->cb_out);
+    if (own){ (*own)--; i_rant_node_sys_wake(fn->n); }
+}
+
 /* caller: a progress datagram. caller_lo filters other callers' calls off the broadcast.
  * Progress can beat RUNNING on its own lane, so it also drops the deadline. */
 static void i_rant_func_on_progress(void *user, const RantMsg *msg){
@@ -436,20 +450,18 @@ static void i_rant_func_on_progress(void *user, const RantMsg *msg){
     pr.data = msg->data; pr.schema = msg->schema;
     pr.written_us = msg->written_us; pr.recv_us = msg->recv_us;
     pr.user = p->progress_user;
-    {   RantProgressFn cb = p->on_progress; i_RantCallbackScope cs;
-        i_rant_node_sys_callback_begin(fn->n, &cs, &fn->cb_out);
-        cb(&pr);
-        i_rant_node_sys_callback_end(fn->n, &cs, &fn->cb_out);
-    }
+    i_rant_func_progress_inline(fn, p, &pr);
 }
 
-/* dispatch: a parked progress update or RUNNING for a call still known here */
+/* dispatch: a parked progress update or RUNNING for a call still known here. A blocking
+   call's entry counts it out, as inline delivery does */
 static void i_rant_func_run_progress(RantFunction *fn, const RantMsg *msg, int running){
-    i_RantPending *p; RantProgress pr; RantProgressFn cb = NULL;
+    i_RantPending *p, *own = NULL; RantProgress pr; RantProgressFn cb = NULL;
     uint32_t call_id = running ? i_rant_le_r32(msg->header.data) : i_rant_le_r32(msg->header.data + 4);
     int acquired = i_rant_node_sys_lock(fn->n);
     p = i_rant_func_find_any(fn, call_id);
     if (p){ cb = p->on_progress; pr.user = p->progress_user; }
+    if (cb && p->sync){ own = p; own->cb_out++; }
     i_rant_node_sys_unlock(fn->n, acquired);
     if (!cb) return;   /* answered and dispatched already: a straggler */
     pr.call_id = call_id; pr.provider = msg->publisher_id;
@@ -457,6 +469,12 @@ static void i_rant_func_run_progress(RantFunction *fn, const RantMsg *msg, int r
     pr.schema = running ? NULL : msg->schema;
     pr.written_us = msg->written_us; pr.recv_us = msg->recv_us;
     cb(&pr);
+    if (own){
+        acquired = i_rant_node_sys_lock(fn->n);
+        own->cb_out--;
+        i_rant_node_sys_wake(fn->n);
+        i_rant_node_sys_unlock(fn->n, acquired);
+    }
 }
 
 /* caller: a response arrived */
@@ -482,11 +500,7 @@ static void i_rant_func_on_response(void *user, const RantMsg *msg){
             pr.written_us = msg->written_us; pr.recv_us = msg->recv_us;
             pr.user = p->progress_user;
             i_rant_func_mark_running(p);
-            {   RantProgressFn cb = p->on_progress; i_RantCallbackScope cs;
-                i_rant_node_sys_callback_begin(fn->n, &cs, &fn->cb_out);
-                cb(&pr);
-                i_rant_node_sys_callback_end(fn->n, &cs, &fn->cb_out);
-            }
+            i_rant_func_progress_inline(fn, p, &pr);
         } else i_rant_func_mark_running(p);
         return;
     }
@@ -515,7 +529,7 @@ static void i_rant_func_on_response(void *user, const RantMsg *msg){
         p->on_response(&r);
         i_rant_node_sys_callback_end(fn->n, &cs, &fn->cb_out);
     }
-    i_rant_func_free_pending(fn, p);
+    if (!p->sync) i_rant_func_free_pending(fn, p);
 }
 
 /* dispatch: the parked outcome for a call, a delivered reply or a synthesized one */
@@ -563,7 +577,8 @@ static void i_rant_func_dispatch(void *user, const RantMsg *msg, uint8_t kind){
 }
 
 /* Fails one unlinked pending entry with a synthesized outcome: parked as a record when the
- * handle has a queue and park says so, else fired inline. Frees the entry when fired. */
+ * handle has a queue and park says so, else fired inline. Frees the entry when fired, but a
+ * blocking call's, which that call frees. */
 static void i_rant_func_fail_pending(RantFunction *fn, i_RantPending *p, RantCallStatus st,
                                      RantString message, int park){
     if (park && !p->sync && i_rant_topic_queue(fn->rsp)){
@@ -579,7 +594,7 @@ static void i_rant_func_fail_pending(RantFunction *fn, i_RantPending *p, RantCal
         r.message = message;
         if (p->on_response) p->on_response(&r);
     }
-    i_rant_func_free_pending(fn, p);
+    if (!p->sync) i_rant_func_free_pending(fn, p);
 }
 
 /* Retire and close: an answered call whose callback never dispatched gets CANCELLED
@@ -765,10 +780,12 @@ RantFunction *rant_node_create_remote_task(RantNode *n, const char *name,
 }
 
 /* Links the pending entry under the lock, then sends outside it so the request engages the
- * flow control wait. A task call with no provider auto directs at the oldest matched. */
+ * flow control wait. A task call with no provider auto directs at the oldest matched. A
+ * blocking call passes sync_entry and gets its entry there, to free itself. */
 static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponseFn on_response,
-                                   void *user, const RantCallOpts *opts, uint32_t *id_out, int sync){
-    uint8_t hdr[RANT__FN_PREFIX]; i_RantPending *p; int acquired, r; uint32_t id;
+                                   void *user, const RantCallOpts *opts, uint32_t *id_out,
+                                   i_RantPending **sync_entry){
+    uint8_t hdr[RANT__FN_PREFIX]; i_RantPending *p, *q; int acquired, r; uint32_t id;
     uint32_t dest = opts ? opts->provider : 0;
     if (!fn || !fn->req || !fn->rsp) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_sys_lock(fn->n);
@@ -782,9 +799,10 @@ static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponse
     p->on_response = on_response; p->user = user;
     p->on_progress = opts ? opts->on_progress : NULL;
     p->progress_user = opts ? opts->progress_user : NULL;
-    p->running = 0; p->sync = (uint8_t)sync;
+    p->running = 0; p->sync = sync_entry != NULL; p->cb_out = 0;
     p->queued_req = NULL; p->queued_len = 0;
     p->next = fn->pending; fn->pending = p;
+    if (sync_entry) *sync_entry = p;
     if (id_out) *id_out = id;
     if (opts && opts->id_out) *opts->id_out = id;   /* set before the send */
     if (rant_topic_match_count(fn->req) == 0){
@@ -808,8 +826,12 @@ static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponse
              : i_rant_topic_send_hdr(fn->req, rant_bytes(hdr, RANT__FN_PREFIX), req);
     if (r != RANT_OK){
         acquired = i_rant_node_sys_lock(fn->n);
-        p = i_rant_func_take_pending(fn, id);     /* may already be reaped or answered: then gone */
-        if (p) i_rant_func_free_pending(fn, p);
+        q = i_rant_func_take_pending(fn, id);     /* may already be reaped or answered: then gone */
+        if (sync_entry){                          /* the blocking call's entry is never gone */
+            i_rant_node_sys_settle(fn->n, &p->cb_out);
+            i_rant_func_free_pending(fn, p);
+            *sync_entry = NULL;
+        } else if (q) i_rant_func_free_pending(fn, q);
         i_rant_node_sys_unlock(fn->n, acquired);
         return r;
     }
@@ -818,7 +840,7 @@ static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponse
 
 int rant_function_call_async(RantFunction *fn, RantBytes req, RantResponseFn on_response,
                              void *user, const RantCallOpts *opts){
-    return i_rant_function_call_id(fn, req, on_response, user, opts, NULL, 0);
+    return i_rant_function_call_id(fn, req, on_response, user, opts, NULL, NULL);
 }
 
 /* Answers and frees every live deferred call of a definition with CANCELLED. Lock held,
@@ -960,27 +982,28 @@ static int i_rant_func_call_wait_done(RantNode *n, void *user, uint64_t now, uin
 
 int rant_function_call(RantFunction *fn, RantBytes req, RantResponse *out, int timeout_ms,
                        const RantCallOpts *opts){
-    i_RantSyncCtx ctx; i_RantCallWait cw; int acquired, r; uint32_t id;
+    i_RantSyncCtx ctx; i_RantCallWait cw; i_RantPending *entry = NULL; int acquired, r; uint32_t id;
     if (!fn) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_sys_lock(fn->n);
     if (!acquired){ i_rant_node_sys_unlock(fn->n, acquired); return RANT_ERR_STATE; }   /* from a callback */
     i_rant_node_sys_unlock(fn->n, acquired);
     ctx.fn = fn; ctx.done = 0; ctx.status = RANT_CALL_TIMEOUT; ctx.schema = NULL; ctx.len = 0;
     ctx.provider = 0; ctx.written_us = 0;
-    r = i_rant_function_call_id(fn, req, i_rant_func_sync_response, &ctx, opts, &id, 1);
+    r = i_rant_function_call_id(fn, req, i_rant_func_sync_response, &ctx, opts, &id, &entry);
     if (r != RANT_OK) return r;
     cw.ctx = &ctx; cw.id = id;
     cw.deadline = i_rant_node_now_us(fn->n)
                 + (uint64_t)(timeout_ms >= 0 ? (uint64_t)timeout_ms * 1000u : fn->timeout_us) + 20000u;
     (void)i_rant_node_sys_wait(fn->n, i_rant_func_call_wait_done, &cw);
-    /* The capture runs under the lock, so under it the call is answered or still pending.
-       A pending entry is unlinked here, so nothing writes this frame once it returns */
-    {   i_RantPending *p;
-        acquired = i_rant_node_sys_lock(fn->n);
-        if (!ctx.done && (p = i_rant_func_take_pending(fn, id)) != NULL)
-            i_rant_node_sys_alloc(fn->n, p, 0);
-        i_rant_node_sys_unlock(fn->n, acquired);
-    }
+    /* The capture runs under the lock, so under it the call is answered or still pending. The
+       entry is this call's: unlinked here when still pending, so no callback finds it after,
+       and freed once none of its progress callbacks is out on another thread, so nothing
+       runs on this frame's progress_user once the call returns */
+    acquired = i_rant_node_sys_lock(fn->n);
+    if (!ctx.done) (void)i_rant_func_take_pending(fn, id);
+    i_rant_node_sys_settle(fn->n, &entry->cb_out);
+    i_rant_func_free_pending(fn, entry);
+    i_rant_node_sys_unlock(fn->n, acquired);
     if (out){
         memset(out, 0, sizeof *out);
         out->status = ctx.done ? ctx.status : RANT_CALL_TIMEOUT;

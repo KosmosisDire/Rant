@@ -739,9 +739,69 @@ static void taskx_checks(void){
     rant_allocator_reset(&ma);
 }
 
+/* A blocking call returns only once its progress callbacks are done, a queued one running
+ * on another thread's dispatch included, so its progress_user may live on the caller's stack */
+static RantFunction *ps_def;
+static RantQueue    *ps_q;
+static uint64_t      ps_token;
+static volatile int  ps_ready, ps_stop, ps_alive, ps_seen, ps_late;
+static void ps_handler(RantRequest *req, void *user){ (void)user; ps_token = rant_request_defer(req); ps_ready = 1; }
+static void ps_on_progress(const RantProgress *p){
+    if (!p->data.len) return;                  /* the RUNNING ack */
+    ps_seen++;
+    test_sleep_ms(300);                        /* a handler doing some work */
+    if (!ps_alive) ps_late++;                  /* the call returned under it */
+}
+static void ps_dispatch(void *arg){ (void)arg; while (!ps_stop) (void)rant_queue_dispatch(ps_q, 0, 20); }
+static void ps_provider(void *arg){
+    uint8_t v[4];
+    (void)arg;
+    i_rant_le_w32(v, 7);
+    while (!ps_ready) test_sleep_ms(1);
+    rant_function_progress(ps_def, ps_token, rant_bytes(v, 4));
+    test_sleep_ms(100);                        /* the outcome lands while the update runs */
+    rant_function_complete(ps_def, ps_token, RANT_CALL_OK, NULL, rant_bytes(v, 4));
+}
+
+static void progress_settle_checks(void){
+    RantAllocator pa = rant_allocator_heap(0), ca = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *P, *C; RantAddr seed; RantFunction *rem;
+    RantCallOpts co; RantResponse out; i_RantThread dt, pt; int r;
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=(uint16_t)(TEST_DOMAIN+38); o.discovery.max_peers=4;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    P = rant_node_open(&pa, "ps-prov", NULL, NULL, &o);
+    C = rant_node_open(&ca, "ps-call", NULL, NULL, &o);
+    CHECK(P && C, "psettle: nodes open");
+    if (!(P && C)){ if(P)rant_node_close(P,0); if(C)rant_node_close(C,0); return; }
+    ps_def = rant_node_create_task_definition(P, "ps/job", NULL, NULL, NULL, ps_handler, NULL, NULL);
+    ps_q   = rant_node_create_queue(C);
+    rem    = rant_node_create_remote_task(C, "ps/job", NULL, NULL, NULL, &(RantTaskOpts){ .queue = ps_q });
+    CHECK(ps_def && ps_q && rem, "psettle: handles created");
+    if (!(ps_def && ps_q && rem)){ rant_node_close(C,0); rant_node_close(P,0); return; }
+    rant_node_start(P); rant_node_start(C);
+    WAIT_UNTIL(4000, rant_function_match_count(rem) > 0);
+    ps_stop = 0; ps_ready = 0; ps_seen = 0; ps_late = 0; ps_alive = 1;
+    i_rant_plat_thread_start(&dt, ps_dispatch, NULL);
+    i_rant_plat_thread_start(&pt, ps_provider, NULL);
+    memset(&co, 0, sizeof co); co.on_progress = ps_on_progress;
+    r = rant_function_call(rem, rant_bytes("go", 2), &out, 3000, &co);
+    ps_alive = 0;
+    CHECK(r == 1 && out.status == RANT_CALL_OK, "psettle: the call completed (rc=%d st=%d)", r, (int)out.status);
+    CHECK(ps_seen == 1, "psettle: its queued progress update ran on the dispatch thread (%d)", ps_seen);
+    test_sleep_ms(400);
+    CHECK(ps_late == 0, "psettle: the call returned only after its progress callback ended");
+    ps_stop = 1;
+    i_rant_plat_thread_join(&dt); i_rant_plat_thread_join(&pt);
+    rant_node_close(C, 1);
+    rant_node_close(P, 1);
+}
+
 static const TestCase cases[] = {
     { "task", task_checks },
     { "task_matrix", taskx_checks },
+    { "progress_settle", progress_settle_checks },
 };
 
 TEST_MAIN(cases)

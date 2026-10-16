@@ -121,7 +121,8 @@ RANT_API RantFunction *rant_node_create_remote_function(RantNode *n, const char 
 /* Calls and blocks: on the service thread's progress when one runs, else driving the loop
  * itself. timeout_ms negative = the function's default. out->data is valid until the next
  * blocking call. 1 = an outcome in *out (NO_PROVIDER and PEER_LOST included), 0 = the local
- * timeout, RANT_ERR_STATE from a callback. docs/patterns.md has the returns. */
+ * timeout, RANT_ERR_STATE from a callback. docs/patterns.md has the returns. No progress
+ * callback of the call runs once it returned, so progress_user may live on the stack. */
 RANT_API int    rant_function_call(RantFunction *fn, RantBytes req, RantResponse *out, int timeout_ms,
                                  const RantCallOpts *opts);
 /* Returns as soon as the request is committed, then on_response fires once with the

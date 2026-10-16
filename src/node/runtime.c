@@ -2291,6 +2291,13 @@ void i_rant_node_sys_callback_end(RantNode *n, i_RantCallbackScope *s, volatile 
     i_rant_node_callback_end(n, s, out);
 }
 void i_rant_node_sys_settle(RantNode *n, const volatile uint32_t *out){ i_rant_node_settle_on(n, out); }
+void i_rant_node_sys_wake(RantNode *n){
+#ifdef RANT_THREADS
+    if (n->cv_waiters) i_rant_plat_cond_broadcast(&n->cv);
+#else
+    (void)n;
+#endif
+}
 int  i_rant_node_sys_poll    (RantNode *n, int timeout_ms){ return rant_node_poll(n, timeout_ms); }
 
 /* The patterns layer's blocking wait: the node's wait skeleton, so it sleeps on the

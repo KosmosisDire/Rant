@@ -110,6 +110,13 @@ so a stale token is `RANT_ERR_STATE`, never undefined behavior. `rant_function_p
 cooperative and never acked: the terminal status is the answer. A CANCELLED completion may
 carry a partial result.
 
+A blocking call owns its pending entry (`i_RantPending.sync`): a response, a reap or a
+cancel unlinks it and runs the capture, but only the call frees it. Each progress callback
+of the call counts itself out on the entry, inline and at a queue's dispatch alike. On its
+way out the call, under one lock hold, unlinks the entry if it is still pending, waits until
+that count is 0 on other threads, then frees it. So no progress callback runs once
+`rant_function_call` returned, and `progress_user` may live on the caller's stack.
+
 Traps pinned by `e2e.tasks`:
 
 - A send only commits. A poll pass transmits. Retire and close drain the CANCELLED

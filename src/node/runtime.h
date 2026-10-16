@@ -366,6 +366,8 @@ void     i_rant_node_sys_callback_begin(RantNode *n, i_RantCallbackScope *s, vol
 void     i_rant_node_sys_callback_end  (RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out);
 /* Waits until *out (NULL: any marked callback) is 0 on another thread. Lock held. */
 void     i_rant_node_sys_settle(RantNode *n, const volatile uint32_t *out);
+/* Wakes the threads a settle or a wait sleeps in, after a count they watch dropped. Lock held. */
+void     i_rant_node_sys_wake(RantNode *n);
 int      i_rant_node_sys_poll    (RantNode *n, int timeout_ms);
 /* Blocks until done says so or its deadline passes, under the node lock, on the service
  * thread's progress when one runs and by pumping the loop otherwise. done runs under the
