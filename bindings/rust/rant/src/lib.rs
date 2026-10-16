@@ -37,6 +37,7 @@ mod string;
 mod task;
 mod topic;
 pub mod types;
+mod variable;
 
 pub use error::{Error, ErrorKind, SendError};
 pub use function::{Deferred, FunctionDefinition, FunctionOptions, RemoteFunction, Request};
@@ -50,6 +51,7 @@ pub use schema::{EnumVariant, Field, FieldType, FieldView, MessageBuilder, Messa
 pub use string::String;
 pub use task::{PendingTask, RemoteTask, TaskDefinition, TaskOptions, TaskRequest};
 pub use topic::{Publisher, Received, Subscriber, TopicCounts, TopicQueueStats};
+pub use variable::{RemoteVariable, VariableDefinition, VariableOptions, VariableUpdate};
 
 /// A timeout with no end.
 pub const FOREVER: std::time::Duration = std::time::Duration::MAX;

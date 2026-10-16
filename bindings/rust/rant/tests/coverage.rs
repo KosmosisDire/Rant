@@ -33,23 +33,8 @@ const SKIPPED: &[(&str, &str)] = &[
     ("rant_std_recognize_elem", "as rant_std_by_name"),
 ];
 
-/// Bound by a later step of the binding: variables, then reflection and logs.
+/// Bound by a later step of the binding: reflection and logs.
 const PENDING: &[&str] = &[
-    "rant_node_create_variable_definition",
-    "rant_node_create_remote_variable",
-    "rant_variable_force",
-    "rant_variable_forced",
-    "rant_variable_get",
-    "rant_variable_match_count",
-    "rant_variable_on_change",
-    "rant_variable_on_write",
-    "rant_variable_refresh",
-    "rant_variable_schema",
-    "rant_variable_set",
-    "rant_variable_unforce",
-    "rant_variable_wait",
-    "rant_node_lock",
-    "rant_node_unlock",
     "rant_node_peers_next",
     "rant_node_entities_next",
     "rant_node_mesh_next",
