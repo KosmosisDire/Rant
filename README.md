@@ -19,7 +19,7 @@ platform libraries:
 ```cmake
 CPMAddPackage(NAME rant
               GIT_REPOSITORY https://github.com/KosmosisDire/Rant.git
-              GIT_TAG v0.0.23)
+              GIT_TAG v0.0.24)
 
 target_link_libraries(app PRIVATE rant::rant_host)
 ```
