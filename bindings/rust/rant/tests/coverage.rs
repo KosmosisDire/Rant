@@ -33,19 +33,6 @@ const SKIPPED: &[(&str, &str)] = &[
     ("rant_std_recognize_elem", "as rant_std_by_name"),
 ];
 
-/// Bound by a later step of the binding: reflection and logs.
-const PENDING: &[&str] = &[
-    "rant_node_peers_next",
-    "rant_node_entities_next",
-    "rant_node_mesh_next",
-    "rant_node_mesh_find",
-    "rant_node_mesh_epoch",
-    "rant_node_meta_function",
-    "rant_node_log_text",
-    "rant_node_log_topic",
-    "rant_node_set_log_queue",
-];
-
 fn source(name: &str) -> String {
     std::fs::read_to_string(format!("{}/src/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
@@ -71,7 +58,7 @@ fn every_c_function_is_bound_or_listed() {
         code.match_indices(&at).any(|(i, _)| !code[i + at.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_'))
     };
     let called: BTreeSet<&str> = declared.iter().copied().filter(|f| used(f)).collect();
-    let listed: BTreeSet<&str> = SKIPPED.iter().map(|(f, _)| *f).chain(PENDING.iter().copied()).collect();
+    let listed: BTreeSet<&str> = SKIPPED.iter().map(|(f, _)| *f).collect();
 
     let unbound: Vec<_> = declared.iter().filter(|f| !called.contains(*f) && !listed.contains(*f)).collect();
     assert!(unbound.is_empty(), "C functions neither called nor listed in tests/coverage.rs: {unbound:?}");

@@ -5,7 +5,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::os::raw::c_char;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,7 @@ use crate::callback::{Callback, Refused, Registry, in_callback_of};
 use crate::error::{Error, ErrorKind, SendError, event_text};
 use crate::ffi;
 use crate::gate::{Gate, Pass};
+use crate::logs::LogFn;
 use crate::message::{Codec, Payload};
 use crate::options::{Qos, options, to_ms, to_us};
 use crate::schema::{MessageView, Schema};
@@ -72,6 +73,10 @@ options! {
         peer_timeout: Duration = Duration::ZERO,
         /// Peers the table holds. 0 = 16.
         max_peers: u16 = 0,
+        /// Static mode: the node runs inside one block of this many bytes taken at open,
+        /// with no growth and no shared memory, and the open fails when it is too small.
+        /// 0 = the heap.
+        memory: usize = 0,
     }
     hand {
         prefix: Option<String> = None,
@@ -355,6 +360,25 @@ fn c_ptr(s: &Option<CString>) -> *const c_char {
     s.as_ref().map_or(null(), |c| c.as_ptr())
 }
 
+/// rant_allocator_static, which the C keeps inline: one page over the whole block, its
+/// header on a 16 byte boundary. Safety: the block outlives the node.
+unsafe fn static_allocator(block: *mut [u8]) -> ffi::RantAllocator {
+    let mut a = ffi::RantAllocator::default();
+    let (base, len) = (block as *mut u8, block.len());
+    let head = base.align_offset(16);
+    let page = std::mem::size_of::<ffi::i_RantPage>();
+    if head != usize::MAX && len >= head + page {
+        // SAFETY: the header lies inside the block, aligned
+        unsafe {
+            let pg = base.add(head) as *mut ffi::i_RantPage;
+            pg.write(ffi::i_RantPage { next: null_mut(), prev: null_mut(), cap: len - head - page, used: 0 });
+            a.shared = pg;
+        }
+        a.pages_live = 1;
+    }
+    a
+}
+
 /// The state behind a [`Node`], shared by every handle. The C node's user pointer points
 /// here, so it lives at a fixed address inside its Arc until the C node is closed.
 pub(crate) struct NodeInner {
@@ -373,6 +397,10 @@ pub(crate) struct NodeInner {
     pub(crate) codecs: Registry<HashMap<TypeId, Arc<Codec>>>,
     /// the pattern handler boxes the C points at, by id, freed at retire or close
     kept: Mutex<HashMap<u64, Box<dyn Any + Send + Sync>>>,
+    pub(crate) on_log: Mutex<Option<Arc<Callback<LogFn>>>>,
+    pub(crate) log_bound: AtomicBool,
+    /// static mode's one block, which the C allocates from until the state is freed
+    memory: Option<*mut [u8]>,
 }
 
 // SAFETY: the C node is thread safe under its own lock, and the gate orders close after every call
@@ -520,7 +548,8 @@ impl NodeInner {
         let handlers = std::mem::take(&mut *lock(&self.handlers));
         let kept = std::mem::take(&mut *lock(&self.kept));
         let on_event = lock(&self.on_event).take();
-        drop((handlers, kept, on_event));
+        let on_log = lock(&self.on_log).take();
+        drop((handlers, kept, on_event, on_log));
         Ok(())
     }
 }
@@ -529,6 +558,10 @@ impl Drop for NodeInner {
     fn drop(&mut self) {
         // reached only with a node already closed, or never opened, since Node closes first
         debug_assert!(self.raw.load(SeqCst).is_null(), "rant: node state freed while the C node is open");
+        if let Some(block) = self.memory {
+            // SAFETY: the block came from Box::into_raw at open, and the C node is gone
+            drop(unsafe { Box::from_raw(block) });
+        }
     }
 }
 
@@ -585,6 +618,9 @@ impl Node {
             next_id: AtomicU64::new(1),
             codecs: Registry::new(HashMap::new()),
             kept: Mutex::new(HashMap::new()),
+            on_log: Mutex::new(None),
+            log_bound: AtomicBool::new(false),
+            memory: (o.memory > 0).then(|| Box::into_raw(vec![0u8; o.memory].into_boxed_slice())),
         });
 
         let co = ffi::RantNodeOpts {
@@ -626,9 +662,12 @@ impl Node {
         };
 
         // SAFETY: open copies the allocator and the options, and keeps only the net strings,
-        // which live in inner for the node's life
+        // which live in inner for the node's life, and the static block, freed with inner
         let raw = unsafe {
-            let mut alloc = ffi::rant_allocator_heap(0);
+            let mut alloc = match inner.memory {
+                Some(block) => static_allocator(block),
+                None => ffi::rant_allocator_heap(0),
+            };
             ffi::rant_node_open(&mut alloc, cname.as_ref().map_or(null(), |c| c.as_ptr()), Some(on_message), Some(on_event), &co)
         };
         if raw.is_null() {
