@@ -1550,6 +1550,74 @@ static bool close_race_leg() {
     return g_failures == fails_at_entry;
 }
 
+/* the handle gate: a remote's close waits for a blocking call on another thread, a close
+ * inside the call's own callback answers State at once, and a deferred answer after its
+ * definition closed is refused */
+static bool handle_gate_leg() {
+    int fails_at_entry = g_failures;
+    rant::NodeOptions opts;
+    opts.domain = test_domain(14);
+    opts.multicast_interface = "127.0.0.1";
+    rant::Node a("GA", opts);
+    rant::Node b("GB", opts);
+    chk("gate: nodes constructed", a.valid() && b.valid());
+    if (!a.valid() || !b.valid()) return false;
+
+    auto slow = a.function_definition<AddReq, AddRsp>("g/slow", [](const AddReq& q) {
+        std::this_thread::sleep_for(300ms);
+        return AddRsp{ q.x + q.y };
+    });
+    auto rem = b.remote_function<AddReq, AddRsp>("g/slow");
+    chk("gate: matched", wait_for(4000, [&] { return rem.match_count() > 0; }));
+    std::atomic<bool> call_done{ false };
+    rant::CallStatus status = rant::CallStatus::Timeout;
+    std::thread caller([&] {
+        auto r = rem.call(AddReq{ 1, 2 }, 3s);
+        status = r.status();
+        call_done = true;
+    });
+    std::this_thread::sleep_for(100ms);
+    rant::SendStatus closed = rem.close();
+    bool done_first = call_done.load();
+    caller.join();
+    chk("gate: a close waits for the blocking call on another thread", done_first);
+    chk("gate: which completed", status == rant::CallStatus::Ok);
+    chk("gate: then the close retired the remote", closed == rant::SendStatus::Ok && !rem.valid());
+    chk("gate: and its calls answer NoTopic", rem.call(AddReq{ 1, 2 }, 100ms).send_status() == rant::SendStatus::NoTopic);
+
+    auto job = a.task_definition<MoveReq, MoveProgress, MoveRsp>("g/job",
+        [](const MoveReq& q, rant::TaskRequest<MoveProgress, MoveRsp>& rq) {
+            (void)rq.start();
+            std::this_thread::sleep_for(200ms);
+            rq.reply(MoveRsp{ q.target });
+        });
+    auto jr = b.remote_task<MoveReq, MoveProgress, MoveRsp>("g/job");
+    chk("gate: task matched", wait_for(4000, [&] { return jr.match_count() > 0; }));
+    rant::SendStatus inside = rant::SendStatus::Ok;
+    auto r2 = jr.call(MoveReq{ 1.0 }, [&](const rant::ProgressView<MoveProgress>&) { inside = jr.close(); });
+    chk("gate: a close inside the call's own callback answers State at once", inside == rant::SendStatus::State);
+    chk("gate: and the call still completes", r2.status() == rant::CallStatus::Ok);
+    chk("gate: a close after it retires the remote", jr.close() == rant::SendStatus::Ok);
+
+    rant::Deferred<AddRsp> parked;
+    std::mutex parked_mu;
+    auto park = a.function_definition<AddReq, AddRsp>("g/park",
+        [&](const AddReq&, rant::Request<AddRsp>& rq) {
+            std::lock_guard<std::mutex> g(parked_mu);
+            parked = rq.defer();
+        });
+    auto pr = b.remote_function<AddReq, AddRsp>("g/park");
+    chk("gate: park matched", wait_for(4000, [&] { return pr.match_count() > 0; }));
+    (void)pr.call_async(AddReq{ 1, 1 }, [](const rant::ResponseView<AddRsp>&) {});
+    chk("gate: the answer parked", wait_for(3000, [&] { std::lock_guard<std::mutex> g(parked_mu); return parked.valid(); }));
+    chk("gate: the definition closes", park.close() == rant::SendStatus::Ok);
+    {
+        std::lock_guard<std::mutex> g(parked_mu);
+        chk("gate: a deferred answer after its definition closed is refused", !parked.valid() && !parked.complete(AddRsp{ 2 }));
+    }
+    return g_failures == fails_at_entry;
+}
+
 /* loud failures: a handler's throw text reaches the caller, a cancelled task's partial result
  * reads, a blocking call inside an inline callback throws */
 static bool failure_leg() {
@@ -1954,6 +2022,7 @@ static const Leg LEGS[] = {
     { "lifetime",   lifetime_leg },
     { "rebind",     rebind_leg },
     { "close_race", close_race_leg },
+    { "handle_gate", handle_gate_leg },
     { "failure",    failure_leg },
     { "factory",    factory_leg },
     { "version",    version_leg },

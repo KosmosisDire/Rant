@@ -193,6 +193,12 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   holds and the last close retires the topic. A close refused inside the handle's own
   callback raises a `State` event. Pattern handler boxes hold the state weakly, since the
   node owns them.
+- A function, task or variable handle keeps its C pointer in a `priv::HandleState` with a
+  gate of its own, shared with its `Deferred` and `PendingTask` answers, since a retire
+  frees it. Every call holds a `priv::HandlePass` on the node and the handle. `close()`
+  waits for them, empties the handle in place with one atomic exchange, so two closes
+  retire once and another thread may still read it, and inside one of the node's
+  callbacks answers `State` while a pass is out instead of waiting on its own caller.
 - `defer()` on a task handler returns a movable thread safe `PendingTask`.
 - Every public declaration carries a comment that stands alone as clangd hover text, with
   no pointers into docs.
