@@ -57,8 +57,10 @@ about a wrapper API, this file wins.
 - An owning message copies its payload, since the transport buffer is reused after the
   callback, but decodes only when the fields or the typed value are read. A handler that
   wants the bytes must not pay for the topic's schema. The decode outlives the callback,
-  so the wrapper registers the publisher's schema in the node (`rant_node_schema_parse`),
-  once per distinct hash, and invalidates its wrappers at close since the node frees them.
+  and the schema a message carries lives until the node closes (spec/schema.md), so the
+  wrapper keeps that schema itself, keyed by pointer and never by hash or re parsed from
+  its wire: a rebased schema keeps the reader's hash and wire with the writer's offsets.
+  It invalidates its wrappers at close since the node frees them.
 - An owning type is a plain noun, a view type has a `View` suffix, "Taken" is banned:
   `Message`, `MessageView`, `MessageBuilder`, `Response`, `ResponseView`.
 - `Peer::entities` replaces any `Peer::topics`. No dual surfaces.

@@ -1944,9 +1944,9 @@ namespace Rant
         /// when it was sent. 0 = none given and WrittenUs is all there is (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/node.md">docs/node.md</see>).</summary>
         public ulong CaptureUs;
 
-        // The node's own copy of the publisher's schema, so a decode after the callback is
-        // safe. Held by reference, so it outlives the node when this message does. Null on
-        // a raw topic or an untyped publisher.
+        // The schema the message arrived with, the publisher's layout bound to ours, which the
+        // node keeps until close. Held by reference, so it outlives the node when this message
+        // does. Null on a raw topic or an untyped publisher.
         private Schema _schema;
         private Type _clrType;
         private Dictionary<string, object> _fields;
@@ -2534,10 +2534,10 @@ namespace Rant
         private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
         // every Schema handed out, invalidated at Close since the C frees them with the node
         private readonly List<Schema> _schemas = new List<Schema>();
-        // A publisher's schema is a node owned view good only until the next poll, so a
-        // message that decodes later needs it registered. Keyed by the schema hash, so one
-        // wrapper serves every message on every topic that carries it.
-        private readonly Dictionary<ulong, Schema> _msgSchemas = new Dictionary<ulong, Schema>();
+        // The schema a message arrives with lives until close, so the wrapper holds it as is.
+        // Keyed by pointer, never by hash: a rebased schema keeps our hash with the writer's
+        // offsets, so two writers of one type arrive with one hash and two layouts.
+        private readonly Dictionary<IntPtr, Schema> _msgSchemas = new Dictionary<IntPtr, Schema>();
         // its own lock: the delivery path reaches it while the node lock is held, and
         // _createLock is held across a create, which takes the node lock the other way round
         private readonly object _msgSchemaLock = new object();
@@ -2881,19 +2881,17 @@ namespace Rant
             return hs;
         }
 
-        // Our copy of a publisher's schema, made once per distinct schema. Called on the
-        // delivering thread, where the view passed in is still valid.
+        // The wrapper of a schema a message arrived with, made once per schema.
         internal Schema OwnedSchema(IntPtr view)
         {
             if (view == IntPtr.Zero) return null;
-            ulong hash = Native.rant_schema_hash(view);
             lock (_msgSchemaLock)
             {
                 Schema owned;
-                if (_msgSchemas.TryGetValue(hash, out owned)) return owned;
-                owned = KeepView(view);
-                if (owned == null) return null;
-                _msgSchemas[hash] = owned;
+                if (_msgSchemas.TryGetValue(view, out owned)) return owned;
+                owned = new Schema(view, null, Gate);
+                _schemas.Add(owned);
+                _msgSchemas[view] = owned;
                 return owned;
             }
         }
@@ -3316,7 +3314,7 @@ namespace Rant
                 var hs = node.SubHandlersOf(m.topic_index);
                 if (hs == null) return;
                 node._topicTypes.TryGetValue(m.topic_index, out clr);
-                // the payload is copied and the schema is ours, so a later decode is safe
+                // the payload is copied and the schema lives until close, so a later decode is safe
                 var msg = RantMessage.FromNative(ref m, clr, node.OwnedSchema(m.schema));
                 using (node.Gate.Running())
                     foreach (var h in hs) h(msg);

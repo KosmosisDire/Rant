@@ -75,6 +75,11 @@ struct AddReq { public int A; public int B; }
 struct AddRsp { public int Sum; }
 struct Level { public int Value; }
 
+// rebind leg types: one wire name in three layouts, each writer puts the reader's fields elsewhere
+[RantSchema("Probe")] record struct ProbeRead(uint A, uint B);
+[RantSchema("Probe")] struct ProbeFirst { public uint B; public uint A; }
+[RantSchema("Probe")] struct ProbeSecond { public uint A; public uint X; public uint B; }
+
 // tasks leg types
 struct XferReq { public int Chunks; }
 struct XferPrg { public int Done; }
@@ -1317,6 +1322,44 @@ static class Program
         return ok;
     }
 
+    // A rebase, then another after the reader's retired slot goes to another name: each
+    // writer's layout decodes with its own offsets, never those cached for an earlier one.
+    static bool RebindLeg()
+    {
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+        bool Until(int ms, Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddMilliseconds(ms);
+            while (DateTime.UtcNow < deadline && !done()) Thread.Sleep(2);
+            return done();
+        }
+
+        using var r = new RantNode("rr", Local(13));
+        using var w1 = new RantNode("rw1", Local(13));
+        using var w2 = new RantNode("rw2", Local(13));
+        var qos = new Qos { Reliability = Reliability.Reliable };
+        int got = 0;
+        uint a = 0, b = 0;
+        Action<ProbeRead> on = p => { a = p.A; b = p.B; Interlocked.Increment(ref got); };
+
+        using (var pub = w1.Publisher<ProbeFirst>("rb/first", qos))
+        using (var sub = r.Subscriber<ProbeRead>("rb/first", on, qos))
+        {
+            Check("first pair matched", Until(4000, () => pub.MatchCount > 0 && pub.Ready));
+            pub.Send(new ProbeFirst { B = 2, A = 1 });
+            Check("the first layout decodes", Until(3000, () => Volatile.Read(ref got) == 1) && a == 1 && b == 2);
+        }
+        using var pub2 = w2.Publisher<ProbeSecond>("rb/second", qos);
+        using var sub2 = r.Subscriber<ProbeRead>("rb/second", on, qos);
+        Check("second pair matched", Until(4000, () => pub2.MatchCount > 0 && pub2.Ready));
+        pub2.Send(new ProbeSecond { A = 1, X = 99, B = 2 });
+        Check("the second layout decodes with its own offsets",
+              Until(3000, () => Volatile.Read(ref got) == 2) && a == 1 && b == 2);
+        if (!ok) Console.WriteLine($"  decoded a={a} b={b}");
+        return ok;
+    }
+
     // Calls on other threads while the node closes answer NoTopic or their usual result and
     // never touch the freed node, and a close inside the node's own callback runs once it
     // returns. Only a sanitizer build of the native library sees every miss.
@@ -1590,6 +1633,7 @@ static class Program
         ("pull", PullLeg),
         ("reflect", ReflectLeg),
         ("dispose", DisposeLeg),
+        ("rebind", RebindLeg),
         ("close_race", CloseRaceLeg),
     };
 
