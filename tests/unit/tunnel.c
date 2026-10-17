@@ -15,6 +15,22 @@ static void hash_checks(void){
     CHECK(strcmp(h, "da39a3ee5e6b4b0d3255bfef95601890afd80709") == 0, "sha1: empty (%s)", h);
     i_rant_sha1("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56, d); hex(d, 20, h);
     CHECK(strcmp(h, "84983e441c3bd26ebaae4aa1f95129e5e54670f1") == 0, "sha1: 56 bytes pad into a second block (%s)", h);
+    {   uint8_t d2[32]; char h2[65]; static uint8_t million[1000000]; char proof[65], key[132];
+        i_rant_sha256("abc", 3, d2); hex(d2, 32, h2);
+        CHECK(strcmp(h2, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") == 0, "sha256: abc");
+        i_rant_sha256("", 0, d2); hex(d2, 32, h2);
+        CHECK(strcmp(h2, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0, "sha256: empty");
+        i_rant_sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56, d2); hex(d2, 32, h2);
+        CHECK(strcmp(h2, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1") == 0, "sha256: 56 bytes pad into a second block");
+        memset(million, 'a', sizeof million);
+        i_rant_sha256(million, sizeof million, d2); hex(d2, 32, h2);
+        CHECK(strcmp(h2, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0") == 0, "sha256: a million a");
+        i_rant_tunnel_proof("Jefe", "what do ya want for nothing?", proof);
+        CHECK(strcmp(proof, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843") == 0, "proof: RFC 4231 case 2");
+        memset(key, 0xaa, 131); key[131] = 0;
+        i_rant_tunnel_proof(key, "Test Using Larger Than Block-Size Key - Hash Key First", proof);
+        CHECK(strcmp(proof, "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54") == 0, "proof: a key past a block, case 6");
+    }
     CHECK(i_rant_base64((const uint8_t*)"foobar", 6, b, sizeof b) == 8 && strcmp(b, "Zm9vYmFy") == 0, "base64: foobar");
     CHECK(i_rant_base64((const uint8_t*)"fo", 2, b, sizeof b) == 4 && strcmp(b, "Zm8=") == 0, "base64: one pad");
     CHECK(i_rant_base64((const uint8_t*)"f", 1, b, sizeof b) == 4 && strcmp(b, "Zg==") == 0, "base64: two pads");

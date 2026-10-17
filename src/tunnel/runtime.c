@@ -37,8 +37,8 @@ typedef struct {
     uint8_t *q; size_t q_cap, q_head, q_tail, q_max;
 } i_RantTunnelSock;
 
-enum { I_RANT_LINK_DOWN, I_RANT_LINK_CONNECTING, I_RANT_LINK_HANDSHAKE, I_RANT_LINK_OPENING,
-       I_RANT_LINK_OPEN, I_RANT_LINK_REFUSED };
+enum { I_RANT_LINK_DOWN, I_RANT_LINK_CONNECTING, I_RANT_LINK_HANDSHAKE, I_RANT_LINK_CHALLENGE,
+       I_RANT_LINK_OPENING, I_RANT_LINK_OPEN, I_RANT_LINK_REFUSED };
 
 struct i_RantTunnel {
     i_RantWsUrl      url;
@@ -48,7 +48,7 @@ struct i_RantTunnel {
     int              state;
     i_RantSock       tcp;
     uint8_t          key[16];           /* the handshake's */
-    uint32_t         open_seq;
+    uint32_t         challenge_seq, open_seq;
     uint64_t         deadline_us;       /* for the step under way */
     uint64_t         heard_us;
     uint64_t         retry_us;
@@ -174,13 +174,20 @@ static void i_rant_tunnel_start(i_RantTunnel *t){
     t->state = I_RANT_LINK_CONNECTING;
 }
 
-static void i_rant_tunnel_send_open(i_RantTunnel *t){
-    char body[900], pass[300], name[200], token[160];
-    i_rant_json_quote(t->passphrase, pass, sizeof pass);
+/* The passphrase never crosses the wire: the bridge sends a nonce, which open proves. */
+static void i_rant_tunnel_send_challenge(i_RantTunnel *t){
+    t->challenge_seq = i_rant_tunnel_ask(t, "\"op\":\"challenge\"");
+    t->state = I_RANT_LINK_CHALLENGE;
+    t->deadline_us = i_rant_plat_now_us() + I_RANT_TUNNEL_STEP_US;
+}
+
+static void i_rant_tunnel_send_open(i_RantTunnel *t, const char *nonce){
+    char body[900], proof[65], name[200], token[160];
+    i_rant_tunnel_proof(t->passphrase, nonce, proof);
     i_rant_json_quote(t->name, name, sizeof name);
     if (t->token[0]) i_rant_json_quote(t->token, token, sizeof token);
-    snprintf(body, sizeof body, "\"op\":\"open\",\"proto\":%d,\"passphrase\":%s,\"name\":%s%s%s",
-             I_RANT_TUNNEL_PROTO, pass, name, t->token[0] ? ",\"resume\":" : "", t->token[0] ? token : "");
+    snprintf(body, sizeof body, "\"op\":\"open\",\"proto\":%d,\"proof\":\"%s\",\"name\":%s%s%s",
+             I_RANT_TUNNEL_PROTO, proof, name, t->token[0] ? ",\"resume\":" : "", t->token[0] ? token : "");
     t->open_seq = i_rant_tunnel_ask(t, body);
     t->state = I_RANT_LINK_OPENING;
     t->deadline_us = i_rant_plat_now_us() + I_RANT_TUNNEL_STEP_US;
@@ -301,6 +308,12 @@ static void i_rant_tunnel_text(i_RantTunnel *t, const char *s, size_t len){
     seq = (uint32_t)i_rant_json_int(i_rant_json_get(j, "seq"), 0);
     ok = i_rant_json_true(i_rant_json_get(j, "ok"));
     i_rant_json_str(i_rant_json_get(j, "error"), err, sizeof err);
+    if (t->state == I_RANT_LINK_CHALLENGE && seq == t->challenge_seq){
+        char nonce[80];
+        if (ok && i_rant_json_str(i_rant_json_get(j, "nonce"), nonce, sizeof nonce)) i_rant_tunnel_send_open(t, nonce);
+        else i_rant_tunnel_drop(t, "the bridge is older than this client, update it", 1);
+        return;
+    }
     if (t->state == I_RANT_LINK_OPENING && seq == t->open_seq){
         if (ok) i_rant_tunnel_opened(t, j);
         else i_rant_tunnel_drop(t, err[0] ? err : "refused", 1);
@@ -395,7 +408,7 @@ static void i_rant_tunnel_read(i_RantTunnel *t){
         if (head == 0) return;
         memmove(t->rx, t->rx + head, t->rx_len - (size_t)head);
         t->rx_len -= (size_t)head;
-        i_rant_tunnel_send_open(t);
+        i_rant_tunnel_send_challenge(t);
     }
     i_rant_tunnel_frames(t);
 }
@@ -421,7 +434,7 @@ static void i_rant_tunnel_step(i_RantTunnel *t, short revents){
     case I_RANT_LINK_DOWN:
         if (now >= t->retry_us && !t->closing) i_rant_tunnel_start(t);
         break;
-    case I_RANT_LINK_CONNECTING: case I_RANT_LINK_HANDSHAKE: case I_RANT_LINK_OPENING:
+    case I_RANT_LINK_CONNECTING: case I_RANT_LINK_HANDSHAKE: case I_RANT_LINK_CHALLENGE: case I_RANT_LINK_OPENING:
         if (now >= t->deadline_us) i_rant_tunnel_drop(t, "the bridge did not answer in time", 0);
         break;
     case I_RANT_LINK_OPEN:

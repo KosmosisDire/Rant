@@ -10,26 +10,30 @@ clients. `RANT/bridge-rant` is the server, and this file is the protocol it serv
 
 1. The client opens `ws://host:7480`, or `wss://` behind a TLS proxy.
 2. With `allowed_origins` set, a browser whose `Origin` is not listed is closed with 4003.
-3. The client sends `open`. Nothing else is accepted before it.
+3. The client asks for a challenge, then sends `open`. Nothing else is accepted before it.
 4. The bridge replies, then pings at the probe interval.
 
 Text messages are JSON. A request carries `op` and a client chosen `seq`, and its reply is
 `{"op":"reply","seq":N,"ok":true,...}` or `{"op":"reply","seq":N,"ok":false,"error":"..."}`.
 
+The passphrase never crosses the wire. `{"op":"challenge","seq":1}` answers a `nonce`, 32 hex
+characters good for the next open on this connection only, and the open proves the
+passphrase on it:
+
 ```json
-{"op":"open","seq":1,"proto":13,"passphrase":"...","name":"page"}
+{"op":"open","seq":2,"proto":14,"proof":"5bdc...","name":"page"}
 ```
 
 | Key | Meaning |
 |---|---|
-| `proto` | 13. Any other is refused and the socket closed with 4001. |
-| `passphrase` | Must match the bridge's. A wrong one is refused after 1 s and closed with 4001. |
+| `proto` | 14. Any other is refused and the socket closed with 4001. |
+| `proof` | HMAC SHA-256 of the nonce's text keyed with the passphrase, 64 lowercase hex characters. A wrong one, or an open with no challenge before it, is refused after 1 s and closed with 4001. A bridge with no passphrase reads none. |
 | `resume` | The token from an earlier reply, to take that session back. |
 | `name` | The session's name in the bridge's logs. |
 | `probe_interval_ms` | How often the bridge pings. Default 250, minimum 10. |
 
 ```json
-{"op":"reply","seq":1,"ok":true,"proto":13,"webrtc":true,"resumed":false,
+{"op":"reply","seq":2,"ok":true,"proto":14,"webrtc":true,"resumed":false,
  "resume_token":"9f...","grace_ms":10000,
  "interfaces":[{"addr":"192.168.1.20","mask":"255.255.255.0"}],"group_binds_any":true}
 ```
@@ -157,14 +161,17 @@ tunnel.
   a socket is ready when its queue holds a datagram.
 - Datagrams a node sends between two flushes leave as one batch. The node flushes at the
   end of each TX drain. A backlog over 4 MB makes a send would block, as a full socket.
-- The open is the one blocking step: it connects, opens the session and binds each
-  socket, since a node needs its ports at once. Other socket ops are sent and not waited
+- The open is the one blocking step: it connects, asks for the challenge, opens the
+  session and binds each socket, since a node needs its ports at once. Other socket ops are sent and not waited
   for. A refused one fires `RANT_E_BRIDGE`.
-- The link is a state machine stepped by the poll: connect, handshake, open, open. A
+- The link is a state machine stepped by the poll: connect, handshake, challenge, open,
+  open. A
   reconnect never blocks a poll, except the OS's name lookup. It backs off from 250 ms to
   5 s, resumes with the token, and binds every socket again when the session was lost.
   Six seconds without a byte from the bridge count as a drop, since it pings.
-- WebSocket only, `ws://` only: no WebRTC and no TLS in the library.
+- WebSocket only, `ws://` only: no WebRTC and no TLS in the library. `src/tunnel/core.c`
+  carries SHA-256 for the proof, as `bindings/web/src/proof.ts` does for a page served over
+  http, which has no WebCrypto.
 - `RANT_TUNNEL` builds it, on with the bundled platform layer, off under
   `RANT_PLAT_CUSTOM` or `RANT_NO_TUNNEL`. The platform adds a nonblocking TCP connect,
   send and recv, and `RANT_POLLOUT`.

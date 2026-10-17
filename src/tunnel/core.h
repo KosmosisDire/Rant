@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#define I_RANT_TUNNEL_PROTO      13
+#define I_RANT_TUNNEL_PROTO      14
 #define I_RANT_TUNNEL_UDP        9      /* a batch [u8 9][u8 flags] then records */
 #define I_RANT_TUNNEL_PING       7      /* [u8 7][u32 seq][u32 us][u32 jitter_us][u32 samples][u32 missed] */
 #define I_RANT_TUNNEL_PONG       8      /* [u8 8][u32 seq] */
@@ -20,6 +20,10 @@ extern "C" {
 #define I_RANT_TUNNEL_BATCH      60000  /* the most one batch carries */
 
 void   i_rant_sha1(const void *data, size_t len, uint8_t out[20]);
+void   i_rant_sha256(const void *data, size_t len, uint8_t out[32]);
+/* The passphrase proof open carries: HMAC SHA-256 of nonce keyed with passphrase, 64
+ * lowercase hex characters and a NUL. */
+void   i_rant_tunnel_proof(const char *passphrase, const char *nonce, char out[65]);
 /* NUL terminated. Returns the characters written, 0 when cap is too small. */
 size_t i_rant_base64(const uint8_t *in, size_t len, char *out, size_t cap);
 
