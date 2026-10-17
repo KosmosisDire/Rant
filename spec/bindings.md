@@ -261,7 +261,8 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   libraries for win-x64, linux-x64 and osx, a `package.json` stamped from `VERSION`, and
   a `.meta` per entry whose GUID is the md5 of its path so an upgrade keeps references.
   Each plugin `.meta` enables exactly its own platform, since the three libraries share
-  the name `rant`. The scene MonoBehaviour is `RantNodeUnity`. Unity only
+  the name `rant`. The assembly is `Rant.Runtime`, since one named `Rant` shares the native
+  library's file name, which Unity warns of. The scene MonoBehaviour is `RantNodeUnity`. Unity only
   registers a MonoBehaviour whose class name matches its file name, and fails silently
   otherwise. Pattern: open in `Threading.Dispatch` and call `Dispatch()` per frame, which
   runs every callback on the frame. OnDisable closes and a beforeAssemblyReload backstop
@@ -270,9 +271,12 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   one translation unit with the web defines), `rant_web.jslib`, `rant_unity.jslib` (the
   connect behind `RantWebGL`) and `rant_tunnel.jspre` (the binding's `TunnelNet` with its module
   syntax taken out), so the web package builds first. `Rant.cs` binds `__Internal` there,
-  and a close inside a callback waits for the end of `Dispatch` since no thread can. The
-  component opens the tunnel before the node. The Unity path has never run in a real editor
-  here: the WebGL files are checked by compiling them with a stand in player under Node.js.
+  and a close inside a callback waits for the end of `Dispatch` since no thread can. With a
+  bridge set the component opens the tunnel before the node in WebGL, and elsewhere opens
+  the node on a worker, since an open through a bridge waits for it, then adopts it in
+  `Pump`. The editor path was run in Unity 6 in batch mode: the package compiles, and a
+  node and the component reach a local node through a bridge. The WebGL files are checked
+  by compiling them with a stand in player under Node.js, never in a Unity WebGL build.
 
 ## Python
 

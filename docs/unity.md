@@ -160,21 +160,23 @@ misbehaves.
 | Run In Edit Mode | keep the node live outside play mode |
 | Log Events | print peer lifecycle, loss and errors to the Console |
 | Persist Across Scenes | survive scene loads in play mode |
-| Bridge Url, Bridge Passphrase | WebGL only: the Rant bridge whose sockets the player's node uses |
+| Bridge Url, Bridge Passphrase | the Rant bridge whose sockets the node uses (Through a bridge). Empty means this machine's own |
 
-## WebGL
+## Through a bridge
 
-A page cannot open UDP sockets, so a WebGL player's node runs on the sockets a Rant bridge
-lends (`rant bridge enable` on a machine of the mesh, docs/web.md). The package compiles Rant
-into the player and takes no native library.
+With Bridge Url set, such as `ws://192.168.1.20:7480`, the node runs on the sockets a Rant
+bridge lends (`rant bridge enable` on a machine of the mesh), a node of that machine to the
+mesh. It reaches a mesh this machine cannot join, and a WebGL player needs it, since a page
+cannot open UDP sockets.
 
-- Set Bridge Url, such as `ws://192.168.1.20:7480`, and Bridge Passphrase on the component.
-- The node opens once the bridge answers, a frame or more after `OnEnable`. Topics work at
-  once. Variables, functions and tasks need the open node: ask for them once
-  `RantNodeUnity.Main.IsOpen`.
+- The node opens once the bridge answers, a frame or more after `OnEnable`, and never
+  blocks a frame. Topics work at once. Variables, functions and tasks need the open node:
+  ask for them once `RantNodeUnity.Main.IsOpen`.
 - A bridge that cannot be reached is logged once and tried again every 2 seconds. A dropped
   link is restored on its own.
-- The browser's rules hold: an `https` page reaches only a `wss://` bridge.
+- A WebGL player compiles Rant into its own wasm and takes no native library. The
+  browser's rules hold there: an `https` page reaches only a `wss://` bridge, and the
+  desktop players speak `ws://` only.
 
 ## Watching what happens
 
