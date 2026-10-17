@@ -22,6 +22,8 @@ extern int  rant_net_interfaces(uint32_t *out, int max);
 extern int  rant_net_hostname(char *buf, int cap);
 extern uint32_t rant_net_loopback_group_bind(uint32_t loopback_naddr);
 extern void rant_net_wait(int ms);
+/* An environment variable's full length, written cut to fit. Node.js has them, a page none. */
+extern int  rant_web_env(const char *name, char *buf, int cap);
 
 enum { NET_SETIF = 1, NET_TTL = 2, NET_LOOP = 3, NET_OWN_GROUPS = 4, NET_RCVBUF = 5, NET_SNDBUF = 6 };
 
@@ -107,9 +109,11 @@ uint64_t i_rant_plat_pid(void){
 }
 
 size_t i_rant_plat_env(const char *name, char *buf, size_t cap){
-    (void)name;
-    if (cap) buf[0] = 0;
-    return 0;
+    int n;
+    if (!name || !buf || cap == 0) return 0;
+    buf[0] = 0;
+    n = rant_web_env(name, buf, (int)cap);
+    return n > 0 ? (size_t)n : 0;
 }
 
 void *i_rant_plat_realloc(void *ptr, size_t size){

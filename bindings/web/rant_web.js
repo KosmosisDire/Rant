@@ -4,6 +4,8 @@
 
 mergeInto(LibraryManager.library, {
     $RantWeb__deps: ['malloc', 'rant_web_deliver'],
+    // the driver for JavaScript that drives the module itself, as the TypeScript binding does
+    $RantWeb__postset: "Module['rantWeb'] = { drive: (f) => RantWeb.drive(f), wake: (ms) => RantWeb.wake(ms) };",
     $RantWeb: {
         drives: [],
         sink: null,          // this instance's, so one net object can serve several
@@ -50,10 +52,12 @@ mergeInto(LibraryManager.library, {
             RantWeb.due = at;
             const token = ++RantWeb.token;
             const run = () => { if (token === RantWeb.token) RantWeb.run(); };
-            if (ms > 0) { setTimeout(run, ms); return; }
+            // In Node.js the sockets keep the process alive while a node is open, never the driver
+            if (ms > 0) { setTimeout(run, ms)?.unref?.(); return; }
             if (!RantWeb.port) {
                 const ch = new MessageChannel();
                 ch.port1.onmessage = () => RantWeb.later.shift()?.();
+                ch.port1.unref?.();
                 RantWeb.port = ch.port2;
             }
             RantWeb.later.push(run);
@@ -64,12 +68,28 @@ mergeInto(LibraryManager.library, {
             if (RantWeb.wait < 0 || ms < RantWeb.wait) RantWeb.wait = ms;
         },
 
+        // A drive is a C function and its user pointer, or a JavaScript function.
+        drive(f, user) {
+            RantWeb.drives.push({ f, user });
+            RantWeb.kick(0);
+        },
+
+        // Zero runs right after the current task, so a send from a page event goes out at once.
+        wake(ms) {
+            if (RantWeb.running) RantWeb.waited(ms);
+            else if (ms <= 0) RantWeb.soon();
+            else RantWeb.kick(ms);
+        },
+
         run() {
             RantWeb.due = -1;
             RantWeb.wait = -1;
             RantWeb.running = true;
             try {
-                for (const d of RantWeb.drives) {{{ makeDynCall('vp', 'd.fn') }}}(d.user);
+                for (const d of RantWeb.drives) {
+                    if (typeof d.f === 'function') d.f();
+                    else {{{ makeDynCall('vp', 'd.f') }}}(d.user);
+                }
             } finally {
                 RantWeb.running = false;
             }
@@ -78,16 +98,10 @@ mergeInto(LibraryManager.library, {
     },
 
     rant_web_drive__deps: ['$RantWeb'],
-    rant_web_drive: (fn, user) => {
-        RantWeb.drives.push({ fn, user });
-        RantWeb.kick(0);
-    },
+    rant_web_drive: (fn, user) => RantWeb.drive(fn, user),
 
     rant_web_wake__deps: ['$RantWeb'],
-    rant_web_wake: (ms) => {
-        if (RantWeb.running) RantWeb.waited(ms);
-        else RantWeb.kick(ms);
-    },
+    rant_web_wake: (ms) => RantWeb.wake(ms),
 
     rant_net_wait__deps: ['$RantWeb'],
     rant_net_wait: (ms) => RantWeb.waited(ms),
@@ -140,6 +154,14 @@ mergeInto(LibraryManager.library, {
     rant_net_loopback_group_bind: (naddr) => {
         const net = RantWeb.net();
         return (net.loopbackGroupBind ? net.loopbackGroupBind(naddr >>> 0) : naddr) >>> 0;
+    },
+
+    rant_web_env__deps: ['$UTF8ToString', '$stringToUTF8', '$lengthBytesUTF8'],
+    rant_web_env: (name, buf, cap) => {
+        const v = typeof process === 'object' && process.env ? process.env[UTF8ToString(name)] : undefined;
+        if (!v) return 0;
+        stringToUTF8(v, buf, cap);
+        return lengthBytesUTF8(v);
     },
 
     rant_net_hostname__deps: ['$RantWeb', '$stringToUTF8'],
