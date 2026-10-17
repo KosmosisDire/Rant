@@ -105,7 +105,8 @@ enum class ErrorKind {
     State,                /* refused at this moment, such as a close inside its own callback */
     BadSchema,            /* schema text or wire that does not compile */
     BadDomain,            /* RANT_DOMAIN is not a number from 0 to 65535 */
-    BadPrefix             /* RANT_PREFIX or the prefix option holds '@', starts or ends with '/' or is too long */
+    BadPrefix,            /* RANT_PREFIX or the prefix option holds '@', starts or ends with '/' or is too long */
+    WireVersion           /* a node of the domain speaks another wire version: ip, port. Once per source */
 };
 
 /* Schema field kinds for reflection, the C wire values. Array and String are fixed,
@@ -143,6 +144,7 @@ static_assert((int)ErrorKind::BadAddress == detail::RANT_E_BAD_ADDRESS, "error e
 static_assert((int)ErrorKind::BadSchema == detail::RANT_E_BAD_SCHEMA, "error enum drift");
 static_assert((int)ErrorKind::BadDomain == detail::RANT_E_BAD_DOMAIN, "error enum drift");
 static_assert((int)ErrorKind::BadPrefix == detail::RANT_E_BAD_PREFIX, "error enum drift");
+static_assert((int)ErrorKind::WireVersion == detail::RANT_E_WIRE_VERSION, "error enum drift");
 static_assert((int)FieldType::Struct == detail::RANT_STRUCT, "field-type enum drift");
 static_assert((int)FieldType::String == detail::RANT_STR, "field-type enum drift");
 static_assert((int)FieldType::Map == detail::RANT_MAP, "field-type enum drift");

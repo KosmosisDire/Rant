@@ -132,6 +132,6 @@ A `NO` flag always wins. An embedded target with its own sockets and clock defin
 | `RANT_TOPIC_NAME_MAX` | 64 | max topic name bytes |
 | `RANT_QUEUE_CAP` | 1 MB | default ring cap of a topic on a callback queue |
 | `RANT_DISCOVERY_META_MAX` | 64 | default per peer announce blob capacity |
-| `RANT_DISCOVERY_PROTO_VERSION` | 5 | discovery protocol version |
+| `RANT_WIRE_VERSION` | 5 | the wire version: nodes on another one report each other, never pair |
 
 Shared memory tunables are in spec/shm.md.

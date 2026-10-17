@@ -125,6 +125,7 @@ class ErrorKind(_pyenum.IntEnum):
     BAD_SCHEMA = 25      # a create refused: the schema failed to parse
     BAD_DOMAIN = 26      # an open refused: RANT_DOMAIN is not a number from 0 to 65535
     BAD_PREFIX = 27      # an open refused: RANT_PREFIX or prefix holds '@', starts or ends with '/' or is too long
+    WIRE_VERSION = 28    # a node of the domain speaks another wire version: ip, port. Once per source
 
 
 class PeerLiveness(_pyenum.IntEnum):

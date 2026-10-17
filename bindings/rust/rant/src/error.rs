@@ -64,6 +64,8 @@ pub enum ErrorKind {
     BadDomain,
     /// The prefix holds '@', starts or ends with '/' or is too long.
     BadPrefix,
+    /// A node of the domain speaks another wire version. Once per source.
+    WireVersion,
     /// A fault this binding does not know yet.
     Unknown,
 }
@@ -100,6 +102,7 @@ impl ErrorKind {
             ffi::RANT_E_BAD_SCHEMA => BadSchema,
             ffi::RANT_E_BAD_DOMAIN => BadDomain,
             ffi::RANT_E_BAD_PREFIX => BadPrefix,
+            ffi::RANT_E_WIRE_VERSION => WireVersion,
             _ => Unknown,
         }
     }
@@ -135,6 +138,7 @@ impl ErrorKind {
             BadSchema => ffi::RANT_E_BAD_SCHEMA,
             BadDomain => ffi::RANT_E_BAD_DOMAIN,
             BadPrefix => ffi::RANT_E_BAD_PREFIX,
+            WireVersion => ffi::RANT_E_WIRE_VERSION,
         }
     }
 }

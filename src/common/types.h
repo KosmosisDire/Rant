@@ -178,8 +178,11 @@ typedef enum {
     RANT_E_BAD_SCHEMA,         /* rant_node_schema refused a text or wire: .schema_detail says why and where.
                                   Or a create's schema failed to parse: .topic_name */
     RANT_E_BAD_DOMAIN,         /* RANT_DOMAIN is not a number from 0 to 65535, refused at open */
-    RANT_E_BAD_PREFIX          /* RANT_PREFIX or opts.prefix holds '@', starts or ends with '/' or
+    RANT_E_BAD_PREFIX,         /* RANT_PREFIX or opts.prefix holds '@', starts or ends with '/' or
                                   leaves no room for a name, refused at open */
+    /* a node this one cannot speak with */
+    RANT_E_WIRE_VERSION        /* a node of the domain speaks another wire version: .ip, .ip_len,
+                                  .port. Once per source */
 } RantErrorKind;
 
 typedef struct {

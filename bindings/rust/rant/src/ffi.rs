@@ -13,7 +13,7 @@ pub const RANT_DISCOVERY_PORT: u32 = 7400;
 pub const RANT_ANNOUNCE_INTERVAL_US: u32 = 3000000;
 pub const RANT_MAX_PEERS: u32 = 16;
 pub const RANT_ALLOCATOR_PAGE: u32 = 65536;
-pub const RANT_DISCOVERY_PROTO_VERSION: u32 = 5;
+pub const RANT_WIRE_VERSION: u32 = 5;
 pub const RANT_DISCOVERY_META_MAX: u32 = 64;
 pub const RANT_DISCOVERY_META_OFF: u32 = 30;
 pub const RANT_DISCOVERY_DISC_MAX: u32 = 52;
@@ -195,6 +195,7 @@ pub const RANT_E_STATE: RantErrorKind = 24;
 pub const RANT_E_BAD_SCHEMA: RantErrorKind = 25;
 pub const RANT_E_BAD_DOMAIN: RantErrorKind = 26;
 pub const RANT_E_BAD_PREFIX: RantErrorKind = 27;
+pub const RANT_E_WIRE_VERSION: RantErrorKind = 28;
 pub type RantErrorKind = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Copy, Clone)]

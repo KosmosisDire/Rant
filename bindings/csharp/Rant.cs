@@ -137,7 +137,10 @@ namespace Rant
         BadDomain,
         /// <summary>RANT_PREFIX or Prefix holds '@', starts or ends with '/' or is too long, so
         /// the open was refused.</summary>
-        BadPrefix
+        BadPrefix,
+        /// <summary>A node of the domain speaks another wire version: Ip, Port. Once per
+        /// source.</summary>
+        WireVersion
     }
 
     /// <summary>A schema field's kind, valued as its wire kind byte.</summary>

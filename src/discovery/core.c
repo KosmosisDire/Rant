@@ -69,6 +69,8 @@ struct i_RantDiscoveryState {
     uint16_t        relay_cursor;     /* round robin over peers for poll_relay */
     i_RantDiscoverySubnet local_nets[RANT_DISCOVERY_MAX_SUBNETS];
     uint8_t       n_local_nets;
+    RantAddr      wire_told[8];   /* sources already reported on another wire version */
+    uint8_t       n_wire_told, next_wire_told;
     i_RantDiscoveryPeer    *peers;
 };
 
@@ -333,7 +335,7 @@ static size_t i_rant_discovery_build(i_RantDiscoveryState *st, uint8_t flags, in
     /* a node with no multicast asks whoever hears it to announce it onward */
     if (st->cfg.relay_me && !(flags & RANT_DISCOVERY_FLAG_BYE)) flags |= RANT_DISCOVERY_FLAG_RELAY_ME;
     p[0]='u'; p[1]='D'; p[2]='S'; p[3]='C';
-    p[4]=(uint8_t)RANT_DISCOVERY_PROTO_VERSION;
+    p[4]=(uint8_t)RANT_WIRE_VERSION;
     p[5]=flags;
     i_rant_le_w16(p+6, st->cfg.domain_id);
     memcpy(p+8, st->cfg.uuid, 16);
@@ -365,7 +367,7 @@ static size_t i_rant_discovery_build_proxy(i_RantDiscoveryState *st, const i_Ran
     if (!peer->port || (peer->ip_len != 4 && peer->ip_len != 16)) return 0;
     if (!peer->meta_version) return 0;
     p[0]='u'; p[1]='D'; p[2]='S'; p[3]='C';
-    p[4]=(uint8_t)RANT_DISCOVERY_PROTO_VERSION;
+    p[4]=(uint8_t)RANT_WIRE_VERSION;
     /* PROXIED is the loop stop. RELAY_ME is carried as origin information only. */
     p[5]=(uint8_t)(RANT_DISCOVERY_FLAG_PROXIED |
                    (peer->relay_me ? RANT_DISCOVERY_FLAG_RELAY_ME : 0));
@@ -408,6 +410,20 @@ static void i_rant_discovery_addr_of(const i_RantDiscoveryPeer *peer, RantAddr *
     out->port   = peer->port;
 }
 
+/* A datagram of this domain on another wire version. Its sender announces every interval, so
+   each source is reported once, the last 8 remembered. */
+static void i_rant_discovery_wire_mismatch(i_RantDiscoveryState *st, const RantAddr *src){
+    RantAddr a; int i;
+    memset(&a, 0, sizeof a);
+    if (src && (src->ip_len==4 || src->ip_len==16)){ memcpy(a.ip, src->ip, src->ip_len); a.ip_len = src->ip_len; a.port = src->port; }
+    for (i = 0; i < st->n_wire_told; i++)
+        if (i_rant_discovery_addr_is(&st->wire_told[i], a.ip, a.ip_len, a.port)) return;
+    st->wire_told[st->next_wire_told] = a;
+    st->next_wire_told = (uint8_t)((st->next_wire_told + 1) % 8);
+    if (st->n_wire_told < 8) st->n_wire_told++;
+    i_rant_discovery_fire_error(st, RANT_E_WIRE_VERSION, 0, &a, 0);
+}
+
 /* Discovery TX destination: an observed source (2, exact), else the locator (1, expanded). */
 static int i_rant_discovery_disc_dest(const i_RantDiscoveryPeer *peer, RantAddr *out){
     if (peer->obs_disc.ip_len){ *out = peer->obs_disc; return 2; }
@@ -433,10 +449,13 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     int have_disc=0; uint16_t disc_port=0; uint8_t disc_ip_len=0;
     const uint8_t *disc_ip=NULL; RantBytes overlay = {NULL, 0}; RantString disc_name = {NULL, 0};
 
-    if (len < (size_t)RANT_DISCOVERY_META_OFF) return;
+    /* the magic, the wire version, the flags and the domain keep bytes 0 to 7 in every
+       version, so a node of this domain on another wire is recognized and reported */
+    if (len < 8) return;
     if (p[0]!='u'||p[1]!='D'||p[2]!='S'||p[3]!='C') return;
-    if (p[4]!=(uint8_t)RANT_DISCOVERY_PROTO_VERSION) return;
     if (i_rant_le_r16(p+6) != st->cfg.domain_id) return;
+    if (p[4]!=(uint8_t)RANT_WIRE_VERSION){ i_rant_discovery_wire_mismatch(st, src); return; }
+    if (len < (size_t)RANT_DISCOVERY_META_OFF) return;
     uuid = p+8;
     if (memcmp(uuid, st->cfg.uuid, 16)==0) return;  /* ignore self */
     meta_version = i_rant_le_r32(p+RANT_DISCOVERY_HDR_LEN);

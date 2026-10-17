@@ -40,16 +40,20 @@ advertises is the node's data socket and it owns no unicast socket of its own.
 
 ## Wire format
 
-Every discovery datagram starts with a 24 byte header: the magic `uDSC`, the protocol
-version (`RANT_DISCOVERY_PROTO_VERSION` = 5), a flags byte, the u16 domain and the
-sender's 16 byte uuid. Then `[u32 meta_version][u16 meta_len]` and the blob. The blob is
+Every discovery datagram starts with a 24 byte header: the magic `uDSC`, the wire version
+(`RANT_WIRE_VERSION` = 5), a flags byte, the u16 domain and the sender's 16 byte uuid. Then `[u32 meta_version][u16 meta_len]` and the blob. The blob is
 the discovery section `[u16 data_port][u8 self_ip_len][self_ip][u8 name_len][name]`
 followed by the opaque overlay. A steady state announce carries meta_len 0 and only the
 version. The flags are BYE 0x01, REQ 0x02 (a solicit, recipients announce back now),
 RELAY_ME 0x04 and PROXIED 0x08. A proxied announce appends the relayer's uuid as a 16
 byte trailer after the blob, which meta_len excludes and parsers otherwise ignore. Version
-history: v3 added the versioned blob, v4 the relay flags, v5 observed sources. A datagram
-with another magic, version or domain is dropped, as is a malformed blob. The per peer
+history: v3 added the versioned blob, v4 the relay flags, v5 observed sources. Since v5 the
+number versions everything that crosses the wire, discovery or not, and any change to it
+bumps the number. The first eight bytes (magic, version, flags, domain) keep their place in
+every version, so a datagram of this domain on another version is recognized from them
+alone: it is dropped and its source reported once with `RANT_E_WIRE_VERSION`, the last 8
+sources remembered. A datagram with another magic or domain is dropped silently, as is a
+malformed blob. The per peer
 overlay capacity defaults to `RANT_DISCOVERY_META_MAX` (64) bytes and the name to
 `RANT_NODE_NAME_MAX` (32).
 

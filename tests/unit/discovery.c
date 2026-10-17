@@ -4,7 +4,7 @@
 #include "support/test.h"
 
 /* the discovery core's callbacks, recorded for the lifecycle checks */
-static uint32_t dc_up_id, dc_up_n, dc_down_id, dc_down_n, dc_refused_n;
+static uint32_t dc_up_id, dc_up_n, dc_down_id, dc_down_n, dc_refused_n, dc_wire_n;
 static int      dc_down_reason;
 static void dc_up(void *user, uint32_t peer, const RantAddr *addr, RantBytes meta){
     (void)user; (void)addr; (void)meta; dc_up_id=peer; dc_up_n++;
@@ -12,7 +12,10 @@ static void dc_up(void *user, uint32_t peer, const RantAddr *addr, RantBytes met
 static void dc_down(void *user, uint32_t peer, i_RantDiscoveryDownReason reason){
     (void)user; dc_down_id=peer; dc_down_reason=(int)reason; dc_down_n++;
 }
-static void dc_error(const RantEvent *ev){ if (ev->error==RANT_E_PEER_REFUSED) dc_refused_n++; }
+static void dc_error(const RantEvent *ev){
+    if (ev->error==RANT_E_PEER_REFUSED) dc_refused_n++;
+    if (ev->error==RANT_E_WIRE_VERSION) dc_wire_n++;
+}
 
 /* craft a v3 announce for sender `uid` (uuid = all uid bytes), meta_len 0 */
 static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port, uint32_t mver){
@@ -20,7 +23,7 @@ static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16
     uint8_t *b = p + off;
     memset(p, 0, off);
     p[0]='u';p[1]='D';p[2]='S';p[3]='C';
-    p[4]=(uint8_t)RANT_DISCOVERY_PROTO_VERSION;
+    p[4]=(uint8_t)RANT_WIRE_VERSION;
     p[5]=flags;                                   /* 0x01 = BYE (internal flag) */
     p[6]=(uint8_t)dom; p[7]=(uint8_t)(dom>>8);
     memset(p+8, uid, 16);                         /* a distinct uuid per uid */
@@ -41,7 +44,7 @@ static size_t dc_mk_ip(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uin
     uint8_t *b = p + off;
     memset(p, 0, off);
     p[0]='u';p[1]='D';p[2]='S';p[3]='C';
-    p[4]=(uint8_t)RANT_DISCOVERY_PROTO_VERSION;
+    p[4]=(uint8_t)RANT_WIRE_VERSION;
     p[5]=flags;
     p[6]=(uint8_t)dom; p[7]=(uint8_t)(dom>>8);
     memset(p+8, uid, 16);
@@ -137,6 +140,19 @@ static void disc_core_checks(void){
                "disc-core: new uuid at a held ip:port evicts the predecessor (downs=%u sameid=%d reason=%d up=%u count=%u)",
                dc_down_n, dc_down_id==idP, dc_down_reason, dc_up_n, i_rant_discovery_peer_count(st));
     }
+
+    /* A node of this domain on another wire version is never a peer and is reported once per
+       source, from its first eight bytes alone. Another domain is ignored. */
+    st = i_rant_discovery_init(mem,sizeof mem,&c);
+    i_rant_discovery_update(st, 1000, out, sizeof out);
+    dc_up_n=dc_wire_n=0;
+    n=dc_mk(buf,9,0,99,6002,1); buf[4]=(uint8_t)(RANT_WIRE_VERSION+1);
+    dc_feed(st,sa,7400,0,buf,n,4000); dc_feed(st,sa,7400,0,buf,n,5000);
+    dc_feed(st,sb,7400,0,buf,8,6000);
+    n=dc_mk(buf,9,0,98,6002,1); buf[4]=(uint8_t)(RANT_WIRE_VERSION+1); dc_feed(st,sc,7400,0,buf,n,7000);
+    CHECK(dc_wire_n==2 && dc_up_n==0 && i_rant_discovery_peer_count(st)==0,
+             "disc-core: another wire version is reported once per source, never a peer (reports=%u ups=%u)",
+             dc_wire_n, dc_up_n);
 
     /* RELAY, the rules the loopback phase cannot see: who enlists us, one hop only, and
        a proxied locator losing to a direct path we still hear */
@@ -441,7 +457,7 @@ static size_t nc_dgram(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uin
     uint16_t ml = (uint16_t)(4u + nl);
     memset(p, 0, off);
     p[0]='u';p[1]='D';p[2]='S';p[3]='C';
-    p[4]=(uint8_t)RANT_DISCOVERY_PROTO_VERSION;
+    p[4]=(uint8_t)RANT_WIRE_VERSION;
     p[5]=flags;
     p[6]=(uint8_t)dom; p[7]=(uint8_t)(dom>>8);
     memset(p+8, uid, 16);                          /* a distinct uuid per uid */
