@@ -5,7 +5,7 @@ A small, dependency-free C99 pub-sub middleware:
 - realtime optionally-reliable UDP transport
 - high-throughput shared-memory communication on localhost
 
-Wrappers for C, C++, Python, C# / .NET, Unity and Rust share one core.
+Wrappers for C, C++, Python, C# / .NET, Unity, Rust and TypeScript share one core.
 
 ## Install
 
@@ -19,7 +19,7 @@ platform libraries:
 ```cmake
 CPMAddPackage(NAME rant
               GIT_REPOSITORY https://github.com/KosmosisDire/Rant.git
-              GIT_TAG v0.0.28)
+              GIT_TAG v0.0.29)
 
 target_link_libraries(app PRIVATE rant::rant_host)
 ```
@@ -53,7 +53,7 @@ its folder first: `dotnet nuget add source <folder> -n rant`.
 ### Rust
 ```toml
 [dependencies]
-rant-middleware = { git = "https://github.com/KosmosisDire/Rant.git", tag = "crate-v0.0.28" }
+rant-middleware = { git = "https://github.com/KosmosisDire/Rant.git", tag = "crate-v0.0.29" }
 ```
 The crate compiles the C library into your program and is used as `rant`. See
 [docs/rust.md](docs/rust.md).
@@ -66,10 +66,17 @@ https://github.com/KosmosisDire/Rant.git#upm
 Or download `rant-<version>.unitypackage` from the release and use `Assets > Import Package
 > Custom Package` (it imports into `Assets/Rant/`, native plugins included).
 
-### In a page or Node.js
-Rant builds to wasm with Emscripten. A CMake project links `rant::rant_web`, and
-`rant-middleware-<version>.tgz` on the release holds the same for any other build, with the
-net objects a page hands it. See [docs/web.md](docs/web.md).
+### TypeScript and JavaScript
+```sh
+npm install https://github.com/KosmosisDire/Rant/releases/download/v0.0.29/rant-middleware-0.0.29.tgz
+```
+Rant built to wasm with its binding, for Node.js and pages. See
+[docs/javascript.md](docs/javascript.md).
+
+### C or C++ in a page or Node.js
+Rant builds to wasm with Emscripten. A CMake project links `rant::rant_web`, and the same
+`rant-middleware-<version>.tgz` holds it for any other build, with the net objects a page
+hands it. See [docs/web.md](docs/web.md).
 
 ### Tools
 `rant-<version>-<platform>.zip` on the release holds the command line tools for Windows,
