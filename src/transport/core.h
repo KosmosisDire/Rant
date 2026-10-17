@@ -98,7 +98,7 @@ typedef struct {
                                         int peer_is_pub, uint64_t schema_hash,
                                         RantBytes schema_wire);
     /* Optional: one line saying why schema_check refused that direction, or NULL. It
-     * rides a SCHEMA_MISMATCH event as .schema_detail. */
+     * rides a SCHEMA_MISMATCH event as .detail. */
     const char         *(*schema_why)(void *user, uint32_t peer, uint16_t topic_index,
                                       int peer_is_pub);
     /* Optional wall clock, UTC microseconds, stamped at commit. NULL still frames the 8

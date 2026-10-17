@@ -186,7 +186,7 @@ class RantEvent(Structure):
         ("identity", c_uint64),
         ("publish_topics", c_uint16),
         ("receive_topics", c_uint16),
-        ("schema_detail", c_char_p),
+        ("detail", c_char_p),
         ("peer_name", c_char_p),
     ]
 

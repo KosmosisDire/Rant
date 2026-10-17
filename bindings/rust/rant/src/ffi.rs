@@ -216,7 +216,7 @@ pub struct RantEvent {
     pub identity: u64,
     pub publish_topics: u16,
     pub receive_topics: u16,
-    pub schema_detail: *const ::std::os::raw::c_char,
+    pub detail: *const ::std::os::raw::c_char,
     pub peer_name: *const ::std::os::raw::c_char,
 }
 impl Default for RantEvent {

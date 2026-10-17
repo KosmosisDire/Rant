@@ -48,7 +48,7 @@ export interface RantEvent {
     /* "ip:port" of the peer, null when the event names none */
     address: string | null;
     lostFirst: number; lostCount: number; tooBigBytes: number; identity: bigint;
-    publishTopics: number; receiveTopics: number; schemaDetail: string | null;
+    publishTopics: number; receiveTopics: number; detail: string | null;
 }
 
 export interface NodeOptions {
@@ -396,7 +396,7 @@ export class RantNode {
 
     /** @internal */ report(error: ErrorKind, text: string, topicName: string | null = null, detail: string | null = null): void {
         this.emit({ kind: "error", error, text, peer: 0, peerName: null, topic: 0, topicName, osError: 0, address: null,
-                    lostFirst: 0, lostCount: 0, tooBigBytes: 0, identity: 0n, publishTopics: 0, receiveTopics: 0, schemaDetail: detail });
+                    lostFirst: 0, lostCount: 0, tooBigBytes: 0, identity: 0n, publishTopics: 0, receiveTopics: 0, detail });
     }
 
     private onMessage(p: number): void {
@@ -480,7 +480,7 @@ export class RantNode {
         const ptr = scoped(this.n, (sc) => this.n.c.rant_node_schema(h, sc.cstr(text)));
         if (!ptr) {
             const e = this.lastError;
-            throw new RantError(`the schema did not compile: ${e.schemaDetail ?? e.text}`, e);
+            throw new RantError(`the schema did not compile: ${e.detail ?? e.text}`, e);
         }
         return ptr;
     }
@@ -719,7 +719,7 @@ function eventFrom(n: Native, p: number): RantEvent {
         lostFirst: Number(n.u64(p + E.lost_first)), lostCount: Number(n.u64(p + E.lost_count)),
         tooBigBytes: Number(n.u64(p + E.too_big_bytes)), identity: n.u64(p + E.identity),
         publishTopics: n.u16(p + E.publish_topics), receiveTopics: n.u16(p + E.receive_topics),
-        schemaDetail: n.cstr(n.u32(p + E.schema_detail)),
+        detail: n.cstr(n.u32(p + E.detail)),
     };
 }
 

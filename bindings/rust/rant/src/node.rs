@@ -213,7 +213,7 @@ impl Event {
             identity: ev.identity,
             publish_topics: ev.publish_topics,
             receive_topics: ev.receive_topics,
-            detail: text(ev.schema_detail),
+            detail: text(ev.detail),
             text: event_text(ev),
         }
     }
@@ -226,7 +226,7 @@ impl Event {
             kind: ffi::RANT_ERROR,
             error: error.to_c(),
             topic_name: topic_c.as_ref().map_or(null(), |c| c.as_ptr()),
-            schema_detail: detail_c.as_ref().map_or(null(), |c| c.as_ptr()),
+            detail: detail_c.as_ref().map_or(null(), |c| c.as_ptr()),
             ..Default::default()
         };
         Event::from_c(&ev)

@@ -51,17 +51,17 @@ static void schema_advert_checks(void){
                  "announce: a create registers its schema in the node, one handle per shape");
         CHECK(rant_node_schema(P, "RantLog { x: u8 }") == NULL, "announce: a builtin name is reserved");
         le = rant_last_error(P);
-        CHECK(le.error == RANT_E_BAD_SCHEMA && le.schema_detail
-                 && strstr(le.schema_detail, "another shape near: RantLog") != NULL,
-                 "announce: the refusal says why and where (%s)", le.schema_detail ? le.schema_detail : "null");
-        CHECK(rant_node_schema(P, "Open {") == NULL && rant_last_error(P).schema_detail
-                 && strstr(rant_last_error(P).schema_detail, "expected } at the end") != NULL,
+        CHECK(le.error == RANT_E_BAD_SCHEMA && le.detail
+                 && strstr(le.detail, "another shape near: RantLog") != NULL,
+                 "announce: the refusal says why and where (%s)", le.detail ? le.detail : "null");
+        CHECK(rant_node_schema(P, "Open {") == NULL && rant_last_error(P).detail
+                 && strstr(rant_last_error(P).detail, "expected } at the end") != NULL,
                  "announce: a truncated text is refused at the end (%s)",
-                 rant_last_error(P).schema_detail ? rant_last_error(P).schema_detail : "null");
-        CHECK(rant_node_schema(P, "Reading { p: Nope }") == NULL && rant_last_error(P).schema_detail
-                 && strstr(rant_last_error(P).schema_detail, "unknown type near: Nope") != NULL,
+                 rant_last_error(P).detail ? rant_last_error(P).detail : "null");
+        CHECK(rant_node_schema(P, "Reading { p: Nope }") == NULL && rant_last_error(P).detail
+                 && strstr(rant_last_error(P).detail, "unknown type near: Nope") != NULL,
                  "announce: an unknown type is named (%s)",
-                 rant_last_error(P).schema_detail ? rant_last_error(P).schema_detail : "null");
+                 rant_last_error(P).detail ? rant_last_error(P).detail : "null");
         CHECK(rant_node_schema(P, "Reading { x: f64 }") != NULL && rant_node_schema(P, "Reading") != NULL,
                  "announce: a definition made on the node names the next compile");
     }

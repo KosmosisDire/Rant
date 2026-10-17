@@ -908,7 +908,7 @@ def _compile_dsl(node, text):
     with node._gate.use(node._h) as h:
         s = node._lib.rant_node_schema(h, text.encode("utf-8")) if h else None
     if not s:
-        raise SchemaError(node.last_error.schema_detail or "schema compile failed")
+        raise SchemaError(node.last_error.detail or "schema compile failed")
     return s
 
 
@@ -1711,7 +1711,7 @@ class Event:
         them (src/node/core.h). str(event) is the one line text."""
     __slots__ = ("kind", "error", "peer", "peer_name", "topic", "topic_name", "os_error",
                  "lost_first", "lost_count", "too_big_bytes", "identity", "publish_topics",
-                 "receive_topics", "schema_detail", "_line")
+                 "receive_topics", "detail", "_line")
 
     @classmethod
     def _from_c(cls, e):
@@ -1729,8 +1729,7 @@ class Event:
         self.identity = e.identity
         self.publish_topics = e.publish_topics
         self.receive_topics = e.receive_topics
-        self.schema_detail = (e.schema_detail.decode("utf-8", "replace")
-                              if e.schema_detail else None)
+        self.detail = e.detail.decode("utf-8", "replace") if e.detail else None
         buf = _c.create_string_buffer(192)
         _c.load().rant_event_str(_c.byref(e), buf, len(buf))
         self._line = buf.value.decode("utf-8", "replace")
@@ -2184,7 +2183,7 @@ class Node:
         e.kind = int(EventKind.ERROR)
         e.error = int(ErrorKind.SCHEMA_MISMATCH)
         e.topic_name = (topic_name or "").encode("utf-8")
-        e.schema_detail = detail.encode("utf-8")
+        e.detail = detail.encode("utf-8")
         try:
             with self._gate.running():
                 (self._on_evt or self._print_event)(Event._from_c(e))

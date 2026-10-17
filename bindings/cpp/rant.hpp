@@ -984,8 +984,8 @@ public:
     /* PeerInterest: the topics we now publish to the peer and receive from it. */
     uint16_t         publish_topics() const { return ev_->publish_topics; }
     uint16_t         receive_topics() const { return ev_->receive_topics; }
-    /* SchemaMismatch: what exactly was incompatible (empty when unknown). */
-    std::string      schema_detail()  const { return ev_->schema_detail ? ev_->schema_detail : ""; }
+    /* SchemaMismatch and BadSchema: one line saying what went wrong (empty when none). */
+    std::string      detail()         const { return ev_->detail ? ev_->detail : ""; }
 
     /* A one-line human-readable rendering (uses the C formatter). */
     std::string to_string() const { char b[192]; return detail::rant_event_str(ev_, b, sizeof b); }
@@ -2230,7 +2230,7 @@ struct NodeImpl : std::enable_shared_from_this<NodeImpl> {
         e.kind = detail::RANT_ERROR;
         e.error = kind;
         e.topic_name = topic_name;
-        e.schema_detail = detail;
+        e.detail = detail;
         e.user = this;
         emit(Event(&e));
     }

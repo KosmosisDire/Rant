@@ -369,7 +369,7 @@ static void i_rant_node_emit(RantNode *n, RantEvent *e){
         n->last_error = *e;
         i_rant_node_keep_str(n->last_error_topic, sizeof n->last_error_topic, e->topic_name, &n->last_error.topic_name);
         i_rant_node_keep_str(n->last_error_peer, sizeof n->last_error_peer, e->peer_name, &n->last_error.peer_name);
-        i_rant_node_keep_str(n->last_error_detail, sizeof n->last_error_detail, e->schema_detail, &n->last_error.schema_detail);
+        i_rant_node_keep_str(n->last_error_detail, sizeof n->last_error_detail, e->detail, &n->last_error.detail);
     }
     /* the error to log mirror records only, the poll pass publishes. Errors on a log
        topic itself are excluded, and nothing is recorded during a flush */
@@ -558,12 +558,12 @@ static int i_rant_node_queue_push(RantNode *n, uint16_t topic_index, i_RantMsgQu
     return 0;
 }
 
-/* Parks an event: the struct, then topic_name, peer_name and schema_detail copied, since
+/* Parks an event: the struct, then topic_name, peer_name and detail copied, since
  * every one of them is a view that dies with a retire or a peer drop. Lock held. */
 static void i_rant_node_park_event(RantNode *n, const RantEvent *e){
     uint8_t strs[3u * (3u + 255u)]; size_t off = 0; int i;
     const char *src[3];
-    src[0] = e->topic_name; src[1] = e->peer_name; src[2] = e->schema_detail;
+    src[0] = e->topic_name; src[1] = e->peer_name; src[2] = e->detail;
     for (i = 0; i < 3; i++){
         size_t len = src[i] ? strlen(src[i]) : 0;
         if (len > 255u) len = 255u;
@@ -582,7 +582,7 @@ static void i_rant_node_queue_event(RantNode *n, const i_RantQRec *rec, RantEven
     const uint8_t *p = body + sizeof *out; const char **dst[3]; int i;
     memcpy(out, body, sizeof *out);
     out->user = n->user_data;
-    dst[0] = &out->topic_name; dst[1] = &out->peer_name; dst[2] = &out->schema_detail;
+    dst[0] = &out->topic_name; dst[1] = &out->peer_name; dst[2] = &out->detail;
     for (i = 0; i < 3; i++){
         size_t len = p[0];
         *dst[i] = p[1] ? (const char*)(p + 2) : NULL;   /* NUL terminated: a 0 byte follows */
@@ -698,7 +698,7 @@ static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from,
         RantEvent e; memset(&e, 0, sizeof e);
         e.kind = RANT_ERROR; e.error = RANT_E_SCHEMA_MISMATCH;
         e.peer = from; e.topic = topic_index; e.topic_name = i_rant_node_topic_name(n, topic_index);
-        e.schema_detail = i_rant_node_core_note_size_mismatch(n->core, from, topic_index,
+        e.detail = i_rant_node_core_note_size_mismatch(n->core, from, topic_index,
                                             payload.len, rant_schema_msg_min(schema));
         i_rant_node_emit(n, &e);
         return 0;
@@ -1369,7 +1369,7 @@ static void i_rant_node_create_fail(RantNode *n, RantErrorKind err, const char *
     e.user = n->user_data;
     n->last_error = e;
     i_rant_node_keep_str(n->last_error_topic, sizeof n->last_error_topic, name, &n->last_error.topic_name);
-    n->last_error.peer_name = NULL; n->last_error.schema_detail = NULL;
+    n->last_error.peer_name = NULL; n->last_error.detail = NULL;
 }
 
 static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRole role,
@@ -2598,7 +2598,7 @@ uint32_t rant_node_evicted_unsent(RantNode *n){
 }
 
 /* A refused schema text or wire: RANT_E_BAD_SCHEMA with the reason and the place in
- * schema_detail. err NULL means the wire form. Lock held. */
+ * detail. err NULL means the wire form. Lock held. */
 static void i_rant_node_schema_fail(RantNode *n, const i_RantSchemaErr *err){
     RantEvent e; char detail[128];
     memset(&e, 0, sizeof e);
@@ -2606,7 +2606,7 @@ static void i_rant_node_schema_fail(RantNode *n, const i_RantSchemaErr *err){
     if (!err) snprintf(detail, sizeof detail, "schema wire refused");
     else if (!err->at || !*err->at) snprintf(detail, sizeof detail, "%s at the end", err->why);
     else snprintf(detail, sizeof detail, "%s near: %.40s", err->why, err->at);
-    e.schema_detail = detail;
+    e.detail = detail;
     i_rant_node_emit(n, &e);
 }
 
@@ -2733,7 +2733,7 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
             /* format from a sanitized copy: the stored event's name views can outlive what
                they pointed at, so the text carries the indices instead */
             RantEvent le = n->last_error; char txt[160];
-            le.topic_name = NULL; le.peer_name = NULL; le.schema_detail = NULL;
+            le.topic_name = NULL; le.peer_name = NULL; le.detail = NULL;
             rant_event_str(&le, txt, sizeof txt);
             rant_map_put_string(w, "last_error_text", rant_cstr(txt));
         }

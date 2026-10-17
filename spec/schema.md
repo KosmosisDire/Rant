@@ -100,7 +100,7 @@ A raw reader accepts anything. A typed reader refuses an untyped or unverifiable
 An identical hash skips the parse. A peer schema is interned once per hash, and the claimed hash must equal the parsed wire's hash, or a lying peer could poison the intern for every honest one. Both directions advertise and run the same gate, so a
 refused pair forms no proxy on either side. The node validates the message length against
 the sender's schema before delivery and fires `RANT_E_SCHEMA_MISMATCH` with a per field
-`schema_detail` from `rant_schema_subset_why`. There is deliberately no boot time
+`detail` from `rant_schema_subset_why`. There is deliberately no boot time
 validator API.
 
 ## DSL
@@ -202,7 +202,7 @@ and a bare reference as the last statement (`Uuid`, `Pose`) gives the same root,
 definition taken by name hashes like its struct written out. A type on its own ends the
 text. `Name = { ... }` and `A = W` for a name `W` are refused at the type, since a struct
 has one spelling and a name never wraps a name. The parser keeps the first refusal as a
-reason and a position, and the node prints both in `schema_detail`. A rule the wire check
+reason and a position, and the node prints both in `detail`. A rule the wire check
 enforces names itself too: the reader keeps the first broken rule in `i_Rd.why`, and
 `i_rant_schema_wire_why` hands it to the compiler.
 

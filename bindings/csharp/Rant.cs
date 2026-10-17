@@ -88,7 +88,7 @@ namespace Rant
         /// <summary>The name is another entity kind at a peer: Topic, Peer.</summary>
         KindMismatch,
         /// <summary>A match was refused or a message did not fit the schema: Topic, Peer,
-        /// SchemaDetail.</summary>
+        /// Detail.</summary>
         SchemaMismatch,
         /// <summary>A peer's topic index map failed to allocate: Peer, LostCount entries.</summary>
         InterestOverflow,
@@ -131,7 +131,7 @@ namespace Rant
         BadName,
         /// <summary>A create was refused at this moment: from a handler, or the table is full.</summary>
         State,
-        /// <summary>A schema text or wire was refused: SchemaDetail says why and where.</summary>
+        /// <summary>A schema text or wire was refused: Detail says why and where.</summary>
         BadSchema,
         /// <summary>RANT_DOMAIN is not a number from 0 to 65535, so the open was refused.</summary>
         BadDomain,
@@ -383,7 +383,7 @@ namespace Rant
         public ulong identity;
         public ushort publish_topics;
         public ushort receive_topics;
-        public IntPtr schema_detail;           // const char*, SchemaMismatch: what was incompatible
+        public IntPtr detail;      // const char*, one line saying what went wrong
         public IntPtr peer_name;   // const char*, the peer's node name
     }
 
@@ -2031,7 +2031,7 @@ namespace Rant
         public ulong TooBigBytes;
         /// <summary>For SchemaMismatch and BadSchema, one line saying what was refused and
         /// where, else null.</summary>
-        public string SchemaDetail;
+        public string Detail;
         /// <summary>The peer's node name, else null.</summary>
         public string PeerName;
         private string _line;
@@ -2063,7 +2063,7 @@ namespace Rant
                 LostFirst = e.lost_first,
                 LostCount = e.lost_count,
                 TooBigBytes = e.too_big_bytes,
-                SchemaDetail = e.schema_detail != IntPtr.Zero ? Codec.PtrToStr(e.schema_detail) : null,
+                Detail = e.detail != IntPtr.Zero ? Codec.PtrToStr(e.detail) : null,
                 PeerName = e.peer_name != IntPtr.Zero ? Codec.PtrToStr(e.peer_name) : null,
                 _line = Codec.CBufStr(buf),
             };
@@ -3229,7 +3229,7 @@ namespace Rant
                 if (h == IntPtr.Zero)
                 {
                     RantEvent e = LastError;
-                    throw new SchemaException(e != null && e.SchemaDetail != null ? e.SchemaDetail
+                    throw new SchemaException(e != null && e.Detail != null ? e.Detail
                                               : "schema compile failed");
                 }
                 return Wrap(h, null);
@@ -3448,7 +3448,7 @@ namespace Rant
                     kind = (int)EventKind.Error,
                     error = (int)ErrorKind.SchemaMismatch,
                     topic_name = t,
-                    schema_detail = d,
+                    detail = d,
                 };
                 EmitEvent(RantEvent.FromValue(e));
             }

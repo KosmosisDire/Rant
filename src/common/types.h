@@ -175,7 +175,7 @@ typedef enum {
     RANT_E_BAD_ADDRESS,        /* a configured address could not be parsed, refused at open */
     RANT_E_BAD_NAME,           /* a create's name is empty, too long or carries '@': .topic_name */
     RANT_E_STATE,              /* a create refused in this state: from a callback, or the reserve is full */
-    RANT_E_BAD_SCHEMA,         /* rant_node_schema refused a text or wire: .schema_detail says why and where.
+    RANT_E_BAD_SCHEMA,         /* rant_node_schema refused a text or wire: .detail says why and where.
                                   Or a create's schema failed to parse: .topic_name */
     RANT_E_BAD_DOMAIN,         /* RANT_DOMAIN is not a number from 0 to 65535, refused at open */
     RANT_E_BAD_PREFIX,         /* RANT_PREFIX or opts.prefix holds '@', starts or ends with '/' or
@@ -202,7 +202,8 @@ typedef struct {
     uint64_t   identity;       /* NAME_COLLISION: the colliding identity */
     uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
     uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from it */
-    const char *schema_detail; /* SCHEMA_MISMATCH: one line saying what was incompatible, or NULL */
+    const char *detail;        /* SCHEMA_MISMATCH and BAD_SCHEMA: one line saying what
+                                  went wrong and where, or NULL */
     const char *peer_name;     /* the peer's node name, NULL when unknown. Prefer it over .peer */
 } RantEvent;
 typedef void (*RantEventFn)(const RantEvent *ev);

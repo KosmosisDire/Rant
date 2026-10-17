@@ -71,8 +71,8 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
         p=i_rant_event_append_str(p,end,"schema-mismatch "); p=i_rant_event_append_topic(p,end,ev);
         p=i_rant_event_append_str(p,end," peer "); p=i_rant_event_append_peer(p,end,ev);
         p=i_rant_event_append_str(p,end,": ");
-        p=i_rant_event_append_str(p,end, ev->schema_detail && ev->schema_detail[0]
-                                  ? ev->schema_detail : "incompatible schemas, refused"); break;
+        p=i_rant_event_append_str(p,end, ev->detail && ev->detail[0]
+                                  ? ev->detail : "incompatible schemas, refused"); break;
     case RANT_E_INTEREST_OVERFLOW:
         p=i_rant_event_append_str(p,end,"interest-overflow peer "); p=i_rant_event_append_peer(p,end,ev);
         p=i_rant_event_append_str(p,end,": "); p=i_rant_event_append_u64(p,end,ev->lost_count);
@@ -139,8 +139,8 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
         p=i_rant_event_append_str(p,end,"state "); p=i_rant_event_append_topic(p,end,ev);
         p=i_rant_event_append_str(p,end,": create refused from a callback or the topic reserve is full"); break;
     case RANT_E_BAD_SCHEMA:
-        if (ev->schema_detail){     /* a refused text or wire, see rant_node_schema */
-            p=i_rant_event_append_str(p,end,"bad-schema: "); p=i_rant_event_append_str(p,end,ev->schema_detail); break;
+        if (ev->detail){     /* a refused text or wire, see rant_node_schema */
+            p=i_rant_event_append_str(p,end,"bad-schema: "); p=i_rant_event_append_str(p,end,ev->detail); break;
         }
         p=i_rant_event_append_str(p,end,"bad-schema "); p=i_rant_event_append_topic(p,end,ev);
         p=i_rant_event_append_str(p,end,": the schema failed to parse, create refused"); break;
@@ -480,7 +480,7 @@ static void i_rant_node_core_peer_schema_clear(i_RantNodeCore *c, uint32_t peer)
     }
 }
 
-/* why a schema gate refused, feeding RantEvent.schema_detail */
+/* why a schema gate refused, feeding RantEvent.detail */
 
 #ifndef RANT_NO_DIAG
 static void i_rant_node_core_schema_why_set(i_RantNodeCore *c, uint32_t peer, uint16_t topic_index,

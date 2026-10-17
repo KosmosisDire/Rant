@@ -141,7 +141,7 @@ queue rings' below.
 
 Events park on one node ring (`RantNode.event_q`, allocated by `rant_node_set_event_queue`,
 `silent` so an eviction counts without emitting) as `I_RANT_REC_EVENT` records: the
-`RantEvent` copy, then `topic_name`, `peer_name` and `schema_detail` as length, presence and
+`RantEvent` copy, then `topic_name`, `peer_name` and `detail` as length, presence and
 NUL terminated bytes, since all three are views that die with a retire or a peer drop. The
 patterns layer's `sys_on_event` still runs inline at emit, state applies at receipt. The
 group walk treats the ring as a handle less member of the event queue.
@@ -216,7 +216,7 @@ the app's `user_data`. Text is built on demand by
 error per node, and a process global slot keeps the failure of a `rant_node_open` that
 returned no handle. That failure also fires the `on_event` passed to open.
 
-`RantEvent.schema_detail` says exactly what was incompatible on a schema mismatch,
+`RantEvent.detail` says exactly what was incompatible on a schema mismatch,
 recorded per (peer, topic, direction) at detail intake. `RantEvent.peer_name` is resolved
 once at the single emit point so `rant_event_str` never prints a bare id. `RantEvent` is
 returned by value, so every binding mirror must match it exactly (spec/bindings.md).

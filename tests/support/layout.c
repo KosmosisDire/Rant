@@ -77,7 +77,7 @@ int main(int argc, char **argv){
     FIELD(RantEvent, identity)
     FIELD(RantEvent, publish_topics)
     FIELD(RantEvent, receive_topics)
-    FIELD(RantEvent, schema_detail)
+    FIELD(RantEvent, detail)
     FIELD(RantEvent, peer_name)
     SIZE(RantFunctionOpts)
     FIELD(RantFunctionOpts, backpressure_wait_us)

@@ -221,7 +221,7 @@ class Event:
     identity: int
     publish_topics: int
     receive_topics: int
-    schema_detail: str | None
+    detail: str | None
     @property
     def is_error(self) -> bool: ...
 

@@ -295,7 +295,7 @@ void i_rant_transport_fire_event(i_RantTransportState *st, RantErrorKind error, 
     case RANT_E_NAME_COLLISION:     ev.identity = first; break;
     case RANT_E_SCHEMA_MISMATCH:    /* first is the refused direction, 1 = their publisher */
         if (st->cfg.schema_why)
-            ev.schema_detail = st->cfg.schema_why(st->cfg.user, peer, topic_index, (int)first);
+            ev.detail = st->cfg.schema_why(st->cfg.user, peer, topic_index, (int)first);
         break;
     case RANT_E_INTEREST_OVERFLOW:  ev.lost_count = count; topic_scoped = 0; break;
     case RANT_E_META_TRUNCATED_INTEREST: topic_scoped = 0; break;
