@@ -43,6 +43,30 @@ export interface TunnelOptions {
     onEvent?: (e: TunnelEvent) => void;
 }
 
+/* A bridge on the network, as a bridge lists them. */
+export interface FoundBridge { name: string; url: string; version: string; self: boolean }
+
+/* The bridges on a network, as the bridge at url lists them. Every bridge answers the name
+ * rant-bridges.local, so the default reaches whichever answers first. No passphrase needed. */
+export async function findBridges(url = "ws://rant-bridges.local:7480", timeoutMs = 3000): Promise<FoundBridge[]> {
+    const ws = new WebSocket(url);
+    try {
+        return await new Promise<FoundBridge[]>((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error(`no bridge answered at ${url}`)), timeoutMs);
+            ws.onerror = () => { clearTimeout(timer); reject(new Error(`cannot reach a bridge at ${url}`)); };
+            ws.onopen = () => ws.send(JSON.stringify({ op: "bridges", seq: 1 }));
+            ws.onmessage = (m) => {
+                clearTimeout(timer);
+                const r = JSON.parse(String(m.data));
+                if (r.ok) resolve(r.bridges ?? []);
+                else reject(new Error(`the bridge at ${url} lists no bridges, update it to 0.0.7 or later`));
+            };
+        });
+    } finally {
+        ws.close();
+    }
+}
+
 /* What crossed the tunnel. Packets are datagrams, batches the messages that carried them. */
 export interface TunnelStats {
     sentPackets: number; sentBatches: number; sentBytes: number;

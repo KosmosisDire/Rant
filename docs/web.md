@@ -81,6 +81,11 @@ const rantNet = await UdpNet.create();
 `onConnectionChange(h)` watches it, `stats` counts what crossed, and `shutdown()` ends the
 session. A dropped connection reconnects on its own and keeps every socket.
 
+`findBridges(url?)` from `rant-middleware/tunnel` lists the bridges on the network as
+`[{ name, url, version, self }]`. Every bridge answers the name `rant-bridges.local` over
+mDNS and lists the others it hears, so the default `ws://rant-bridges.local:7480` reaches
+one, with no passphrase.
+
 | `UdpNet.create(opts)` option | Meaning |
 |---|---|
 | `spares` | Sockets bound ahead, one per node opened at once (2). |

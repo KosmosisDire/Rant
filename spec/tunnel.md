@@ -37,6 +37,22 @@ Text messages are JSON. A request carries `op` and a client chosen `seq`, and it
 multicast group only on a socket bound to any address (POSIX), which the net object's
 `loopbackGroupBind` passes on. Absent means false.
 
+## Finding bridges
+
+Every bridge with `advertise` on (the default) speaks mDNS on the interfaces it listens on:
+
+- It advertises `<host>._rant-bridge._tcp.local` through DNS-SD, with SRV to its port and TXT
+  `v=<version>` and `name=<host>`. A second bridge on one host adds its port to the name.
+- It answers the shared name `rant-bridges.local` with its own address, so a client reaches
+  whichever bridge answers first, with no bridge chosen to serve the list.
+- It browses for the others at start and every minute, keeps those heard in the last three
+  minutes, and says goodbye when it stops.
+
+`{"op":"bridges","seq":1}`, before or after `open` and with no passphrase, answers
+`{"bridges":[{"name","url","version","self"}]}`: this bridge once per interface, then the
+others. The list is no secret, since mDNS tells anyone on the network. `findBridges(url)`
+beside `TunnelNet` asks it, `ws://rant-bridges.local:7480` by default.
+
 ## Sockets
 
 Sockets are numbered by the client, 1 to 65535, at most 16 at once.
