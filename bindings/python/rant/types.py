@@ -1,0 +1,367 @@
+"""The standard types of docs/stdtypes.md as Python classes: a field annotated with one
+spells as that type on the wire, so the same schema hashes the same in every language."""
+
+import dataclasses as _dataclasses
+import enum as _pyenum
+from . import _native as _c
+from . import _StdAlias, _std, _String, u8, u32, i32, i64, f32, f64, string, enum
+
+Timestamp = _StdAlias("Timestamp", i64)     # microseconds since the Unix epoch, UTC
+Duration  = _StdAlias("Duration", i64)      # microseconds
+Uuid      = _StdAlias("Uuid", u8[16])       # RFC 4122 byte order
+Matrix3x3 = _StdAlias("Matrix3x3", f32[9])  # row-major
+Matrix4x4 = _StdAlias("Matrix4x4", f32[16])
+Uri       = _StdAlias("Uri", _String(256))
+
+
+@_std("Float2")
+class Float2:
+    x: f32 = 0.0
+    y: f32 = 0.0
+
+
+@_std("Float3")
+class Float3:
+    x: f32 = 0.0
+    y: f32 = 0.0
+    z: f32 = 0.0
+
+
+@_std("Float4")
+class Float4:
+    x: f32 = 0.0
+    y: f32 = 0.0
+    z: f32 = 0.0
+    w: f32 = 0.0
+
+
+@_std("Double2")
+class Double2:
+    x: f64 = 0.0
+    y: f64 = 0.0
+
+
+@_std("Double3")
+class Double3:
+    x: f64 = 0.0
+    y: f64 = 0.0
+    z: f64 = 0.0
+
+
+@_std("Double4")
+class Double4:
+    x: f64 = 0.0
+    y: f64 = 0.0
+    z: f64 = 0.0
+    w: f64 = 0.0
+
+
+@_std("Int2")
+class Int2:
+    x: i32 = 0
+    y: i32 = 0
+
+
+@_std("Int3")
+class Int3:
+    x: i32 = 0
+    y: i32 = 0
+    z: i32 = 0
+
+
+@_std("Int4")
+class Int4:
+    x: i32 = 0
+    y: i32 = 0
+    z: i32 = 0
+    w: i32 = 0
+
+
+@_std("Quaternion")
+class Quaternion:
+    x: f64 = 0.0
+    y: f64 = 0.0
+    z: f64 = 0.0
+    w: f64 = 1.0     # identity rotation
+
+
+@_std("Color")
+class Color:
+    r: u8 = 0
+    g: u8 = 0
+    b: u8 = 0
+    a: u8 = 255
+
+
+@_std("Pose")
+class Pose:
+    position: Double3 = _dataclasses.field(default_factory=Double3)
+    orientation: Quaternion = _dataclasses.field(default_factory=Quaternion)
+
+
+@_std("Pose2D")
+class Pose2D:
+    position: Double2 = _dataclasses.field(default_factory=Double2)
+    angle: f64 = 0.0    # radians, from +x toward +y
+
+
+# parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned.
+@_std("Transform")
+class Transform:
+    pose: Pose = _dataclasses.field(default_factory=Pose)
+    parent: string(30) = ""
+
+
+@_std("Transform2D")
+class Transform2D:
+    pose: Pose2D = _dataclasses.field(default_factory=Pose2D)
+    parent: string(30) = ""
+
+
+@_std("Twist")
+class Twist:
+    linear: Double3 = _dataclasses.field(default_factory=Double3)    # m/s
+    angular: Double3 = _dataclasses.field(default_factory=Double3)   # rad/s
+
+
+@_std("Twist2D")
+class Twist2D:
+    linear: Double2 = _dataclasses.field(default_factory=Double2)    # m/s
+    angular: f64 = 0.0                                                # rad/s, from +x toward +y
+
+
+@_std("Wrench")
+class Wrench:
+    force: Double3 = _dataclasses.field(default_factory=Double3)     # N
+    torque: Double3 = _dataclasses.field(default_factory=Double3)    # N m about the frame origin
+
+
+@_std("Wrench2D")
+class Wrench2D:
+    force: Double2 = _dataclasses.field(default_factory=Double2)     # N
+    torque: f64 = 0.0                                                 # N m, from +x toward +y
+
+
+@_std("GeoPoint")
+class GeoPoint:
+    lat: f64 = 0.0      # degrees
+    lon: f64 = 0.0      # degrees
+    alt: f64 = 0.0      # meters
+
+
+# The shapes, in the units of their frame.
+
+@_std("AlignedBox")
+class AlignedBox:
+    min: Double3 = _dataclasses.field(default_factory=Double3)       # min <= max on every axis
+    max: Double3 = _dataclasses.field(default_factory=Double3)
+
+
+@_std("AlignedBox2D")
+class AlignedBox2D:
+    min: Double2 = _dataclasses.field(default_factory=Double2)
+    max: Double2 = _dataclasses.field(default_factory=Double2)
+
+
+@_std("OrientedBox")
+class OrientedBox:
+    pose: Pose = _dataclasses.field(default_factory=Pose)
+    size: Double3 = _dataclasses.field(default_factory=Double3)      # full edge lengths
+
+
+@_std("OrientedBox2D")
+class OrientedBox2D:
+    pose: Pose2D = _dataclasses.field(default_factory=Pose2D)
+    size: Double2 = _dataclasses.field(default_factory=Double2)
+
+
+@_std("Plane")
+class Plane:
+    position: Double3 = _dataclasses.field(default_factory=Double3)  # any point on the plane
+    normal: Double3 = _dataclasses.field(default_factory=Double3)    # unit length
+
+
+@_std("Segment")
+class Segment:
+    a: Double3 = _dataclasses.field(default_factory=Double3)
+    b: Double3 = _dataclasses.field(default_factory=Double3)
+
+
+@_std("Sphere")
+class Sphere:
+    center: Double3 = _dataclasses.field(default_factory=Double3)
+    radius: f64 = 0.0
+
+
+@_std("Capsule")
+class Capsule:
+    axis: Segment = _dataclasses.field(default_factory=Segment)
+    radius: f64 = 0.0
+
+
+@_std("Cylinder")
+class Cylinder:
+    axis: Segment = _dataclasses.field(default_factory=Segment)      # the cap centers
+    radius: f64 = 0.0
+
+
+@_std("Cone")
+class Cone:
+    base: Double3 = _dataclasses.field(default_factory=Double3)
+    tip: Double3 = _dataclasses.field(default_factory=Double3)
+    radius: f64 = 0.0                                                 # at the base
+
+
+@_std("Polygon")
+class Polygon:
+    points: list[Double3] = _dataclasses.field(default_factory=list)  # closed, planar
+
+
+@_std("Plane2D")
+class Plane2D:
+    position: Double2 = _dataclasses.field(default_factory=Double2)  # any point on the line
+    normal: Double2 = _dataclasses.field(default_factory=Double2)    # unit length
+
+
+@_std("Segment2D")
+class Segment2D:
+    a: Double2 = _dataclasses.field(default_factory=Double2)
+    b: Double2 = _dataclasses.field(default_factory=Double2)
+
+
+@_std("Circle")
+class Circle:
+    center: Double2 = _dataclasses.field(default_factory=Double2)
+    radius: f64 = 0.0
+
+
+@_std("Capsule2D")
+class Capsule2D:
+    axis: Segment2D = _dataclasses.field(default_factory=Segment2D)
+    radius: f64 = 0.0
+
+
+@_std("Polygon2D")
+class Polygon2D:
+    points: list[Double2] = _dataclasses.field(default_factory=list)  # closed
+
+
+@_std("Empty")
+class Empty:
+    pass
+
+
+# The video family. Each member value IS the wire value, so the names and numbers
+# below are the same in every binding.
+
+class ImageFormat(_pyenum.IntEnum):
+    """How an Image's data is laid out. A value >= 16 is a compressed container, so
+    `data` holds the file bytes rather than pixels."""
+    Mono8 = 0
+    Mono16 = 1
+    Rgb8 = 2
+    Rgba8 = 3
+    Bgr8 = 4
+    Yuyv = 5
+    Nv12 = 6
+    Monof32 = 7
+    Jpeg = 16
+    Png = 17
+
+
+class VideoCodec(_pyenum.IntEnum):
+    """The codec a VideoFrame's data is encoded with. Unknown is the unstated
+    codec hint (an ExternalVideoStream that does not state one)."""
+    Unknown = 0
+    Mjpeg = 1
+    H264 = 2
+    H265 = 3
+    Av1 = 4
+
+
+class VideoStreamKind(_pyenum.IntEnum):
+    """The protocol an ExternalVideoStream's url speaks."""
+    Rtsp = 0
+    WebrtcWhep = 1
+    Hls = 2
+    Srt = 3
+    Rtp = 4
+    HttpMjpeg = 5
+    Other = 15
+
+
+@_std("Image")
+class Image:
+    width: u32 = 0
+    height: u32 = 0
+    stride: u32 = 0                             # bytes per row, 0 = tightly packed
+    format: enum(ImageFormat, u8) = ImageFormat.Mono8
+    data: list[u8] = b""                        # pixels, or the file bytes if compressed
+
+
+@_std("VideoFrame")
+class VideoFrame:
+    codec: enum(VideoCodec, u8) = VideoCodec.Unknown
+    width: u32 = 0                              # the coded size, 0 = unstated
+    height: u32 = 0
+    keyframe: bool = False
+    pts: Timestamp = 0                          # presentation time, the Timestamp clock
+    data: list[u8] = b""
+
+
+# Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. codec,
+# width and height are hints for pickers, the stream stays authoritative once connected.
+@_std("ExternalVideoStream")
+class ExternalVideoStream:
+    kind: enum(VideoStreamKind, u8) = VideoStreamKind.Rtsp
+    codec: enum(VideoCodec, u8) = VideoCodec.Unknown
+    width: u32 = 0
+    height: u32 = 0
+    url: Uri = ""
+    name: string(32) = ""
+
+
+class DistortionModel(_pyenum.IntEnum):
+    """A lens distortion model. NoDistortion is an ideal pinhole."""
+    NoDistortion = 0
+    BrownConrady = 1
+    Fisheye = 2
+    Rational = 3
+
+
+# The pinhole model and its lens distortion. coeffs is zero filled past the model's count.
+@_std("CameraIntrinsics")
+class CameraIntrinsics:
+    width: u32 = 0                              # the resolution these numbers are valid for
+    height: u32 = 0
+    fx: f64 = 0.0
+    fy: f64 = 0.0
+    cx: f64 = 0.0
+    cy: f64 = 0.0
+    model: enum(DistortionModel, u8) = DistortionModel.NoDistortion
+    coeffs: f64[8] = _dataclasses.field(default_factory=lambda: [0.0] * 8)
+
+
+# SI: radians or meters, per second, and newtons or newton meters. velocity and effort
+# may be empty. The names ride a JointNames variable, not every sample.
+@_std("JointState")
+class JointState:
+    position: list[f64] = _dataclasses.field(default_factory=list)
+    velocity: list[f64] = _dataclasses.field(default_factory=list)
+    effort: list[f64] = _dataclasses.field(default_factory=list)
+
+
+# Published once as a variable. The order every JointState array follows.
+@_std("JointNames")
+class JointNames:
+    name: list[string(32)] = _dataclasses.field(default_factory=list)
+
+
+def now():
+    """The wall clock in Timestamp units, microseconds since the Unix epoch UTC, the clock a
+        message's written_us uses."""
+    return int(_c.load().rant_timestamp_now())
+
+
+# the vocabulary only built the roster, so it stays on rant. and not on rant.types.
+del _StdAlias, _std, _String, u8, u32, i32, i64, f32, f64, string, enum
