@@ -111,6 +111,7 @@ rant_c_test(unit discovery)
 rant_c_test(unit shm SHM_ONLY)
 rant_c_test(unit schema)
 rant_c_test(unit detail)
+rant_c_test(unit tunnel)
 
 # Real nodes on loopback.
 rant_c_test(e2e stream)

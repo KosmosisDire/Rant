@@ -67,6 +67,7 @@ program in this order.
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
+| `unit.tunnel` | hash, handshake, frame, json, batch |
 | `e2e.stream` | stream, scale, named, collision |
 | `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, prefix |
 | `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema |
