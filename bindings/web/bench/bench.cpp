@@ -308,6 +308,7 @@ template <class B> int run(const Args& a)
         b->node.poll(std::chrono::milliseconds(60000));
         int ms = b->step();
         if (ms >= 0) rant_web_wake(ms);
+        else b->node.close();     /* a finished bench leaves the mesh, not a node no one polls */
     }, b);
     return 0;
 #else
