@@ -41,7 +41,8 @@ cmake --build build --config Release --target packages
 `nuget_package` runs `dotnet pack` for `dist/Rant.<version>.nupkg`, and `python_wheel`
 runs `pip wheel` for this platform's wheel. Each bundles the native libraries in
 `dist/native/`, so a local package covers this machine and the release workflow covers
-every platform. The version is the `VERSION` file at the root.
+every platform. The Unity package gets its WebGL files once the `web` preset has built.
+The version is the `VERSION` file at the root.
 
 `python_install` builds the wheel and reinstalls it into the Python found first on PATH,
 forced since a local build keeps the released version number. It is not part of

@@ -149,10 +149,8 @@ jobs:
       - name: NuGet package
         run: dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
 
-      - name: Unity package
-        run: cmake -P tools/unity.cmake
-
-      # The web package carries the binding's wasm, so it builds with Emscripten.
+      # The web package carries the binding's wasm, so it builds with Emscripten. It comes before
+      # the Unity package, whose WebGL plugin takes the binding's tunnel script.
       - name: Web package
         run: |
           sudo apt-get update
@@ -163,6 +161,9 @@ jobs:
           export EMSDK="$HOME/emsdk"
           cmake --preset web
           cmake --build --preset web --target web_package
+
+      - name: Unity package
+        run: cmake -P tools/unity.cmake
 
       - name: Stage the assets
         run: |

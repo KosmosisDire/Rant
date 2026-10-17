@@ -1,11 +1,12 @@
 # Rant for Unity
 
 Rant in Unity: peer discovery + reliable realtime UDP
-pub/sub with typed messages. Desktop standalone (Windows, Linux x86_64, macOS) and the Editor.
+pub/sub with typed messages. Desktop standalone (Windows, Linux x86_64, macOS), the Editor,
+and WebGL through a Rant bridge (docs/unity.md).
 
 This is the **same `Rant.cs`** as the NuGet wrapper (one source, in `bindings/csharp/Rant.cs`) plus
-a **prebuilt native plugin** per platform. Unity cannot compile the C at build time, so a
-native library is required. The package is assembled into `dist/` by a script, so git
+a **prebuilt native plugin** per desktop platform. A WebGL player compiles the C into its own
+wasm from the package's `Plugins/WebGL`. The package is assembled into `dist/` by a script, so git
 keeps one copy of the code and no binaries.
 
 ## Install
@@ -21,7 +22,8 @@ the release and import it via `Assets > Import Package > Custom Package`.
 ## Building the package locally (maintainers)
 
 `tools/unity.cmake` assembles `dist/com.rant.rant/` and `dist/rant-<version>.unitypackage`
-from `bindings/csharp/Rant.cs`, this folder's `Runtime/` and the libraries in `dist/native/`. It
+from `bindings/csharp/Rant.cs`, this folder's `Runtime/`, the libraries in `dist/native/` and,
+for WebGL, the web build in `bindings/web/dist/` (`cmake --preset web`). It
 writes `package.json` with the version from `VERSION` and a `.meta` for every entry, each
 plugin enabled for exactly its platform. Nothing generated lives in this folder.
 

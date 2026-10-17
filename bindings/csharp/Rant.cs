@@ -605,7 +605,12 @@ namespace Rant
 
     internal static class Native
     {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        // a WebGL player compiles the C into its own wasm, and its JavaScript gives the sockets
+        internal const string LIB = "__Internal";
+#else
         internal const string LIB = "rant";
+#endif
         private const CallingConvention CC = CallingConvention.Cdecl;
 
         [DllImport(LIB, CallingConvention = CC)]
@@ -2997,8 +3002,17 @@ namespace Rant
             if (_queue == null)
                 throw new InvalidOperationException("Dispatch() needs Threading.Dispatch, this node is " + Threading);
             if (_pumpInDispatch && timeoutMs == 0) Poll(0);
-            return _queue.Dispatch(maxCallbacks, timeoutMs);
+            int n = _queue.Dispatch(maxCallbacks, timeoutMs);
+            if (_closeAfterDispatch is bool bye)
+            {
+                _closeAfterDispatch = null;
+                Close(bye);
+            }
+            return n;
         }
+
+        // a close asked for inside a callback where no thread can wait for it to end (WebGL)
+        private bool? _closeAfterDispatch;
 
         // ---- handles ----------------------------------------------------------------
 
@@ -3312,8 +3326,12 @@ namespace Rant
         {
             if (Gate.IsRunning)
             {
+#if UNITY_WEBGL && !UNITY_EDITOR
+                _closeAfterDispatch = sendBye;
+#else
                 var t = new Thread(() => Close(sendBye)) { IsBackground = true, Name = "rant close" };
                 t.Start();
+#endif
                 return true;
             }
             lock (_closeLock)

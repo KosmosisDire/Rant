@@ -36,6 +36,10 @@ namespace Rant
         [SerializeField] private bool logEvents = true;
         [Tooltip("Play mode: survive scene loads (DontDestroyOnLoad).")]
         [SerializeField] private bool persistAcrossScenes = true;
+        [Tooltip("WebGL: the Rant bridge whose sockets the player's node uses, such as ws://192.168.1.20:7480. A page cannot open UDP sockets of its own.")]
+        [SerializeField] private string bridgeUrl = "";
+        [Tooltip("WebGL: the bridge's passphrase, empty when it asks for none.")]
+        [SerializeField] private string bridgePassphrase = "";
 
         private static RantNodeUnity s_main;
 
@@ -46,6 +50,11 @@ namespace Rant
         private readonly Dictionary<string, SharedEntry> _shared = new Dictionary<string, SharedEntry>();
         private string _openName; private int _openDomain; private int _openMax; private string _openIf;
         private string _openPrefix;
+        // WebGL: the tunnel for the bridge settings in _tunnelFor, up or on its way, and when a
+        // failed one is tried again
+        private string _tunnelFor;
+        private bool _tunnelUp, _tunnelOpening, _tunnelWarned;
+        private float _tunnelRetryAt = -1;
 
         /// <summary>The scene's RantNodeUnity (found lazily), or null if none exists.</summary>
         public static RantNodeUnity Main
@@ -180,7 +189,7 @@ namespace Rant
             if (_node == null)
                 throw new InvalidOperationException(
                     "Rant node is not open: '" + key + "' cannot be created (component disabled, "
-                    + "Run In Edit Mode off, or open failed)");
+                    + "Run In Edit Mode off, open failed, or a WebGL player's bridge not reached yet)");
             var e = new SharedEntry { Make = n => make(n) };
             e.Handle = make(_node);
             _shared.Add(slot, e);
@@ -275,9 +284,50 @@ namespace Rant
                 && (Application.isPlaying || runInEditMode);
             bool changed = _node != null
                 && (_openName != nodeName || _openDomain != domain || _openPrefix != prefix
-                    || _openMax != maxTopics || _openIf != multicastInterface);
+                    || _openMax != maxTopics || _openIf != multicastInterface
+                    || (RantWebGL.Needed && _tunnelFor != bridgeUrl + "\n" + bridgePassphrase));
             if (_node != null && (!shouldRun || changed)) CloseNativeNode();
-            if (_node == null && shouldRun) OpenNativeNode();
+            if (_node == null && shouldRun && TunnelReady()) OpenNativeNode();
+        }
+
+        // In a WebGL player a node opens on the bridge's sockets, so the tunnel comes first. Its
+        // callback marks the config dirty, and the next frame opens the node.
+        private bool TunnelReady()
+        {
+            if (!RantWebGL.Needed) return true;
+            string want = bridgeUrl + "\n" + bridgePassphrase;
+            if (_tunnelFor != want)
+            {
+                if (_tunnelUp || _tunnelOpening) RantWebGL.Disconnect();
+                _tunnelFor = want;
+                _tunnelUp = _tunnelOpening = _tunnelWarned = false;
+            }
+            if (_tunnelUp) return true;
+            if (_tunnelOpening) return false;
+            if (string.IsNullOrEmpty(bridgeUrl))
+            {
+                Debug.LogError("[Rant] a WebGL player reaches the mesh through a bridge: set Bridge Url", this);
+                return false;
+            }
+            _tunnelOpening = true;
+            _tunnelRetryAt = -1;
+            RantWebGL.Connect(bridgeUrl, bridgePassphrase, nodeName, (why) =>
+            {
+                if (_tunnelFor != want) return;
+                _tunnelOpening = false;
+                _tunnelUp = why == null;
+                if (_tunnelUp)
+                {
+                    _tunnelWarned = false;
+                    _configDirty = true;
+                    return;
+                }
+                // the first failure is logged, and the player keeps trying quietly
+                if (!_tunnelWarned) Debug.LogError("[Rant] the bridge at " + bridgeUrl + ": " + why, this);
+                _tunnelWarned = true;
+                _tunnelRetryAt = Time.realtimeSinceStartup + 2f;
+            });
+            return false;
         }
 
         private void OpenNativeNode()
@@ -329,7 +379,7 @@ namespace Rant
 
         private void Pump()
         {
-            if (_configDirty) Reconcile();
+            if (_configDirty || (_tunnelRetryAt >= 0 && Time.realtimeSinceStartup >= _tunnelRetryAt)) Reconcile();
             if (_node == null) return;
             _node.Dispatch(Mathf.Max(dispatchBudget, 0));   // every parked callback, up to the budget
             if ((++_frame & 0xFF) == 0)

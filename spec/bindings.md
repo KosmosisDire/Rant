@@ -265,8 +265,14 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   registers a MonoBehaviour whose class name matches its file name, and fails silently
   otherwise. Pattern: open in `Threading.Dispatch` and call `Dispatch()` per frame, which
   runs every callback on the frame. OnDisable closes and a beforeAssemblyReload backstop
-  stops the service thread. The Unity path has never run in
-  a real editor here.
+  stops the service thread. A WebGL player has no native library: the package's
+  `Runtime/Plugins/WebGL/` holds `rant_webgl.c` (the library and `bindings/web/platform.c` as
+  one translation unit with the web defines), `rant_web.jslib`, `rant_unity.jslib` (the
+  connect behind `RantWebGL`) and `rant_tunnel.jspre` (the binding's `TunnelNet` with its module
+  syntax taken out), so the web package builds first. `Rant.cs` binds `__Internal` there,
+  and a close inside a callback waits for the end of `Dispatch` since no thread can. The
+  component opens the tunnel before the node. The Unity path has never run in a real editor
+  here: the WebGL files are checked by compiling them with a stand in player under Node.js.
 
 ## Python
 
