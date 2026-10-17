@@ -15,8 +15,11 @@ extern "C" {
 typedef intptr_t i_RantSock;
 #define RANT_SOCK_BAD ((i_RantSock)-1)
 
-/* Mirrors struct pollfd without the OS header. */
-#define RANT_POLLIN 0x01
+/* Mirrors struct pollfd without the OS header. ERR is hang up or error, reported whatever
+ * was asked for. */
+#define RANT_POLLIN  0x01
+#define RANT_POLLOUT 0x04
+#define RANT_POLLERR 0x08
 typedef struct { i_RantSock fd; short events; short revents; } i_RantPollfd;
 
 /* Process wide net init and teardown. The OS refcounts matched calls, so pairs nest safely. */
@@ -85,6 +88,16 @@ int  i_rant_plat_would_block(void);
 int  i_rant_plat_poll(i_RantPollfd *fds, int n, int timeout_ms);
 /* The OS's last socket error on the calling thread, for diagnostics. Keeps no state. */
 int  i_rant_plat_last_socket_error(void);
+
+#ifdef RANT_TUNNEL
+/* TCP, for the tunnel to a bridge. connect resolves host, a name or dotted IPv4, and gives a
+ * nonblocking socket with TCP_NODELAY, or RANT_SOCK_BAD past timeout_ms. The name lookup
+ * itself is the OS's and may take longer. */
+i_RantSock i_rant_plat_tcp_connect(const char *host, uint16_t port, int timeout_ms);
+/* Bytes moved, or negative on error or would block. recv returns 0 once the peer closed. */
+int        i_rant_plat_tcp_send(i_RantSock s, const void *buf, size_t len);
+int        i_rant_plat_tcp_recv(i_RantSock s, void *buf, size_t cap);
+#endif /* RANT_TUNNEL */
 
 /* address helpers, a naddr is network byte order */
 uint32_t i_rant_plat_parse_ip(const char *dotted);            /* "1.2.3.4" to naddr */

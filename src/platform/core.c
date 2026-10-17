@@ -16,6 +16,7 @@
 #include "core.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #ifdef _WIN32
   #ifndef WIN32_LEAN_AND_MEAN
@@ -64,7 +65,10 @@
   #endif
   #include <fcntl.h>
   #include <errno.h>
-  #include <stdio.h>
+  #ifdef RANT_TUNNEL
+    #include <netdb.h>           /* getaddrinfo */
+    #include <netinet/tcp.h>     /* TCP_NODELAY */
+  #endif
   #include <stdlib.h>           /* arc4random_buf */
   #ifdef RANT_PROC_STATS
     #if defined(ESP_PLATFORM)
@@ -517,7 +521,8 @@ int i_rant_plat_poll(i_RantPollfd *fds, int n, int timeout_ms){
     memset(p, 0, sizeof p);
     for (i = 0; i < n; i++){
         p[i].fd = RANT__FD(fds[i].fd);
-        p[i].events = (short)((fds[i].events & RANT_POLLIN) ? POLLIN : 0);
+        p[i].events = (short)(((fds[i].events & RANT_POLLIN) ? POLLIN : 0)
+                            | ((fds[i].events & RANT_POLLOUT) ? POLLOUT : 0));
     }
 #ifdef _WIN32
     r = WSAPoll(p, (ULONG)n, timeout_ms);
@@ -525,9 +530,79 @@ int i_rant_plat_poll(i_RantPollfd *fds, int n, int timeout_ms){
     r = poll(p, (nfds_t)n, timeout_ms);
 #endif
     for (i = 0; i < n; i++)
-        fds[i].revents = (short)((p[i].revents & POLLIN) ? RANT_POLLIN : 0);
+        fds[i].revents = (short)(((p[i].revents & POLLIN) ? RANT_POLLIN : 0)
+                               | ((p[i].revents & POLLOUT) ? RANT_POLLOUT : 0)
+                               | ((p[i].revents & (POLLERR | POLLHUP)) ? RANT_POLLERR : 0));
     return r;
 }
+
+#ifdef RANT_TUNNEL
+/* Waits for a nonblocking connect, then reads its outcome. */
+static int i_rant_plat_connected(i_RantSock s, int timeout_ms){
+    int err = 0; i_RantSocklen len = sizeof err;
+#ifdef _WIN32
+    /* select, since WSAPoll misses a failed connect on older Windows */
+    fd_set w, x; struct timeval tv;
+    FD_ZERO(&w); FD_ZERO(&x); FD_SET((SOCKET)s, &w); FD_SET((SOCKET)s, &x);
+    tv.tv_sec = timeout_ms / 1000; tv.tv_usec = (timeout_ms % 1000) * 1000;
+    if (select(0, NULL, &w, &x, &tv) <= 0 || FD_ISSET((SOCKET)s, &x)) return 0;
+#else
+    struct pollfd p;
+    p.fd = (int)s; p.events = POLLOUT; p.revents = 0;
+    if (poll(&p, 1, timeout_ms) <= 0) return 0;
+#endif
+    if (getsockopt(RANT__FD(s), SOL_SOCKET, SO_ERROR, (char*)&err, &len) != 0) return 0;
+    return err == 0;
+}
+
+i_RantSock i_rant_plat_tcp_connect(const char *host, uint16_t port, int timeout_ms){
+    struct addrinfo hints, *res = NULL, *ai;
+    char service[8];
+    i_RantSock s = RANT_SOCK_BAD;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;          /* a bridge listens on IPv4 */
+    hints.ai_socktype = SOCK_STREAM;
+    snprintf(service, sizeof service, "%u", (unsigned)port);
+    if (!host || getaddrinfo(host, service, &hints, &res) != 0) return RANT_SOCK_BAD;
+    for (ai = res; ai && s == RANT_SOCK_BAD; ai = ai->ai_next){
+        int on = 1, r;
+#ifdef _WIN32
+        SOCKET c = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (c == INVALID_SOCKET) continue;
+#else
+        int c = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (c < 0) continue;
+#endif
+        i_rant_plat_set_nonblock((i_RantSock)c);
+        r = connect(c, ai->ai_addr, (i_RantSocklen)ai->ai_addrlen);
+#ifdef _WIN32
+        if (r != 0 && WSAGetLastError() != WSAEWOULDBLOCK){ closesocket(c); continue; }
+#else
+        if (r != 0 && errno != EINPROGRESS){ close(c); continue; }
+#endif
+        if (r != 0 && !i_rant_plat_connected((i_RantSock)c, timeout_ms)){ i_rant_plat_close((i_RantSock)c); continue; }
+        setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char*)&on, sizeof on);
+#ifdef SO_NOSIGPIPE
+        setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, (const char*)&on, sizeof on);
+#endif
+        s = (i_RantSock)c;
+    }
+    freeaddrinfo(res);
+    return s;
+}
+
+int i_rant_plat_tcp_send(i_RantSock s, const void *buf, size_t len){
+#if defined(MSG_NOSIGNAL)
+    return (int)send(RANT__FD(s), (const char*)buf, (int)len, MSG_NOSIGNAL);
+#else
+    return (int)send(RANT__FD(s), (const char*)buf, (int)len, 0);
+#endif
+}
+
+int i_rant_plat_tcp_recv(i_RantSock s, void *buf, size_t cap){
+    return (int)recv(RANT__FD(s), (char*)buf, (int)cap, 0);
+}
+#endif /* RANT_TUNNEL */
 
 /* address helpers */
 uint32_t i_rant_plat_parse_ip(const char *dotted){
