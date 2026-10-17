@@ -4,18 +4,18 @@
 
 import { dotted, naddr, type Interface, type NetObject, type Sink } from "./net.js";
 
-const PROTOCOL = 12;
+const PROTOCOL = 13;
 const UDP = 9;
-const PING = 7;
-const PONG = 8;
+const PING = 7;             /* [u8 7][u32 seq][u32 us][u32 jitter_us][u32 samples][u32 missed] */
+const PONG = 8;             /* [u8 8][u32 seq] */
+const PING_BYTES = 21;
+const PONG_BYTES = 5;
 const RECORD = 14;          /* [u16 sock][4 ip][u16 port][4 via][u16 len] before each datagram */
 const BATCH = 60000;        /* the most one message carries */
 const BACKLOG = 4 << 20;    /* past this a batch is dropped, as a full socket drops datagrams */
 const CONTROL_CHANNEL = 0;
 const TUNNEL_CHANNEL = 1;
-const FRAME_HEADER = 29;    /* a ping's: op, flags, u16, u32, u32, u64, u64, then the text length */
 const REQUEST_MS = 10000;   /* a request the bridge leaves unanswered this long fails */
-const CHUNK_FLAG = 0x80;
 
 export type ConnectionState = "connecting" | "open" | "reconnecting" | "closed";
 export interface Rtt { us: number; jitterUs: number; samples: number; atUs: number }
@@ -388,18 +388,12 @@ class Link {
         this.ws = ws;
         ws.onmessage = (m) => typeof m.data === "string" ? this.text(JSON.parse(m.data)) : this.binary(new Uint8Array(m.data as ArrayBuffer));
         ws.onclose = (e) => this.dropped(ws, e.code ? ` (${e.code}${e.reason ? " " + e.reason : ""})` : "");
-        const r = await this.request({ op: "open", proto: PROTOCOL, tunnel: true, passphrase: this.opts.passphrase,
+        const r = await this.request({ op: "open", proto: PROTOCOL, passphrase: this.opts.passphrase,
                                        name: this.opts.name, resume: this.token || undefined, probe_interval_ms: this.opts.probeIntervalMs })
             .catch((e: Error & { answered?: boolean }) => { if (e.answered) this.refused = e; throw e; });
-        if (!r.tunnel) {
-            /* a bridge before tunnels ignores the ask and opens a node of its own */
-            this.refused = new Error("this bridge is too old to lend sockets, update it to 0.0.5 or later");
-            ws.close();
-            throw this.refused;
-        }
         this.token = r.resume_token;
-        this.interfaces = (r.tunnel?.interfaces ?? []).map((f: { addr: string; mask: string }) => ({ addr: naddr(f.addr), mask: naddr(f.mask) }));
-        this.groupBindsAny = r.tunnel?.group_binds_any === true;
+        this.interfaces = (r.interfaces ?? []).map((f: { addr: string; mask: string }) => ({ addr: naddr(f.addr), mask: naddr(f.mask) }));
+        this.groupBindsAny = r.group_binds_any === true;
         this.backoff = 250;
         if (resuming && !r.resumed) await this.onLost();
         this.setState("open", "websocket");
@@ -460,22 +454,14 @@ class Link {
         else if (b[0] === PING) this.ping(b);
     }
 
-    /* The bridge measures the link with pings and says what it saw. A pong is the ping's header
-     * with the op changed. */
+    /* The bridge measures the link with pings and says in each what it saw. */
     private ping(b: Uint8Array): void {
-        const end = FRAME_HEADER + (b.length > 28 ? b[28] : 0);
-        if (b.length < end) return;
-        const body = end + (b[1] & CHUNK_FLAG ? 10 : 0);
-        if (body < b.length) {
-            try {
-                const s = stats(b.subarray(body));
-                this.conn.rtt = { us: s.us ?? 0, jitterUs: s.jitter_us ?? 0, samples: s.samples ?? 0, atUs: Date.now() * 1000 };
-                this.conn.missed = s.missed ?? 0;
-            } catch { /* stats it cannot read leave the last ones */ }
-        }
-        const pong = b.slice(0, end);
+        if (b.length < PING_BYTES) return;
+        const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+        this.conn.rtt = { us: v.getUint32(5, true), jitterUs: v.getUint32(9, true), samples: v.getUint32(13, true), atUs: Date.now() * 1000 };
+        this.conn.missed = v.getUint32(17, true);
+        const pong = b.slice(0, PONG_BYTES);
         pong[0] = PONG;
-        pong[1] &= ~CHUNK_FLAG;
         const dc = this.channels.get(CONTROL_CHANNEL);
         if (dc && dc.readyState === "open") dc.send(pong);
         else this.ws?.send(pong);
@@ -542,38 +528,3 @@ class Link {
     }
 }
 
-/* A ping's stats: a CBOR map of text keys to numbers, all a pong needs to read. */
-function stats(b: Uint8Array): Record<string, number> {
-    const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
-    let at = 0;
-    const arg = (ai: number): number => {
-        if (ai < 24) return ai;
-        if (ai === 24) return v.getUint8(at++);
-        if (ai === 25) { at += 2; return v.getUint16(at - 2); }
-        if (ai === 26) { at += 4; return v.getUint32(at - 4); }
-        if (ai === 27) { at += 8; return Number(v.getBigUint64(at - 8)); }
-        throw new Error("an indefinite length");
-    };
-    const item = (): string | number => {
-        const head = v.getUint8(at++), major = head >> 5, ai = head & 31;
-        if (major === 0) return arg(ai);
-        if (major === 1) return -1 - arg(ai);
-        if (major === 3) {
-            const n = arg(ai);
-            if (at + n > b.length) throw new Error("a text past the end");
-            at += n;
-            return new TextDecoder().decode(b.subarray(at - n, at));
-        }
-        if (major === 7 && ai === 26) { at += 4; return v.getFloat32(at - 4); }
-        if (major === 7 && ai === 27) { at += 8; return v.getFloat64(at - 8); }
-        throw new Error("an item a ping never carries");
-    };
-    const head = v.getUint8(at++);
-    if (head >> 5 !== 5) throw new Error("not a map");
-    const out: Record<string, number> = {};
-    for (let i = arg(head & 31); i > 0; i--) {
-        const k = item(), x = item();
-        if (typeof k === "string" && typeof x === "number") out[k] = x;
-    }
-    return out;
-}

@@ -3,8 +3,7 @@
 A node that cannot open UDP sockets, Rant in a page, borrows them from a bridge: the bridge
 binds sockets on its host and forwards datagrams both ways, so to the mesh the node is a
 node of that host. The bridge reads none of them. `bindings/web/src/tunnel.ts` (`TunnelNet`)
-is the client. `RANT/bridge-rant` is the server, and this file is the protocol it serves to
-a tunnel session.
+is the client. `RANT/bridge-rant` is the server, and this file is the protocol it serves.
 
 ## Connection
 
@@ -17,22 +16,21 @@ Text messages are JSON. A request carries `op` and a client chosen `seq`, and it
 `{"op":"reply","seq":N,"ok":true,...}` or `{"op":"reply","seq":N,"ok":false,"error":"..."}`.
 
 ```json
-{"op":"open","seq":1,"proto":12,"tunnel":true,"passphrase":"...","name":"page"}
+{"op":"open","seq":1,"proto":13,"passphrase":"...","name":"page"}
 ```
 
 | Key | Meaning |
 |---|---|
-| `proto` | 12. Any other is refused and the socket closed with 4001. |
-| `tunnel` | true, else the bridge opens a node of its own for the session. |
+| `proto` | 13. Any other is refused and the socket closed with 4001. |
 | `passphrase` | Must match the bridge's. A wrong one is refused after 1 s and closed with 4001. |
 | `resume` | The token from an earlier reply, to take that session back. |
 | `name` | The session's name in the bridge's logs. |
 | `probe_interval_ms` | How often the bridge pings. Default 250, minimum 10. |
 
 ```json
-{"op":"reply","seq":1,"ok":true,"proto":12,"webrtc":true,"resumed":false,
+{"op":"reply","seq":1,"ok":true,"proto":13,"webrtc":true,"resumed":false,
  "resume_token":"9f...","grace_ms":10000,
- "tunnel":{"interfaces":[{"addr":"192.168.1.20","mask":"255.255.255.0"}],"group_binds_any":true}}
+ "interfaces":[{"addr":"192.168.1.20","mask":"255.255.255.0"}],"group_binds_any":true}
 ```
 
 `interfaces` are the host's IPv4 interfaces, dotted. `group_binds_any` says the host hears a
@@ -84,21 +82,19 @@ bytes in all.
   each again to the port its node knows, with its options and groups, then binds new
   spares.
 
-PING and PONG are binary messages with a 29 byte header, the frame of the bridge's other
-sessions:
+PING and PONG are binary messages, little endian:
 
 ```
-[u8 op][u8 flags][u16 id][u32 seq][u32 peer][u64 written_us][u64 capture_us][u8 text_len][text]
-[u16 msg][u32 total][u32 offset]     only when flags bit 7 is set
-[payload]
+PING  [u8 7][u32 seq][u32 us][u32 jitter_us][u32 samples][u32 missed]
+PONG  [u8 8][u32 seq]
 ```
 
-A PING is op 7, its payload CBOR link stats `{us, jitter_us, samples, missed}` (the round
-trip the bridge measures, its jitter, and probe intervals gone unanswered). A PONG is op 8:
-the ping's header and text with the op changed, bit 7 cleared and no payload.
+A PING carries what the bridge measures of the link: the last round trip, its jitter, the
+samples so far and the probe intervals gone unanswered. A PONG answers it with its `seq`.
 
 | Close code | Why |
 |---|---|
+| 1009 | A message over the bridge's `max_message_bytes`. |
 | 4001 | The open was refused: wrong protocol or passphrase. |
 | 4003 | `origin not allowed`. |
 | 4008 | `no answer to pings`. |
