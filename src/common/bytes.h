@@ -10,5 +10,7 @@ static inline void i_rant_le_w64(uint8_t *p, uint64_t v){ int i; for (i=0;i<8;i+
 static inline uint16_t i_rant_le_r16(const uint8_t *p){ return (uint16_t)(p[0] | ((uint16_t)p[1]<<8)); }
 static inline uint32_t i_rant_le_r32(const uint8_t *p){ return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24); }
 static inline uint64_t i_rant_le_r64(const uint8_t *p){ uint64_t v=0; int i; for (i=0;i<8;i++) v|=((uint64_t)p[i])<<(8*i); return v; }
+/* The lowercase hex digit of v's low four bits. */
+static inline char i_rant_hex(unsigned v){ return "0123456789abcdef"[v & 15u]; }
 
 #endif /* RANT_BYTES_H */

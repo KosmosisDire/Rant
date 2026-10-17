@@ -104,7 +104,6 @@ void i_rant_sha256(const void *data, size_t len, uint8_t out[32]){
 }
 
 void i_rant_tunnel_proof(const char *passphrase, const char *nonce, char out[65]){
-    static const char digits[] = "0123456789abcdef";
     uint8_t key[64], pad[64], inner[32], mac[32]; size_t kl = passphrase ? strlen(passphrase) : 0; int i;
     memset(key, 0, sizeof key);
     if (kl > 64) i_rant_sha256(passphrase, kl, key);
@@ -113,7 +112,7 @@ void i_rant_tunnel_proof(const char *passphrase, const char *nonce, char out[65]
     i_rant_sha256_two(pad, 64, (const uint8_t*)nonce, nonce ? strlen(nonce) : 0, inner);
     for (i = 0; i < 64; i++) pad[i] = (uint8_t)(key[i] ^ 0x5c);
     i_rant_sha256_two(pad, 64, inner, 32, mac);
-    for (i = 0; i < 32; i++){ out[2*i] = digits[mac[i] >> 4]; out[2*i+1] = digits[mac[i] & 15]; }
+    for (i = 0; i < 32; i++){ out[2*i] = i_rant_hex(mac[i] >> 4); out[2*i+1] = i_rant_hex(mac[i]); }
     out[64] = 0;
 }
 
@@ -372,7 +371,7 @@ int i_rant_json_true(i_RantJson v){
     return v.len == 4 && memcmp(v.p, "true", 4) == 0;
 }
 
-static int i_rant_hex(int c){
+static int i_rant_hex_value(int c){
     if (c >= '0' && c <= '9') return c - '0';
     c = i_rant_lower(c);
     return c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
@@ -394,7 +393,7 @@ size_t i_rant_json_str(i_RantJson v, char *out, size_t cap){
             case 'u': {
                 int d0, d1, d2, d3;
                 if (i + 4 >= v.len) return 0;
-                d0 = i_rant_hex(v.p[i+1]); d1 = i_rant_hex(v.p[i+2]); d2 = i_rant_hex(v.p[i+3]); d3 = i_rant_hex(v.p[i+4]);
+                d0 = i_rant_hex_value(v.p[i+1]); d1 = i_rant_hex_value(v.p[i+2]); d2 = i_rant_hex_value(v.p[i+3]); d3 = i_rant_hex_value(v.p[i+4]);
                 if (d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0) return 0;
                 c = (unsigned)((d0 << 12) | (d1 << 8) | (d2 << 4) | d3);
                 i += 4;

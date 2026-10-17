@@ -14,6 +14,7 @@
 #endif
 
 #include "core.h"
+#include "../common/bytes.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -177,13 +178,12 @@ size_t i_rant_plat_hostname(char *buf, size_t cap){
 #if defined(ESP_PLATFORM)
     /* lwIP has no gethostname. The factory MAC is unique and readable before any
        interface is up, which is what the uuid fallback wants. */
-    {   static const char hex[] = "0123456789abcdef";
-        uint8_t mac[6]; size_t i;
+    {   uint8_t mac[6]; size_t i;
         if (cap >= 17 && esp_efuse_mac_get_default(mac) == ESP_OK){
             memcpy(buf, "esp-", 4);
             for (i = 0; i < 6; i++){
-                buf[4 + i*2]     = hex[mac[i] >> 4];
-                buf[4 + i*2 + 1] = hex[mac[i] & 0x0F];
+                buf[4 + i*2]     = i_rant_hex(mac[i] >> 4);
+                buf[4 + i*2 + 1] = i_rant_hex(mac[i]);
             }
             buf[16] = 0;
         }

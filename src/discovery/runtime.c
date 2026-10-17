@@ -3,6 +3,7 @@
 #include "runtime.h"
 #include "../platform/core.h"
 #include "../common/arena.h"
+#include "../common/bytes.h"
 #include <string.h>
 
 #define RANT_DISCOVERY_BYE_SENDS 3     /* one shot UDP, so resend. Receivers dedup by uuid */
@@ -194,7 +195,6 @@ void i_rant_discovery_auto_uuid(uint8_t out[16]){
 }
 
 uint8_t i_rant_discovery_default_name(char *out, size_t cap, const char *want){
-    static const char hex[] = "0123456789abcdef";
     uint32_t r; size_t i, max;
     if (!out || cap == 0) return 0;
     max = cap - 1;
@@ -207,7 +207,7 @@ uint8_t i_rant_discovery_default_name(char *out, size_t cap, const char *want){
     if (max < 13){ out[0] = '\0'; return 0; }        /* no room for "node-XXXXXXXX" */
     if (!i_rant_plat_random(&r, sizeof r)) r = (uint32_t)i_rant_plat_pid();
     memcpy(out, "node-", 5);                          /* 8 random hex digits, pid fallback */
-    for (i = 0; i < 8; i++) out[5+i] = hex[(r >> ((7-i)*4)) & 0xF];
+    for (i = 0; i < 8; i++) out[5+i] = i_rant_hex(r >> ((7-i)*4));
     out[13] = '\0';
     return 13;
 }

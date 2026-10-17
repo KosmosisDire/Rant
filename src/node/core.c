@@ -2,6 +2,7 @@
 
 #include "core.h"
 #include "../common/arena.h"
+#include "../common/bytes.h"
 #include <string.h>
 
 /* rant_event_str and its bounded appenders. No stdio, so it stays in the sans-IO core. */
@@ -691,11 +692,10 @@ static void i_rant_reflect_format_addr(i_RantReflect *r, const RantAddr *a){
             if (i < 3) *p++ = '.';
         }
     } else if (a->ip_len == 16){
-        static const char hx[] = "0123456789abcdef";
         *p++ = '[';
         for (i = 0; i < 16; i += 2){
-            *p++ = hx[a->ip[i] >> 4]; *p++ = hx[a->ip[i] & 15];
-            *p++ = hx[a->ip[i+1] >> 4]; *p++ = hx[a->ip[i+1] & 15];
+            *p++ = i_rant_hex(a->ip[i] >> 4); *p++ = i_rant_hex(a->ip[i]);
+            *p++ = i_rant_hex(a->ip[i+1] >> 4); *p++ = i_rant_hex(a->ip[i+1]);
             if (i < 14) *p++ = ':';
         }
         *p++ = ']';

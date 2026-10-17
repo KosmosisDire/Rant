@@ -25,10 +25,9 @@ int i_rant_shm_desc_decode(i_RantShmDesc *d, const uint8_t *in, size_t len){
 }
 
 void i_rant_shm_seg_name(char *buf, uint64_t segment_id){
-    static const char hex_digits[] = "0123456789abcdef";
     const char prefix[] = "/rant.shm."; int i, k = 0;
     while (prefix[k]){ buf[k] = prefix[k]; k++; }
-    for (i=15;i>=0;i--) buf[k++] = hex_digits[(segment_id >> (4*i)) & 0xF];
+    for (i=15;i>=0;i--) buf[k++] = i_rant_hex((unsigned)(segment_id >> (4*i)));
     buf[k] = 0;
 }
 
