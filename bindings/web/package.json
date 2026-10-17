@@ -1,5 +1,5 @@
 {
-    "name": "@rantlib/rant",
+    "name": "rant-middleware",
     "version": "0.0.27",
     "description": "Rant in a page or in Node.js: the net objects of Rant built to wasm, and its C side",
     "license": "SEE LICENSE IN LICENCE.md",

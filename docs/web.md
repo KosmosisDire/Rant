@@ -11,7 +11,7 @@ browser or in Node.js. Its sockets come from a net object the page hands over:
 
 In a CMake project built with Emscripten that fetches Rant, link `rant::rant_web`.
 
-Without CMake, take the release's web package `rantlib-rant-<version>.tgz`. Compile
+Without CMake, take the release's web package `rant-middleware-<version>.tgz`. Compile
 `c/rant.c` and `c/platform.c` with these defines, and link the JavaScript side:
 
 ```
@@ -49,7 +49,7 @@ int main() {
 The net object goes in as `rantNet`, before the first node opens:
 
 ```js
-import { TunnelNet } from "@rantlib/rant/tunnel";
+import { TunnelNet } from "rant-middleware/tunnel";
 import createApp from "./app.mjs";     // built with -sMODULARIZE -sEXPORT_ES6
 
 const rantNet = await TunnelNet.connect("ws://192.168.1.20:7480", { passphrase: "..." });
@@ -59,7 +59,7 @@ await createApp({ rantNet });
 In Node.js:
 
 ```js
-import { UdpNet } from "@rantlib/rant/udp";
+import { UdpNet } from "rant-middleware/udp";
 const rantNet = await UdpNet.create();
 ```
 

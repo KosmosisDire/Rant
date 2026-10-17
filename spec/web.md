@@ -17,7 +17,7 @@ library.
 | `test.mjs`, `bench/` | the ctest entry `web` and the bench it runs |
 
 npm compiles `src/` into `dist/`. `web_package` packs that with `c/` (the platform files and
-the single headers) into `dist/rantlib-rant-<version>.tgz`, which a release attaches, so a
+the single headers) into `dist/rant-middleware-<version>.tgz`, which a release attaches, so a
 project that fetched Rant never needs npm or TypeScript.
 
 ## The net object

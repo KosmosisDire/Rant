@@ -68,7 +68,7 @@ Or download `rant-<version>.unitypackage` from the release and use `Assets > Imp
 
 ### In a page or Node.js
 Rant builds to wasm with Emscripten. A CMake project links `rant::rant_web`, and
-`rantlib-rant-<version>.tgz` on the release holds the same for any other build, with the
+`rant-middleware-<version>.tgz` on the release holds the same for any other build, with the
 net objects a page hands it. See [docs/web.md](docs/web.md).
 
 ### Tools

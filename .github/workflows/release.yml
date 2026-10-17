@@ -162,7 +162,7 @@ jobs:
           VERSION="$(cat VERSION)"
           mkdir -p release
           cp dist/rant.h dist/rant.c dist/rant.hpp dist/rant.cpp release/
-          cp dist/Rant.*.nupkg dist/rant-*.unitypackage dist/rantlib-rant-*.tgz wheelhouse/* artifacts/programs-*/*.zip release/
+          cp dist/Rant.*.nupkg dist/rant-*.unitypackage dist/rant-middleware-*.tgz wheelhouse/* artifacts/programs-*/*.zip release/
           (cd dist && cmake -E tar cf "../release/rant-$VERSION-native.zip" --format=zip native)
           ls -la release
 
