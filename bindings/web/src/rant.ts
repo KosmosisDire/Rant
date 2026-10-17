@@ -2,7 +2,7 @@
  * shows how to use it. */
 
 export {
-    openNode, RantNode, Reflection, CompiledSchema, Handle, Publisher, Subscriber, FunctionDefinition, RemoteFunction,
+    openNode, version, RantNode, Reflection, CompiledSchema, Handle, Publisher, Subscriber, FunctionDefinition, RemoteFunction,
     TaskDefinition, RemoteTask, Variable, VariableDefinition, RemoteVariable, RantError, CancelledError, AppError, MetaSection,
     type SchemaArg, type NodeOptions, type TopicOptions, type FunctionOptions, type TaskOptions, type VariableOptions,
     type Message, type Request, type TaskContext, type TaskCall, type Response, type Progress, type VariableUpdate,

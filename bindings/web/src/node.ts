@@ -181,7 +181,10 @@ type Val<S> = S extends Schema<any> ? Infer<S> : S extends null ? Uint8Array : u
 
 /* ---- the node ----------------------------------------------------------------------------- */
 
-/* Opens a node. In Node.js without a net it runs on this machine's UDP. The one async step. */
+/* The C library's version, such as "0.0.30". A promise, since the wasm loads first. */
+export function version(): Promise<string> { return Native.version(); }
+
+/* Opens a node. In Node.js without a net it runs on this machine's UDP. The async step. */
 export async function openNode(name?: string | null, opts: NodeOptions = {}): Promise<RantNode> {
     let net = opts.net, release: (() => void) | null = null;
     if (!net) ({ net, release } = await defaultNet(opts.multicastInterface === "127.0.0.1" ? "127.0.0.1" : "0.0.0.0"));

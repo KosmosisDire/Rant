@@ -20,6 +20,8 @@ const text = new TextDecoder();
 /* The C callback kinds. Each passes a user value naming the box that handles it. */
 type Callback = "message" | "event" | "request" | "response" | "progress" | "update" | "cancel";
 
+let versionOf: Promise<string> | undefined;
+
 export class Native {
     /* the exported C functions without their leading underscore */
     readonly c: Record<string, Fn> = {};
@@ -57,6 +59,17 @@ export class Native {
             loaded.set(net, p);
         }
         return p;
+    }
+
+    /* The C library's version, from an instance of its own, which opens no socket. */
+    static version(): Promise<string> {
+        versionOf ??= createRant({}).then((m) => {
+            const h = (m as Module).HEAPU8, p = (m as Module)._rant_version() as number;
+            let end = p;
+            while (h[end]) end++;
+            return text.decode(h.subarray(p, end));
+        });
+        return versionOf;
     }
 
     /* A JavaScript exception must never unwind through C frames, so each callback stops here. */

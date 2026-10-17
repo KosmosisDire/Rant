@@ -2,8 +2,9 @@
 // every pattern and the reflection.   node bindings/web/test/binding.mjs
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
-    openNode, struct, f64, f32, bool, u64, i32, string, array, enumOf, map, types, CancelledError, AppError,
+    openNode, version, struct, f64, f32, bool, u64, i32, string, array, enumOf, map, types, CancelledError, AppError,
 } from "../dist/rant.js";
 
 const domain = 190 + (process.pid % 10);
@@ -43,6 +44,11 @@ const sample = {
     gains: new Float32Array([1, 2, 3]), labels: ["a", "bb"], note: "a note of any length",
     origin: { x: 1, y: -2 }, path: [{ x: 1, y: 2 }, { x: 3, y: 4 }], extra: { n: 3, ok: true, s: "x", list: [1, "two"], sub: { f: 1.5 } },
 };
+
+await check("version is the package's", async () => {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    assert.equal(await version(), pkg.version);
+});
 
 await check("a typed message crosses whole", async () => {
     const got = [];
