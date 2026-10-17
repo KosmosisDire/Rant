@@ -391,6 +391,12 @@ class Link {
         const r = await this.request({ op: "open", proto: PROTOCOL, tunnel: true, passphrase: this.opts.passphrase,
                                        name: this.opts.name, resume: this.token || undefined, probe_interval_ms: this.opts.probeIntervalMs })
             .catch((e: Error & { answered?: boolean }) => { if (e.answered) this.refused = e; throw e; });
+        if (!r.tunnel) {
+            /* a bridge before tunnels ignores the ask and opens a node of its own */
+            this.refused = new Error("this bridge is too old to lend sockets, update it to 0.0.5 or later");
+            ws.close();
+            throw this.refused;
+        }
         this.token = r.resume_token;
         this.interfaces = (r.tunnel?.interfaces ?? []).map((f: { addr: string; mask: string }) => ({ addr: naddr(f.addr), mask: naddr(f.mask) }));
         this.groupBindsAny = r.tunnel?.group_binds_any === true;
