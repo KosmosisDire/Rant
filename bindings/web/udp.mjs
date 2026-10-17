@@ -80,6 +80,8 @@ export class UdpNet {
     setMulticastTTL(id, ttl) { this.#when(id, (k) => k.setMulticastTTL(ttl)); }
     setMulticastLoopback(id, on) { this.#when(id, (k) => k.setMulticastLoopback(on)); }
     ownGroupsOnly(_id) { /* Node has no IP_MULTICAST_ALL, and only Linux needs it */ }
+    setReceiveBufferSize(id, bytes) { this.#when(id, (k) => k.setRecvBufferSize(bytes)); }
+    setSendBufferSize(id, bytes) { this.#when(id, (k) => k.setSendBufferSize(bytes)); }
 
     membership(id, group, ifNaddr, join) {
         return this.#when(id, (k) => {

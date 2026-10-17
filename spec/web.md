@@ -19,6 +19,7 @@ endian u32, which is how wasm memory holds them.
 | `open()` | a new socket id, above 0 |
 | `bind(id, ifNaddr, port, reuse)` | the bound port now, 0 when it cannot be bound now |
 | `setMulticastInterface(id, ifNaddr)`, `setMulticastTTL(id, ttl)`, `setMulticastLoopback(id, on)`, `ownGroupsOnly(id)` | the socket options |
+| `setReceiveBufferSize(id, bytes)`, `setSendBufferSize(id, bytes)` | optional, the socket buffers a node asks for |
 | `membership(id, group, ifNaddr, join)` | joins or leaves a group, true when it will |
 | `send(id, bytes, naddr, port)` | bytes sent, or -1. `bytes` views wasm memory and is valid only during the call |
 | `close(id)` | |

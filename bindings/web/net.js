@@ -113,6 +113,8 @@ mergeInto(LibraryManager.library, {
         case 2: net.setMulticastTTL(id, value); break;
         case 3: net.setMulticastLoopback(id, !!value); break;
         case 4: net.ownGroupsOnly(id); break;
+        case 5: net.setReceiveBufferSize?.(id, value); break;
+        case 6: net.setSendBufferSize?.(id, value); break;
         }
     },
 

@@ -22,7 +22,7 @@ extern int  rant_net_interfaces(uint32_t *out, int max);
 extern int  rant_net_hostname(char *buf, int cap);
 extern void rant_net_wait(int ms);
 
-enum { NET_SETIF = 1, NET_TTL = 2, NET_LOOP = 3, NET_OWN_GROUPS = 4 };
+enum { NET_SETIF = 1, NET_TTL = 2, NET_LOOP = 3, NET_OWN_GROUPS = 4, NET_RCVBUF = 5, NET_SNDBUF = 6 };
 
 typedef struct Packet {
     struct Packet *next;
@@ -152,12 +152,18 @@ uint16_t i_rant_plat_local_port(i_RantSock s){
 }
 
 void i_rant_plat_set_nonblock(i_RantSock s){ (void)s; }
-void i_rant_plat_set_sndbuf(i_RantSock s, int bytes){ (void)s; (void)bytes; }
 void i_rant_plat_suppress_connreset(i_RantSock s){ (void)s; }
 
+/* The queue here and the net object's socket both take the size. */
 void i_rant_plat_set_rcvbuf(i_RantSock s, int bytes){
     Socket *k = socket_of(s);
-    if (k && bytes > 0) k->cap = (size_t)bytes;
+    if (!k || bytes <= 0) return;
+    k->cap = (size_t)bytes;
+    rant_net_option(k->id, NET_RCVBUF, bytes);
+}
+
+void i_rant_plat_set_sndbuf(i_RantSock s, int bytes){
+    if (bytes > 0) rant_net_option((int)s, NET_SNDBUF, bytes);
 }
 
 void i_rant_plat_mcast_setif(i_RantSock s, uint32_t if_naddr){ rant_net_option((int)s, NET_SETIF, (int)if_naddr); }
