@@ -524,6 +524,16 @@ def value_roots():
         else:
             same = out == value
         check("round-trip %s -> %r" % (rant.dsl(src).strip(), out), same)
+    # a standard alias root is named after its type and is still a bare value
+    T = rant.types
+    for alias, value in ((T.Timestamp, 1234567), (T.Duration, -5), (T.Uuid, bytes(range(16))),
+                         (T.Matrix3x3, [float(i) for i in range(9)]),
+                         (T.Matrix4x4, [float(i) for i in range(16)]),
+                         (T.Uri, "rtsp://host/stream")):
+        for sch in (node.schema(alias), node.schema(alias.name)):
+            out = sch.decode(sch.encode(value))
+            check("round-trip %s root -> %r" % (sch.name, out),
+                  (bytes(out) if isinstance(value, bytes) else out) == value)
     # text DSL and the bare type agree, and a named bare root is an error
     check("text `bool` == plain bool", node.schema("bool").hash == HASH_BOOL)
     try:
@@ -705,27 +715,35 @@ def value_roots_live():
         pub_note = a.publisher("note", str, reliable=True, keep_last=4)
         sub_note = b.subscriber("note", str, lambda v, m: got.setdefault(m.topic_name, v),
                                 reliable=True, keep_last=4)
+        pub_url = a.publisher("url", rant.types.Uri, reliable=True, keep_last=4)
+        sub_url = b.subscriber("url", rant.types.Uri, lambda v, m: got.setdefault(m.topic_name, v),
+                               reliable=True, keep_last=4)
         vd = a.variable_definition("gain", rant.f64, initial=1.25)
         rv = b.remote_variable("gain", rant.f64)
         check("handles created", all(h is not None for h in
-                                    (pub_flag, sub_flag, pub_note, sub_note, vd, rv)))
+                                    (pub_flag, sub_flag, pub_note, sub_note, pub_url, sub_url,
+                                     vd, rv)))
         deadline = time.time() + 8.0
         while time.time() < deadline and (pub_flag.match_count == 0
                                           or pub_note.match_count == 0
+                                          or pub_url.match_count == 0
                                           or rv.get() is None):
             a.poll(0.001)
             b.poll(0.001)
         check("bare topics matched",
-              pub_flag.match_count == 1 and pub_note.match_count == 1)
+              pub_flag.match_count == 1 and pub_note.match_count == 1
+              and pub_url.match_count == 1)
         check("bare variable replicated the initial", rv.get() == 1.25)
         pub_flag.send(True)
         pub_note.send("a bare unbounded string")
+        pub_url.send("rtsp://host/stream")
         deadline = time.time() + 5.0
-        while time.time() < deadline and len(got) < 2:
+        while time.time() < deadline and len(got) < 3:
             a.poll(0.001)
             b.poll(0.001)
         check("bool delivered as a plain value", got.get("flag") is True)
         check("string delivered as a plain value", got.get("note") == "a bare unbounded string")
+        check("Uri root delivered as a plain value", got.get("url") == "rtsp://host/stream")
         rv.set(2.5)
         deadline = time.time() + 5.0
         while time.time() < deadline and vd.get() != 2.5:

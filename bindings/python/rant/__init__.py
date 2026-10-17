@@ -695,11 +695,10 @@ def _elems(idx):
 
 
 def _is_value_root(lib, s, infos=None):
-    """True when the schema is a BARE TYPE: an unnamed root of one anonymous field, so its
-    message is a single value (encode/decode take and give that value, not a dict). A struct
-    array root carries its element template, so the run under it does not count."""
-    if lib.rant_schema_name(s).len != 0:
-        return False
+    """True when the schema is a BARE TYPE: a root of one anonymous field, so its message is
+    a single value (encode/decode take and give that value, not a dict). A named alias root
+    such as Matrix3x3 counts too. A struct array root carries its element template, so the
+    run under it does not count."""
     if infos is None:
         infos = _fields_of(lib, s)
     if not infos:
