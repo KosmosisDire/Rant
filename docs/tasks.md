@@ -184,9 +184,9 @@ No wrapper spawns threads except Python (one daemon thread per running call).
   whose drop answers APP_ERROR. Caller: `call(req, options, on_progress)` blocking,
   `call_async` returning a `TaskCall` Future with its id, which cancels the task when
   dropped early, and `cancel(id)`.
-- JS and bridge: handler `async (req, ctx)` with `ctx.progress(v)` and `ctx.signal` (an
-  AbortSignal, where `throwIfAborted` completes CANCELLED). Caller: `const run =
-  task.call(req)`, then `run.onProgress(cb)` (null = the RUNNING ack), `await run.result`,
+- TypeScript: handler `async (req, ctx)` with `ctx.progress(v)`, `ctx.cancelled` and
+  `ctx.signal` (an AbortSignal, where `throwIfAborted` completes CANCELLED). Caller: `const
+  run = task.call(req, { onProgress })` (null = the RUNNING ack), `await run.result`,
   `run.cancel()`.
 
 Reflection folds the three channels into one `RANT_ENTITY_TASK` entity (name, the three

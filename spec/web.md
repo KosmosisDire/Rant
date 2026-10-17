@@ -14,11 +14,18 @@ library.
 | `src/net.ts` | the net object contract |
 | `src/udp.ts` | `UdpNet`, Node's UDP sockets |
 | `src/tunnel.ts` | `TunnelNet`, sockets borrowed from a bridge, spec/tunnel.md |
+| `src/rant.ts`, `node.ts`, `codec.ts`, `schema.ts`, `wasm.ts` | the TypeScript binding (spec/bindings.md) |
+| `src/layout.ts`, `layout.mjs` | the C struct offsets for wasm32, generated from `tests/support/layout.c` |
 | `test.mjs`, `bench/` | the ctest entry `web` and the bench it runs |
+| `test/binding.mjs` | the ctest entry `web.binding` |
 
-npm compiles `src/` into `dist/`. `web_package` packs that with `c/` (the platform files and
-the single headers) into `dist/rant-middleware-<version>.tgz`, which a release attaches, so a
-project that fetched Rant never needs npm or TypeScript.
+The target `rant_wasm` builds the library as a module of its own into `dist/rant_wasm.mjs`
+and `.wasm`, with `RANT_BUILD_SHARED`, so every `RANT_API` function is exported as it is
+from the shared library. npm compiles `src/` into `dist/` beside it. `web_package`, in the
+web build only, packs that with `c/` (the platform files and the single headers) into
+`dist/rant-middleware-<version>.tgz`, which a release attaches, so a project that fetched
+Rant never needs Emscripten, npm or TypeScript. After a public struct changes, build
+`web_layout` to write `src/layout.ts` again, and `web.layout` fails until it matches.
 
 ## The net object
 
@@ -71,3 +78,11 @@ Three rules follow:
 
 The driver keeps its schedule in fields of the library object `$RantWeb`. Emscripten writes
 that object out as source text, and an `Infinity` there becomes `null`, so "none" is -1.
+JavaScript that drives the module itself, as the binding does, reaches the same driver as
+`Module.rantWeb`: `drive(f)` takes a JavaScript function and `wake(ms)` is
+`rant_web_wake`. In Node.js the driver's timers and channel are unreferenced, so only the
+sockets keep the process alive.
+
+The platform reads the environment through `rant_web_env`, which answers from
+`process.env` in Node.js and nothing in a page, so `RANT_DOMAIN` and `RANT_PREFIX` work
+there as on any node.

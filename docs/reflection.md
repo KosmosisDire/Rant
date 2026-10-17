@@ -63,4 +63,5 @@ for its life.
 
 The same walks are in every binding: C++ `Peer` and `Entity`, C# `RantPeer` and `RantEntity`
 (docs/csharp.md), Python `Peer` and `Entity` on `node.reflection` (docs/python.md), Rust
-`Peer` and `Entity` on `node.reflection()` (docs/rust.md), and the bridge's `peers` op.
+`Peer` and `Entity` on `node.reflection()` (docs/rust.md), and TypeScript `Peer` and `Entity` on
+`node.reflection` (docs/javascript.md).

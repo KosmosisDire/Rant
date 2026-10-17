@@ -127,8 +127,8 @@ across its calls, so its close waits for them.
 
 ## Wrappers
 
-C++, C#, Python, Rust and the JS bridge expose all three patterns. A thrown handler in
-C#, Python or JS, and a panicking one in Rust, answers APP_ERROR with its text. C++ and
+C++, C#, Python, Rust and TypeScript expose all three patterns. A thrown handler in
+C#, Python or TypeScript, and a panicking one in Rust, answers APP_ERROR with its text. C++ and
 Rust `defer()` return a `PendingTask` made to move to the app's own thread, C# handlers are
-async with a real `CancellationToken`, JS handlers get `ctx.progress` and an
+async with a real `CancellationToken`, TypeScript handlers get `ctx.progress` and an
 `AbortSignal`. Only Python spawns threads (one daemon thread per running call).

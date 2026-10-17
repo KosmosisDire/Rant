@@ -1,8 +1,9 @@
 # Bindings
 
 Six API surfaces share one C core: C, C++ (`bindings/cpp/rant.hpp`), C# (`bindings/csharp/Rant.cs` plus
-the Unity copy), Python (`bindings/python/rant/__init__.py`), Rust (`bindings/rust/`) and JS
-through the bridge. The cross language rules below were argued once and apply everywhere.
+the Unity copy), Python (`bindings/python/rant/__init__.py`), Rust (`bindings/rust/`) and
+TypeScript (`bindings/web/src/`, over the C built to wasm). The cross language rules below
+were argued once and apply everywhere.
 Where anything else disagrees about a wrapper API, this file wins.
 
 ## Cross language rules
@@ -10,7 +11,7 @@ Where anything else disagrees about a wrapper API, this file wins.
 - DEFINITION and REMOTE vocabulary everywhere: `create_function_definition`,
   `create_remote_function`, `create_variable_definition`, `create_remote_variable`.
 - `call` is the completed transaction in every language. `_async` marks the callback or
-  Task form. JS has no callAsync, the Promise is it.
+  Task form. TypeScript has no callAsync, the Promise is it.
 - Match queries are `match_count` and `MatchCount` on every handle, the count of the
   other side. A C# or Python subscriber has none yet since the C exposes no publisher
   count on the subscribing side. C keeps its generic primitives.
@@ -18,7 +19,7 @@ Where anything else disagrees about a wrapper API, this file wins.
   whatever the status, so a cancelled task's partial result and an AppError's failure data
   are readable: C++ `value()` and Rust `value()` are optional, and C# `Value` and Python
   `.value` throw only when the call did not end OK and nothing came back. Rust's
-  `into_result()` is the `?` form. JS `call()` rejects only on connection loss. C# is the
+  `into_result()` is the `?` form. A TypeScript `call()` never rejects. C# is the
   exception: `Call` and `CallAsync` return the response itself and throw `CallException`
   off OK, and `TryCall` and `TryCallAsync` are the value forms.
 - A payload that does not decode into a handle's type raises an Error event of kind
@@ -93,9 +94,9 @@ Where anything else disagrees about a wrapper API, this file wins.
   reopens the gate. Inside one of the node's callbacks close never waits, since that
   callback's own caller may hold a pass: it answers `State` while one is out. Rust needs
   no wait, since a call borrows the handle that `close` consumes.
-- JS: the client class is `RantNode` (`await RantNode.connect(url)`). Handles come from
-  async factory methods. The schema is a positional argument, never inside an opts object.
-  A null schema means raw or payload less.
+- TypeScript: `await openNode(name, options)` is the one async step. Handles come from
+  synchronous factory methods. The schema is a positional argument, never inside an opts
+  object. A null schema means raw or payload less.
 - A reflected field table mirrors the C `RantSchemaFieldInfo` exactly, everywhere,
   including `type_name`, `elem_name`, `elem_size`, `arr_parent` and `arr_depth`. A dropped `type_name`
   turns `color: Color` into an anonymous struct and every named reader then refuses the
@@ -105,7 +106,7 @@ Where anything else disagrees about a wrapper API, this file wins.
   point is reachable from every binding the moment it is declared. Bindings format log
   text in their own runtime and call `rant_node_log_text`, never the variadic
   `rant_node_log` over FFI.
-- A thrown handler in C++, C#, Python or JS, or a panicking one in Rust, answers APP_ERROR
+- A thrown handler in C++, C#, Python or TypeScript, or a panicking one in Rust, answers APP_ERROR
   with its text.
 - Every wait is a probe plus an event plus a bounded block. No blocking only APIs.
 
@@ -357,3 +358,30 @@ needs no DLL and no cmake.
 - Static mode runs in one block the node allocates at open, through a copy of
   `rant_allocator_static`, which the C keeps inline.
 - The crate ships as a git dependency on the tag `crate-v<VERSION>` (spec/build.md).
+
+## TypeScript
+
+`bindings/web/src/` binds the C library built to wasm as the module `rant_wasm`, whose
+exports are the `RANT_API` functions (spec/web.md). The npm package `rant-middleware` ships
+the module prebuilt.
+
+- `src/layout.ts` holds the C struct offsets for wasm32, generated from `tests/support/layout.c`
+  built to wasm, so the mirrors cannot drift: `web.layout` compares it with a fresh build. A
+  struct passed by value goes as a pointer to a copy, and one returned by value through a
+  pointer first argument, as the wasm C ABI has it. 64 bit integers cross as bigints.
+- One module instance per net object, shared by the nodes opened on it. Callbacks are one
+  function pointer per kind made with `addFunction`, routed by the user value the C passes
+  back, and a thrown JavaScript exception never unwinds through C.
+- The binding drives its nodes through `Module.rantWeb`: each drive polls the node, then
+  dispatches its one queue, which every handle, the events and the logs are created with. So
+  a handler runs outside the poll and may use the whole API, and a close asked for while
+  handlers run waits until they end. A pulled subscriber has no queue, as the C requires.
+- Values are encoded and decoded by walking the flat field table and calling
+  `rant_set_value_at` and `rant_get_value_at` by index, as Python does, so the wire layout
+  stays the C's alone. Only the map body is built and parsed in TypeScript. Member names map
+  to wire names through `rant_field_name`.
+- A message decodes when it is delivered, since its view lives only for the callback.
+- Nothing blocks: `settle`, `drain` and a variable `wait` are promises that check after
+  each drive, and `match_wait` is always negative.
+- In Node.js `openNode` without a net shares one `UdpNet` per bind address, shut once its last
+  node closes, since its sockets keep the process alive.

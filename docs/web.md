@@ -1,13 +1,15 @@
 # Rant in a page
 
-Rant builds to wasm with Emscripten. A C or C++ app links it and runs the real node in a
-browser or in Node.js. Its sockets come from a net object the page hands over:
+Rant builds to wasm with Emscripten and runs the real node in a browser or in Node.js. A
+TypeScript or JavaScript app uses the binding in the npm package `rant-middleware`
+(docs/javascript.md). A C or C++ app links the library itself, as below. Either way the
+sockets come from a net object:
 
 - `TunnelNet` in a browser: UDP sockets borrowed from a Rant bridge, over a WebSocket and
   WebRTC.
 - `UdpNet` in Node.js: the machine's own UDP sockets.
 
-## Build
+## Build a C or C++ app
 
 In a CMake project built with Emscripten that fetches Rant, link `rant::rant_web`.
 
@@ -46,7 +48,8 @@ int main() {
 
 ## Give it sockets
 
-The net object goes in as `rantNet`, before the first node opens:
+The binding takes the net object as `openNode`'s `net` option. A C or C++ app gets it as
+`rantNet`, before the first node opens:
 
 ```js
 import { TunnelNet } from "rant-middleware/tunnel";
@@ -83,9 +86,13 @@ session. A dropped connection reconnects on its own and keeps every socket.
 | `spares` | Sockets bound ahead, one per node opened at once (2). |
 | `address` | Where they bind: `"127.0.0.1"` for nodes pinned to loopback, else any (default). |
 
-One net object can serve several modules in one page.
+One net object can serve several modules in one page. In Node.js its sockets keep the
+process alive, so shut it down once its nodes closed. `openNode` does that for the `UdpNet`
+it makes when given none.
 
-## Rules
+## Rules for a C or C++ app
+
+The binding keeps these itself.
 
 - Never block: every timeout is zero and `match_wait` is negative.
 - A send from a page event waits for the next drive. Poll once with a zero timeout after

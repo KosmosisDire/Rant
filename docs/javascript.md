@@ -1,79 +1,117 @@
 # JavaScript
 
-`dist/rant.mjs` is the bridge client: one `RantNode` is one full node on the mesh, spoken
-through `rant_bridge` over a WebSocket. It has no runtime dependencies and runs in
-browsers, Node 22 and later, Deno and Bun off the global WebSocket. `dist/rant.d.ts`
-carries the types and `dist/rant.js` is the classic script twin exposing one global,
-`RantNode`. The wire is RANT/bridge-rant/PROTOCOL.md and the design is spec/bridge.md. The
-semantics are the C ones, so docs/topics.md, docs/patterns.md and docs/tasks.md apply.
+The npm package `rant-middleware` is Rant for TypeScript and JavaScript: the C library built
+to wasm, the binding over it and the net objects its sockets come from. It runs in Node.js 22
+and later and in browsers. Releases attach it as `rant-middleware-<version>.tgz`. The
+semantics are the C ones, so docs/node.md, docs/topics.md, docs/patterns.md and
+docs/tasks.md apply. This page says what is different in JavaScript.
 
 ## A node
 
-```js
-const node = await RantNode.connect("ws://localhost:7480", { name: "dashboard" });
-const pub  = await node.publisher("Line1/Conveyor",
-                                  "Conveyor { speed: f64, running: bool, part: string<16> }");
-pub.send({ speed: 0.5, running: true, part: "bracket" });
-const add  = await node.remoteFunction("Add", "A { a: i32, b: i32 }", "R { sum: i32 }");
-const r    = await add.call({ a: 2, b: 3 });
+```ts
+import { openNode, struct, f64, bool, string } from "rant-middleware";
+
+const Conveyor = struct("Conveyor", { speed: f64, running: bool, part: string(16) });
+const node = await openNode("dashboard", { domain: 7 });
+const belt = node.publisher("Line1/Conveyor", Conveyor, { reliable: true });
+belt.send({ speed: 0.5, running: true, part: "bracket" });
+node.subscriber("Line1/Conveyor", Conveyor, (c) => console.log(c.speed));
 ```
 
-The WebSocket opens first and carries the JSON control plane. Data rides binary frames
-over a WebRTC data channel per entity when WebRTC negotiates, and over the WebSocket
-otherwise. The API is the same either way and `node.transport` says which carrier won.
-`transport: "websocket"` skips WebRTC, `rtcTimeoutMs` bounds the attempt, and
-`iceServers` adds servers beside the bridge's own. The other connect options mirror the
-C node options with snake case names, plus `onEvent` for the event stream.
+- `openNode(name, options)` is the one async step: it loads the wasm and opens the node.
+  Every factory and call after it is synchronous, and a call returns a promise.
+- `options.net` gives the sockets. In Node.js leave it out for this machine's UDP. In a page
+  pass `await TunnelNet.connect(url, { passphrase })` from `rant-middleware/tunnel`, which
+  borrows them from a bridge (docs/web.md).
+- The other options are docs/getting-started.md's in camelCase: `domain`, `prefix`,
+  `multicastInterface`, `maxTopics`, `fetchDetails`, `disableLogs`, `disableMeta`,
+  `disableErrorLogs`, `seedPeers` as "ip" or "ip:port", `unicastOnly`, `selfIp`,
+  `advertisePort`, `dataPort`, `discoveryGroup`, `discoveryPort`, `multicastTtl`,
+  `fragmentSize`, `recvBufferBytes`, `sendBufferBytes`, `announceIntervalMs`,
+  `peerTimeoutMs`, `maxPeers`. In Node.js `RANT_DOMAIN` and `RANT_PREFIX` apply as anywhere.
+- `onEvent` in the options, or `node.onEvent(handler)` later, gets every event. With none,
+  errors print to the console.
+- Durations are milliseconds and end in `Ms`. Timestamps are microseconds as numbers, and
+  64 bit integer fields are bigints.
+- The binding drives the node. Handlers run after a poll, never inside one, so a handler may
+  create, call and close anything. A close from a handler happens once the handlers end.
 
-Every handle comes from an async factory on the node: `topic(name, role, opts)`,
-`publisher`, `subscriber`, `functionDefinition`, `remoteFunction`, `taskDefinition`,
-`remoteTask`, `variableDefinition`, `remoteVariable` and `video`. Schemas are DSL text
-passed positionally, and null means raw bytes. The client owns encoding: a create reply
-carries the field table, and `Layout` encodes and decodes plain nested objects against
-it. A missing fixed field encodes as zero and a missing variable field as empty. A bare
-type schema takes the value itself. `settle()`, `close()`, `peers()`, `entities()`,
-`peerEntities(peer, includeDropped)`, `mesh()`, `meshFind(kind, name)`, `meta(peer,
-sections)`, `log(level, text)` and `onLog(handler, levels)` mirror the C node.
+## Schemas
 
-## Messages
+- `u8` to `f64`, `bool`, `string(cap?)`, `array(elem, n?)`, `enumOf({ Idle: 0, Run: 1 },
+  backing?)`, `map`, `struct(name, fields)` and the standard types of docs/stdtypes.md as
+  `types.Pose` and the rest. A handle takes its value type from the schema, and
+  `Infer<typeof S>` names it.
+- Values: numbers, bigints for 64 bit integers, strings, an enum's option names, typed
+  arrays for numeric arrays (`Uint8Array` for `u8`), `boolean[]`, `string[]`, plain objects
+  for structs and maps.
+- Member names are yours: `partNumber` travels as `part_number` and decodes back into
+  `partNumber`.
+- A schema argument is a builder, DSL text, a `CompiledSchema`, or `null` for raw
+  `Uint8Array` payloads.
+- `node.schema(source)` compiles one: `name`, `hash`, `dsl`, `wire`, `fields` (the C field
+  table), `enumVariants(field)`, `canRead(writer)`, `encode(value)` and `decode(bytes)`.
+- A missing field encodes as zero or empty. A value that does not fit answers `"schema"`.
 
-A subscriber handler receives the decoded value and a `RantMessage`. `get(path)` reads
-one field by dotted path, with bigint for 64 bit integers, a string for string fields, a
-plain object for a map and arrays for array fields, where a u8 array is a `Uint8Array`
-view. `value` decodes the whole message once. `writtenUs` is the publisher's source stamp,
-0 when it opted out.
+## Topics
 
-## Functions, tasks and variables
+- `node.publisher(name, schema, options)`: `send(value, captureUs?)` returns a SendStatus,
+  `matchCount`, `ready`, `drain(timeoutMs)`, `counts`.
+- `node.subscriber(name, schema, handler?, options)`: the handler gets `(value, msg)`. A
+  `Message` has `value`, `data`, `publisherId`, `publisherName`, `topicName`, `recvUs`,
+  `writtenUs` and `captureUs`. Without a handler the subscriber is pulled: `take()` and
+  `latest()` return a message or null.
+- Options: `reliable`, `keepLast`, `catchUp`, `maxMessageBytes`, `heartbeatMs`,
+  `repairDelayMs`, `backpressureWaitMs`, `queueBytes`, `maxRateHz`, `noTimestamp`,
+  `reflectFromMesh`.
+- `schema` is the schema in use, and `refresh()` takes the mesh's again for a
+  `reflectFromMesh` handle. Same name handles on one node share one topic.
+- SendStatus: `"ok"`, `"no_topic"`, `"too_big"`, `"role"`, `"oom"`, `"state"`, `"nosys"`,
+  `"schema"`.
 
-A function handler's return value, possibly a promise, is the reply, and a throw answers
-"app_error". `call(value, timeoutMs)` resolves with a `Response` whose `status` is a
-string and never rejects on a status, only on connection loss. `timeoutMs` adds a client
-side bound that resolves "timeout". `message` is the outcome text to display on a
-failure.
+## Functions and tasks
 
-A task handler receives the request and a context: `ctx.progress(value)` streams updates
-and `ctx.signal` aborts when the caller or a third party requests cancellation. Honor a
-cancel by throwing the signal's reason, which answers "cancelled". Any other throw answers
-"app_error" and a normal return completes "ok" even after an abort. `RemoteTask.call()`
-returns a `TaskRun` synchronously: `result` is the one terminal response, `onProgress`
-observes updates with null for the RUNNING ack and replays any that arrived before
-registration, and `cancel()` resolves with "ok", "no_cancel", "not_pending" or "error".
-There is no client side timer, since after RUNNING a task runs as long as it runs.
+```ts
+const Req = struct("AddReq", { a: i32, b: i32 }), Rsp = struct("AddRsp", { sum: i32 });
+node.functionDefinition("Add", (v) => ({ sum: v.a + v.b }), Req, Rsp);
+const add = node.remoteFunction("Add", Req, Rsp);
+const r = await add.call({ a: 2, b: 3 });     // r.status "ok", r.value { sum: 5 }
+```
 
-A variable handle reads with `get()`, writes with `set`, `force` and `unforce`, and waits
-with `wait(timeoutMs)`. `onChange` fires per pushed change and once at registration when
-a value is cached. `onWrite` needs `onWrite: true` at create so the bridge pushes every
-write. A remote set round trips through the owner and the cache is authoritative.
+- A handler returns the response or a promise of it, and gets the `Request` second. A throw
+  answers `"app_error"` with its message, and `new AppError(message, value)` sends data too.
+- `call(value, { timeoutMs, provider })` never rejects. A `Response` has `ok`, `status`,
+  `sendStatus`, `value`, `hasValue`, `data`, `message`, `provider` and `writtenUs`.
+- Status: `"ok"`, `"app_error"`, `"no_handler"`, `"timeout"`, `"peer_lost"`,
+  `"cancelled"`, `"no_provider"`.
+- Options: `timeoutMs`, `backpressureWaitMs`, `keepLast`, `multi`, `reflectFromMesh`.
+- `node.taskDefinition(name, handler, req, prg, rsp, options)`: the handler gets
+  `(value, ctx)` with `ctx.progress(value)`, `ctx.cancelled` and `ctx.signal`. Throw
+  `new CancelledError(message, partial)` to answer cancelled.
+- `node.remoteTask(name, req, prg, rsp, options).call(value, { onProgress, provider })`
+  returns a `TaskCall`: `callId`, `result` and `cancel()`, which answers `"ok"`,
+  `"no_cancel"` or `"not_pending"`. `onProgress` gets null first, for RUNNING.
+- Task options add `progressBestEffort`, `progressKeepLast`, `noCancel` and `exclusive`.
 
-## Video
+## Variables
 
-A `VideoView` is a picture as a `MediaStream`: set `videoEl.srcObject = view.stream`.
-`push(value)` shows any VideoFrame, Image or ExternalVideoStream value from anywhere, using
-WebCodecs for H264, H265 and AV1, the image decoder for MJPEG, JPEG and PNG, and a pixel
-converter for raw formats. An ExternalVideoStream makes the view follow its URL: WHEP as
-a WebRTC session, MJPEG through an image, HLS through a media element. `attach(source,
-path)` binds the view to the VideoFrame or Image field of an entity's stream, and over
-WebRTC asks the bridge to carry an encoded VideoFrame field on a real video track the
-browser decodes, with the frames then arriving with the pixels emptied. `node.video(name)`
-subscribes a VideoFrame topic best effort and attaches a view in one call. The stream
-carries exactly one of the track and the canvas at a time.
+- `node.variableDefinition(name, schema, options)` and `node.remoteVariable(name, schema,
+  options)`. Options: `initial`, `readOnly`, `allowForce`, `catchUp`, `keepLast`,
+  `backpressureWaitMs`, `reflectFromMesh`.
+- `get()` is undefined before a value. `set(v)`, `force(v)` and `unforce()` return a
+  SendStatus. `forced`, `wait(timeoutMs)`, `matchCount`.
+- `onChange(handler)` fires with the current value, then on each change. `onWrite(handler)`
+  fires on every applied write. Both get `(value, update)`, and null stops them.
+
+## The rest
+
+- `settle(timeoutMs?)` resolves once discovery and matching settle.
+- `log(level, text)` publishes a line. `onLog(handler)` gets every other node's as a
+  `LogLine`: `level`, `node`, `nodeId`, `text`, `wallUs`, `monoUs`, `recvUs`, `writtenUs`.
+- `node.reflection`: `peers()`, `entities(peer = 0)`, `mesh()`, `find(kind, name)`,
+  `epoch`, `meta(peer, { sections, timeoutMs })`.
+- `stats`, `lastError`, `close(sendBye?)`. Every handle has `name`, `closed`, `close()` and
+  `[Symbol.dispose]`, and a closed one answers `"no_topic"`.
+- A failed open or factory throws `RantError` with the event behind it. `take()` throws
+  `SchemaError` for a message that does not decode, and a handler's does not run but an
+  error event names the topic.
