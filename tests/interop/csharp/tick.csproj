@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The C# tick program of the interop pairs. Compiles the wrapper (bindings/csharp/Rant.cs)
+       and copies the native library next to it, like bindings/csharp/test. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>rant_tick</AssemblyName>
+    <RootNamespace>RantTick</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../../bindings/csharp/Rant.cs" />
+    <None Include="../../../dist/native/**/*" Link="%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
