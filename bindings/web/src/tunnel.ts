@@ -37,6 +37,9 @@ export interface TunnelOptions {
     probeIntervalMs?: number;
     /* sockets bound ahead, one for each node opened before the next refill lands */
     spares?: number;
+    /* the address they bind to on the bridge's host, which must be the one each node binds
+     * its data socket to: 127.0.0.1 for a node pinned to loopback, else any */
+    address?: string;
     onEvent?: (e: TunnelEvent) => void;
 }
 
@@ -72,7 +75,8 @@ export class TunnelNet implements NetObject {
     private outCount = 0;
     private flushing = false;
 
-    private constructor(private readonly link: Link, private readonly spareCount: number, private readonly host: string) {
+    private constructor(private readonly link: Link, private readonly spareCount: number, private readonly host: string,
+                        private readonly address: string) {
         link.onBatch = (b) => this.received(b);
         link.onLost = () => this.restore();
     }
@@ -81,7 +85,7 @@ export class TunnelNet implements NetObject {
      * the bridge cannot be reached or refuses. */
     static async connect(url: string, opts: TunnelOptions = {}): Promise<TunnelNet> {
         const link = new Link(url, opts);
-        const net = new TunnelNet(link, opts.spares ?? 2, opts.name ?? "web");
+        const net = new TunnelNet(link, opts.spares ?? 2, opts.name ?? "web", opts.address ?? "0.0.0.0");
         try {
             await link.start();
             await net.prepare();
@@ -101,7 +105,7 @@ export class TunnelNet implements NetObject {
     async prepare(): Promise<void> {
         while (this.spares.length < this.spareCount) {
             const sock = this.newSock();
-            const r = await this.link.call({ op: "udp_bind", sock, port: 0 });
+            const r = await this.link.call({ op: "udp_bind", sock, port: 0, if: this.address });
             this.spares.push({ sock, port: r.port });
         }
     }
@@ -121,9 +125,14 @@ export class TunnelNet implements NetObject {
         const s = this.sockets.get(id);
         if (!s || s.sock) return 0;
         if (port === 0) {
-            /* a node needs its port now, so it takes a socket bound ahead to any address */
-            const spare = ifNaddr ? undefined : this.spares.shift();
+            /* a node needs its port now, so it takes a socket bound ahead */
+            if (ifNaddr !== naddr(this.address)) {
+                this.link.warn("binding", `a node binds ${dotted(ifNaddr)} but the tunnel binds its spare sockets to ${this.address}, so connect with that address`);
+                return 0;
+            }
+            const spare = this.spares.shift();
             if (!spare) return 0;
+            s.ifNaddr = ifNaddr;
             this.adopt(id, s, spare.sock, spare.port);
             this.prepare().catch((e) => this.link.warn("binding a spare socket", e));
             return spare.port;

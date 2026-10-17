@@ -71,6 +71,7 @@ const rantNet = await UdpNet.create();
 | `iceServers`, `rtcTimeoutMs` | Servers beside the bridge's own, and how long WebRTC may take (4000). |
 | `probeIntervalMs` | How often the bridge checks the link (250). |
 | `spares` | Sockets bound ahead, one per node opened at once (2). |
+| `address` | Where they bind on the bridge's host: `"127.0.0.1"` for nodes pinned to loopback, else any (default). |
 | `onEvent` | `(e) => ...` for `resumed`, `restored`, warnings and errors. |
 
 `connection` holds the state, the carrier (`"webrtc"` or `"websocket"`) and the round trip.
@@ -90,4 +91,4 @@ One net object can serve several modules in one page.
 - A send from a page event waits for the next drive. Poll once with a zero timeout after
   it, or call `rant_web_wake(0)`.
 - Close a node outside its own callbacks.
-- Behind a bridge the node is a node of the bridge's host. It cannot pin loopback.
+- Behind a bridge the node is a node of the bridge's host, its loopback included.

@@ -44,10 +44,9 @@ an explorer and a second app in one page over one bridge session for example.
 
 A node needs its data port the moment it binds, while a browser or Node.js binds only
 asynchronously. So a net object binds sockets to ephemeral ports ahead of time and hands
-one out for each bind to port 0. `UdpNet` binds them to one address chosen at create,
-which must be the one the node binds its data socket to: 127.0.0.1 for a node pinned to
-loopback, else any. `TunnelNet` binds them to any, so a node behind a bridge cannot pin
-loopback. A bind to a fixed port (the discovery port, with reuse) answers that port at once
+one out for each bind to port 0. Both net objects bind them to one address chosen at
+create, which must be the one the node binds its data socket to: 127.0.0.1 for a node
+pinned to loopback, else any. A bind to a fixed port (the discovery port, with reuse) answers that port at once
 and binds in the background. Work asked of a socket meanwhile waits for it.
 
 ## The driver
