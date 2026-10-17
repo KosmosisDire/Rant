@@ -1254,7 +1254,12 @@ static class Program
         Check("a definition reports its schemas", radd.Name == "radd"
               && radd.RequestSchema.Name == "AddReq" && radd.ResponseSchema.Name == "AddRsp");
         deadline = DateTime.UtcNow.AddSeconds(10);
-        while (DateTime.UtcNow < deadline && raddR.RequestSchema == null) { raddR.Refresh(); Thread.Sleep(20); }
+        // the two channels' details arrive apart, so a refresh may adopt one before the other
+        while (DateTime.UtcNow < deadline && (raddR.RequestSchema == null || raddR.ResponseSchema == null))
+        {
+            raddR.Refresh();
+            Thread.Sleep(20);
+        }
         Check("a reflect remote reports the schemas it adopted",
               raddR.RequestSchema != null && raddR.RequestSchema.Hash == radd.RequestSchema.Hash
               && raddR.ResponseSchema.Hash == radd.ResponseSchema.Hash);

@@ -133,6 +133,7 @@ fn static_memory_runs_in_one_block() {
     // a function call through a static node too
     let _add = a.function_definition("Inc", FunctionOptions::new(), |r: Request<Ping, u32>| r.seq + 1).unwrap();
     let inc = b.remote_function::<Ping, u32>("Inc", FunctionOptions::new()).unwrap();
-    assert!(wait_for(4000, None, || inc.match_count() > 0));
+    // both sides, so the answer finds the caller matched too
+    assert!(wait_for(4000, None, || inc.match_count() > 0 && _add.match_count() > 0));
     assert_eq!(inc.call(&Ping { seq: 9 }, CallOptions::new()).unwrap().into_result().unwrap(), 10);
 }
