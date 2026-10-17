@@ -921,6 +921,22 @@ static class Program
                 s.Encode(new Dictionary<string, object> { { "battery", 87 } }));
             Check("round-trip map", back.Count == 1 && Convert.ToInt64(back["battery"]) == 87);
         }
+        // a standard alias root is named after its type and is still a bare value
+        (string, object)[] aliases =
+        {
+            ("Timestamp", 1234567L), ("Duration", -5L),
+            ("Uuid", new byte[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }),
+            ("Matrix3x3", new float[] { 0, 1, 2, 3, 4, 5, 6, 7, 8 }),
+            ("Matrix4x4", new float[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }),
+            ("Uri", "rtsp://host/stream"),
+        };
+        foreach (var (name, v) in aliases)
+        {
+            var s = node.Schema(name);
+            object back = s.Decode(s.Encode(v));
+            Check($"round-trip {name} root -> {back}", System.Collections.StructuralComparisons
+                  .StructuralEqualityComparer.Equals(back, v));
+        }
         // a struct array root defines its element above it and is spelled by name
         {
             var s = node.Schema(typeof(Corner[]));

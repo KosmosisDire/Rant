@@ -5858,13 +5858,12 @@ namespace Rant
             finally { Marshal.FreeHGlobal(buf); }
         }
 
-        // True when a compiled schema is a BARE TYPE: an unnamed root whose first field is
-        // anonymous, so its message is a single value (encode takes it, decode returns it). A
-        // struct array root is followed by its element's members.
+        // True when a compiled schema is a BARE TYPE: a root whose first field is anonymous, so
+        // its message is a single value (encode takes it, decode returns it). A named alias root
+        // such as Matrix3x3 counts too. A struct array root is followed by its element's members.
         internal static bool IsValueRoot(IntPtr s)
         {
             if (s == IntPtr.Zero || Native.rant_schema_field_count(s) == 0) return false;
-            if ((ulong)Native.rant_schema_name(s).len != 0) return false;
             RantSchemaFieldInfo info;
             if (Native.rant_schema_field_at(s, 0, out info) == 0) return false;
             return info.depth == 0 && (ulong)info.name.len == 0 && info.kind != STRUCT;
