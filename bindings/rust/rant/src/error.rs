@@ -66,6 +66,8 @@ pub enum ErrorKind {
     BadPrefix,
     /// A node of the domain speaks another wire version. Once per source.
     WireVersion,
+    /// The bridge cannot be reached or refused, or its link dropped. The detail says why.
+    Bridge,
     /// A fault this binding does not know yet.
     Unknown,
 }
@@ -103,6 +105,7 @@ impl ErrorKind {
             ffi::RANT_E_BAD_DOMAIN => BadDomain,
             ffi::RANT_E_BAD_PREFIX => BadPrefix,
             ffi::RANT_E_WIRE_VERSION => WireVersion,
+            ffi::RANT_E_BRIDGE => Bridge,
             _ => Unknown,
         }
     }
@@ -139,6 +142,7 @@ impl ErrorKind {
             BadDomain => ffi::RANT_E_BAD_DOMAIN,
             BadPrefix => ffi::RANT_E_BAD_PREFIX,
             WireVersion => ffi::RANT_E_WIRE_VERSION,
+            Bridge => ffi::RANT_E_BRIDGE,
         }
     }
 }

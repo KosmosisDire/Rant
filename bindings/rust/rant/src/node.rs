@@ -84,6 +84,8 @@ options! {
         multicast_interface: Option<String> = None,
         self_ip: Option<String> = None,
         seed_peers: Vec<String> = Vec::new(),
+        bridge: Option<String> = None,
+        bridge_passphrase: Option<String> = None,
         match_wait: Option<Duration> = None,
     }
 }
@@ -116,6 +118,19 @@ impl NodeOptions {
     /// Announce by unicast to these peers too, each "ip" or "ip:port".
     pub fn seed_peers<S: Into<String>>(mut self, peers: impl IntoIterator<Item = S>) -> Self {
         self.seed_peers = peers.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Run on the sockets of the Rant bridge at this ws:// URL, a node of its host to the
+    /// mesh. Left out takes RANT_BRIDGE, else this host's own.
+    pub fn bridge(mut self, url: impl Into<String>) -> Self {
+        self.bridge = Some(url.into());
+        self
+    }
+
+    /// The bridge's passphrase. Left out takes RANT_BRIDGE_PASSPHRASE.
+    pub fn bridge_passphrase(mut self, passphrase: impl Into<String>) -> Self {
+        self.bridge_passphrase = Some(passphrase.into());
         self
     }
 
@@ -324,6 +339,8 @@ struct Net {
     group: Option<CString>,
     interface: Option<CString>,
     self_ip: Option<CString>,
+    bridge: Option<CString>,
+    bridge_passphrase: Option<CString>,
     seeds: Vec<ffi::RantAddr>,
 }
 
@@ -351,6 +368,8 @@ impl Net {
             group: c(&o.discovery_group, ErrorKind::BadAddress, "discovery group")?,
             interface: c(&o.multicast_interface, ErrorKind::BadAddress, "multicast interface")?,
             self_ip: c(&o.self_ip, ErrorKind::BadAddress, "self ip")?,
+            bridge: c(&o.bridge, ErrorKind::Bridge, "bridge")?,
+            bridge_passphrase: c(&o.bridge_passphrase, ErrorKind::Bridge, "bridge passphrase")?,
             seeds,
         })
     }
@@ -652,6 +671,8 @@ impl Node {
                 fragment_size: o.fragment_size,
                 self_ip: c_ptr(&inner.net.self_ip),
                 advertise_port: o.advertise_port,
+                bridge: c_ptr(&inner.net.bridge),
+                bridge_passphrase: c_ptr(&inner.net.bridge_passphrase),
             },
             discovery: ffi::RantNodeDiscovery {
                 announce_interval_us: to_us(o.announce_interval),

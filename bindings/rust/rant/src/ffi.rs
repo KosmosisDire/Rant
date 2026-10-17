@@ -20,6 +20,8 @@ pub const RANT_DISCOVERY_DISC_MAX: u32 = 52;
 pub const RANT_DISCOVERY_WIRE_MAX: u32 = 128;
 pub const RANT_DISCOVERY_MAX_SUBNETS: u32 = 16;
 pub const RANT_POLLIN: u32 = 1;
+pub const RANT_POLLOUT: u32 = 4;
+pub const RANT_POLLERR: u32 = 8;
 pub const RANT_DISCOVERY_MAX_SEEDS: u32 = 4;
 pub const RANT_DGRAM_MAX: u32 = 1390;
 pub const RANT_SHM_DESC_BYTES: u32 = 24;
@@ -144,6 +146,8 @@ pub struct RantNodeNet {
     pub fragment_size: u16,
     pub self_ip: *const ::std::os::raw::c_char,
     pub advertise_port: u16,
+    pub bridge: *const ::std::os::raw::c_char,
+    pub bridge_passphrase: *const ::std::os::raw::c_char,
 }
 impl Default for RantNodeNet {
     fn default() -> Self {
@@ -196,6 +200,7 @@ pub const RANT_E_BAD_SCHEMA: RantErrorKind = 25;
 pub const RANT_E_BAD_DOMAIN: RantErrorKind = 26;
 pub const RANT_E_BAD_PREFIX: RantErrorKind = 27;
 pub const RANT_E_WIRE_VERSION: RantErrorKind = 28;
+pub const RANT_E_BRIDGE: RantErrorKind = 29;
 pub type RantErrorKind = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Copy, Clone)]

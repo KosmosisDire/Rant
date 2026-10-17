@@ -10,14 +10,14 @@
 extern "C" {
 #endif
 
-#define RANT_TUNNEL_PROTO    13
-#define RANT_TUNNEL_UDP      9      /* a batch [u8 9][u8 flags] then records */
-#define RANT_TUNNEL_PING     7      /* [u8 7][u32 seq][u32 us][u32 jitter_us][u32 samples][u32 missed] */
-#define RANT_TUNNEL_PONG     8      /* [u8 8][u32 seq] */
-#define RANT_TUNNEL_PING_BYTES 21
-#define RANT_TUNNEL_PONG_BYTES 5
-#define RANT_TUNNEL_RECORD   14     /* [u16 sock][4 ip][u16 port][4 via][u16 len] */
-#define RANT_TUNNEL_BATCH    60000  /* the most one batch carries */
+#define I_RANT_TUNNEL_PROTO      13
+#define I_RANT_TUNNEL_UDP        9      /* a batch [u8 9][u8 flags] then records */
+#define I_RANT_TUNNEL_PING       7      /* [u8 7][u32 seq][u32 us][u32 jitter_us][u32 samples][u32 missed] */
+#define I_RANT_TUNNEL_PONG       8      /* [u8 8][u32 seq] */
+#define I_RANT_TUNNEL_PING_BYTES 21
+#define I_RANT_TUNNEL_PONG_BYTES 5
+#define I_RANT_TUNNEL_RECORD     14     /* [u16 sock][4 ip][u16 port][4 via][u16 len] */
+#define I_RANT_TUNNEL_BATCH      60000  /* the most one batch carries */
 
 void   i_rant_sha1(const void *data, size_t len, uint8_t out[20]);
 /* NUL terminated. Returns the characters written, 0 when cap is too small. */
@@ -34,12 +34,12 @@ size_t i_rant_ws_request(const i_RantWsUrl *u, const uint8_t key[16], char *out,
  * is needed, negative when it refused or is no WebSocket. */
 int    i_rant_ws_accept(const uint8_t key[16], const char *reply, size_t len);
 
-enum { RANT_WS_CONT = 0, RANT_WS_TEXT = 1, RANT_WS_BINARY = 2, RANT_WS_CLOSE = 8,
-       RANT_WS_PING = 9, RANT_WS_PONG = 10 };
-#define RANT_WS_HEAD_MAX 14
+enum { I_RANT_WS_CONT = 0, I_RANT_WS_TEXT = 1, I_RANT_WS_BINARY = 2, I_RANT_WS_CLOSE = 8,
+       I_RANT_WS_PING = 9, I_RANT_WS_PONG = 10 };
+#define I_RANT_WS_HEAD_MAX 14
 
 /* A client frame's head, which is masked. Returns its length. */
-size_t i_rant_ws_head(uint8_t out[RANT_WS_HEAD_MAX], int opcode, size_t len, const uint8_t mask[4]);
+size_t i_rant_ws_head(uint8_t out[I_RANT_WS_HEAD_MAX], int opcode, size_t len, const uint8_t mask[4]);
 /* Masks p in place, offset bytes into the payload. */
 void   i_rant_ws_mask(uint8_t *p, size_t len, const uint8_t mask[4], size_t offset);
 
@@ -73,8 +73,8 @@ typedef struct {
 /* Walks the batch b: *at starts at 0. 1 with the next datagram, 0 at the end or at a record
  * cut short. */
 int    i_rant_tunnel_next(const uint8_t *b, size_t len, size_t *at, i_RantTunnelDgram *out);
-/* One record's head, its payload to follow. Returns RANT_TUNNEL_RECORD. */
-size_t i_rant_tunnel_record(uint8_t out[RANT_TUNNEL_RECORD], uint16_t sock, const uint8_t ip[4],
+/* One record's head, its payload to follow. Returns I_RANT_TUNNEL_RECORD. */
+size_t i_rant_tunnel_record(uint8_t out[I_RANT_TUNNEL_RECORD], uint16_t sock, const uint8_t ip[4],
                             uint16_t port, uint32_t via_naddr, uint16_t len);
 
 #ifdef __cplusplus

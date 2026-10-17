@@ -28,7 +28,8 @@ node.subscriber("Line1/Conveyor", Conveyor, lambda c: print(c))
 `rant.Node(name, **options)` opens a node, the name optional. The options are
 docs/getting-started.md's as keywords: `domain`, `prefix`, `multicast_interface`, `max_topics`,
 `match_wait`, `fetch_details`, the discovery options of docs/discovery.md (`seed_peers` as
-"ip" or "ip:port" strings, `unicast_only`, `self_ip` with `advertise_port`) and the rest.
+"ip" or "ip:port" strings, `unicast_only`, `self_ip` with `advertise_port`, `bridge` with
+`bridge_passphrase`) and the rest.
 `on_event` receives every peer, loss and error event, and `node.on_event(handler)` sets or
 replaces it after open. With none set, error events print to stderr.
 Every duration option is float seconds, 0 = the default, and every timeout is float

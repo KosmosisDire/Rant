@@ -16,7 +16,8 @@ called a naddr. The two are the same four bytes. `i_rant_plat_ip4_to_naddr` and
 
 ## Feature flags
 
-Three features share one flag shape: `RANT_SHM`, `RANT_THREADS` and `RANT_PROC_STATS`.
+Four features share one flag shape: `RANT_SHM`, `RANT_THREADS`, `RANT_PROC_STATS` and
+`RANT_TUNNEL`.
 The detection lives once in `common/features.h`. Each is auto detected where the bundled layer provides it, the matching `RANT_NO_*` opt
 out always wins, and a new platform layer that implements the contract declares support by
 defining the flag itself. Code guards are `#ifdef RANT_THREADS`, never
@@ -27,6 +28,7 @@ defining the flag itself. Code guards are `#ifdef RANT_THREADS`, never
 | `RANT_SHM` | Windows, Linux, macOS, the BSDs | file mappings, or shm_open and mmap. Older glibc wants `-lrt` |
 | `RANT_THREADS` | the same plus ESP-IDF and any libc with pthread.h | thread, mutex, condvar and waker. Older toolchains want `-lpthread` |
 | `RANT_PROC_STATS` | the same plus ESP-IDF | GetProcessTimes, getrusage or the ESP heap API |
+| `RANT_TUNNEL` | Windows, Linux, macOS, the BSDs, never under `RANT_PLAT_CUSTOM` | a nonblocking TCP connect with getaddrinfo, send and recv (spec/tunnel.md, The native client) |
 
 When `RANT_PROC_STATS` is off the two stats functions are absent and every consumer
 compiles out with them, so the meta snapshot omits its proc section and a layer that
@@ -50,6 +52,9 @@ cannot measure implements nothing. The SHM and THREADS detection blocks are mirr
   sees a value cut short. A platform with no environment, like a MotoPlus kernel module, returns 0.
 - Heap. `i_rant_plat_realloc` is the single heap dependency (ptr NULL allocates, size 0
   frees). A target with a custom heap overrides just this.
+- Poll. `RANT_POLLOUT` asks for writable, and `RANT_POLLERR` reports a hang up or an error
+  whatever was asked. A poll of no sockets sleeps, which WSAPoll refuses, so Windows
+  sleeps instead.
 - Process stats are per process, not per node, so several nodes in one process report the
   same numbers and consumers dedup by pid. Any out pointer may be NULL. A platform may fill
   peak RSS but not current, which then reads 0. On ESP the firmware image is the process:

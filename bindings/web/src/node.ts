@@ -21,7 +21,7 @@ export type ErrorKind =
     | "meta_truncated_interest" | "peer_meta_too_big" | "msg_too_big" | "peer_refused" | "evicted_unsent"
     | "unmatched_send" | "duplicate_authority" | "oom" | "platform" | "socket" | "bind" | "mcast_join" | "send"
     | "recv" | "poll" | "waker" | "bad_address" | "bad_name" | "state" | "bad_schema" | "bad_domain"
-    | "bad_prefix" | "wire_version";
+    | "bad_prefix" | "wire_version" | "bridge";
 
 const SEND: Record<number, SendStatus> = { 0: "ok", [-1]: "no_topic", [-2]: "too_big", [-3]: "role", [-4]: "oom", [-5]: "state", [-6]: "nosys", [-7]: "schema" };
 const CALL: CallStatus[] = ["ok", "app_error", "no_handler", "timeout", "peer_lost", "cancelled", "running", "no_provider"];
@@ -33,7 +33,8 @@ const ERROR: ErrorKind[] = [
     "none", "name_collision", "qos_incompatible", "kind_mismatch", "schema_mismatch", "interest_overflow",
     "meta_truncated_interest", "peer_meta_too_big", "msg_too_big", "peer_refused", "evicted_unsent",
     "unmatched_send", "duplicate_authority", "oom", "platform", "socket", "bind", "mcast_join", "send", "recv",
-    "poll", "waker", "bad_address", "bad_name", "state", "bad_schema", "bad_domain", "bad_prefix", "wire_version"];
+    "poll", "waker", "bad_address", "bad_name", "state", "bad_schema", "bad_domain", "bad_prefix", "wire_version",
+    "bridge"];
 const sendStatus = (r: number): SendStatus => SEND[r] ?? "state";
 
 /* The section mask of a meta snapshot, 0 for all of them. */

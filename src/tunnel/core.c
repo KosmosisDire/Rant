@@ -152,7 +152,7 @@ int i_rant_ws_accept(const uint8_t key[16], const char *reply, size_t len){
 
 /* ---- frames ---- */
 
-size_t i_rant_ws_head(uint8_t out[RANT_WS_HEAD_MAX], int opcode, size_t len, const uint8_t mask[4]){
+size_t i_rant_ws_head(uint8_t out[I_RANT_WS_HEAD_MAX], int opcode, size_t len, const uint8_t mask[4]){
     size_t n = 2;
     out[0] = (uint8_t)(0x80 | (opcode & 15));
     if (len < 126) out[1] = (uint8_t)(0x80 | len);
@@ -365,24 +365,24 @@ size_t i_rant_json_quote(const char *s, char *out, size_t cap){
 int i_rant_tunnel_next(const uint8_t *b, size_t len, size_t *at, i_RantTunnelDgram *out){
     size_t i = *at ? *at : 2;
     uint16_t l;
-    if (len < 2 || b[0] != RANT_TUNNEL_UDP || i + RANT_TUNNEL_RECORD > len) return 0;
+    if (len < 2 || b[0] != I_RANT_TUNNEL_UDP || i + I_RANT_TUNNEL_RECORD > len) return 0;
     l = i_rant_le_r16(b + i + 12);
-    if (i + RANT_TUNNEL_RECORD + l > len) return 0;
+    if (i + I_RANT_TUNNEL_RECORD + l > len) return 0;
     out->sock = i_rant_le_r16(b + i);
     memcpy(out->ip, b + i + 2, 4);
     out->port = i_rant_le_r16(b + i + 6);
     out->len = l;
-    out->data = b + i + RANT_TUNNEL_RECORD;
-    *at = i + RANT_TUNNEL_RECORD + l;
+    out->data = b + i + I_RANT_TUNNEL_RECORD;
+    *at = i + I_RANT_TUNNEL_RECORD + l;
     return 1;
 }
 
-size_t i_rant_tunnel_record(uint8_t out[RANT_TUNNEL_RECORD], uint16_t sock, const uint8_t ip[4],
+size_t i_rant_tunnel_record(uint8_t out[I_RANT_TUNNEL_RECORD], uint16_t sock, const uint8_t ip[4],
                             uint16_t port, uint32_t via_naddr, uint16_t len){
     i_rant_le_w16(out, sock);
     memcpy(out + 2, ip, 4);
     i_rant_le_w16(out + 6, port);
     memcpy(out + 8, &via_naddr, 4);
     i_rant_le_w16(out + 12, len);
-    return RANT_TUNNEL_RECORD;
+    return I_RANT_TUNNEL_RECORD;
 }

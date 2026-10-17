@@ -90,10 +90,12 @@ int  i_rant_plat_poll(i_RantPollfd *fds, int n, int timeout_ms);
 int  i_rant_plat_last_socket_error(void);
 
 #ifdef RANT_TUNNEL
-/* TCP, for the tunnel to a bridge. connect resolves host, a name or dotted IPv4, and gives a
- * nonblocking socket with TCP_NODELAY, or RANT_SOCK_BAD past timeout_ms. The name lookup
- * itself is the OS's and may take longer. */
-i_RantSock i_rant_plat_tcp_connect(const char *host, uint16_t port, int timeout_ms);
+/* TCP, for the tunnel to a bridge. connect starts a nonblocking connect with TCP_NODELAY to
+ * host, a name or dotted IPv4, and returns at once. Only the OS's name lookup blocks.
+ * RANT_SOCK_BAD when it cannot start. connected says, once the socket polls writable, 1 for
+ * connected and 0 for failed. */
+i_RantSock i_rant_plat_tcp_connect(const char *host, uint16_t port);
+int        i_rant_plat_tcp_connected(i_RantSock s);
 /* Bytes moved, or negative on error or would block. recv returns 0 once the peer closed. */
 int        i_rant_plat_tcp_send(i_RantSock s, const void *buf, size_t len);
 int        i_rant_plat_tcp_recv(i_RantSock s, void *buf, size_t cap);

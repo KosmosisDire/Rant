@@ -53,14 +53,14 @@ static void handshake_checks(void){
 }
 
 static void frame_checks(void){
-    uint8_t h[RANT_WS_HEAD_MAX], buf[32];
+    uint8_t h[I_RANT_WS_HEAD_MAX], buf[32];
     const uint8_t mask[4] = { 1, 2, 3, 4 };
     i_RantWsFrame f;
-    CHECK(i_rant_ws_head(h, RANT_WS_TEXT, 5, mask) == 6 && h[0] == 0x81 && h[1] == 0x85 && h[2] == 1,
+    CHECK(i_rant_ws_head(h, I_RANT_WS_TEXT, 5, mask) == 6 && h[0] == 0x81 && h[1] == 0x85 && h[2] == 1,
           "head: short, masked, fin");
-    CHECK(i_rant_ws_head(h, RANT_WS_BINARY, 300, mask) == 8 && h[1] == (0x80 | 126) && h[2] == 1 && h[3] == 44,
+    CHECK(i_rant_ws_head(h, I_RANT_WS_BINARY, 300, mask) == 8 && h[1] == (0x80 | 126) && h[2] == 1 && h[3] == 44,
           "head: 16 bit length");
-    CHECK(i_rant_ws_head(h, RANT_WS_BINARY, 70000, mask) == 14 && h[1] == (0x80 | 127) && h[7] == 1 && h[8] == 0x11
+    CHECK(i_rant_ws_head(h, I_RANT_WS_BINARY, 70000, mask) == 14 && h[1] == (0x80 | 127) && h[7] == 1 && h[8] == 0x11
           && h[9] == 0x70, "head: 64 bit length");
     memcpy(buf, "hello", 5);
     i_rant_ws_mask(buf, 3, mask, 0); i_rant_ws_mask(buf + 3, 2, mask, 3);
@@ -68,10 +68,10 @@ static void frame_checks(void){
 
     buf[0] = 0x82; buf[1] = 126; buf[2] = 1; buf[3] = 0;
     CHECK(i_rant_ws_frame(buf, 3, &f) == 0, "frame: waits for its extended length");
-    CHECK(i_rant_ws_frame(buf, 4, &f) == 1 && f.opcode == RANT_WS_BINARY && f.fin && f.head == 4 && f.len == 256,
+    CHECK(i_rant_ws_frame(buf, 4, &f) == 1 && f.opcode == I_RANT_WS_BINARY && f.fin && f.head == 4 && f.len == 256,
           "frame: 16 bit length");
     buf[0] = 0x01; buf[1] = 3;
-    CHECK(i_rant_ws_frame(buf, 2, &f) == 1 && f.opcode == RANT_WS_TEXT && !f.fin && f.len == 3, "frame: a first fragment");
+    CHECK(i_rant_ws_frame(buf, 2, &f) == 1 && f.opcode == I_RANT_WS_TEXT && !f.fin && f.len == 3, "frame: a first fragment");
     buf[0] = 0x89; buf[1] = 0x83;
     CHECK(i_rant_ws_frame(buf, 2, &f) < 0, "frame: a masked server frame refused");
     buf[0] = 0x09; buf[1] = 3;
@@ -115,7 +115,7 @@ static void batch_checks(void){
     uint8_t b[128]; size_t len = 2, at = 0;
     const uint8_t ip1[4] = { 192, 168, 1, 5 }, ip2[4] = { 127, 0, 0, 1 };
     i_RantTunnelDgram d;
-    b[0] = RANT_TUNNEL_UDP; b[1] = 0;
+    b[0] = I_RANT_TUNNEL_UDP; b[1] = 0;
     len += i_rant_tunnel_record(b + len, 3, ip1, 7400, 0, 4); memcpy(b + len, "ping", 4); len += 4;
     len += i_rant_tunnel_record(b + len, 65535, ip2, 50000, 0, 0);
     CHECK(i_rant_tunnel_next(b, len, &at, &d) && d.sock == 3 && memcmp(d.ip, ip1, 4) == 0 && d.port == 7400
@@ -123,8 +123,8 @@ static void batch_checks(void){
     CHECK(i_rant_tunnel_next(b, len, &at, &d) && d.sock == 65535 && d.port == 50000 && d.len == 0, "batch: an empty one");
     CHECK(!i_rant_tunnel_next(b, len, &at, &d), "batch: then the end");
     at = 0;
-    CHECK(!i_rant_tunnel_next(b, 2 + RANT_TUNNEL_RECORD + 3, &at, &d), "batch: a cut record ends it");
-    b[0] = RANT_TUNNEL_PING; at = 0;
+    CHECK(!i_rant_tunnel_next(b, 2 + I_RANT_TUNNEL_RECORD + 3, &at, &d), "batch: a cut record ends it");
+    b[0] = I_RANT_TUNNEL_PING; at = 0;
     CHECK(!i_rant_tunnel_next(b, len, &at, &d), "batch: another op is no batch");
     i_rant_tunnel_record(b, 1, ip1, 1, 0x0100007Fu, 0);
     CHECK(b[8] == 0x7F && b[11] == 0x01, "record: via keeps the naddr's bytes");

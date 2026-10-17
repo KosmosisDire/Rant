@@ -2,8 +2,9 @@
 
 A node that cannot open UDP sockets, Rant in a page, borrows them from a bridge: the bridge
 binds sockets on its host and forwards datagrams both ways, so to the mesh the node is a
-node of that host. The bridge reads none of them. `bindings/web/src/tunnel.ts` (`TunnelNet`)
-is the client. `RANT/bridge-rant` is the server, and this file is the protocol it serves.
+node of that host. The bridge reads none of them. A native node does the same to reach a
+mesh it cannot join. `bindings/web/src/tunnel.ts` (`TunnelNet`) and `src/tunnel/` are the
+clients. `RANT/bridge-rant` is the server, and this file is the protocol it serves.
 
 ## Connection
 
@@ -142,3 +143,28 @@ are bound, and tries WebRTC behind it, giving up after `rtcTimeoutMs`. A request
 reply in 10 s fails. A socket op made while the link reconnects waits for it, and one the
 drop left unanswered is sent again. Events report `resumed`, `restored` (a lost session set
 up again), warnings and errors.
+
+## The native client
+
+`opts.net.bridge` runs a node of the C library on a tunnel, one per node.
+`src/tunnel/core.c` is the sans IO part: SHA-1 and base64 for the handshake, frames, a
+JSON reader and batch records. `src/tunnel/runtime.c` is the client. Discovery and the
+node reach every socket through `i_rant_net_*`, which goes to the OS or to the node's
+tunnel.
+
+- A tunnel's socket is a handle below `RANT_SOCK_BAD`, so one poll set mixes them with the
+  OS's, such as the node's waker. The poll waits on the WebSocket and the OS sockets, and
+  a socket is ready when its queue holds a datagram.
+- Datagrams a node sends between two flushes leave as one batch. The node flushes at the
+  end of each TX drain. A backlog over 4 MB makes a send would block, as a full socket.
+- The open is the one blocking step: it connects, opens the session and binds each
+  socket, since a node needs its ports at once. Other socket ops are sent and not waited
+  for. A refused one fires `RANT_E_BRIDGE`.
+- The link is a state machine stepped by the poll: connect, handshake, open, open. A
+  reconnect never blocks a poll, except the OS's name lookup. It backs off from 250 ms to
+  5 s, resumes with the token, and binds every socket again when the session was lost.
+  Six seconds without a byte from the bridge count as a drop, since it pings.
+- WebSocket only, `ws://` only: no WebRTC and no TLS in the library.
+- `RANT_TUNNEL` builds it, on with the bundled platform layer, off under
+  `RANT_PLAT_CUSTOM` or `RANT_NO_TUNNEL`. The platform adds a nonblocking TCP connect,
+  send and recv, and `RANT_POLLOUT`.

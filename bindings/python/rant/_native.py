@@ -117,6 +117,8 @@ class RantNodeNet(Structure):
         ("fragment_size", c_uint16),
         ("self_ip", c_char_p),
         ("advertise_port", c_uint16),
+        ("bridge", c_char_p),
+        ("bridge_passphrase", c_char_p),
     ]
 
 

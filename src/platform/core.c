@@ -525,6 +525,7 @@ int i_rant_plat_poll(i_RantPollfd *fds, int n, int timeout_ms){
                             | ((fds[i].events & RANT_POLLOUT) ? POLLOUT : 0));
     }
 #ifdef _WIN32
+    if (n == 0){ Sleep(timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms); return 0; }   /* WSAPoll refuses an empty set */
     r = WSAPoll(p, (ULONG)n, timeout_ms);
 #else
     r = poll(p, (nfds_t)n, timeout_ms);
@@ -537,58 +538,44 @@ int i_rant_plat_poll(i_RantPollfd *fds, int n, int timeout_ms){
 }
 
 #ifdef RANT_TUNNEL
-/* Waits for a nonblocking connect, then reads its outcome. */
-static int i_rant_plat_connected(i_RantSock s, int timeout_ms){
-    int err = 0; i_RantSocklen len = sizeof err;
-#ifdef _WIN32
-    /* select, since WSAPoll misses a failed connect on older Windows */
-    fd_set w, x; struct timeval tv;
-    FD_ZERO(&w); FD_ZERO(&x); FD_SET((SOCKET)s, &w); FD_SET((SOCKET)s, &x);
-    tv.tv_sec = timeout_ms / 1000; tv.tv_usec = (timeout_ms % 1000) * 1000;
-    if (select(0, NULL, &w, &x, &tv) <= 0 || FD_ISSET((SOCKET)s, &x)) return 0;
-#else
-    struct pollfd p;
-    p.fd = (int)s; p.events = POLLOUT; p.revents = 0;
-    if (poll(&p, 1, timeout_ms) <= 0) return 0;
-#endif
-    if (getsockopt(RANT__FD(s), SOL_SOCKET, SO_ERROR, (char*)&err, &len) != 0) return 0;
-    return err == 0;
-}
-
-i_RantSock i_rant_plat_tcp_connect(const char *host, uint16_t port, int timeout_ms){
-    struct addrinfo hints, *res = NULL, *ai;
+i_RantSock i_rant_plat_tcp_connect(const char *host, uint16_t port){
+    struct addrinfo hints, *res = NULL;
     char service[8];
     i_RantSock s = RANT_SOCK_BAD;
+    int on = 1, r;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET;          /* a bridge listens on IPv4 */
     hints.ai_socktype = SOCK_STREAM;
     snprintf(service, sizeof service, "%u", (unsigned)port);
-    if (!host || getaddrinfo(host, service, &hints, &res) != 0) return RANT_SOCK_BAD;
-    for (ai = res; ai && s == RANT_SOCK_BAD; ai = ai->ai_next){
-        int on = 1, r;
+    if (!host || getaddrinfo(host, service, &hints, &res) != 0 || !res) return RANT_SOCK_BAD;
 #ifdef _WIN32
-        SOCKET c = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (c == INVALID_SOCKET) continue;
+    {   SOCKET c = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (c != INVALID_SOCKET) s = (i_RantSock)c; }
 #else
-        int c = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (c < 0) continue;
+    {   int c = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (c >= 0) s = (i_RantSock)c; }
 #endif
-        i_rant_plat_set_nonblock((i_RantSock)c);
-        r = connect(c, ai->ai_addr, (i_RantSocklen)ai->ai_addrlen);
-#ifdef _WIN32
-        if (r != 0 && WSAGetLastError() != WSAEWOULDBLOCK){ closesocket(c); continue; }
-#else
-        if (r != 0 && errno != EINPROGRESS){ close(c); continue; }
-#endif
-        if (r != 0 && !i_rant_plat_connected((i_RantSock)c, timeout_ms)){ i_rant_plat_close((i_RantSock)c); continue; }
-        setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char*)&on, sizeof on);
+    if (s != RANT_SOCK_BAD){
+        i_rant_plat_set_nonblock(s);
+        setsockopt(RANT__FD(s), IPPROTO_TCP, TCP_NODELAY, (const char*)&on, sizeof on);
 #ifdef SO_NOSIGPIPE
-        setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, (const char*)&on, sizeof on);
+        setsockopt(RANT__FD(s), SOL_SOCKET, SO_NOSIGPIPE, (const char*)&on, sizeof on);
 #endif
-        s = (i_RantSock)c;
+        r = connect(RANT__FD(s), res->ai_addr, (i_RantSocklen)res->ai_addrlen);
+#ifdef _WIN32
+        if (r != 0 && WSAGetLastError() != WSAEWOULDBLOCK){ i_rant_plat_close(s); s = RANT_SOCK_BAD; }
+#else
+        if (r != 0 && errno != EINPROGRESS){ i_rant_plat_close(s); s = RANT_SOCK_BAD; }
+#endif
     }
     freeaddrinfo(res);
     return s;
+}
+
+int i_rant_plat_tcp_connected(i_RantSock s){
+    int err = 0; i_RantSocklen len = sizeof err;
+    if (getsockopt(RANT__FD(s), SOL_SOCKET, SO_ERROR, (char*)&err, &len) != 0) return 0;
+    return err == 0;
 }
 
 int i_rant_plat_tcp_send(i_RantSock s, const void *buf, size_t len){

@@ -1,4 +1,4 @@
-/* The discovery runtime. All OS access goes through the platform layer. */
+/* The discovery runtime. Its sockets are the node's net, the OS's or a tunnel's. */
 
 #include "runtime.h"
 #include "../platform/core.h"
@@ -10,6 +10,7 @@
 
 struct i_RantDiscovery {
     i_RantDiscoveryState *core;
+    i_RantTunnel           *tunnel;        /* the sockets' owner, NULL for the OS */
     i_RantSock              fd;
     i_RantSock              tx_fd;         /* unicast TX leaves here: the node's data socket, else fd */
     i_RantIface            ifs[RANT_DISCOVERY_MAX_SUBNETS];    /* joined and announced out of */
@@ -30,7 +31,7 @@ struct i_RantDiscovery {
 
 static void i_rant_discovery_tx1(i_RantDiscovery *d, const uint8_t *out, size_t n_bytes,
                           const uint8_t ip[4], uint16_t port){
-    i_rant_plat_send(d->tx_fd, out, n_bytes, ip, port);
+    i_rant_net_send(d->tunnel, d->tx_fd, out, n_bytes, ip, port);
 }
 
 /* One copy: the data port once the blob named one, else the discovery port. A peer whose
@@ -54,10 +55,10 @@ static void i_rant_discovery_tx_group(i_RantDiscovery *d, const uint8_t *out, si
     uint8_t group_ip[4], i;
     if (d->unicast_only) return;   /* seeds and known peers are the only paths */
     i_rant_plat_naddr_to_ip4(d->group_naddr, group_ip);
-    if (!d->n_ifs){ i_rant_plat_send(d->fd, out, n_bytes, group_ip, d->discovery_port); return; }
+    if (!d->n_ifs){ i_rant_net_send(d->tunnel, d->fd, out, n_bytes, group_ip, d->discovery_port); return; }
     for (i = 0; i < d->n_ifs; i++){
-        i_rant_plat_mcast_setif(d->fd, d->ifs[i].addr);
-        i_rant_plat_send(d->fd, out, n_bytes, group_ip, d->discovery_port);
+        i_rant_net_mcast_setif(d->tunnel, d->fd, d->ifs[i].addr);
+        i_rant_net_send(d->tunnel, d->fd, out, n_bytes, group_ip, d->discovery_port);
     }
 }
 
@@ -107,8 +108,8 @@ i_RantSock i_rant_discovery_fd(i_RantDiscovery *d){ return d ? d->fd : RANT_SOCK
 
 /* The up, non loopback interfaces. Loopback is the fallback for a host with nothing else
  * up, never a member of the normal set. 0 only when the platform cannot enumerate. */
-static uint8_t i_rant_discovery_if_scan(i_RantIface *out, uint8_t max){
-    int n = i_rant_plat_local_ifaces(out, (int)max), i;
+static uint8_t i_rant_discovery_if_scan(i_RantTunnel *t, i_RantIface *out, uint8_t max){
+    int n = i_rant_net_local_ifaces(t, out, (int)max), i;
     uint8_t k = 0;
     for (i = 0; i < n; i++){
         uint8_t ip[4];
@@ -125,9 +126,9 @@ static uint8_t i_rant_discovery_if_scan(i_RantIface *out, uint8_t max){
 }
 
 /* The netmask the host reports for addr, 0 if none. A pinned interface still ranks. */
-static uint32_t i_rant_discovery_if_mask_of(uint32_t addr){
+static uint32_t i_rant_discovery_if_mask_of(i_RantTunnel *t, uint32_t addr){
     i_RantIface all[RANT_DISCOVERY_MAX_SUBNETS];
-    int n = i_rant_plat_local_ifaces(all, RANT_DISCOVERY_MAX_SUBNETS), i;
+    int n = i_rant_net_local_ifaces(t, all, RANT_DISCOVERY_MAX_SUBNETS), i;
     for (i = 0; i < n; i++) if (all[i].addr == addr) return all[i].mask;
     return 0;
 }
@@ -148,10 +149,10 @@ static uint8_t i_rant_discovery_if_apply(i_RantDiscovery *d, const i_RantIface *
     else {
         for (i = 0; i < d->n_ifs; i++)
             if (!i_rant_discovery_if_has(want, n_want, d->ifs[i].addr))
-                i_rant_plat_mcast_leave(d->fd, d->group_naddr, d->ifs[i].addr);
+                i_rant_net_mcast_leave(d->tunnel, d->fd, d->group_naddr, d->ifs[i].addr);
         for (i = 0; i < n_want; i++){
             if (i_rant_discovery_if_has(d->ifs, d->n_ifs, want[i].addr)){ joined++; continue; }
-            if (i_rant_plat_mcast_join(d->fd, d->group_naddr, want[i].addr)) joined++;
+            if (i_rant_net_mcast_join(d->tunnel, d->fd, d->group_naddr, want[i].addr)) joined++;
         }
     }
     for (i = 0; i < n_want; i++){
@@ -167,7 +168,7 @@ static uint8_t i_rant_discovery_if_apply(i_RantDiscovery *d, const i_RantIface *
 /* A link that comes up after open is joined, and one that goes away drops its membership. */
 static void i_rant_discovery_if_refresh(i_RantDiscovery *d){
     i_RantIface want[RANT_DISCOVERY_MAX_SUBNETS];
-    uint8_t n_want = i_rant_discovery_if_scan(want, RANT_DISCOVERY_MAX_SUBNETS);
+    uint8_t n_want = i_rant_discovery_if_scan(d->tunnel, want, RANT_DISCOVERY_MAX_SUBNETS);
     uint8_t i, same = (uint8_t)(n_want == d->n_ifs);
     if (same)
         for (i = 0; i < n_want; i++)
@@ -249,7 +250,7 @@ RantErrorKind i_rant_discovery_last_error(void){ return g_place_error; }
 int                       i_rant_discovery_last_os_error(void){ return g_place_os_error; }
 
 i_RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const i_RantDiscoveryCoreConfig *cfg,
-                                    const RantNodeNet *net){
+                                    const RantNodeNet *net, i_RantTunnel *tunnel){
     i_RantDiscoveryCoreConfig c;
     uint16_t discovery_port;
     i_RantDiscovery *d;
@@ -296,13 +297,14 @@ i_RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const i_RantDisco
     d->core = i_rant_discovery_init(core_mem, cap - (size_t)(core_mem - (uint8_t*)mem), &c);
     if (!d->core){ i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_OOM, 0); }
 
-    fd = i_rant_plat_udp_open();
-    if (fd == RANT_SOCK_BAD){ int e=i_rant_plat_last_socket_error(); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_SOCKET, e); }
+    d->tunnel = tunnel;
+    fd = i_rant_net_udp_open(tunnel);
+    if (fd == RANT_SOCK_BAD){ int e=i_rant_net_last_error(tunnel); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_SOCKET, e); }
     /* a node pinned to loopback is single host and listens on no network interface */
     bind_naddr = i_rant_plat_parse_ip(net->multicast_interface);
-    bind_naddr = i_rant_plat_is_loopback(bind_naddr) ? i_rant_plat_loopback_group_bind(bind_naddr) : 0;
-    if (!i_rant_plat_bind(fd, bind_naddr, discovery_port, 1)){ int e=i_rant_plat_last_socket_error(); i_rant_plat_close(fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_BIND, e); }
-    i_rant_plat_mcast_own_groups(fd);
+    bind_naddr = i_rant_plat_is_loopback(bind_naddr) ? i_rant_net_loopback_group_bind(tunnel, bind_naddr) : 0;
+    if (!i_rant_net_bind(tunnel, fd, bind_naddr, discovery_port, 1)){ int e=i_rant_net_last_error(tunnel); i_rant_net_close(tunnel, fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_BIND, e); }
+    i_rant_net_mcast_own_groups(tunnel, fd);
 
     /* Join and announce on every interface. A pinned interface means exactly that one. */
     group_naddr = i_rant_plat_parse_ip(group);
@@ -314,9 +316,9 @@ i_RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const i_RantDisco
     d->pinned = net->multicast_interface ? 1u : 0u;
     if (d->pinned){
         want[0].addr = i_rant_plat_parse_ip(net->multicast_interface);
-        want[0].mask = i_rant_discovery_if_mask_of(want[0].addr);     /* 0 if it names no real one */
+        want[0].mask = i_rant_discovery_if_mask_of(tunnel, want[0].addr);     /* 0 if it names no real one */
         n_want = 1;
-    } else n_want = i_rant_discovery_if_scan(want, RANT_DISCOVERY_MAX_SUBNETS);
+    } else n_want = i_rant_discovery_if_scan(tunnel, want, RANT_DISCOVERY_MAX_SUBNETS);
     joined = i_rant_discovery_if_apply(d, want, n_want);
     if (!d->unicast_only){
         if (!joined && !(n_want == 1 && want[0].addr == 0)){
@@ -324,15 +326,15 @@ i_RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const i_RantDisco
             joined = i_rant_discovery_if_apply(d, &any, 1);
         }
         if (!joined){
-            int e=i_rant_plat_last_socket_error();
-            i_rant_plat_close(fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_MCAST_JOIN, e);
+            int e=i_rant_net_last_error(tunnel);
+            i_rant_net_close(tunnel, fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_MCAST_JOIN, e);
         }
-        i_rant_plat_mcast_ttl(fd, ttl);
+        i_rant_net_mcast_ttl(tunnel, fd, ttl);
         /* loop stays on for several instances per host, the uuid filter drops the echoes */
-        i_rant_plat_mcast_loop(fd, 1);
+        i_rant_net_mcast_loop(tunnel, fd, 1);
     }   /* unicast_only sets no group option, so a stack with no multicast opens */
-    i_rant_plat_set_nonblock(fd);     /* the drain's last recv must return would block */
-    i_rant_plat_suppress_connreset(fd);     /* a dead peer's ICMP bounce must not disrupt RX */
+    i_rant_net_set_nonblock(tunnel, fd);     /* the drain's last recv must return would block */
+    i_rant_net_suppress_connreset(tunnel, fd);     /* a dead peer's ICMP bounce must not disrupt RX */
 
     d->if_scan_us = i_rant_plat_now_us() + RANT_DISCOVERY_IF_SCAN_US;
     d->discovery_port = discovery_port;
@@ -382,8 +384,8 @@ static int i_rant_discovery_rt_drain(i_RantDiscovery *d, i_RantSock fd, i_RantDi
     for (guard = 0; guard < RANT_DISCOVERY_RX_BURST; guard++){
         RantAddr src;
         uint8_t src_ip[4]; uint16_t src_port = 0;
-        int n = i_rant_plat_recv(fd, d->rxbuf, d->wire_max, src_ip, &src_port);
-        if (n < 0){ if (i_rant_plat_would_block()) break; continue; }    /* empty or transient */
+        int n = i_rant_net_recv(d->tunnel, fd, d->rxbuf, d->wire_max, src_ip, &src_port);
+        if (n < 0){ if (i_rant_net_would_block(d->tunnel)) break; continue; }    /* empty or transient */
         if (n > 0){
             memset(&src, 0, sizeof src);
             memcpy(src.ip, src_ip, 4); src.ip_len = 4; src.port = src_port;
@@ -447,6 +449,6 @@ void i_rant_discovery_close(i_RantDiscovery *d, int send_bye){
         for (k = 0; n_bytes && k < RANT_DISCOVERY_BYE_SENDS; k++) i_rant_discovery_tx(d, d->txbuf, n_bytes, NULL);
     }
     i_rant_discovery_destroy(d->core);
-    i_rant_plat_close(d->fd);
+    i_rant_net_close(d->tunnel, d->fd);
     i_rant_plat_cleanup();
 }

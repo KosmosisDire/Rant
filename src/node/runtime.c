@@ -102,6 +102,7 @@ struct RantNode {
     i_RantNodeCore *core;       /* the peer table and discovery lifecycle, sans-IO */
     i_RantDiscovery       *discovery;
     i_RantSock         fd;       /* the unicast data socket */
+    i_RantTunnel      *tunnel;   /* the bridge lending the sockets, NULL for this host's own */
     uint16_t      domain;
     RantNodeNet    net;         /* a copy of opts.net */
     /* the detail exchange retry cadence: queued requests drain each poll and a sweep re
@@ -673,6 +674,17 @@ static RantNode *i_rant_node_open_fail(RantEventFn on_event, void *user, RantErr
     return NULL;
 }
 
+/* An open time failure with a one line reason, kept until the next. */
+static char g_last_error_detail[192];
+static RantNode *i_rant_node_open_fail_why(RantEventFn on_event, void *user, RantErrorKind err, const char *why){
+    RantEvent e; memset(&e, 0, sizeof e);
+    snprintf(g_last_error_detail, sizeof g_last_error_detail, "%s", why);
+    e.kind = RANT_ERROR; e.error = err; e.user = user; e.detail = g_last_error_detail;
+    g_last_error = e;
+    if (on_event) on_event(&e);
+    return NULL;
+}
+
 RantEvent rant_last_error(RantNode *n){ return n ? n->last_error : g_last_error; }
 
 /* Builds a RantMsg and hands it to the app, inline or copied into its queue ring.
@@ -808,13 +820,13 @@ static void i_rant_node_layout(i_RantBump *b, uint16_t max_topics,
 static int i_rant_node_tx(RantNode *n, uint32_t to, const uint8_t *buf, size_t len){
     RantAddr d;
     if (!i_rant_node_core_resolve(n->core, to, &d)) return 1;     /* the peer vanished */
-    if (i_rant_plat_send(n->fd, buf, len, d.ip, d.port) < 0){
-        if (i_rant_plat_would_block()) return 0;                  /* TX full: retry next tick */
+    if (i_rant_net_send(n->tunnel, n->fd, buf, len, d.ip, d.port) < 0){
+        if (i_rant_net_would_block(n->tunnel)) return 0;          /* TX full: retry next tick */
         {   /* a hard failure: report and drop, reliable data is repaired. Byte 0 is type and
                flags, bytes 1 and 2 the first submessage's topic index */
             RantEvent e; memset(&e, 0, sizeof e);
             e.kind = RANT_ERROR; e.error = RANT_E_SEND; e.peer = to;
-            e.os_error = i_rant_plat_last_socket_error();
+            e.os_error = i_rant_net_last_error(n->tunnel);
             e.too_big_bytes = len;
             if (len >= 3){
                 uint16_t idx = (uint16_t)(buf[1] | ((uint16_t)buf[2] << 8));
@@ -827,9 +839,9 @@ static int i_rant_node_tx(RantNode *n, uint32_t to, const uint8_t *buf, size_t l
     return 1;
 }
 
-/* The one TX drain: retries the held datagram, then pulls until the transport is empty.
- * The core already consumed a pulled datagram, so a full socket parks it in tx_hold. */
-static void i_rant_node_tx_drain(RantNode *n){
+/* Retries the held datagram, then pulls until the transport is empty. The core already
+ * consumed a pulled datagram, so a full socket parks it in tx_hold. */
+static void i_rant_node_tx_pull(RantNode *n){
     uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t out_len;
     if (n->tx_hold_len && i_rant_node_tx(n, n->tx_hold_peer, n->tx_hold, n->tx_hold_len))
         n->tx_hold_len = 0;
@@ -841,6 +853,12 @@ static void i_rant_node_tx_drain(RantNode *n){
             return;         /* the TX buffer is full: the next pass retries */
         }
     }
+}
+
+/* The one TX drain. A tunnel batches what one drain sends into one message. */
+static void i_rant_node_tx_drain(RantNode *n){
+    i_rant_node_tx_pull(n);
+    i_rant_net_flush(n->tunnel);
 }
 
 /* What a send owes its commit: the sender writes the socket itself where another thread
@@ -1004,6 +1022,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     char node_name[RANT_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;
     char launch_name[RANT_NODE_NAME_MAX + 1], launch_domain[32]; size_t len;
     char launch_prefix[RANT_TOPIC_NAME_MAX + 1], prefix[RANT_TOPIC_NAME_MAX + 1]; size_t prefix_len = 0;
+    char launch_bridge[512], launch_pass[256]; const char *bridge;
 
     /* a live reference, so a linker that drops unreferenced data keeps the magic */
     (void)*(const volatile char *)i_rant_magic;
@@ -1027,6 +1046,21 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     if (len >= sizeof launch_prefix || !i_rant_prefix_join(prefix, &prefix_len, launch_prefix, len)
         || (o.prefix && !i_rant_prefix_join(prefix, &prefix_len, o.prefix, strlen(o.prefix))))
         return i_rant_node_open_fail(on_event, o.user_data, RANT_E_BAD_PREFIX, 0, 0, 0);
+    /* a launcher may run the node on a bridge's sockets. spec/tunnel.md, The native client */
+    bridge = o.net.bridge;
+    if (!bridge && (len = i_rant_plat_env("RANT_BRIDGE", launch_bridge, sizeof launch_bridge))){
+        if (len >= sizeof launch_bridge)
+            return i_rant_node_open_fail_why(on_event, o.user_data, RANT_E_BRIDGE, "RANT_BRIDGE is too long");
+        bridge = launch_bridge;
+    }
+    if (!o.net.bridge_passphrase && (len = i_rant_plat_env("RANT_BRIDGE_PASSPHRASE", launch_pass, sizeof launch_pass))){
+        if (len >= sizeof launch_pass)
+            return i_rant_node_open_fail_why(on_event, o.user_data, RANT_E_BRIDGE, "RANT_BRIDGE_PASSPHRASE is too long");
+        o.net.bridge_passphrase = launch_pass;
+    }
+    if (bridge && !bridge[0]) bridge = NULL;
+    o.net.bridge = bridge;
+    if (bridge) o.disable_shm = 1;      /* its peers are on the bridge's host, never this one */
     /* a node has no memory of its own, so no allocator is the same fault as one that
        returns NULL. Reported, never a bare NULL with an empty last error. */
     if (!alloc) return i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, sizeof *n);
@@ -1172,21 +1206,33 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
         if (!n->core){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, 0); goto fail_threads; }
     }
 
+    /* a bridge's session first: the sockets below are the ones it lends */
+    if (o.net.bridge){
+#ifdef RANT_TUNNEL
+        char why[160];
+        n->tunnel = i_rant_tunnel_open(o.net.bridge, o.net.bridge_passphrase, n->name, why, sizeof why);
+        if (!n->tunnel){ (void)i_rant_node_open_fail_why(on_event, o.user_data, RANT_E_BRIDGE, why); goto fail_threads; }
+#else
+        (void)i_rant_node_open_fail_why(on_event, o.user_data, RANT_E_BRIDGE, "this build of Rant has no tunnel to a bridge");
+        goto fail_threads;
+#endif
+    }
+
     /* the data socket is bound before discovery opens so we advertise its real port. No
        reuse: a unicast endpoint owns its port, so a collision fails loudly here. A node
        pinned to loopback is single host and binds loopback only */
-    fd = i_rant_plat_udp_open();
-    if (fd==RANT_SOCK_BAD){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_SOCKET, i_rant_plat_last_socket_error(), 0, 0); goto fail_threads; }
+    fd = i_rant_net_udp_open(n->tunnel);
+    if (fd==RANT_SOCK_BAD){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_SOCKET, i_rant_net_last_error(n->tunnel), 0, 0); goto fail_threads; }
     n->fd=fd;                       /* owned now: fail_sock closes it */
     bind_naddr = i_rant_plat_parse_ip(o.net.multicast_interface);
     if (!i_rant_plat_is_loopback(bind_naddr)) bind_naddr = 0;
-    if (!i_rant_plat_bind(fd, bind_naddr, o.net.data_port, 0)){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_BIND, i_rant_plat_last_socket_error(), o.net.data_port, 0); goto fail_sock; }
-    local_port = i_rant_plat_local_port(fd);
+    if (!i_rant_net_bind(n->tunnel, fd, bind_naddr, o.net.data_port, 0)){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_BIND, i_rant_net_last_error(n->tunnel), o.net.data_port, 0); goto fail_sock; }
+    local_port = i_rant_net_local_port(n->tunnel, fd);
     if (local_port==0){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_SOCKET, 0, 0, 0); goto fail_sock; }
-    i_rant_plat_set_nonblock(fd);     /* never block in recv or send, poll drains the queue */
-    i_rant_plat_suppress_connreset(fd);    /* suppress WSAECONNRESET from a bounced send */
-    if (o.net.recv_buffer_bytes) i_rant_plat_set_rcvbuf(fd, (int)o.net.recv_buffer_bytes);
-    if (o.net.send_buffer_bytes) i_rant_plat_set_sndbuf(fd, (int)o.net.send_buffer_bytes);
+    i_rant_net_set_nonblock(n->tunnel, fd);     /* never block in recv or send, poll drains the queue */
+    i_rant_net_suppress_connreset(n->tunnel, fd);    /* suppress WSAECONNRESET from a bounced send */
+    if (o.net.recv_buffer_bytes) i_rant_net_set_rcvbuf(n->tunnel, fd, (int)o.net.recv_buffer_bytes);
+    if (o.net.send_buffer_bytes) i_rant_net_set_sndbuf(n->tunnel, fd, (int)o.net.send_buffer_bytes);
     /* our advertised locator: the port we really bound and no address, unless the caller
        states one outright. See docs/discovery.md */
     dc.data_port = o.net.advertise_port ? o.net.advertise_port : local_port;
@@ -1208,7 +1254,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     /* the core builds our overlay, discovery wraps it in its blob after the locator and name */
     i_rant_node_core_build_meta(n->core);
     dc.meta = i_rant_node_core_meta(n->core);
-    n->discovery = i_rant_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc, &o.net);
+    n->discovery = i_rant_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc, &o.net, n->tunnel);
     if (!n->discovery){
         (void)i_rant_node_open_fail(on_event, o.user_data, i_rant_discovery_last_error(),
                                     i_rant_discovery_last_os_error(),
@@ -1240,9 +1286,12 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     return n;
 
 fail_sock:
-    if (n->fd != RANT_SOCK_BAD) i_rant_plat_close(n->fd);
+    if (n->fd != RANT_SOCK_BAD) i_rant_net_close(n->tunnel, n->fd);
     n->fd = RANT_SOCK_BAD;
 fail_threads:
+#ifdef RANT_TUNNEL
+    if (n->tunnel) i_rant_tunnel_close(n->tunnel);
+#endif
 #ifdef RANT_THREADS
     if (n->waker.fd != RANT_SOCK_BAD) i_rant_plat_waker_close(&n->waker);
     i_rant_plat_cond_destroy(&n->cv);
@@ -1683,7 +1732,7 @@ static void i_rant_node_rx_one(RantNode *n, i_RantSock fd, const uint8_t *buf, s
         if (buf[4]==RANT_DETAIL_REQ){
             RantBytes resp = i_rant_node_core_detail_respond(n->core, n->domain,
                                                              rant_bytes(buf, len));
-            if (resp.len) i_rant_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+            if (resp.len) i_rant_net_send(n->tunnel, fd, resp.data, resp.len, src_ip, src_port);
             {   /* the request names the version the peer applied: feed the rebind hold */
                 uint32_t from;
                 if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from)
@@ -1701,7 +1750,7 @@ static void i_rant_node_rx_one(RantNode *n, i_RantSock fd, const uint8_t *buf, s
                peer is still fetching that version */
             RantBytes resp = i_rant_node_core_interest_respond(n->core, n->domain,
                                                                rant_bytes(buf, len));
-            if (resp.len) i_rant_plat_send(fd, resp.data, resp.len, src_ip, src_port);
+            if (resp.len) i_rant_net_send(n->tunnel, fd, resp.data, resp.len, src_ip, src_port);
         } else if (buf[4]==RANT_INTEREST_RESP){
             uint32_t from;
             if (i_rant_node_core_id_for_addr(n->core, src_ip, src_port, &from))
@@ -1721,12 +1770,12 @@ static void i_rant_node_rx_drain(RantNode *n, i_RantSock fd, uint64_t deadline){
     uint8_t *buf = n->rx_buf;
     for (;;){
         uint8_t src_ip[4]; uint16_t src_port;
-        int r = i_rant_plat_recv(fd, buf, n->rx_buf_bytes, src_ip, &src_port);
+        int r = i_rant_net_recv(n->tunnel, fd, buf, n->rx_buf_bytes, src_ip, &src_port);
         if (r<0){
-            if (i_rant_plat_would_block()) break;          /* the queue is empty */
+            if (i_rant_net_would_block(n->tunnel)) break;  /* the queue is empty */
             {   /* a hard error: report and stop this tick, never spin on a wedged socket */
                 RantEvent e; memset(&e, 0, sizeof e);
-                e.kind = RANT_ERROR; e.error = RANT_E_RECV; e.os_error = i_rant_plat_last_socket_error();
+                e.kind = RANT_ERROR; e.error = RANT_E_RECV; e.os_error = i_rant_net_last_error(n->tunnel);
                 i_rant_node_emit(n, &e);
             }
             break;
@@ -1812,11 +1861,11 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
         }
         n->pollers_sleeping++;
         i_rant_node_unlock_raw(n);
-        poll_rc = i_rant_plat_poll(pfd, nfds, wait_ms);
+        poll_rc = i_rant_net_poll(n->tunnel, pfd, nfds, wait_ms);
         i_rant_node_lock_raw(n);
         n->pollers_sleeping--;
     } else {
-        poll_rc = i_rant_plat_poll(pfd, nfds, wait_ms);
+        poll_rc = i_rant_net_poll(n->tunnel, pfd, nfds, wait_ms);
     }
     if (waker_slot >= 0 && (pfd[waker_slot].revents & RANT_POLLIN)){
         /* revents gated, so an idle pass costs no drain syscall. A kick still in flight
@@ -1826,13 +1875,23 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
     }
 #else
     (void)outer;
-    poll_rc = i_rant_plat_poll(pfd, nfds, wait_ms);
+    poll_rc = i_rant_net_poll(n->tunnel, pfd, nfds, wait_ms);
 #endif
     if (poll_rc < 0){   /* the wait itself failed, a real fault such as a bad fd */
         RantEvent e; memset(&e, 0, sizeof e);
         e.kind = RANT_ERROR; e.error = RANT_E_POLL; e.os_error = i_rant_plat_last_socket_error();
         i_rant_node_emit(n, &e);
     }
+#ifdef RANT_TUNNEL
+    if (n->tunnel){     /* the link dropped, or the bridge refused a socket op */
+        char why[192];
+        while (i_rant_tunnel_note(n->tunnel, why, sizeof why)){
+            RantEvent e; memset(&e, 0, sizeof e);
+            e.kind = RANT_ERROR; e.error = RANT_E_BRIDGE; e.detail = why;
+            i_rant_node_emit(n, &e);
+        }
+    }
+#endif
 
     /* the discovery tick off this wait's readiness. A failed wait leaves revents zeroed,
        so the clock driven work still runs */
@@ -1851,7 +1910,7 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
         if (n->next_detail_us && now >= n->next_detail_us)
             i_rant_node_core_detail_rearm(n->core);
         while ((len = i_rant_node_core_detail_req_next(n->core, n->domain, buf, sizeof buf, &dst)) != 0){
-            i_rant_plat_send(n->fd, buf, len, dst.ip, dst.port);     /* best effort: retries heal */
+            i_rant_net_send(n->tunnel, n->fd, buf, len, dst.ip, dst.port);     /* best effort: retries heal */
             sent = 1;
         }
         n->next_detail_us = sent ? now + n->announce_us : 0;
@@ -3385,7 +3444,10 @@ int rant_node_close(RantNode *n, int send_bye){
     }
     /* discovery frees peer blobs via our hook, so it must close before the pool is copied out */
     if (n->discovery) i_rant_discovery_close(n->discovery, send_bye);
-    if (n->fd != RANT_SOCK_BAD) i_rant_plat_close(n->fd);
+    if (n->fd != RANT_SOCK_BAD) i_rant_net_close(n->tunnel, n->fd);
+#ifdef RANT_TUNNEL
+    if (n->tunnel) i_rant_tunnel_close(n->tunnel);     /* the bye and the closes go out first */
+#endif
 #ifdef RANT_SHM
     if (n->shm_capable){                              /* the pool reset unmaps nothing */
         uint32_t i, n_segments = (uint32_t)n->shm_n_topics * RANT_SHM_N_CLASSES;

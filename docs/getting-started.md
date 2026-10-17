@@ -52,6 +52,7 @@ Names are capped at `RANT_NODE_NAME_MAX` (32) bytes.
 | `RANT_NODE_NAME_PREFIX` | goes with `/` in front of the node name, cut to the 32 byte cap |
 | `RANT_DOMAIN` | the domain for a node whose code leaves `domain` at 0. Not a number from 0 to 65535 refuses the open with `RANT_E_BAD_DOMAIN` |
 | `RANT_PREFIX` | the outer name prefix, in front of `opts.prefix` (see Name prefix) |
+| `RANT_BRIDGE`, `RANT_BRIDGE_PASSPHRASE` | run a node whose code sets no `net.bridge` on a bridge's sockets (docs/discovery.md, Through a bridge) |
 
 All are read once at `rant_node_open`. Set `RANT_DOMAIN` machine wide, or per workspace,
 to put every node there on one domain.

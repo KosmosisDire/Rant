@@ -5,6 +5,7 @@
 
 #include "core.h"
 #include "../platform/core.h"
+#include "../tunnel/runtime.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,10 +25,11 @@ i_RantDiscoveryState *i_rant_discovery_state(i_RantDiscovery *d);
 size_t       i_rant_discovery_placement_memory(const i_RantDiscoveryCoreConfig *cfg);
 /* Places a runtime in caller memory, which the caller owns. cfg is the core config, a zero
  * uuid is auto generated. net gives the group, port, ttl, interface, seeds and
- * unicast_only, where unicast_only implies cfg.relay_me. NULL on failure, and
- * i_rant_discovery_last_error names the step. */
+ * unicast_only, where unicast_only implies cfg.relay_me. tunnel owns the sockets, NULL for
+ * the OS. NULL on failure, and i_rant_discovery_last_error names the step. */
 i_RantDiscovery       *i_rant_discovery_place(void *mem, size_t mem_size,
-                                          const i_RantDiscoveryCoreConfig *cfg, const RantNodeNet *net);
+                                          const i_RantDiscoveryCoreConfig *cfg, const RantNodeNet *net,
+                                          i_RantTunnel *tunnel);
 
 /* Why the last place returned NULL: OOM (the buffer was too small), PLATFORM, SOCKET, BIND
  * or MCAST_JOIN. A process global with no lock, read it right after. */

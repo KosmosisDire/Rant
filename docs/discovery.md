@@ -57,6 +57,28 @@ it is translated. One address goes to every peer. Neither option creates an inbo
 An unparseable address refuses the open with `RANT_E_BAD_ADDRESS`. A VLAN does not
 translate addresses, so it needs only the relay above.
 
+## Through a bridge
+
+A node can run on the UDP sockets of another host: a Rant bridge (`rant bridge enable` on
+that host) lends them over one WebSocket, and to the mesh the node is a node of that host.
+It reaches a mesh on another network, or one its own host cannot join.
+
+```c
+RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){
+    .net = { .bridge = "ws://192.168.1.20:7480", .bridge_passphrase = "secret" } });
+```
+
+- `RANT_BRIDGE` and `RANT_BRIDGE_PASSPHRASE` set them for a node whose code leaves them
+  NULL. An empty `bridge` means this host's own sockets whatever the environment says.
+- The open connects first and fails with `RANT_E_BRIDGE` when the bridge cannot be reached
+  or refuses, `.detail` saying why, such as `wrong passphrase`.
+- A dropped link fires `RANT_E_BRIDGE` and reconnects on its own. A restarted bridge gets
+  the node's sockets bound again on the same ports, so peers keep reaching it.
+- `ws://` only: the library carries no TLS. Shared memory is off, since its peers are on
+  the bridge's host.
+- The other network options apply on the bridge's host: `multicast_interface` names one
+  of its interfaces, `127.0.0.1` its loopback.
+
 ## Network options
 
 | option | meaning |
@@ -70,6 +92,7 @@ translate addresses, so it needs only the relay above.
 | `recv_buffer_bytes`, `send_buffer_bytes` | data socket OS buffers. 0 = OS default |
 | `fragment_size` | UDP payload bytes per fragment. 0 = `RANT_FRAG_SIZE`. One size per node |
 | `self_ip`, `advertise_port` | state our own locator |
+| `bridge`, `bridge_passphrase` | run on a bridge's sockets (Through a bridge) |
 
 `opts.discovery` holds `announce_interval_us` (3 s), `peer_timeout_us` (12 s) and
 `max_peers` (16).

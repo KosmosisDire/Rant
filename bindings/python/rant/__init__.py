@@ -126,6 +126,7 @@ class ErrorKind(_pyenum.IntEnum):
     BAD_DOMAIN = 26      # an open refused: RANT_DOMAIN is not a number from 0 to 65535
     BAD_PREFIX = 27      # an open refused: RANT_PREFIX or prefix holds '@', starts or ends with '/' or is too long
     WIRE_VERSION = 28    # a node of the domain speaks another wire version: ip, port. Once per source
+    BRIDGE = 29          # the bridge cannot be reached or refused, or its link dropped: detail says why
 
 
 class PeerLiveness(_pyenum.IntEnum):
@@ -2068,12 +2069,13 @@ class Node:
                  discovery_port=0, multicast_ttl=0, seed_peers=(), unicast_only=False,
                  self_ip=None, advertise_port=0, fragment_size=0, recv_buffer_bytes=0,
                  send_buffer_bytes=0, announce_interval=0.0, peer_timeout=0.0, max_peers=0,
-                 threading=Threading.SERVICE_THREAD):
+                 bridge=None, bridge_passphrase=None, threading=Threading.SERVICE_THREAD):
         """Open a node. name None = auto generated. on_event receives every peer, loss and
                 error event, printed to stderr when None. The options are
                 docs/getting-started.md's, durations in seconds and 0 = the default.
-                match_wait None = off. seed_peers are "ip" or "ip:port" strings. The service
-                thread runs from here unless threading is MANUAL."""
+                match_wait None = off. seed_peers are "ip" or "ip:port" strings. bridge is the
+                ws:// URL of a Rant bridge whose sockets the node runs on, None takes
+                RANT_BRIDGE. The service thread runs from here unless threading is MANUAL."""
         self._lib = None
         self._gate = _Gate()                    # every call into the C holds a pass on it
         self._close_lock = _threading.Lock()    # a later close waits until the first is done
@@ -2126,6 +2128,8 @@ class Node:
         co.net.unicast_only = 1 if unicast_only else 0
         co.net.self_ip = self_ip.encode() if self_ip else None
         co.net.advertise_port = advertise_port
+        co.net.bridge = bridge.encode("utf-8") if bridge else None   # copied by open
+        co.net.bridge_passphrase = bridge_passphrase.encode("utf-8") if bridge_passphrase is not None else None
         co.net.fragment_size = fragment_size
         co.net.recv_buffer_bytes = recv_buffer_bytes
         co.net.send_buffer_bytes = send_buffer_bytes

@@ -30,7 +30,7 @@ pub.Send(new Conveyor(0.5, true, "bracket"));
 the C node options under C# names, where 0, false or null means the C default: `Domain`,
 `Prefix`, `MaxTopics`, `MulticastInterface`, `MatchWaitMs`, `FetchDetails`, the discovery options of
 docs/discovery.md (`SeedPeers` as "ip" or "ip:port" strings, `UnicastOnly`, `SelfIp` with
-`AdvertisePort`) and the rest. `node.OnEvent` carries peer lifecycle, loss and error
+`AdvertisePort`, `Bridge` with `BridgePassphrase`) and the rest. `node.OnEvent` carries peer lifecycle, loss and error
 events. It is optional: with no handler attached, error events print to stderr, and
 `LastError` records the last error either way, null before any. `Stats` reads the node's memory, backpressure and evicted unsent counters.
 The static `RantNode.Version` is the native library's version, such as "0.0.17".

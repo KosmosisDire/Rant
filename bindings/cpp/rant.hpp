@@ -106,7 +106,8 @@ enum class ErrorKind {
     BadSchema,            /* schema text or wire that does not compile */
     BadDomain,            /* RANT_DOMAIN is not a number from 0 to 65535 */
     BadPrefix,            /* RANT_PREFIX or the prefix option holds '@', starts or ends with '/' or is too long */
-    WireVersion           /* a node of the domain speaks another wire version: ip, port. Once per source */
+    WireVersion,          /* a node of the domain speaks another wire version: ip, port. Once per source */
+    Bridge                /* the bridge cannot be reached, refused, or its link dropped: detail() */
 };
 
 /* Schema field kinds for reflection, the C wire values. Array and String are fixed,
@@ -144,7 +145,7 @@ static_assert((int)ErrorKind::BadAddress == detail::RANT_E_BAD_ADDRESS, "error e
 static_assert((int)ErrorKind::BadSchema == detail::RANT_E_BAD_SCHEMA, "error enum drift");
 static_assert((int)ErrorKind::BadDomain == detail::RANT_E_BAD_DOMAIN, "error enum drift");
 static_assert((int)ErrorKind::BadPrefix == detail::RANT_E_BAD_PREFIX, "error enum drift");
-static_assert((int)ErrorKind::WireVersion == detail::RANT_E_WIRE_VERSION, "error enum drift");
+static_assert((int)ErrorKind::Bridge == detail::RANT_E_BRIDGE, "error enum drift");
 static_assert((int)FieldType::Struct == detail::RANT_STRUCT, "field-type enum drift");
 static_assert((int)FieldType::String == detail::RANT_STR, "field-type enum drift");
 static_assert((int)FieldType::Map == detail::RANT_MAP, "field-type enum drift");
@@ -477,6 +478,10 @@ struct NodeOptions {
      * source. For a static 1:1 mapping such as a cloud IP or a published container port. */
     std::string              self_ip;   /* "203.0.113.7", empty = learn per path */
     uint16_t                 advertise_port       = 0;   /* 0 = the port we actually bound */
+    /* Run on the sockets of the Rant bridge at this ws:// URL, a node of its host to the mesh.
+     * Empty takes RANT_BRIDGE, else this host's own. */
+    std::string              bridge;
+    std::string              bridge_passphrase;   /* empty takes RANT_BRIDGE_PASSPHRASE */
     /* discovery cadence */
     std::chrono::microseconds announce_interval{ 0 };   /* 0 = 1 s */
     std::chrono::microseconds peer_timeout{ 0 };        /* 0 = 3.5 s */
@@ -2964,6 +2969,8 @@ public:
         co.net.unicast_only        = o.unicast_only ? 1 : 0;
         co.net.self_ip             = impl->self_ip.empty() ? nullptr : impl->self_ip.c_str();
         co.net.advertise_port      = o.advertise_port;
+        co.net.bridge              = o.bridge.empty() ? nullptr : o.bridge.c_str();
+        co.net.bridge_passphrase   = o.bridge_passphrase.empty() ? nullptr : o.bridge_passphrase.c_str();
         co.net.fragment_size       = o.fragment_size;
         co.net.recv_buffer_bytes   = o.recv_buffer_bytes;
         co.net.send_buffer_bytes   = o.send_buffer_bytes;

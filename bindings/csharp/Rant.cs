@@ -140,7 +140,10 @@ namespace Rant
         BadPrefix,
         /// <summary>A node of the domain speaks another wire version: Ip, Port. Once per
         /// source.</summary>
-        WireVersion
+        WireVersion,
+        /// <summary>The bridge cannot be reached or refused, so the open failed, or its link
+        /// dropped later: Detail says why.</summary>
+        Bridge
     }
 
     /// <summary>A schema field's kind, valued as its wire kind byte.</summary>
@@ -304,6 +307,8 @@ namespace Rant
         public ushort fragment_size;
         public IntPtr self_ip;                 // const char*
         public ushort advertise_port;
+        public IntPtr bridge;                  // const char*
+        public IntPtr bridge_passphrase;       // const char*
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1050,6 +1055,11 @@ namespace Rant
         /// <summary>Advertise this data port instead of the bound one, for a published
         /// container port.</summary>
         public ushort AdvertisePort;
+        /// <summary>Run on the sockets of the Rant bridge at this ws:// URL, a node of its host
+        /// to the mesh. Null takes RANT_BRIDGE, else this host's own.</summary>
+        public string Bridge;
+        /// <summary>The bridge's passphrase. Null takes RANT_BRIDGE_PASSPHRASE.</summary>
+        public string BridgePassphrase;
         /// <summary>Microseconds between discovery announces, 0 = 3 s.</summary>
         public uint AnnounceIntervalUs;
         /// <summary>Drop a peer after this many microseconds of silence, 0 = 12 s.</summary>
@@ -2696,6 +2706,10 @@ namespace Rant
             IntPtr prefixPtr = Codec.CStrPtr(o.Prefix);     // copied by open, freed below
             co.prefix = prefixPtr;
             co.net.advertise_port = o.AdvertisePort;
+            IntPtr bridgePtr = Codec.CStrPtr(o.Bridge);     // copied by open, freed below
+            IntPtr bridgePassPtr = Codec.CStrPtr(o.BridgePassphrase);
+            co.net.bridge = bridgePtr;
+            co.net.bridge_passphrase = bridgePassPtr;
             co.net.fragment_size = o.FragmentSize;
             co.net.recv_buffer_bytes = o.RecvBufferBytes;
             co.net.send_buffer_bytes = o.SendBufferBytes;
@@ -2709,6 +2723,8 @@ namespace Rant
             if (seedBlock != IntPtr.Zero) Marshal.FreeHGlobal(seedBlock);
             Codec.FreeCStr(selfIpPtr);
             Codec.FreeCStr(prefixPtr);
+            Codec.FreeCStr(bridgePtr);
+            Codec.FreeCStr(bridgePassPtr);
 
             if (h == IntPtr.Zero)
             {

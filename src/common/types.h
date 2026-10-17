@@ -125,6 +125,12 @@ typedef struct {
     const char           *self_ip;           /* advertise this IPv4 address. Unparseable refuses the
                                                 open with RANT_E_BAD_ADDRESS */
     uint16_t              advertise_port;    /* advertise this data port instead of the bound one */
+    /* Running on another host's sockets. docs/discovery.md, Through a bridge */
+    const char           *bridge;            /* the ws:// URL of a Rant bridge whose sockets this node
+                                                uses, a node of that host to the mesh. NULL takes
+                                                RANT_BRIDGE, unset means this host's own */
+    const char           *bridge_passphrase; /* the bridge's passphrase. NULL takes
+                                                RANT_BRIDGE_PASSPHRASE */
 } RantNodeNet;
 
 /* Discovery cadence and the peer table size, zero means default. */
@@ -181,8 +187,10 @@ typedef enum {
     RANT_E_BAD_PREFIX,         /* RANT_PREFIX or opts.prefix holds '@', starts or ends with '/' or
                                   leaves no room for a name, refused at open */
     /* a node this one cannot speak with */
-    RANT_E_WIRE_VERSION        /* a node of the domain speaks another wire version: .ip, .ip_len,
+    RANT_E_WIRE_VERSION,       /* a node of the domain speaks another wire version: .ip, .ip_len,
                                   .port. Once per source */
+    RANT_E_BRIDGE              /* the bridge of net.bridge cannot be reached or refused, at open,
+                                  or its link dropped or a socket op failed later: .detail */
 } RantErrorKind;
 
 typedef struct {
@@ -202,7 +210,7 @@ typedef struct {
     uint64_t   identity;       /* NAME_COLLISION: the colliding identity */
     uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
     uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from it */
-    const char *detail;        /* SCHEMA_MISMATCH and BAD_SCHEMA: one line saying what
+    const char *detail;        /* SCHEMA_MISMATCH, BAD_SCHEMA and BRIDGE: one line saying what
                                   went wrong and where, or NULL */
     const char *peer_name;     /* the peer's node name, NULL when unknown. Prefer it over .peer */
 } RantEvent;

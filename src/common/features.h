@@ -46,7 +46,9 @@
 
 /* RANT_TUNNEL, a node on a bridge's sockets, needs the bundled platform layer's TCP client. */
 #if !defined(RANT_TUNNEL) && !defined(RANT_NO_TUNNEL) && !defined(RANT_PLAT_CUSTOM)
-  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) ||       defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) ||       defined(__DragonFly__)
+  #if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || \
+      defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
+      defined(__DragonFly__)
     #define RANT_TUNNEL
   #endif
 #endif
