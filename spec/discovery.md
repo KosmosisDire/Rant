@@ -124,6 +124,13 @@ still converges. The IO layer feeds its subnets in with
 `i_rant_discovery_set_local_subnets`. A sans-IO caller that does not gets only the routed
 versus link local half of the ranking.
 
+The locator is where we send. What we accept is wider, since a multihomed peer sends from
+whichever address its route to our locator picks, which need not be the one we chose for it.
+Each peer keeps the sources of its last direct announces, up to 4 paths. A datagram is the
+peer's when it comes from the locator, else from its data port on a path heard within three
+announce intervals. A path two peers share attributes to neither, and a peer with observed
+sources (NAT) matches only those.
+
 ## Stated locators
 
 `self_ip` and `advertise_port` put a locator in the announce that peers treat as

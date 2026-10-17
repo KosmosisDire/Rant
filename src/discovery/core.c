@@ -46,6 +46,9 @@ struct i_RantDiscoveryPeer {
     RantAddr obs_data;
     uint16_t introduce_cursor;   /* next slot to introduce to this relay me peer, or IDLE */
     uint64_t introduce_sweep_us; /* next periodic re introduction */
+    /* Sources its own announces came from lately, one per path on a multihomed host. Its
+       data may leave from any of them, whichever locator it holds for us. */
+    struct { uint8_t ip[16]; uint8_t ip_len; uint64_t heard_us; } paths[4];
 };
 typedef struct i_RantDiscoveryPeer i_RantDiscoveryPeer;
 
@@ -71,6 +74,7 @@ struct i_RantDiscoveryState {
     uint8_t       n_local_nets;
     RantAddr      wire_told[8];   /* sources already reported on another wire version */
     uint8_t       n_wire_told, next_wire_told;
+    uint64_t      now_us;         /* the latest time fed in, which ages the paths */
     i_RantDiscoveryPeer    *peers;
 };
 
@@ -410,6 +414,30 @@ static void i_rant_discovery_addr_of(const i_RantDiscoveryPeer *peer, RantAddr *
     out->port   = peer->port;
 }
 
+/* A path to the peer: the slot already holding ip, else the stalest, empty ones first. */
+static void i_rant_discovery_note_path(i_RantDiscoveryPeer *peer, const uint8_t *ip, uint8_t ip_len,
+                                       uint64_t now){
+    int i, at = 0;
+    for (i = 0; i < 4; i++){
+        if (peer->paths[i].ip_len == ip_len && memcmp(peer->paths[i].ip, ip, ip_len) == 0){ at = i; break; }
+        if (peer->paths[i].heard_us < peer->paths[at].heard_us) at = i;
+    }
+    memcpy(peer->paths[at].ip, ip, ip_len);
+    peer->paths[at].ip_len = ip_len;
+    peer->paths[at].heard_us = now;
+}
+
+/* ip was a path to the peer within three announce intervals, so two lost announces in a
+   row keep it and a path that went away stops counting. */
+static int i_rant_discovery_on_path(const i_RantDiscoveryState *st, const i_RantDiscoveryPeer *peer,
+                                    const uint8_t *ip, uint8_t ip_len){
+    int i;
+    for (i = 0; i < 4; i++)
+        if (peer->paths[i].ip_len == ip_len && memcmp(peer->paths[i].ip, ip, ip_len) == 0)
+            return st->now_us - peer->paths[i].heard_us <= (uint64_t)st->cfg.announce_interval_us * 3u;
+    return 0;
+}
+
 /* A datagram of this domain on another wire version. Its sender announces every interval, so
    each source is reported once, the last 8 remembered. */
 static void i_rant_discovery_wire_mismatch(i_RantDiscoveryState *st, const RantAddr *src){
@@ -449,6 +477,7 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     int have_disc=0; uint16_t disc_port=0; uint8_t disc_ip_len=0;
     const uint8_t *disc_ip=NULL; RantBytes overlay = {NULL, 0}; RantString disc_name = {NULL, 0};
 
+    st->now_us = now;
     /* the magic, the wire version, the flags and the domain keep bytes 0 to 7 in every
        version, so a node of this domain on another wire is recognized and reported */
     if (len < 8) return;
@@ -557,7 +586,10 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     peer = &st->peers[idx];
     if (peer->dropped){ peer->dropped = 0; revived = 1; }   /* a DROPPED peer returned: resume it */
     peer->last_heard_us = now;
-    if (!proxied) peer->last_direct_us = now;   /* only the peer itself is direct liveness */
+    if (!proxied){
+        peer->last_direct_us = now;              /* only the peer itself is direct liveness */
+        if (src_ip) i_rant_discovery_note_path(peer, src_ip, src_ip_len, now);
+    }
     else if (!(relayer && memcmp(relayer, st->cfg.uuid, 16)==0) && peer->proxies_heard != 0xFFu)
         peer->proxies_heard++;   /* a foreign proxy counts, our own echo must not */
 
@@ -666,6 +698,7 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
 
 size_t i_rant_discovery_update(i_RantDiscoveryState *st, uint64_t now, void *out, size_t cap){
     uint16_t i;
+    st->now_us = now;
     if (!st->started){
         st->started = 1;
         st->next_announce_us = now + (i_rant_discovery_fnv(st->cfg.uuid,16) % st->cfg.announce_interval_us);
@@ -901,6 +934,7 @@ RantString i_rant_discovery_peer_name(const i_RantDiscoveryState *st, uint32_t i
 int i_rant_discovery_id_for_addr(const i_RantDiscoveryState *st, const uint8_t *ip, uint8_t ip_len,
                                uint16_t port, uint32_t *id){
     uint16_t i;
+    int found = -1;
     if (!ip || (ip_len != 4 && ip_len != 16)) return 0;
     for (i=0;i<st->cap_peers;i++){
         const i_RantDiscoveryPeer *p = &st->peers[i];
@@ -918,7 +952,18 @@ int i_rant_discovery_id_for_addr(const i_RantDiscoveryState *st, const uint8_t *
             return 1;
         }
     }
-    return 0;
+    /* Else the data port on any recent path of the peer's. One peer or none: an address two
+       peers share attributes to neither. */
+    for (i=0;i<st->cap_peers;i++){
+        const i_RantDiscoveryPeer *p = &st->peers[i];
+        if (!p->used || p->dropped || p->port != port || p->obs_disc.ip_len || p->obs_data.ip_len) continue;
+        if (!i_rant_discovery_on_path(st, p, ip, ip_len)) continue;
+        if (found >= 0) return 0;
+        found = i;
+    }
+    if (found < 0) return 0;
+    if (id) *id = st->peers[found].local_id;
+    return 1;
 }
 
 size_t i_rant_discovery_leave(i_RantDiscoveryState *st, void *out, size_t cap){

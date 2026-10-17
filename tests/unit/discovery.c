@@ -154,6 +154,29 @@ static void disc_core_checks(void){
              "disc-core: another wire version is reported once per source, never a peer (reports=%u ups=%u)",
              dc_wire_n, dc_up_n);
 
+    /* A peer heard on two paths is known from either, as a multihomed host sends from
+       whichever its route picks. A path two peers share is neither's, and a path quiet for
+       three announce intervals stops counting. */
+    { uint32_t idM, idN, got = 0;
+      st = i_rant_discovery_init(mem,sizeof mem,&c);
+      i_rant_discovery_update(st, 1000, out, sizeof out);
+      n=dc_mk(buf,10,0,99,6100,1); dc_feed(st,sa,7400,0,buf,n,2000); idM=dc_up_id;
+      dc_feed(st,sb,7400,0,buf,n,2000);
+      n=dc_mk(buf,11,0,99,6100,1); dc_feed(st,sc,7400,0,buf,n,2000); idN=dc_up_id;
+      CHECK(i_rant_discovery_id_for_addr(st,sa,4,6100,&got) && got==idM
+               && i_rant_discovery_id_for_addr(st,sb,4,6100,&got) && got==idM
+               && !i_rant_discovery_id_for_addr(st,sb,4,6101,&got),
+               "disc-core: a peer heard on two paths is known from either");
+      dc_feed(st,sb,7400,0,buf,n,2500);
+      CHECK(!i_rant_discovery_id_for_addr(st,sb,4,6100,&got)
+               && i_rant_discovery_id_for_addr(st,sc,4,6100,&got) && got==idN,
+               "disc-core: a path two peers share is neither's");
+      n=dc_mk(buf,10,0,99,6100,1); dc_feed(st,sa,7400,0,buf,n,3500000);
+      CHECK(i_rant_discovery_id_for_addr(st,sa,4,6100,&got) && got==idM
+               && !i_rant_discovery_id_for_addr(st,sb,4,6100,&got),
+               "disc-core: a path quiet for three intervals stops counting");
+    }
+
     /* RELAY, the rules the loopback phase cannot see: who enlists us, one hop only, and
        a proxied locator losing to a direct path we still hear */
     { uint32_t id9; RantAddr a; size_t pn; uint16_t pport;
