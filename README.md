@@ -66,6 +66,11 @@ https://github.com/KosmosisDire/Rant.git#upm
 Or download `rant-<version>.unitypackage` from the release and use `Assets > Import Package
 > Custom Package` (it imports into `Assets/Rant/`, native plugins included).
 
+### In a page or Node.js
+Rant builds to wasm with Emscripten. A CMake project links `rant::rant_web`, and
+`rantlib-rant-<version>.tgz` on the release holds the same for any other build, with the
+net objects a page hands it. See [docs/web.md](docs/web.md).
+
 ### Tools
 `rant-<version>-<platform>.zip` on the release holds the command line tools for Windows,
 Linux and macOS. Unzip and run, nothing installs.
