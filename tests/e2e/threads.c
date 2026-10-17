@@ -57,27 +57,65 @@ static void th_echo_a_on_msg(const RantMsg *m){ (void)m; test_atomic_add(&th_ech
 static long long th_hammer_stop;
 /* a slow inline handler: 30 ms of work, plus a create from inside, which stays refused */
 static volatile unsigned long th_slow_runs, th_echo_recv; static volatile int th_slow_create_refused;
+/* A handler holds while th_hold is set, up to a second, so a send on another thread that
+   waited for it would take that second: a cause, not a race against a CI runner's clock. */
+static volatile int th_hold, th_in_handler;
+static void th_hold_here(void){
+    uint64_t end = i_rant_plat_now_us() + 1000000u;
+    th_in_handler = 1;
+    while (th_hold && i_rant_plat_now_us() < end) test_sleep_ms(1);
+    test_sleep_ms(30);
+    th_in_handler = 0;
+}
+/* Holds a handler, measures sends on w meanwhile, then lets it go. 0 when no handler came. */
+static uint64_t th_send_while_held(RantNode *w, int topic, void (*trigger)(void *), void *arg){
+    uint8_t payload[16]; uint64_t worst = 0, end; int k;
+    memset(payload, 0, sizeof payload);
+    th_hold = 1;
+    trigger(arg);
+    end = i_rant_plat_now_us() + 2000000u;
+    while (!th_in_handler && i_rant_plat_now_us() < end) test_sleep_ms(1);
+    if (!th_in_handler){ th_hold = 0; return 0; }
+    for (k=0;k<5;k++){
+        uint64_t t0 = i_rant_plat_now_us(), dt;
+        test_send(w, topic, payload, sizeof payload);
+        dt = i_rant_plat_now_us() - t0;
+        if (dt > worst) worst = dt;
+    }
+    th_hold = 0;
+    end = i_rant_plat_now_us() + 2000000u;
+    while (th_in_handler && i_rant_plat_now_us() < end) test_sleep_ms(1);
+    return worst ? worst : 1;
+}
 static void th_slow_on_message(const RantMsg *m){
     uint8_t b[8]; int k;
     th_slow_runs++;
     if (!rant_node_create_topic(m->node, "th/inside", RANT_PUB_ONLY, NULL, NULL)) th_slow_create_refused = 1;
     /* a burst from inside the handler on a depth 1 topic: each send must leave before the next */
     for (k=0;k<8;k++){ memset(b, k, sizeof b); test_send(m->node, 2, b, sizeof b); }
-    test_sleep_ms(30);
+    th_hold_here();
 }
 static void th_echo_on_message(const RantMsg *m){ if (m->topic_index == 2) th_echo_recv++; }
 /* a slow function handler on the service thread, and a caller thread driving it */
 static volatile unsigned long th_fn_runs, th_fn_ok;
 static void th_slow_on_request(RantRequest *rq, void *user){
-    (void)user; th_fn_runs++; test_sleep_ms(30); rant_request_reply(rq, rant_bytes("ok", 2));
+    (void)user; th_fn_runs++; th_hold_here(); rant_request_reply(rq, rant_bytes("ok", 2));
 }
+/* one call per go, from a thread of its own, since a call waits for its reply */
+static volatile int th_call_go, th_call_quit;
 static void th_caller(void *arg){
-    int k;
-    for (k=0;k<10;k++){
+    while (!th_call_quit){
         RantResponse rsp;
-        if (rant_function_call((RantFunction*)arg, rant_bytes("q",1), &rsp, 2000, NULL) == 1
+        if (!th_call_go){ test_sleep_ms(1); continue; }
+        th_call_go = 0;
+        if (rant_function_call((RantFunction*)arg, rant_bytes("q",1), &rsp, 3000, NULL) == 1
             && rsp.status == RANT_CALL_OK) th_fn_ok++;
     }
+}
+static void th_trigger_call(void *arg){ (void)arg; th_call_go = 1; }
+static void th_trigger_slow(void *arg){
+    uint8_t payload[16]; memset(payload, 0, sizeof payload);
+    test_send((RantNode*)arg, 1, payload, sizeof payload);
 }
 /* a create from a third thread while the handler is out: it waits, then succeeds */
 static volatile RantTopic *th_late_topic; static volatile uint64_t th_late_us;
@@ -222,7 +260,8 @@ static void threaded_checks(void){
     }
 
     /* CAPPED: a rate capped subscriber holds samples back on its lane, which must never
-       slow a depth 1 publisher. A send that waits for the lane's tick takes 20 ms here. */
+       slow a depth 1 publisher. A send that waited for the lane's tick would take up to
+       200 ms here, far past a busy runner's stall. */
     { i_RantTopicDef cd[1]; RantNodeOpts o; RantNode *w, *r; uint8_t payload[16];
       memset(payload, 0, sizeof payload);
       memset(cd, 0, sizeof cd);
@@ -231,7 +270,7 @@ static void threaded_checks(void){
       memset(&o, 0, sizeof o);
       o.domain = TEST_DOMAIN+12; o.disable_shm = 1; o.discovery.max_peers = 4; o.net.multicast_interface="127.0.0.1";
       w = test_node_open("th-cpub", NULL, th_on_event, o, cd, 1);
-      cd[0].role = RANT_SUB_ONLY; cd[0].qos.max_rate_hz = 50;
+      cd[0].role = RANT_SUB_ONLY; cd[0].qos.max_rate_hz = 5;
       r = test_node_open("th-csub", th_on_message, th_on_event, o, cd, 1);
       CHECK(w && r, "capped: nodes open");
       if (w && r){
@@ -243,7 +282,7 @@ static void threaded_checks(void){
                 test_sleep_ms(5); }
           test_sleep_ms(300);                     /* the rate section rides an announce */
           began = i_rant_plat_now_us();
-          for (i=0;i<200;i++){
+          for (i=0;i<600;i++){
               uint64_t t0 = i_rant_plat_now_us(), dt;
               test_send(w, 0, payload, sizeof payload);
               dt = i_rant_plat_now_us() - t0;
@@ -252,17 +291,18 @@ static void threaded_checks(void){
           }
           /* the cap is judged over the real span, a busy publisher may still send slower */
           secs = (double)(i_rant_plat_now_us() - began) / 1e6;
-          most = (long long)(50.0 * secs * 1.25) + 2;
-          CHECK(worst < 10000u, "capped: no send waits for the capped lane (worst %.2f ms)",
+          most = (long long)(5.0 * secs * 1.25) + 2;
+          CHECK(worst < 100000u, "capped: no send waits for the capped lane (worst %.2f ms)",
                    worst/1000.0);
           got = test_atomic_load(&th_recv);
-          CHECK(got >= 2 && got <= most && got < 200,
-                   "capped: the subscriber is still paced (%lld of 200 in %.0f ms, at most %lld)",
+          CHECK(got >= 2 && got <= most && got < 600,
+                   "capped: the subscriber is still paced (%lld of 600 in %.0f ms, at most %lld)",
                    got, secs * 1000.0, most);
           CHECK(rant_node_evicted_unsent(w) == 0, "capped: a held back sample is not an eviction (%u)",
                    rant_node_evicted_unsent(w));
-          /* a lone held back sample leaves at the lane's 20 ms tick: the send that armed the
-             tick must wake the service thread, which otherwise sleeps out its older plan */
+          /* a lone held back sample leaves at the lane's 200 ms tick: the send that armed the
+             tick must wake the service thread, which otherwise sleeps out its older plan of
+             seconds */
           { uint64_t worst_gap = 0; int pair;
             for (pair=0;pair<3;pair++){
                 long long r0; uint64_t t0, dt;
@@ -276,14 +316,14 @@ static void threaded_checks(void){
                 if (test_atomic_load(&th_recv) < r0 + 2) dt = 1000000u;
                 if (dt > worst_gap) worst_gap = dt;
             }
-            CHECK(worst_gap < 100000u, "capped: a held back sample leaves at its tick (worst %.0f ms)",
+            CHECK(worst_gap < 1000000u, "capped: a held back sample leaves at its tick (worst %.0f ms)",
                      worst_gap/1000.0); }
           rant_node_close(r, 1); rant_node_close(w, 1);
       }
     }
 
-    /* UNLOCKED HANDLER: a 30 ms inline handler on the service thread must not delay a
-       send on another thread of the same node. A create from a third thread waits for the
+    /* UNLOCKED HANDLER: an inline handler held on the service thread must not delay a send
+       on another thread of the same node. A create from a third thread waits for the
        handler and succeeds, a create from inside the handler stays refused. */
     { i_RantTopicDef cw[3], cr[3]; RantNodeOpts o; RantNode *w, *r; uint8_t payload[16];
       memset(payload, 0, sizeof payload);
@@ -298,25 +338,21 @@ static void threaded_checks(void){
       r = test_node_open("th-usub", th_echo_on_message, th_on_event, o, cr, 3);
       CHECK(w && r, "unlocked: nodes open");
       if (w && r){
-          i_RantThread creator; uint64_t worst = 0, next_slow, end;
+          i_RantThread creator; uint64_t worst = 0, end; int held;
           th_slow_runs = 0; th_echo_recv = 0; th_slow_create_refused = 0; th_late_topic = NULL; th_late_us = 0;
           rant_node_start(w); rant_node_start(r);
           end = i_rant_plat_now_us() + 5000000u;
           while ((test_match_count(w, 0) == 0 || test_match_count(r, 1) == 0
                   || test_match_count(w, 2) == 0) && i_rant_plat_now_us() < end) test_sleep_ms(5);
           i_rant_plat_thread_start(&creator, th_late_creator, w);
-          end = i_rant_plat_now_us() + 1000000u; next_slow = 0;
-          while (i_rant_plat_now_us() < end){
-              uint64_t t0 = i_rant_plat_now_us(), dt;
-              if (t0 >= next_slow){ test_send(r, 1, payload, sizeof payload); next_slow = t0 + 50000u; }
-              test_send(w, 0, payload, sizeof payload);
-              dt = i_rant_plat_now_us() - t0;
+          for (held = 0; held < 10; held++){
+              uint64_t dt = th_send_while_held(w, 0, th_trigger_slow, r);
+              if (!dt) break;
               if (dt > worst) worst = dt;
-              test_sleep_ms(1);
           }
           i_rant_plat_thread_join(&creator);
-          CHECK(th_slow_runs >= 10, "unlocked: the slow handler ran (%lu times)", th_slow_runs);
-          CHECK(worst < 10000u, "unlocked: no send waited for the handler (worst %.1f ms)", worst/1000.0);
+          CHECK(held == 10, "unlocked: the slow handler ran (%d held of 10, %lu runs)", held, th_slow_runs);
+          CHECK(worst < 500000u, "unlocked: no send waited for the handler (worst %.1f ms)", worst/1000.0);
           CHECK(th_slow_create_refused, "unlocked: a create from inside the handler is refused");
           CHECK(th_late_topic != NULL, "unlocked: a create from a third thread succeeds (%.1f ms)",
                    th_late_us/1000.0);
@@ -329,19 +365,20 @@ static void threaded_checks(void){
             end = i_rant_plat_now_us() + 5000000u;
             while (def && rem && rant_function_match_count(rem) == 0 && i_rant_plat_now_us() < end) test_sleep_ms(5);
             CHECK(def && rem && rant_function_match_count(rem) == 1, "unlocked: function pair matched");
+            th_call_go = 0; th_call_quit = 0;
             i_rant_plat_thread_start(&caller, th_caller, rem);
-            end = i_rant_plat_now_us() + 600000u;
-            while (i_rant_plat_now_us() < end){
-                uint64_t t0 = i_rant_plat_now_us(), dt;
-                test_send(w, 0, payload, sizeof payload);
-                dt = i_rant_plat_now_us() - t0;
+            for (held = 0; held < 10; held++){
+                uint64_t dt = th_send_while_held(w, 0, th_trigger_call, NULL);
+                if (!dt) break;
                 if (dt > fworst) fworst = dt;
-                test_sleep_ms(1);
             }
+            end = i_rant_plat_now_us() + 3000000u;
+            while (th_fn_ok < (unsigned long)held && i_rant_plat_now_us() < end) test_sleep_ms(1);
+            th_call_quit = 1;
             i_rant_plat_thread_join(&caller);
-            CHECK(th_fn_ok == 10 && th_fn_runs == 10, "unlocked: ten calls answered through the slow handler (%lu ok, %lu runs)",
+            CHECK(held == 10 && th_fn_ok == 10 && th_fn_runs == 10, "unlocked: ten calls answered through the slow handler (%lu ok, %lu runs)",
                      th_fn_ok, th_fn_runs);
-            CHECK(fworst < 10000u, "unlocked: no send waited for the function handler (worst %.1f ms)", fworst/1000.0);
+            CHECK(fworst < 500000u, "unlocked: no send waited for the function handler (worst %.1f ms)", fworst/1000.0);
             if (rem) rant_function_retire(rem);
             if (def) rant_function_retire(def); }
           test_sleep_ms(100);

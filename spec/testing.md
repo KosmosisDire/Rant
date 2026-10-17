@@ -220,20 +220,22 @@ What each phase pins, grouped by layer.
 - RELIABLE: three sender threads of 1000 reliable messages each with no poll anywhere,
   exactly once, per thread ordered, no unsent eviction, drain completes.
 - BURST: 64 back to back best effort sends from one thread all reach the wire.
-- CAPPED: a `keep_last` 1 publisher at 1 kHz against a `max_rate_hz` 50 subscriber. No send
+- CAPPED: a `keep_last` 1 publisher at 1 kHz against a `max_rate_hz` 5 subscriber. No send
   may wait for the capped lane's tick, the subscriber stays paced and nothing counts as
-  evicted unsent. A lone held back sample after a quiet spell must leave at the 20 ms
-  tick, which pins the kick a send owes a timer it armed.
+  evicted unsent. A lone held back sample after a quiet spell must leave at the 200 ms
+  tick, which pins the kick a send owes a timer it armed. The slow rate keeps a wait apart
+  from a busy runner's stall: one would take up to 200 ms, the bounds are 100 ms and 1 s.
 - HOSTILE (Windows): transport sends forced to would block. The first pass parks one
   datagram in `tx_hold`, past that the burst overwrites truly unsent history, which must
   surface as RANT_EVICTED_UNSENT so every send is delivered or accounted.
 - WAKER: an idle started pair delivers a single send within milliseconds, not at the next
   announce capped wakeup.
-- UNLOCKED HANDLER: a 30 ms inline handler on the service thread while another thread
-  sends at 1 kHz on the same node. No send may wait for the handler, a create from a
-  third thread waits for the handler and succeeds, one from inside stays refused, a
-  burst of eight sends from inside the handler on a depth 1 topic all arrive, and a 30 ms
-  function handler driven by a caller thread stalls no send either.
+- UNLOCKED HANDLER: an inline handler on the service thread is held while another thread
+  sends on the same node, and lets go only once those sends returned, so a send that
+  waited for it would take its one second hold, not a stall's milliseconds. A create
+  from a third thread waits for the handler and succeeds, one from inside stays refused,
+  a burst of eight sends from inside the handler on a depth 1 topic all arrive, and a
+  function handler held the same way, driven by a caller thread, stalls no send either.
 - REENTRANT: a callback echo works, and create, set_role and a foreign poll refuse loudly.
   The ring must be deeper than the request burst, since a reentrant send never waits for
   a TX pass.
