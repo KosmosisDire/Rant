@@ -66,10 +66,8 @@ jobs:
       - name: Python wheel
         run: python -m pip wheel . --no-deps -w dist
 
-      - name: Web package
-        run: cmake --build build --config Release --target web_package
-
-  # Rant built to wasm, an echo and a ping in Node.js over UdpNet on loopback.
+  # Rant built to wasm: an echo and a ping, and the TypeScript binding, in Node.js over UdpNet
+  # on loopback, then the web package with the wasm inside.
   web:
     runs-on: ubuntu-22.04
     steps:
@@ -92,3 +90,6 @@ jobs:
           cmake --preset web
           cmake --build --preset web
           ctest --preset web
+
+      - name: Web package
+        run: cmake --build --preset web --target web_package

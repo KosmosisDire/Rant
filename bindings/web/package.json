@@ -1,13 +1,26 @@
 {
     "name": "rant-middleware",
     "version": "0.0.28",
-    "description": "Rant in a page or in Node.js: the net objects of Rant built to wasm, and its C side",
+    "description": "Rant for TypeScript, real Rant built to wasm, in a page or in Node.js, and its net objects and C side",
     "license": "SEE LICENSE IN LICENCE.md",
     "type": "module",
     "exports": {
-        "./net": { "types": "./dist/net.d.ts", "default": "./dist/net.js" },
-        "./udp": { "types": "./dist/udp.d.ts", "default": "./dist/udp.js" },
-        "./tunnel": { "types": "./dist/tunnel.d.ts", "default": "./dist/tunnel.js" }
+        ".": {
+            "types": "./dist/rant.d.ts",
+            "default": "./dist/rant.js"
+        },
+        "./net": {
+            "types": "./dist/net.d.ts",
+            "default": "./dist/net.js"
+        },
+        "./udp": {
+            "types": "./dist/udp.d.ts",
+            "default": "./dist/udp.js"
+        },
+        "./tunnel": {
+            "types": "./dist/tunnel.d.ts",
+            "default": "./dist/tunnel.js"
+        }
     },
     "files": ["dist", "c", "LICENCE.md"],
     "scripts": {

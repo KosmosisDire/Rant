@@ -8,6 +8,9 @@
 #if defined(RANT_BUILD_SHARED)
   #if defined(_WIN32)
     #define RANT_API __declspec(dllexport)
+  #elif defined(__EMSCRIPTEN__)
+    /* used is what makes the wasm module export it */
+    #define RANT_API __attribute__((used, visibility("default")))
   #else
     #define RANT_API __attribute__((visibility("default")))
   #endif

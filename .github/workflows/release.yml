@@ -152,10 +152,17 @@ jobs:
       - name: Unity package
         run: cmake -P tools/unity.cmake
 
+      # The web package carries the binding's wasm, so it builds with Emscripten.
       - name: Web package
         run: |
-          cmake -S . -B build-web-package -DRANT_BUILD_TOOLS=OFF
-          cmake --build build-web-package --target web_package
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          "$HOME/emsdk/emsdk" install 3.1.56
+          "$HOME/emsdk/emsdk" activate 3.1.56
+          export EMSDK="$HOME/emsdk"
+          cmake --preset web
+          cmake --build --preset web --target web_package
 
       - name: Stage the assets
         run: |
