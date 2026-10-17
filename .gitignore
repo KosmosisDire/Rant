@@ -6,6 +6,8 @@ old
 /build-coverage/
 /build-fuzz/
 /build-web/
+/bindings/web/dist/
+/bindings/web/node_modules/
 
 /Debug/
 *.png

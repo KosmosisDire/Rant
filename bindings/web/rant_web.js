@@ -6,7 +6,7 @@ mergeInto(LibraryManager.library, {
     $RantWeb__deps: ['malloc', 'rant_web_deliver'],
     $RantWeb: {
         drives: [],
-        attached: null,
+        sink: null,          // this instance's, so one net object can serve several
         running: false,
         // -1 for none in both, since Emscripten writes this object out and Infinity as null
         wait: -1,            // the shortest wait asked for during the current run
@@ -19,10 +19,6 @@ mergeInto(LibraryManager.library, {
         net() {
             const net = Module['rantNet'];
             if (!net) throw new Error('rant: set Module.rantNet before opening a node');
-            if (RantWeb.attached !== net) {
-                RantWeb.attached = net;
-                net.attach({ deliver: RantWeb.deliver });
-            }
             return net;
         },
 
@@ -98,7 +94,8 @@ mergeInto(LibraryManager.library, {
 
     rant_net_open__deps: ['$RantWeb'],
     rant_net_open: () => {
-        try { return RantWeb.net().open(); }
+        RantWeb.sink ??= { deliver: RantWeb.deliver };
+        try { return RantWeb.net().open(RantWeb.sink); }
         catch (e) { err(String(e?.message ?? e)); return -1; }
     },
 
@@ -137,6 +134,12 @@ mergeInto(LibraryManager.library, {
             HEAPU32[(out >> 2) + 2 * i + 1] = f.mask >>> 0;
         });
         return list.length;
+    },
+
+    rant_net_loopback_group_bind__deps: ['$RantWeb'],
+    rant_net_loopback_group_bind: (naddr) => {
+        const net = RantWeb.net();
+        return (net.loopbackGroupBind ? net.loopbackGroupBind(naddr >>> 0) : naddr) >>> 0;
     },
 
     rant_net_hostname__deps: ['$RantWeb', '$stringToUTF8'],

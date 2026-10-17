@@ -65,3 +65,30 @@ jobs:
 
       - name: Python wheel
         run: python -m pip wheel . --no-deps -w dist
+
+      - name: Web package
+        run: cmake --build build --config Release --target web_package
+
+  # Rant built to wasm, an echo and a ping in Node.js over UdpNet on loopback.
+  web:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Emscripten
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          "$HOME/emsdk/emsdk" install 3.1.56
+          "$HOME/emsdk/emsdk" activate 3.1.56
+          echo "EMSDK=$HOME/emsdk" >> "$GITHUB_ENV"
+
+      - name: Loopback multicast
+        run: sudo ip link set lo multicast on
+
+      - name: Build and test
+        run: |
+          cmake --preset web
+          cmake --build --preset web
+          ctest --preset web

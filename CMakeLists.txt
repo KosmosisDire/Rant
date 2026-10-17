@@ -198,19 +198,23 @@ if(RANT_BUILD_TOOLS)
 endif()
 
 # Rant in a page or in Node.js, from the web preset, and its bench, which a native build
-# makes too for the comparison.
-if(EMSCRIPTEN OR RANT_BUILD_TOOLS)
-  add_subdirectory(bindings/web)
+# makes too for the comparison. The net objects and the web package build wherever npm is.
+if(EMSCRIPTEN)
+  enable_testing()
 endif()
+add_subdirectory(bindings/web)
 
 # 4. The packages, into dist/. unity_package needs nothing installed, nuget_package needs
-#    dotnet and python_wheel needs Python, and packages is whichever of the three this
-#    machine can build. The release workflow runs the same three per platform.
+#    dotnet, python_wheel needs Python and web_package (bindings/web) needs npm, and packages
+#    is whichever of them this machine can build. The release workflow runs the same ones.
 if(RANT_IS_TOP_LEVEL AND TARGET rant_shared)
   add_custom_target(unity_package
     COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/unity.cmake" VERBATIM)
   add_dependencies(unity_package rant_shared)
   add_custom_target(packages DEPENDS unity_package)
+  if(TARGET web_package)
+    add_dependencies(packages web_package)
+  endif()
 
   find_program(DOTNET_EXECUTABLE dotnet)
   if(DOTNET_EXECUTABLE)

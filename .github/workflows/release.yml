@@ -26,12 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Cargo cannot read VERSION, so the Rust workspace repeats it
+      # Cargo and npm cannot read VERSION, so the Rust workspace and the web package repeat it
       - name: The tag matches VERSION
         shell: bash
         run: |
           test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
           grep -q "^version = \"$(tr -d '\r' < VERSION)\"" bindings/rust/Cargo.toml
+          grep -q "\"version\": \"$(tr -d '\r' < VERSION)\"" bindings/web/package.json
 
       # aarch64 wheels build under emulation, since no arm runner is free on a private repo.
       - uses: docker/setup-qemu-action@v4
@@ -151,12 +152,17 @@ jobs:
       - name: Unity package
         run: cmake -P tools/unity.cmake
 
+      - name: Web package
+        run: |
+          cmake -S . -B build-web-package -DRANT_BUILD_TOOLS=OFF
+          cmake --build build-web-package --target web_package
+
       - name: Stage the assets
         run: |
           VERSION="$(cat VERSION)"
           mkdir -p release
           cp dist/rant.h dist/rant.c dist/rant.hpp dist/rant.cpp release/
-          cp dist/Rant.*.nupkg dist/rant-*.unitypackage wheelhouse/* artifacts/programs-*/*.zip release/
+          cp dist/Rant.*.nupkg dist/rant-*.unitypackage dist/rantlib-rant-*.tgz wheelhouse/* artifacts/programs-*/*.zip release/
           (cd dist && cmake -E tar cf "../release/rant-$VERSION-native.zip" --format=zip native)
           ls -la release
 

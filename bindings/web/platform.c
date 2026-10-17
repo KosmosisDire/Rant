@@ -20,6 +20,7 @@ extern int  rant_net_send(int id, const void *buf, int len, uint32_t naddr, int 
 extern void rant_net_close(int id);
 extern int  rant_net_interfaces(uint32_t *out, int max);
 extern int  rant_net_hostname(char *buf, int cap);
+extern uint32_t rant_net_loopback_group_bind(uint32_t loopback_naddr);
 extern void rant_net_wait(int ms);
 
 enum { NET_SETIF = 1, NET_TTL = 2, NET_LOOP = 3, NET_OWN_GROUPS = 4, NET_RCVBUF = 5, NET_SNDBUF = 6 };
@@ -262,7 +263,8 @@ int i_rant_plat_is_loopback(uint32_t naddr){
     return ip[0] == 127;
 }
 
-uint32_t i_rant_plat_loopback_group_bind(uint32_t loopback_naddr){ return loopback_naddr; }
+/* The net object's host decides, as the native layer decides by its own OS. */
+uint32_t i_rant_plat_loopback_group_bind(uint32_t loopback_naddr){ return rant_net_loopback_group_bind(loopback_naddr); }
 uint32_t i_rant_plat_route_src(uint32_t dst_naddr, uint16_t port){ (void)dst_naddr; (void)port; return 0; }
 
 /* The interfaces of the host whose sockets these are: the bridge's, or this machine's. */

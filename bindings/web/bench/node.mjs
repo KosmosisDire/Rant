@@ -1,12 +1,14 @@
 // Runs the wasm bench in Node.js over real UDP, the control between the native build and a
 // page behind the bridge:   node bindings/web/bench/node.mjs ping --size 64 --count 1000
-// It prints the bench's JSON line and exits once the bench is done.
+// It prints the bench's JSON line and exits once the bench is done. --if 127.0.0.1 keeps it on
+// loopback, as the tests do.
 
-import { UdpNet } from "../udp.mjs";
+import { UdpNet } from "../dist/udp.js";
 import createBench from "../../../bin/web/rant_web_bench.mjs";
 
 const args = process.argv.slice(2);
-const net = await UdpNet.create();
+const at = args.indexOf("--if");
+const net = await UdpNet.create({ address: at >= 0 && args[at + 1] === "127.0.0.1" ? "127.0.0.1" : "0.0.0.0" });
 let done;
 const finished = new Promise((r) => { done = r; });
 await createBench({

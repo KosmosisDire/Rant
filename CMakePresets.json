@@ -193,6 +193,12 @@
       "execution": { "jobs": 8 }
     },
     {
+      "name": "web",
+      "displayName": "Rant in wasm under Node.js",
+      "configurePreset": "web",
+      "output": { "outputOnFailure": true }
+    },
+    {
       "name": "windows-asan",
       "configurePreset": "windows-asan",
       "configuration": "RelWithDebInfo",
