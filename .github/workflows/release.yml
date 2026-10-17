@@ -1,0 +1,222 @@
+# Cut a release on a tag v<VERSION>: every package and program attached to a GitHub Release,
+# the upm branch, the Rust crate tag, and NuGet and wheels where a key is set (spec/build.md).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  # The shared library and the Python wheel per platform, both from cibuildwheel: the
+  # library inside each wheel is the one the NuGet and Unity packages bundle too, so on
+  # Linux it comes out of the manylinux container and runs on any glibc since 2.28.
+  native:
+    name: native ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux }
+          - { os: windows-latest, name: windows }
+          - { os: macos-latest,   name: macos }
+    steps:
+      - uses: actions/checkout@v7
+
+      # Cargo and npm cannot read VERSION, so the Rust workspace and the web package repeat it
+      - name: The tag matches VERSION
+        shell: bash
+        run: |
+          test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+          grep -q "^version = \"$(tr -d '\r' < VERSION)\"" bindings/rust/Cargo.toml
+          grep -q "\"version\": \"$(tr -d '\r' < VERSION)\"" bindings/web/package.json
+
+      # aarch64 wheels build under emulation, since no arm runner is free on a private repo.
+      - uses: docker/setup-qemu-action@v4
+        if: runner.os == 'Linux'
+        with:
+          platforms: arm64
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - uses: pypa/cibuildwheel@v4.2.1
+
+      - name: The libraries out of the wheels
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import glob, os, zipfile
+          for w in glob.glob("wheelhouse/*.whl"):
+              tag = os.path.basename(w).rsplit("-", 1)[1]
+              rid = ("win-x64" if "win_amd64" in tag else "linux-arm64" if "aarch64" in tag
+                     else "linux-x64" if "x86_64" in tag else "osx")
+              with zipfile.ZipFile(w) as z:
+                  for n in z.namelist():
+                      if n in ("rant/rant.dll", "rant/librant.so", "rant/librant.dylib"):
+                          os.makedirs("dist/native/" + rid, exist_ok=True)
+                          with open("dist/native/" + rid + "/" + n[5:], "wb") as f:
+                              f.write(z.read(n))
+                          print(w, "->", rid)
+          EOF
+          ls -lR dist/native
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.name }}
+          path: wheelhouse/*.whl
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.name }}
+          path: dist/native/
+
+  # The command line tools, one zip per platform. Linux builds on ubuntu-22.04 so the
+  # binaries run on glibc 2.35 and newer.
+  programs:
+    name: programs ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04,   name: linux-x64 }
+          - { os: windows-latest, name: win-x64 }
+          - { os: macos-latest,   name: osx-arm64 }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel 4
+
+      - name: Zip
+        shell: bash
+        run: |
+          mkdir -p out/rant
+          for p in rant_bench pubsub if_probe_check; do
+            cp "bin/$p" out/rant/ 2>/dev/null || cp "bin/$p.exe" out/rant/
+          done
+          ls out/rant
+          cd out && cmake -E tar cf "../rant-$(cat ../VERSION)-${{ matrix.name }}.zip" --format=zip rant
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: programs-${{ matrix.name }}
+          path: rant-*.zip
+
+  # Everything into one GitHub Release, the upm branch and the registries.
+  release:
+    needs: [native, programs]
+    runs-on: ubuntu-latest
+    env:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # Before the platform artifacts land in the tree, so the sdist is the source alone.
+      - name: Source distribution
+        run: |
+          python -m pip install build
+          python -m build --sdist -o wheelhouse
+
+      # dist/ is not committed, so the single headers the release attaches are packed here.
+      - name: Single headers
+        run: cmake -P tools/pack.cmake
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Merge the platforms
+        run: |
+          mkdir -p dist/native
+          cp -r artifacts/native-*/. dist/native/
+          cp artifacts/wheels-*/*.whl wheelhouse/
+          ls -R dist/native wheelhouse
+
+      - name: NuGet package
+        run: dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
+
+      # The web package carries the binding's wasm, so it builds with Emscripten. It comes before
+      # the Unity package, whose WebGL plugin takes the binding's tunnel script.
+      - name: Web package
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          "$HOME/emsdk/emsdk" install 3.1.56
+          "$HOME/emsdk/emsdk" activate 3.1.56
+          export EMSDK="$HOME/emsdk"
+          cmake --preset web
+          cmake --build --preset web --target web_package
+
+      - name: Unity package
+        run: cmake -P tools/unity.cmake
+
+      - name: Stage the assets
+        run: |
+          VERSION="$(cat VERSION)"
+          mkdir -p release
+          cp dist/rant.h dist/rant.c dist/rant.hpp dist/rant.cpp release/
+          cp dist/Rant.*.nupkg dist/rant-*.unitypackage dist/rant-middleware-*.tgz wheelhouse/* artifacts/programs-*/*.zip release/
+          (cd dist && cmake -E tar cf "../release/rant-$VERSION-native.zip" --format=zip native)
+          ls -la release
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: release/*
+          generate_release_notes: true
+
+      # The Unity package as a git URL: https://github.com/OWNER/REPO.git#upm
+      - name: Publish the upm branch
+        run: |
+          pkg="$RUNNER_TEMP/upm"
+          rm -rf "$pkg"
+          cp -r dist/com.rant.rant "$pkg"
+          cd "$pkg"
+          git init -q -b upm
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "upm $(cat "$GITHUB_WORKSPACE/VERSION")"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" upm
+
+      # The Rust crate as a git dependency, tag = "crate-vVERSION": the release tree plus the
+      # packed C in csrc/, as a commit with no parents so cargo fetches one snapshot. Never moved.
+      - name: Publish the crate tag
+        run: |
+          tag="crate-v$(cat VERSION)"
+          mkdir -p bindings/rust/rant/csrc
+          cp dist/rant.h dist/rant.c bindings/rust/rant/csrc/
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan crate
+          git add -f bindings/rust/rant/csrc
+          git commit -q -m "$tag"
+          git tag "$tag"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag"
+
+      # Set NUGET_API_KEY and PYPI_API_TOKEN as repository secrets and the next tag
+      # publishes. Without them the release is the GitHub page alone.
+      - name: Publish to nuget.org
+        if: env.NUGET_API_KEY != ''
+        run: dotnet nuget push "dist/Rant.*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Publish to PyPI
+        if: env.PYPI_API_TOKEN != ''
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: wheelhouse

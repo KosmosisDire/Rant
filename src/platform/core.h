@@ -1,0 +1,173 @@
+/* The one OS layer. A runtime speaks only these functions and never a sockaddr or an OS
+ * ifdef. The contract and the address rules are in spec/platform.md. */
+#ifndef RANT_PLAT_H
+#define RANT_PLAT_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include "../common/features.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* A POSIX fd or a Windows SOCKET, both fit in intptr_t. */
+typedef intptr_t i_RantSock;
+#define RANT_SOCK_BAD ((i_RantSock)-1)
+
+/* Mirrors struct pollfd without the OS header. ERR is hang up or error, reported whatever
+ * was asked for. */
+#define RANT_POLLIN  0x01
+#define RANT_POLLOUT 0x04
+#define RANT_POLLERR 0x08
+typedef struct { i_RantSock fd; short events; short revents; } i_RantPollfd;
+
+/* Process wide net init and teardown. The OS refcounts matched calls, so pairs nest safely. */
+int  i_rant_plat_startup(void);     /* 1 on success */
+void i_rant_plat_cleanup(void);
+
+/* Monotonic microseconds from an arbitrary epoch. */
+uint64_t i_rant_plat_now_us(void);
+
+/* CSPRNG fill. 0 means no entropy source and the caller falls back. */
+int      i_rant_plat_random(void *buf, size_t len);
+/* Host identity for the uuid fallback. Returns the bytes written. */
+size_t   i_rant_plat_hostname(char *buf, size_t cap);
+uint64_t i_rant_plat_pid(void);
+/* Copies an environment variable into buf, NUL terminated and cut to fit. Returns its full
+ * length like snprintf, so cap or more means cut. 0 when unset, empty or no environment. */
+size_t   i_rant_plat_env(const char *name, char *buf, size_t cap);
+/* Wall clock microseconds since the Unix epoch, for timestamps compared across hosts. */
+uint64_t i_rant_plat_wall_us(void);
+
+#ifdef RANT_PROC_STATS
+/* Per process, not per node. Any out pointer may be NULL. 0 on a transient OS failure. */
+int      i_rant_plat_proc_stats(uint64_t *cpu_us, uint64_t *rss_bytes, uint64_t *peak_rss_bytes,
+                                int *have_cpu);
+/* Heap diagnostics. Only ESP has them, the others return 0 so callers omit the fields. */
+int      i_rant_plat_heap_stats(uint64_t *total_bytes, uint64_t *free_bytes,
+                                uint64_t *min_free_bytes, uint64_t *largest_free_block_bytes);
+#endif /* RANT_PROC_STATS */
+
+/* The one heap dependency. ptr NULL allocates, size 0 frees and returns NULL. */
+void    *i_rant_plat_realloc(void *ptr, size_t size);
+
+/* UDP sockets */
+i_RantSock i_rant_plat_udp_open(void);                       /* RANT_SOCK_BAD on failure */
+void      i_rant_plat_close(i_RantSock s);
+/* if_naddr 0 is INADDR_ANY and port 0 is ephemeral. reuse sets SO_REUSEADDR, and
+ * SO_REUSEPORT where it exists, before binding. 1 ok, 0 fail. */
+int       i_rant_plat_bind(i_RantSock s, uint32_t if_naddr, uint16_t port, int reuse);
+/* Bound port in host order, 0 on failure. */
+uint16_t  i_rant_plat_local_port(i_RantSock s);
+void      i_rant_plat_set_nonblock(i_RantSock s);
+void      i_rant_plat_set_rcvbuf(i_RantSock s, int bytes);
+void      i_rant_plat_set_sndbuf(i_RantSock s, int bytes);
+/* Stops an ICMP port unreachable from failing the next recv. Windows only, no op elsewhere. */
+void      i_rant_plat_suppress_connreset(i_RantSock s);
+
+/* multicast */
+void i_rant_plat_mcast_setif(i_RantSock s, uint32_t if_naddr);
+void i_rant_plat_mcast_ttl    (i_RantSock s, uint8_t ttl);
+void i_rant_plat_mcast_loop (i_RantSock s, int on);
+/* Group traffic reaches s only for groups s joined itself. Linux otherwise hands it every
+   group any socket on the host joined, so a unicast only node would hear multicast */
+void i_rant_plat_mcast_own_groups(i_RantSock s);
+int  i_rant_plat_mcast_join (i_RantSock s, uint32_t group_naddr, uint32_t if_naddr); /* 1 ok */
+void i_rant_plat_mcast_leave(i_RantSock s, uint32_t group_naddr, uint32_t if_naddr);
+
+/* datagram IO */
+/* Bytes sent, or negative on error. Test i_rant_plat_would_block after a failure. */
+int  i_rant_plat_send(i_RantSock s, const void *buf, size_t len,
+                    const uint8_t ip[4], uint16_t port);
+/* Bytes received, or 0 or negative when none. src_ip and src_port may be NULL. */
+int  i_rant_plat_recv(i_RantSock s, void *buf, size_t cap,
+                    uint8_t src_ip[4], uint16_t *src_port);
+int  i_rant_plat_would_block(void);
+/* Positive when ready, 0 on timeout, negative on error. */
+int  i_rant_plat_poll(i_RantPollfd *fds, int n, int timeout_ms);
+/* The OS's last socket error on the calling thread, for diagnostics. Keeps no state. */
+int  i_rant_plat_last_socket_error(void);
+
+#ifdef RANT_TUNNEL
+/* TCP, for the tunnel to a bridge. connect starts a nonblocking connect with TCP_NODELAY to
+ * host, a name or dotted IPv4, and returns at once. Only the OS's name lookup blocks.
+ * RANT_SOCK_BAD when it cannot start. connected says, once the socket polls writable, 1 for
+ * connected and 0 for failed. */
+i_RantSock i_rant_plat_tcp_connect(const char *host, uint16_t port);
+int        i_rant_plat_tcp_connected(i_RantSock s);
+/* Bytes moved, or negative on error or would block. recv returns 0 once the peer closed. */
+int        i_rant_plat_tcp_send(i_RantSock s, const void *buf, size_t len);
+int        i_rant_plat_tcp_recv(i_RantSock s, void *buf, size_t cap);
+#endif /* RANT_TUNNEL */
+
+/* address helpers, a naddr is network byte order */
+uint32_t i_rant_plat_parse_ip(const char *dotted);            /* "1.2.3.4" to naddr */
+uint32_t i_rant_plat_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
+uint32_t i_rant_plat_ip4_to_naddr(const uint8_t ip[4]);
+void     i_rant_plat_naddr_to_ip4(uint32_t naddr, uint8_t out[4]);
+int      i_rant_plat_is_loopback(uint32_t naddr);               /* in 127.0.0.0/8 */
+/* The address a socket receiving a group joined on the loopback address binds. Windows hands
+   group traffic to a socket bound to the interface, POSIX only to one bound to any */
+uint32_t i_rant_plat_loopback_group_bind(uint32_t loopback_naddr);
+/* The source address the OS would use toward dst, with no packet sent. A diagnostic only. */
+uint32_t i_rant_plat_route_src(uint32_t dst_naddr, uint16_t port);
+
+/* One IPv4 interface, address and netmask in network order. */
+typedef struct { uint32_t addr, mask; } i_RantIface;
+/* The up, non loopback interfaces. A netmask the platform cannot report stays 0. */
+int      i_rant_plat_local_ifaces(i_RantIface *out, int max);
+
+/* threads, only under RANT_THREADS */
+#ifdef RANT_THREADS
+/* Opaque blobs keep OS headers out of this header. core.c checks the real types fit. */
+typedef union { void *align_p; uint64_t align_8; unsigned char b[64]; } i_RantMutex;
+typedef union { void *align_p; uint64_t align_8; unsigned char b[64]; } i_RantCond;
+typedef union { void *align_p; uint64_t align_8; unsigned char b[32]; } i_RantThread;
+
+/* start runs fn(arg) on a new thread, 1 on success. join blocks until fn returns. */
+int      i_rant_plat_thread_start(i_RantThread *t, void (*fn)(void *), void *arg);
+void     i_rant_plat_thread_join (i_RantThread *t);
+/* Nonzero id of the calling thread, compared and never dereferenced. */
+uint64_t i_rant_plat_thread_id     (void);
+
+void i_rant_plat_mutex_init     (i_RantMutex *m);
+void i_rant_plat_mutex_destroy(i_RantMutex *m);
+void i_rant_plat_mutex_lock     (i_RantMutex *m);
+void i_rant_plat_mutex_unlock (i_RantMutex *m);
+
+void i_rant_plat_cond_init       (i_RantCond *c);
+void i_rant_plat_cond_destroy    (i_RantCond *c);
+/* Waits with m held and holds it again on return. May wake early or spuriously, so
+ * callers loop on a predicate plus a monotonic deadline. */
+void i_rant_plat_cond_wait       (i_RantCond *c, i_RantMutex *m, uint32_t timeout_us);
+void i_rant_plat_cond_broadcast(i_RantCond *c);
+
+/* A self connected loopback UDP socket that sits in a poll set so another thread can cut
+ * a wait short. Signals coalesce. */
+typedef struct { i_RantSock fd; } i_RantWaker;
+int  i_rant_plat_waker_open    (i_RantWaker *w);     /* 1 on success */
+int  i_rant_plat_waker_signal(i_RantWaker *w);       /* 1 when the signal went out */
+void i_rant_plat_waker_drain (i_RantWaker *w);
+void i_rant_plat_waker_close (i_RantWaker *w);
+#endif /* RANT_THREADS */
+
+/* shared memory, only under RANT_SHM */
+#ifdef RANT_SHM
+/* create maps a fresh zero filled segment. attach maps an existing one whole and reports
+ * its size, which detach needs. Both return the base, or NULL on failure. */
+void *i_rant_plat_shm_create(const char *name, size_t bytes, void **handle);
+void *i_rant_plat_shm_attach(const char *name, size_t *out_bytes, void **handle);
+/* The creator passes unlink_it to also remove the OS object. */
+void  i_rant_plat_shm_detach(void *base, size_t bytes, void *handle, int unlink_it);
+/* A stable per host id for the same host pre check. A successful attach is the real gate. */
+void  i_rant_plat_host_uuid(uint8_t out[16]);
+/* Cross process 64 bit atomics with acquire and release order, for the chunk stamp. */
+uint64_t i_rant_plat_atomic_load64 (volatile uint64_t *p);
+void     i_rant_plat_atomic_store64(volatile uint64_t *p, uint64_t v);
+#endif /* RANT_SHM */
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* RANT_PLAT_H */
