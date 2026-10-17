@@ -1,13 +1,14 @@
 /* The web build's benchmark: one program built natively and to wasm, so both run the same
  * Rant code. One side echoes, the other measures.
  *
- *   rant_web_bench echo [--domain N] [--reliable] [--if IP]
+ *   rant_web_bench echo [--domain N] [--reliable] [--if IP] [--events]
  *   rant_web_bench ping [--domain N] [--reliable] [--size B] [--count N] [--rate HZ] [--window W]
  *   rant_web_bench idle [--domain N] [--seconds S]
  *
  * ping sends count pings of size bytes to bench/ping, at rate per second, or with window
  * set keeping that many unanswered, and prints one JSON line of what came back on
- * bench/pong. idle holds a node on the mesh for seconds and prints what it took. */
+ * bench/pong. idle holds a node on the mesh for seconds and prints what it took. --events
+ * prints every node event to stderr. */
 
 #include "rant.hpp"
 
@@ -74,6 +75,7 @@ struct Args {
     int         window = 0;
     int         seconds = 10;
     std::string iface;          /* multicast_interface, empty for every interface */
+    bool        events = false;
 };
 
 Args parse(int argc, char** argv)
@@ -91,6 +93,7 @@ Args parse(int argc, char** argv)
         else if (k == "--window") { a.window = std::atoi(v); i++; }
         else if (k == "--seconds") { a.seconds = std::atoi(v); i++; }
         else if (k == "--if") { a.iface = v; i++; }
+        else if (k == "--events") a.events = true;
     }
     if (a.size < 16) a.size = 16;
     return a;
@@ -109,6 +112,11 @@ rant::NodeOptions options(const Args& a, const char* role)
     o.send_buffer_bytes = 8u << 20;
     (void)role;
     return o;
+}
+
+void watch(rant::Node& node, const Args& a)
+{
+    if (a.events) node.on_event([](const rant::Event& e) { std::fprintf(stderr, "event: %s\n", e.to_string().c_str()); });
 }
 
 rant::Qos qos(const Args& a)
@@ -132,6 +140,7 @@ struct Echo {
 
     explicit Echo(const Args& a) : node("bench-echo", options(a, "echo"))
     {
+        watch(node, a);
         pong = node.publisher<rant::Bytes>("bench/pong", qos(a));
         ping = node.subscriber<rant::Bytes>("bench/ping", [this](const rant::MessageView& m) {
             if (pong.send(m.data()) != rant::SendStatus::Ok) { backlog.push_back(m.data().to_vector()); deferred++; }
@@ -172,6 +181,7 @@ struct Ping {
 
     explicit Ping(const Args& args) : a(args), node("bench-ping", options(args, "ping")), payload(args.size, 0x5a)
     {
+        watch(node, a);
         ping = node.publisher<rant::Bytes>("bench/ping", qos(a));
         pong = node.subscriber<rant::Bytes>("bench/pong", [this](const rant::MessageView& m) { heard(m); }, qos(a));
         rtt.reserve((size_t)a.count);
