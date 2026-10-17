@@ -19,7 +19,7 @@ platform libraries:
 ```cmake
 CPMAddPackage(NAME rant
               GIT_REPOSITORY https://github.com/KosmosisDire/Rant.git
-              GIT_TAG v0.0.27)
+              GIT_TAG v0.0.28)
 
 target_link_libraries(app PRIVATE rant::rant_host)
 ```
@@ -53,7 +53,7 @@ its folder first: `dotnet nuget add source <folder> -n rant`.
 ### Rust
 ```toml
 [dependencies]
-rant-middleware = { git = "https://github.com/KosmosisDire/Rant.git", tag = "crate-v0.0.27" }
+rant-middleware = { git = "https://github.com/KosmosisDire/Rant.git", tag = "crate-v0.0.28" }
 ```
 The crate compiles the C library into your program and is used as `rant`. See
 [docs/rust.md](docs/rust.md).
