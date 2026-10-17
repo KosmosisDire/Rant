@@ -14,6 +14,7 @@ mergeInto(LibraryManager.library, {
         token: 0,
         port: null,          // a MessageChannel for runs that should not wait on a timer
         later: [],
+        micro: false,        // a run is queued as a microtask
 
         net() {
             const net = Module['rantNet'];
@@ -31,7 +32,19 @@ mergeInto(LibraryManager.library, {
             const p = _malloc(bytes.length || 1);
             HEAPU8.set(bytes, p);
             _rant_web_deliver(id, naddr, port, p, bytes.length);
-            RantWeb.kick(0);
+            RantWeb.soon();
+        },
+
+        // A run right after the task that delivered, before any other task, so a datagram is
+        // handled with no hop through the event loop. One run serves a whole batch.
+        soon() {
+            if (RantWeb.micro) return;
+            RantWeb.micro = true;
+            queueMicrotask(() => {
+                RantWeb.micro = false;
+                RantWeb.token++;      // a run now makes the scheduled one moot
+                RantWeb.run();
+            });
         },
 
         // Runs the drives no later than ms from now. Zero yields once, with no timer clamp.
