@@ -24,6 +24,11 @@ if(EMSCRIPTEN)
   target_link_options(rant_web_bench PRIVATE
     -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createBench -sENVIRONMENT=web,node
     -sALLOW_MEMORY_GROWTH=1)
+  # function names in the wasm, so a browser profile shows where the time goes
+  option(RANT_WEB_PROFILE "Keep function names in the bench wasm" OFF)
+  if(RANT_WEB_PROFILE)
+    target_link_options(rant_web_bench PRIVATE --profiling-funcs)
+  endif()
 else()
   if(NOT CMAKE_CXX_COMPILER)
     return()
