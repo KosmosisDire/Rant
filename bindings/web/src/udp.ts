@@ -20,6 +20,7 @@ export class UdpNet implements NetObject {
     private nextId = 1;
     private sockets = new Map<number, Socket>();
     private spares: { sock: dgram.Socket; port: number }[] = [];
+    private shut = false;
 
     private constructor(private readonly spareCount: number, private readonly address: string) {}
 
@@ -32,18 +33,21 @@ export class UdpNet implements NetObject {
 
     /* Binds spare sockets until there are enough for the next nodes. */
     async prepare(): Promise<void> {
-        while (this.spares.length < this.spareCount) {
+        while (!this.shut && this.spares.length < this.spareCount) {
             const sock = dgram.createSocket({ type: "udp4" });
             await new Promise<void>((res, rej) => {
                 sock.once("error", rej);
                 sock.bind(0, this.address, () => { sock.off("error", rej); res(); });
             });
-            this.spares.push({ sock, port: sock.address().port });
+            /* a refill that lands after shutdown would keep the process alive */
+            if (this.shut) sock.close();
+            else this.spares.push({ sock, port: sock.address().port });
         }
     }
 
-    /* Closes every socket, the spares too. */
+    /* Closes every socket, the spares too, and binds no more. */
     shutdown(): void {
+        this.shut = true;
         for (const id of [...this.sockets.keys()]) this.close(id);
         for (const s of this.spares.splice(0)) s.sock.close();
     }

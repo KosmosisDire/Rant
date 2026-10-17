@@ -191,5 +191,7 @@ await check("no errors were reported", async () => assert.deepEqual(errors.map((
 
 assert.equal(a.close(), true);
 assert.equal(b.close(), true);
+// a node closed at once, while its net still binds spare sockets, must let the process end too
+(await openNode("brief", opts)).close();
 console.log(failed ? `${failed} failed` : "all passed");
 process.exitCode = failed ? 1 : 0;
