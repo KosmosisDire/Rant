@@ -306,7 +306,7 @@ static void threaded_checks(void){
           { uint64_t worst_gap = 0; int pair;
             for (pair=0;pair<3;pair++){
                 long long r0; uint64_t t0, dt;
-                test_sleep_ms(300);
+                test_sleep_ms(600);     /* past the lane's last tick, so the first leaves at once */
                 r0 = test_atomic_load(&th_recv);
                 test_send(w, 0, payload, sizeof payload); test_sleep_ms(1);
                 test_send(w, 0, payload, sizeof payload);
