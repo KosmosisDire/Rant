@@ -1563,7 +1563,9 @@ static bool handle_gate_leg() {
     chk("gate: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
 
-    auto slow = a.function_definition<AddReq, AddRsp>("g/slow", [](const AddReq& q) {
+    std::atomic<bool> handling{ false };
+    auto slow = a.function_definition<AddReq, AddRsp>("g/slow", [&handling](const AddReq& q) {
+        handling = true;
         std::this_thread::sleep_for(300ms);
         return AddRsp{ q.x + q.y };
     });
@@ -1576,7 +1578,8 @@ static bool handle_gate_leg() {
         status = r.status();
         call_done = true;
     });
-    std::this_thread::sleep_for(100ms);
+    /* the call is surely under way once its handler runs, however slow the machine */
+    chk("gate: the call reached its handler", wait_for(4000, [&] { return handling.load(); }));
     rant::SendStatus closed = rem.close();
     bool done_first = call_done.load();
     caller.join();
