@@ -95,7 +95,7 @@ event, never a silent truncation. spec/allocation.md lists what is allocated whe
 | `match_wait_ms` | first send match wait bound, 0 = 1 s, negative = off (docs/topics.md) |
 | `fetch_details` | fetch names and schemas for every topic every peer has, for observer tools |
 | `disable_logs`, `disable_meta`, `disable_error_logs` | strip the built in log topics and meta function (docs/node.md) |
-| `net` | ports, group, interface, seed peers, unicast only, own locator (docs/discovery.md) |
+| `net` | ports, group, interface, seed peers, own locator, bridge (docs/discovery.md) |
 | `discovery` | announce interval, peer timeout, max peers (docs/discovery.md) |
 | `user_data` | surfaced as `RantMsg.user` and `RantEvent.user` |
 

@@ -111,7 +111,6 @@ class RantNodeNet(Structure):
         ("multicast_ttl", c_uint8),
         ("seed_peers", c_void_p),
         ("n_seed_peers", c_uint16),
-        ("unicast_only", c_uint8),
         ("recv_buffer_bytes", c_uint32),
         ("send_buffer_bytes", c_uint32),
         ("fragment_size", c_uint16),

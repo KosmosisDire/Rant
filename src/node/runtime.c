@@ -1265,8 +1265,8 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     i_rant_node_core_bind_discovery(n->core, i_rant_discovery_state(n->discovery));
     i_rant_node_core_set_self_name(n->core, rant_string(n->name, strlen(n->name)));
 
-    /* every unicast discovery send goes out of the data socket, so a NAT's per flow
-       mappings are the ones the data will use. See spec/discovery.md */
+    /* every unicast discovery send goes out of the data socket, so all unicast between two
+       nodes uses one port pair. See spec/discovery.md */
     i_rant_discovery_set_tx_fd(n->discovery, fd);
 
     /* the post open gather anchor: discovery solicits on startup, so every peer already
@@ -1720,8 +1720,7 @@ static void i_rant_node_log_flush(RantNode *n){
 static void i_rant_node_rx_one(RantNode *n, i_RantSock fd, const uint8_t *buf, size_t len,
                                const uint8_t src_ip[4], uint16_t src_port){
     if (len>=4 && buf[0]=='u' && buf[1]=='D' && buf[2]=='S' && buf[3]=='C'){
-        /* a unicast announce aimed at our data port goes to discovery with its
-           source port, so a translated peer's observed source can bind */
+        /* a unicast announce aimed at our data port goes to discovery */
         RantAddr src;
         memset(&src, 0, sizeof src);
         memcpy(src.ip, src_ip, 4); src.ip_len = 4; src.port = src_port;

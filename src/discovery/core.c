@@ -7,11 +7,7 @@
 #define RANT_DISCOVERY_HDR_LEN 24              /* magic(4) ver(1) flags(1) domain(2) uuid(16) */
 #define RANT_DISCOVERY_FLAG_BYE 0x01
 #define RANT_DISCOVERY_FLAG_REQ 0x02           /* solicit: recipients announce back now */
-#define RANT_DISCOVERY_FLAG_RELAY_ME 0x04      /* no multicast: direct hearers announce it on */
-#define RANT_DISCOVERY_FLAG_PROXIED    0x08    /* rebuilt by a relay: never re relayed */
 #define RANT_DISCOVERY_BLOB_RESEND 3u          /* announces that carry the full blob after a change */
-#define RANT_DISCOVERY_INTRODUCE_IDLE 0xFFFFu     /* no introduction walk in progress */
-#define RANT_DISCOVERY_INTRODUCE_SWEEP 10u        /* re introduce every this many intervals */
 
 struct i_RantDiscoveryPeer {
     uint8_t  used;
@@ -22,7 +18,6 @@ struct i_RantDiscoveryPeer {
     uint8_t  ip_len;
     uint16_t port;
     uint64_t last_heard_us;
-    uint64_t last_direct_us; /* last non proxied announce. The relay gate, never last_heard_us */
     uint64_t addr_heard_us;  /* last datagram that arrived from ip. A fresh incumbent stays put */
     uint8_t *meta;          /* the overlay: a pool slot or a grown hook block */
     uint16_t meta_cap;
@@ -34,18 +29,6 @@ struct i_RantDiscoveryPeer {
     uint8_t  name_len;
     uint8_t  reply_due;     /* owes a unicast announce plus blob, it solicited us */
     uint8_t  solicit_due;   /* owes a unicast REQ, its version is ahead of ours */
-    uint8_t  wants_relay;   /* its direct announces carry RELAY_ME */
-    uint8_t  relay_due;     /* a proxied announce for it is due out of poll_relay */
-    uint8_t  proxies_heard; /* foreign proxies since our last tick. 2 or more suppress ours */
-    uint8_t  relay_me;      /* a unicast only origin, so its locator is not an endpoint identity */
-    uint8_t  stated_ip;     /* its blob states a self_ip, so observed sources never bind */
-    uint8_t  heard_direct;  /* heard a non proxied announce since appearing: ours to introduce */
-    /* Observed sources of its direct RELAY_ME announces, one per local channel. These, not
-       the locator, are a NAT'd peer's return paths. ip_len 0 means none. */
-    RantAddr obs_disc;
-    RantAddr obs_data;
-    uint16_t introduce_cursor;   /* next slot to introduce to this relay me peer, or IDLE */
-    uint64_t introduce_sweep_us; /* next periodic re introduction */
     /* Sources its own announces came from lately, one per path on a multihomed host. Its
        data may leave from any of them, whichever locator it holds for us. */
     struct { uint8_t ip[16]; uint8_t ip_len; uint64_t heard_us; } paths[4];
@@ -69,7 +52,6 @@ struct i_RantDiscoveryState {
     uint8_t         self_name_len;
     uint16_t        self_blob_resend; /* announces remaining that carry the full blob */
     uint16_t        targeted_cursor;  /* round robin over peers for poll_targeted */
-    uint16_t        relay_cursor;     /* round robin over peers for poll_relay */
     i_RantDiscoverySubnet local_nets[RANT_DISCOVERY_MAX_SUBNETS];
     uint8_t       n_local_nets;
     RantAddr      wire_told[8];   /* sources already reported on another wire version */
@@ -200,7 +182,6 @@ i_RantDiscoveryState *i_rant_discovery_init(void *mem, size_t cap, const i_RantD
         st->peers[i].meta     = st->meta_pool ? st->meta_pool + (size_t)i * meta_cap : NULL;
         st->peers[i].meta_cap = st->meta_pool ? meta_cap : 0;
         st->peers[i].user = st->user_pool ? st->user_pool + (size_t)i * st->user_stride : NULL;
-        st->peers[i].introduce_cursor = RANT_DISCOVERY_INTRODUCE_IDLE;
     }
     st->self_meta         = cfg->meta;
     st->self_meta_version = 1;
@@ -241,7 +222,6 @@ i_RantDiscoveryState *i_rant_discovery_core_migrate(i_RantDiscoveryState *old, v
         st->peers[i].meta     = st->meta_pool ? st->meta_pool + (size_t)i * new_meta_cap : NULL;
         st->peers[i].meta_cap = st->meta_pool ? new_meta_cap : 0;
         st->peers[i].user = st->user_pool ? st->user_pool + (size_t)i * st->user_stride : NULL;
-        st->peers[i].introduce_cursor = RANT_DISCOVERY_INTRODUCE_IDLE;
     }
     if (st->user_pool) memset(st->user_pool, 0, (size_t)new_max_peers * st->user_stride);
     omp = old->cap_peers;
@@ -299,14 +279,13 @@ static int i_rant_discovery_alloc(i_RantDiscoveryState *st){
 }
 
 /* A new uuid from an (ip, port) we hold means that process restarted, so the old entry is
- * evicted as GONE. Port 0 is not an endpoint, and a relay me peer's locator is not either. */
+ * evicted as GONE. Port 0 is not an endpoint. */
 static void i_rant_discovery_evict_endpoint(i_RantDiscoveryState *st, const RantAddr *addr){
     uint16_t i;
     if (!addr->ip_len || !addr->port) return;
     for (i=0;i<st->cap_peers;i++){
         i_RantDiscoveryPeer *peer = &st->peers[i];
         if (!peer->used) continue;
-        if (peer->relay_me || peer->obs_disc.ip_len || peer->obs_data.ip_len) continue;
         if (peer->ip_len==addr->ip_len && peer->port==addr->port && memcmp(peer->ip, addr->ip, 16)==0)
             i_rant_discovery_peer_gone(st, peer);
     }
@@ -317,27 +296,11 @@ static int i_rant_discovery_addr_is(const RantAddr *a, const uint8_t *ip, uint8_
     return a->ip_len == ip_len && a->port == port && memcmp(a->ip, ip, ip_len) == 0;
 }
 
-/* The observed source twin of evict_endpoint. */
-static void i_rant_discovery_evict_observed(i_RantDiscoveryState *st, const uint8_t *ip,
-                                            uint8_t ip_len, uint16_t port){
-    uint16_t i;
-    if (!ip || !port) return;
-    for (i=0;i<st->cap_peers;i++){
-        i_RantDiscoveryPeer *peer = &st->peers[i];
-        if (!peer->used) continue;
-        if ((peer->obs_disc.ip_len && i_rant_discovery_addr_is(&peer->obs_disc, ip, ip_len, port)) ||
-            (peer->obs_data.ip_len && i_rant_discovery_addr_is(&peer->obs_data, ip, ip_len, port)))
-            i_rant_discovery_peer_gone(st, peer);
-    }
-}
-
 /* Builds an announce, solicit or bye. with_blob adds the discovery section and the overlay. */
 static size_t i_rant_discovery_build(i_RantDiscoveryState *st, uint8_t flags, int with_blob,
                                    uint8_t *p, size_t cap){
     uint16_t meta_len = 0;
     if (cap < (size_t)RANT_DISCOVERY_META_OFF) return 0;
-    /* a node with no multicast asks whoever hears it to announce it onward */
-    if (st->cfg.relay_me && !(flags & RANT_DISCOVERY_FLAG_BYE)) flags |= RANT_DISCOVERY_FLAG_RELAY_ME;
     p[0]='u'; p[1]='D'; p[2]='S'; p[3]='C';
     p[4]=(uint8_t)RANT_WIRE_VERSION;
     p[5]=flags;
@@ -359,37 +322,6 @@ static size_t i_rant_discovery_build(i_RantDiscoveryState *st, uint8_t flags, in
     i_rant_le_w32(p+RANT_DISCOVERY_HDR_LEN, st->self_meta_version);
     i_rant_le_w16(p+RANT_DISCOVERY_HDR_LEN+4, meta_len);
     return (size_t)RANT_DISCOVERY_META_OFF + meta_len;
-}
-
-/* Builds a PROXIED announce for peer: its uuid and blob version, its locator stated
- * outright, then our uuid as a trailer after the blob so a relay can tell its own echo. */
-static size_t i_rant_discovery_build_proxy(i_RantDiscoveryState *st, const i_RantDiscoveryPeer *peer,
-                                   uint8_t *p, size_t cap){
-    uint8_t *b, *bend;
-    size_t need;
-    if (cap < (size_t)RANT_DISCOVERY_META_OFF) return 0;
-    if (!peer->port || (peer->ip_len != 4 && peer->ip_len != 16)) return 0;
-    if (!peer->meta_version) return 0;
-    p[0]='u'; p[1]='D'; p[2]='S'; p[3]='C';
-    p[4]=(uint8_t)RANT_WIRE_VERSION;
-    /* PROXIED is the loop stop. RELAY_ME is carried as origin information only. */
-    p[5]=(uint8_t)(RANT_DISCOVERY_FLAG_PROXIED |
-                   (peer->relay_me ? RANT_DISCOVERY_FLAG_RELAY_ME : 0));
-    i_rant_le_w16(p+6, st->cfg.domain_id);
-    memcpy(p+8, peer->uuid, 16);
-    b = p + RANT_DISCOVERY_META_OFF; bend = p + cap;
-    need = 2u + 1u + (size_t)peer->ip_len + 1u + peer->name_len + peer->meta_len + 16u;
-    if ((size_t)(bend - b) < need) return 0;
-    i_rant_le_w16(b, peer->port); b += 2;
-    *b++ = peer->ip_len;
-    memcpy(b, peer->ip, peer->ip_len); b += peer->ip_len;
-    *b++ = peer->name_len;
-    if (peer->name_len){ memcpy(b, peer->name, peer->name_len); b += peer->name_len; }
-    if (peer->meta_len){ memcpy(b, peer->meta, peer->meta_len); b += peer->meta_len; }
-    i_rant_le_w32(p+RANT_DISCOVERY_HDR_LEN, peer->meta_version);       /* the origin's version */
-    i_rant_le_w16(p+RANT_DISCOVERY_HDR_LEN+4, (uint16_t)(b - (p + RANT_DISCOVERY_META_OFF)));
-    memcpy(b, st->cfg.uuid, 16); b += 16;    /* relayer trailer, after the blob */
-    return (size_t)(b - p);
 }
 
 /* Higher wins: 2 on one of our subnets, 1 routed, 0 link local. See spec/discovery.md. */
@@ -452,26 +384,14 @@ static void i_rant_discovery_wire_mismatch(i_RantDiscoveryState *st, const RantA
     i_rant_discovery_fire_error(st, RANT_E_WIRE_VERSION, 0, &a, 0);
 }
 
-/* Discovery TX destination: an observed source (2, exact), else the locator (1, expanded). */
-static int i_rant_discovery_disc_dest(const i_RantDiscoveryPeer *peer, RantAddr *out){
-    if (peer->obs_disc.ip_len){ *out = peer->obs_disc; return 2; }
-    if (peer->obs_data.ip_len){ *out = peer->obs_data; return 2; }
-    i_rant_discovery_addr_of(peer, out);
-    return 1;
-}
-
 void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
-                       i_RantDiscoveryVia via, RantBytes datagram, uint64_t now){
+                       RantBytes datagram, uint64_t now){
     const uint8_t *p = datagram.data; size_t len = datagram.len;
     const uint8_t *src_ip = (src && (src->ip_len==4 || src->ip_len==16)) ? src->ip : NULL;
     uint8_t  src_ip_len = src_ip ? src->ip_len : 0;
-    uint16_t src_port   = src_ip ? src->port : 0;
     uint8_t flags; uint16_t meta_len; uint32_t meta_version;
     const uint8_t *uuid, *blob;
     RantAddr addr; int idx, addr_changed, first_contact=0, blob_changed=0, revived=0;
-    int keep_held;  /* a unicast only receiver holds its known locator against the source */
-    int proxied;   /* rebuilt by a relay: the locator is a candidate and it enlists nobody */
-    const uint8_t *relayer = NULL;   /* the proxy trailer, NULL on an old build */
     i_RantDiscoveryPeer *peer;
     /* the blob's discovery section, valid when have_disc. disc_name is not NUL terminated */
     int have_disc=0; uint16_t disc_port=0; uint8_t disc_ip_len=0;
@@ -501,9 +421,6 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     }
     blob = p + RANT_DISCOVERY_META_OFF;
     flags = p[5];
-    proxied = (flags & RANT_DISCOVERY_FLAG_PROXIED) != 0;
-    if (proxied && len >= (size_t)RANT_DISCOVERY_META_OFF + meta_len + 16u)
-        relayer = p + RANT_DISCOVERY_META_OFF + meta_len;     /* build_proxy's relayer trailer */
 
     /* the discovery section, then the opaque overlay. A malformed blob drops the datagram */
     if (meta_len){
@@ -536,20 +453,16 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
         return;
     }
 
-    /* The IP is a candidate from the source, or a stated self_ip. A unicast only node keeps
-       a held locator, since its own NAT rewrites sources. See spec/discovery.md. */
-    keep_held = st->cfg.relay_me && !proxied && !disc_ip_len && idx >= 0
-                && (st->peers[idx].ip_len == 4 || st->peers[idx].ip_len == 16);
+    /* The IP is a candidate from the source, or a stated self_ip. See spec/discovery.md. */
     memset(&addr, 0, sizeof addr);
     if (have_disc){
         if (disc_ip_len){ addr.ip_len = disc_ip_len; memcpy(addr.ip, disc_ip, disc_ip_len); }
-        else if (keep_held){ addr.ip_len = st->peers[idx].ip_len; memcpy(addr.ip, st->peers[idx].ip, 16); }
         else if (src_ip && (src_ip_len==4 || src_ip_len==16)){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
         else return;
         addr.port = disc_port;
     } else if (idx >= 0){
         addr.port = st->peers[idx].port;
-        if (!keep_held && src_ip && (src_ip_len==4 || src_ip_len==16)){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
+        if (src_ip && (src_ip_len==4 || src_ip_len==16)){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
         else { addr.ip_len = st->peers[idx].ip_len; memcpy(addr.ip, st->peers[idx].ip, 16); }
     } else if (src_ip && (src_ip_len==4 || src_ip_len==16)){
         addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len);   /* port from the blob */
@@ -557,12 +470,8 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
 
     if (idx < 0){
         uint8_t *keep_meta, *keep_user; uint16_t keep_cap;
-        /* a new uuid from a held endpoint means a restart: evict the dead predecessor. A
-           RELAY_ME locator asserts no endpoint, its source is the real one. */
-        if (!(flags & RANT_DISCOVERY_FLAG_RELAY_ME))
-            i_rant_discovery_evict_endpoint(st, &addr);
-        if (!proxied && src_ip)
-            i_rant_discovery_evict_observed(st, src_ip, src_ip_len, src_port);
+        /* a new uuid from a held endpoint means a restart: evict the dead predecessor */
+        i_rant_discovery_evict_endpoint(st, &addr);
         idx = i_rant_discovery_alloc(st);
         if (idx < 0){       /* table full of active peers: refuse, never evict a live one */
             i_rant_discovery_fire_error(st, RANT_E_PEER_REFUSED, 0, &addr, 0);
@@ -580,22 +489,16 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
         memcpy(st->peers[idx].uuid, uuid, 16);
         st->peers[idx].local_id = st->next_local_id++;
         st->peers[idx].ip_len   = 0xFF;   /* force first peer_up */
-        st->peers[idx].introduce_cursor = RANT_DISCOVERY_INTRODUCE_IDLE;
         first_contact = 1;
     }
     peer = &st->peers[idx];
     if (peer->dropped){ peer->dropped = 0; revived = 1; }   /* a DROPPED peer returned: resume it */
     peer->last_heard_us = now;
-    if (!proxied){
-        peer->last_direct_us = now;              /* only the peer itself is direct liveness */
-        if (src_ip) i_rant_discovery_note_path(peer, src_ip, src_ip_len, now);
-    }
-    else if (!(relayer && memcmp(relayer, st->cfg.uuid, 16)==0) && peer->proxies_heard != 0xFFu)
-        peer->proxies_heard++;   /* a foreign proxy counts, our own echo must not */
+    if (src_ip) i_rant_discovery_note_path(peer, src_ip, src_ip_len, now);
 
     /* Rank the candidate against the incumbent so a multi path locator never flaps. A
-       stated self_ip skips this, a proxied one is only a candidate. See spec/discovery.md. */
-    if ((!disc_ip_len || proxied) && peer->ip_len == 4 && addr.ip_len == 4 && memcmp(peer->ip, addr.ip, 4) != 0){
+       stated self_ip skips this. See spec/discovery.md. */
+    if (!disc_ip_len && peer->ip_len == 4 && addr.ip_len == 4 && memcmp(peer->ip, addr.ip, 4) != 0){
         int rank_new = i_rant_discovery_addr_rank(st, addr.ip, 4);
         int rank_old = i_rant_discovery_addr_rank(st, peer->ip, 4);
         if (rank_new < rank_old ||
@@ -633,60 +536,12 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
                 peer->meta_len = (uint16_t)overlay.len; peer->meta_version = meta_version;
                 if (disc_name.data && nl) memcpy(peer->name, disc_name.data, nl);
                 peer->name[nl] = '\0'; peer->name_len = nl;
-                /* only a direct announce may state a self_ip. A proxy always embeds a
-                   locator, which asserts nothing. */
-                if (!proxied){
-                    peer->stated_ip = disc_ip_len ? 1u : 0u;
-                    if (peer->stated_ip){
-                        memset(&peer->obs_disc, 0, sizeof peer->obs_disc);
-                        memset(&peer->obs_data, 0, sizeof peer->obs_data);
-                    }
-                }
                 blob_changed = 1;
             }
         }
         peer->solicit_due = 0;
     } else if (meta_version > peer->meta_version){
         peer->solicit_due = 1;
-    }
-
-    /* Only a direct announce enlists a relay. A new or changed relay me peer is introduced
-       at once, not at our next announce. */
-    if (!proxied){
-        peer->heard_direct = 1;
-        peer->wants_relay = (flags & RANT_DISCOVERY_FLAG_RELAY_ME) ? 1u : 0u;
-        peer->relay_me    = peer->wants_relay;   /* its own word beats any proxy's */
-        if (!peer->relay_me && !st->cfg.relay_me){   /* ordinary again */
-            memset(&peer->obs_disc, 0, sizeof peer->obs_disc);
-            memset(&peer->obs_data, 0, sizeof peer->obs_data);
-        }
-        if (peer->wants_relay && (first_contact || blob_changed || revived || addr_changed))
-            peer->relay_due = 1;
-    } else if (!peer->heard_direct && (flags & RANT_DISCOVERY_FLAG_RELAY_ME))
-        peer->relay_me = 1;   /* known only second hand, the proxy's origin information stands */
-
-    /* Bind, or quietly rebind, the source per arrival channel. A unicast only node binds it
-       for every direct peer, since everything reached it through its own NAT. */
-    if (!proxied && ((flags & RANT_DISCOVERY_FLAG_RELAY_ME) || st->cfg.relay_me)
-        && !peer->stated_ip && src_ip && src_port){
-        RantAddr *obs = (via == RANT_DISCOVERY_VIA_DATA) ? &peer->obs_data
-                                                                  : &peer->obs_disc;
-        memset(obs, 0, sizeof *obs);
-        memcpy(obs->ip, src_ip, src_ip_len);
-        obs->ip_len = src_ip_len; obs->port = src_port;
-    }
-
-    /* Introductions: a relay me peer is walked the whole table when it appears, and every
-       relay me peer is re walked when a direct peer appears, resumes or moves. */
-    if (!proxied && (first_contact || revived) && peer->wants_relay)
-        peer->introduce_cursor = 0;
-    if (!proxied && (first_contact || revived || addr_changed)){
-        uint16_t k;
-        for (k=0;k<st->cap_peers;k++){
-            i_RantDiscoveryPeer *rme = &st->peers[k];
-            if (rme == peer || !rme->used || rme->dropped || !rme->wants_relay) continue;
-            rme->introduce_cursor = 0;
-        }
     }
 
     if (first_contact || addr_changed || blob_changed || revived)
@@ -713,13 +568,9 @@ size_t i_rant_discovery_update(i_RantDiscoveryState *st, uint64_t now, void *out
                 i_rant_discovery_peer_gone(st, &st->peers[i]);
             continue;
         }
-        if (st->peers[i].heard_direct &&
-            now - st->peers[i].last_direct_us > st->cfg.peer_timeout_us)
-            st->peers[i].heard_direct = 0;   /* direct path silent: not ours to introduce */
         if (now - st->peers[i].last_heard_us > st->cfg.peer_timeout_us){
             /* fell silent: demote, keeping the slot and id so a same uuid return resumes */
             st->peers[i].dropped = 1;
-            st->peers[i].heard_direct = 0;   /* a proxy only return is not ours to introduce */
             i_rant_discovery_fire_down(st, st->peers[i].local_id, RANT_DISCOVERY_DROP);
         }
     }
@@ -729,25 +580,8 @@ size_t i_rant_discovery_update(i_RantDiscoveryState *st, uint64_t now, void *out
     }
     if (now >= st->next_announce_us){
         int with_blob = st->self_blob_resend > 0;
-        uint16_t k;
         if (with_blob) st->self_blob_resend--;
         st->next_announce_us = now + st->cfg.announce_interval_us;
-        /* One proxy per relay me peer per interval, gated on direct liveness and suppressed
-           when two foreign proxies were heard. The introduction sweep rides the same cadence. */
-        for (k=0;k<st->cap_peers;k++){
-            i_RantDiscoveryPeer *rp = &st->peers[k];
-            uint8_t heard = rp->proxies_heard;
-            rp->proxies_heard = 0;
-            if (rp->used && !rp->dropped && rp->wants_relay &&
-                now - rp->last_direct_us <= st->cfg.peer_timeout_us){
-                if (heard < 2u) rp->relay_due = 1;
-                if (now >= rp->introduce_sweep_us){
-                    rp->introduce_cursor   = 0;
-                    rp->introduce_sweep_us = now +
-                        (uint64_t)st->cfg.announce_interval_us * RANT_DISCOVERY_INTRODUCE_SWEEP;
-                }
-            }
-        }
         return i_rant_discovery_build(st, 0, with_blob, (uint8_t *)out, cap);
     }
     return 0;
@@ -783,7 +617,7 @@ void i_rant_discovery_set_local_subnets(i_RantDiscoveryState *st, const i_RantDi
 }
 
 size_t i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, void *out, size_t cap,
-                                    RantAddr *to, int *exact){
+                                    RantAddr *to){
     uint16_t n = st->cap_peers, k;
     if (n == 0) return 0;
     for (k=0;k<n;k++){
@@ -793,60 +627,14 @@ size_t i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, void *out, size_
         if (!peer->used){ peer->reply_due = peer->solicit_due = 0; continue; }
         if (peer->reply_due){                 /* reply to a soliciter with the blob */
             peer->reply_due = 0;
-            if (exact) *exact = i_rant_discovery_disc_dest(peer, to) == 2;
-            else       i_rant_discovery_disc_dest(peer, to);
+            i_rant_discovery_addr_of(peer, to);
             return i_rant_discovery_build(st, 0, 1, (uint8_t *)out, cap);
         }
         if (peer->solicit_due){               /* re fetch: ask this peer to announce back */
             peer->solicit_due = 0;
-            if (exact) *exact = i_rant_discovery_disc_dest(peer, to) == 2;
-            else       i_rant_discovery_disc_dest(peer, to);
+            i_rant_discovery_addr_of(peer, to);
             return i_rant_discovery_build(st, RANT_DISCOVERY_FLAG_REQ, 1, (uint8_t *)out, cap);
         }
-    }
-    return 0;
-}
-
-size_t i_rant_discovery_poll_introduce(i_RantDiscoveryState *st, void *out, size_t cap,
-                                     RantAddr *to, int *exact){
-    uint16_t i;
-    if (!st) return 0;
-    for (i=0;i<st->cap_peers;i++){
-        i_RantDiscoveryPeer *peer = &st->peers[i];
-        if (!peer->used || peer->dropped || !peer->wants_relay) continue;
-        if (peer->introduce_cursor == (uint16_t)RANT_DISCOVERY_INTRODUCE_IDLE) continue;
-        while (peer->introduce_cursor < st->cap_peers){
-            i_RantDiscoveryPeer *origin = &st->peers[peer->introduce_cursor++];
-            size_t n_bytes;
-            /* only peers we hear directly are ours to introduce, the one hop rule */
-            if (origin == peer || !origin->used || origin->dropped || !origin->heard_direct)
-                continue;
-            n_bytes = i_rant_discovery_build_proxy(st, origin, (uint8_t *)out, cap);
-            if (!n_bytes) continue;           /* nothing useful to say about it yet */
-            if (exact) *exact = i_rant_discovery_disc_dest(peer, to) == 2;
-            else       i_rant_discovery_disc_dest(peer, to);
-            return n_bytes;
-        }
-        peer->introduce_cursor = (uint16_t)RANT_DISCOVERY_INTRODUCE_IDLE;
-    }
-    return 0;
-}
-
-size_t i_rant_discovery_poll_relay(i_RantDiscoveryState *st, void *out, size_t cap){
-    uint16_t n, k;
-    if (!st) return 0;
-    n = st->cap_peers;
-    if (n == 0) return 0;
-    for (k=0;k<n;k++){
-        uint16_t i = st->relay_cursor;
-        i_RantDiscoveryPeer *peer = &st->peers[i];
-        st->relay_cursor = (uint16_t)((i+1u) % n);
-        /* a dropped peer is introduced to nobody: the silence is how third parties learn it went */
-        if (!peer->used || peer->dropped || !peer->wants_relay){ peer->relay_due = 0; continue; }
-        if (!peer->relay_due) continue;
-        peer->relay_due = 0;
-        {   size_t n_bytes = i_rant_discovery_build_proxy(st, peer, (uint8_t *)out, cap);
-            if (n_bytes) return n_bytes; }   /* 0 means nothing to say yet, try the next */
     }
     return 0;
 }
@@ -911,10 +699,7 @@ void *i_rant_discovery_peer_user(i_RantDiscoveryState *st, uint32_t id){
 int i_rant_discovery_addr_of_id(const i_RantDiscoveryState *st, uint32_t id, RantAddr *out){
     i_RantDiscoveryPeer *p = i_rant_discovery_by_id(st, id);
     if (!p) return 0;
-    /* the observed data source when bound, else the locator. See spec/discovery.md */
-    if      (p->obs_data.ip_len) *out = p->obs_data;
-    else if (p->obs_disc.ip_len) *out = p->obs_disc;
-    else i_rant_discovery_addr_of(p, out);
+    i_rant_discovery_addr_of(p, out);
     return 1;
 }
 
@@ -938,16 +723,8 @@ int i_rant_discovery_id_for_addr(const i_RantDiscoveryState *st, const uint8_t *
     if (!ip || (ip_len != 4 && ip_len != 16)) return 0;
     for (i=0;i<st->cap_peers;i++){
         const i_RantDiscoveryPeer *p = &st->peers[i];
-        int hit;
         if (!p->used) continue;
-        /* a peer with observed sources matches only those. Its locator is not its endpoint
-           and may even equal another peer's. */
-        if (p->obs_disc.ip_len || p->obs_data.ip_len)
-            hit = (p->obs_disc.ip_len && i_rant_discovery_addr_is(&p->obs_disc, ip, ip_len, port)) ||
-                  (p->obs_data.ip_len && i_rant_discovery_addr_is(&p->obs_data, ip, ip_len, port));
-        else
-            hit = p->ip_len == ip_len && p->port == port && memcmp(p->ip, ip, ip_len) == 0;
-        if (hit){
+        if (p->ip_len == ip_len && p->port == port && memcmp(p->ip, ip, ip_len) == 0){
             if (id) *id = p->local_id;
             return 1;
         }
@@ -956,7 +733,7 @@ int i_rant_discovery_id_for_addr(const i_RantDiscoveryState *st, const uint8_t *
        peers share attributes to neither. */
     for (i=0;i<st->cap_peers;i++){
         const i_RantDiscoveryPeer *p = &st->peers[i];
-        if (!p->used || p->dropped || p->port != port || p->obs_disc.ip_len || p->obs_data.ip_len) continue;
+        if (!p->used || p->dropped || p->port != port) continue;
         if (!i_rant_discovery_on_path(st, p, ip, ip_len)) continue;
         if (found >= 0) return 0;
         found = i;
@@ -975,5 +752,6 @@ int i_rant_discovery_peer_addr(const i_RantDiscoveryState *st, uint16_t slot, Ra
     if (slot >= st->cap_peers) return 0;
     p = &st->peers[slot];
     if (!p->used || p->dropped) return 0;   /* active only, a dropped peer just bounces */
-    return i_rant_discovery_disc_dest(p, out);     /* 2 = observed source: exact, never expanded */
+    i_rant_discovery_addr_of(p, out);
+    return 1;
 }

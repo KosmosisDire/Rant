@@ -114,8 +114,6 @@ typedef struct {
     uint8_t               multicast_ttl;     /* hops an announce may travel, 1 */
     const RantAddr       *seed_peers;        /* unicast announces here too, port 0 = discovery_port */
     uint16_t              n_seed_peers;
-    uint8_t               unicast_only;      /* 1 = no group join, seeds and relays only. Also for a
-                                                node behind an outbound only NAT */
     uint32_t              recv_buffer_bytes; /* the data socket SO_RCVBUF, 0 = OS default */
     uint32_t              send_buffer_bytes; /* the data socket SO_SNDBUF, 0 = OS default */
     uint16_t              fragment_size;     /* UDP payload bytes per fragment, 0 = RANT_FRAG_SIZE.

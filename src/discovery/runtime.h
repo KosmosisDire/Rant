@@ -24,9 +24,9 @@ i_RantDiscoveryState *i_rant_discovery_state(i_RantDiscovery *d);
 
 size_t       i_rant_discovery_placement_memory(const i_RantDiscoveryCoreConfig *cfg);
 /* Places a runtime in caller memory, which the caller owns. cfg is the core config, a zero
- * uuid is auto generated. net gives the group, port, ttl, interface, seeds and
- * unicast_only, where unicast_only implies cfg.relay_me. tunnel owns the sockets, NULL for
- * the OS. NULL on failure, and i_rant_discovery_last_error names the step. */
+ * uuid is auto generated. net gives the group, port, ttl, interface and seeds. tunnel owns
+ * the sockets, NULL for the OS. NULL on failure, and i_rant_discovery_last_error names the
+ * step. */
 i_RantDiscovery       *i_rant_discovery_place(void *mem, size_t mem_size,
                                           const i_RantDiscoveryCoreConfig *cfg, const RantNodeNet *net,
                                           i_RantTunnel *tunnel);
@@ -45,8 +45,7 @@ i_RantDiscovery       *i_rant_discovery_migrate(i_RantDiscovery *old, void *new_
 void         i_rant_discovery_close(i_RantDiscovery *d, int send_bye);
 
 /* node integration */
-/* A discovery datagram that arrived on the data socket. src carries the port too, so the
- * core can bind an observed source. */
+/* A discovery datagram that arrived on the data socket. */
 void         i_rant_discovery_feed(i_RantDiscovery *d, const RantAddr *src, RantBytes datagram);
 /* Routes unicast discovery TX out of fd, the node's data socket. RANT_SOCK_BAD restores
  * the own socket. Group TX stays on the own socket. */

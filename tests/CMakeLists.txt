@@ -124,7 +124,6 @@ rant_c_test(e2e patterns)
 rant_c_test(e2e tasks)
 rant_c_test(e2e entities)
 rant_c_test(e2e matchwait)
-rant_c_test(e2e relay)
 rant_c_test(e2e timestamps)
 rant_c_test(e2e threads)
 

@@ -33,22 +33,20 @@ actual length and reused across occupants. The event carries the overlay when th
 datagram arrived whole and a NULL data pointer when the OS truncated it.
 
 Unicast discovery traffic leaves the DATA socket (`i_rant_discovery_set_tx_fd`). Group sends
-stay on the multicast socket. So each announce is identity plus return path in one
-datagram. Per peer unicast goes to one port: the peer's data port once its blob named
+stay on the multicast socket. So all unicast between two nodes uses one port pair, and each
+announce is identity plus return path in one datagram. Per peer unicast goes to one port: the peer's data port once its blob named
 one, else the discovery port. Discovery always runs inside a node, so the locator it
 advertises is the node's data socket and it owns no unicast socket of its own.
 
 ## Wire format
 
 Every discovery datagram starts with a 24 byte header: the magic `uDSC`, the wire version
-(`RANT_WIRE_VERSION` = 5), a flags byte, the u16 domain and the sender's 16 byte uuid. Then `[u32 meta_version][u16 meta_len]` and the blob. The blob is
+(`RANT_WIRE_VERSION` = 6), a flags byte, the u16 domain and the sender's 16 byte uuid. Then `[u32 meta_version][u16 meta_len]` and the blob. The blob is
 the discovery section `[u16 data_port][u8 self_ip_len][self_ip][u8 name_len][name]`
 followed by the opaque overlay. A steady state announce carries meta_len 0 and only the
-version. The flags are BYE 0x01, REQ 0x02 (a solicit, recipients announce back now),
-RELAY_ME 0x04 and PROXIED 0x08. A proxied announce appends the relayer's uuid as a 16
-byte trailer after the blob, which meta_len excludes and parsers otherwise ignore. Version
-history: v3 added the versioned blob, v4 the relay flags, v5 observed sources. Since v5 the
-number versions everything that crosses the wire, discovery or not, and any change to it
+version. The flags are BYE 0x01 and REQ 0x02 (a solicit, recipients announce back now).
+Version history: v3 added the versioned blob, v4 and v5 relaying, which v6 removed. Since
+v5 the number versions everything that crosses the wire, discovery or not, and any change to it
 bumps the number. The first eight bytes (magic, version, flags, domain) keep their place in
 every version, so a datagram of this domain on another version is recognized from them
 alone: it is dropped and its source reported once with `RANT_E_WIRE_VERSION`, the last 8
@@ -112,7 +110,9 @@ that comes up later is joined and one that goes away drops its membership.
 `multicast_interface` pins one interface and freezes the set (its mask is still looked up
 so the ranking works). A loopback pin is single host: the data socket binds 127.0.0.1, and
 the discovery socket does too on Windows. POSIX stacks hand group traffic only to a socket
-bound to INADDR_ANY, so discovery stays there, and no POSIX firewall prompts for it.
+bound to INADDR_ANY, so discovery stays there, and no POSIX firewall prompts for it. Linux
+would also hand that socket every group another socket on the host joined, so the discovery
+socket turns off `IP_MULTICAST_ALL` and hears only its own groups.
 
 An announce carries no address of its own, so each copy arrives with the source address
 correct for its path. A peer heard on several paths has several candidate locators, and
@@ -126,92 +126,15 @@ versus link local half of the ranking.
 
 The locator is where we send. What we accept is wider, since a multihomed peer sends from
 whichever address its route to our locator picks, which need not be the one we chose for it.
-Each peer keeps the sources of its last direct announces, up to 4 paths. A datagram is the
+Each peer keeps the sources of its last announces, up to 4 paths. A datagram is the
 peer's when it comes from the locator, else from its data port on a path heard within three
-announce intervals. A path two peers share attributes to neither, and a peer with observed
-sources (NAT) matches only those.
+announce intervals. A path two peers share attributes to neither.
 
 ## Stated locators
 
 `self_ip` and `advertise_port` put a locator in the announce that peers treat as
-authoritative. It skips the ranking, and a relay proxies the stated address rather than
-the source it saw. One locator goes to every peer. An unparseable address refuses the
-open with `RANT_E_BAD_ADDRESS`.
-
-## Relaying for unicast only nodes
-
-A `unicast_only` node joins no group, announces only to seed peers and known peers, and
-marks every announce `RELAY_ME`. It also skips the join, the group sends and the ttl and
-loop options, so a device with no multicast can open at all. Linux would still hand its
-socket every group another socket on the host joined, so the discovery socket turns off
-`IP_MULTICAST_ALL` and hears only its own groups. A node that hears a
-`RELAY_ME` announce DIRECTLY re announces it: `i_rant_discovery_poll_relay` builds an
-announce on behalf of that peer (its uuid, its blob at the origin's version, and the
-locator we know it at stated outright) and the IO layer sends it out every path. This is
-one hop and the relay only introduces. Data is unicast point to point as always, and once
-two nodes know each other they keep each other alive directly, so the relay may die.
-
-Three rules keep it safe:
-
-- `PROXIED` is the loop stop. A proxied announce never enlists a second hop. Only a direct
-  announce enlists a relay. Proxies carry the origin's `RELAY_ME` as information only.
-- A proxied locator is a ranked candidate, never authoritative, so a relay's view cannot
-  stomp or flap a direct path we still hear, which would re fire peer up forever.
-- Relaying and introducing are sustained by DIRECT liveness only (`last_direct_us`). Every
-  relay hears the other relays' proxies and its own multicast looped echoes (a proxy
-  carries the origin's uuid, so the self filter never drops it). If those sustained
-  relaying, a dead origin would be re announced forever, mesh wide. Proxies still refresh
-  plain liveness for third parties, so on real silence every relay stops within one
-  `peer_timeout` and the mesh forgets the peer within about two.
-
-The cost is one proxy per relayed peer per announce interval, duplicate suppressed mesh
-wide: two or more foreign proxies for an origin within one interval mean a quorum exists,
-so a relay sits that interval out. Steady state is two or three active relays whatever
-the mesh size. A new or changed origin is always emitted at once. A relay tells foreign
-proxies from its own echoes by the 16 byte relayer uuid trailer that `build_proxy`
-appends after the blob (`meta_len` excludes it, and a trailer less proxy counts as
-foreign). A proxy is never unicast back to its own origin.
-
-## Observed sources (NAT)
-
-A `unicast_only` node behind an outbound only NAT (rootless containers, slirp class
-stacks) has a fictional locator and one rewritten source per flow. Three mechanisms cover
-it with no new wire kinds.
-
-1. Every node sends unicast discovery from its data socket, so each announce opens,
-   identifies and keeps alive exactly the NAT mapping that peer needs. The 3 s cadence
-   beats common UDP mapping timeouts. A NAT'd peer that replies to an announce's ARRIVAL
-   source reaches the one socket that demuxes every datagram family.
-2. Peers bind one OBSERVED source per arrival channel (`obs_disc`, `obs_data`) from direct
-   `RELAY_ME` announces, keyed by uuid, with `i_RantDiscoveryVia` saying which local socket.
-   A unicast only node binds them for EVERY direct peer, because everything reaching it
-   came through its own NAT: a published port forward rewrites the source to the NAT's
-   internal gateway, which is the only endpoint replies are known to reach. For the same
-   reason a unicast only node never lets an arrival source override a locator it already
-   holds. The gateway source sits on the container's own subnet, so it would win the
-   ranking and black hole every send to that peer. `i_rant_discovery_addr_of_id` (the
-   node's one data and detail destination) returns `obs_data`, then `obs_disc`, then the
-   locator. Discovery TX targets `obs_disc`, then `obs_data`, then the locator, exactly,
-   never expanded to conventional ports. Attribution (`id_for_addr`) accepts observed
-   sources only for peers that have one and refuses the phantom locator, which two NAT'd
-   containers on one device even share. A `RELAY_ME` locator asserts no endpoint, so
-   neither evicts the other. A new uuid arriving from a held observed endpoint does evict.
-   A changed source rebinds quietly. A `self_ip` stated in a DIRECT announce stays
-   authoritative and clears observed sources. A proxy always embeds a locator and must
-   never set the stated flag.
-3. The NAT'd side must speak first, so relays also run introductions
-   (`i_rant_discovery_poll_introduce`): each relay me peer is sent proxied announces of the
-   peers we hear directly (the `heard_direct` flag, one hop). This is change triggered
-   (once when it appears, again when any direct peer appears, resumes or moves, plus a
-   repair sweep every `RANT_DISCOVERY_INTRODUCE_SWEEP` = 10 announce intervals), never
-   periodic. The NAT'd node then contacts each introduced peer itself and the pair self
-   sustains.
-
-Two NAT'd nodes are out of scope. Neither can receive first, so their matches stay
-pending. These rules are pinned twice: the `discovery_core` case of `unit.discovery` covers
-observed binding, eviction, introductions, the ghost gate, the published port forward and
-relay suppression, and the `nat` case of `e2e.relay` has the NAT'd node advertise a black
-holed port yet carry reliable data that outlives the introducer.
+authoritative. It skips the ranking. One locator goes to every peer. An unparseable
+address refuses the open with `RANT_E_BAD_ADDRESS`.
 
 ## Node names
 

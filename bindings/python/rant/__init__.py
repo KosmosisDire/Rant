@@ -2066,7 +2066,7 @@ class Node:
                  multicast_interface=None, max_topics=0, match_wait=0.0, disable_shm=False,
                  fetch_details=False, disable_logs=False, disable_meta=False,
                  disable_error_logs=False, data_port=0, discovery_group=None,
-                 discovery_port=0, multicast_ttl=0, seed_peers=(), unicast_only=False,
+                 discovery_port=0, multicast_ttl=0, seed_peers=(),
                  self_ip=None, advertise_port=0, fragment_size=0, recv_buffer_bytes=0,
                  send_buffer_bytes=0, announce_interval=0.0, peer_timeout=0.0, max_peers=0,
                  bridge=None, bridge_passphrase=None, threading=Threading.SERVICE_THREAD):
@@ -2125,7 +2125,6 @@ class Node:
         if n_seeds:
             co.net.seed_peers = _c.cast(seeds, _c.c_void_p)
             co.net.n_seed_peers = n_seeds
-        co.net.unicast_only = 1 if unicast_only else 0
         co.net.self_ip = self_ip.encode() if self_ip else None
         co.net.advertise_port = advertise_port
         co.net.bridge = bridge.encode("utf-8") if bridge else None   # copied by open

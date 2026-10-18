@@ -13,7 +13,7 @@ pub const RANT_DISCOVERY_PORT: u32 = 7400;
 pub const RANT_ANNOUNCE_INTERVAL_US: u32 = 3000000;
 pub const RANT_MAX_PEERS: u32 = 16;
 pub const RANT_ALLOCATOR_PAGE: u32 = 65536;
-pub const RANT_WIRE_VERSION: u32 = 5;
+pub const RANT_WIRE_VERSION: u32 = 6;
 pub const RANT_DISCOVERY_META_MAX: u32 = 64;
 pub const RANT_DISCOVERY_META_OFF: u32 = 30;
 pub const RANT_DISCOVERY_DISC_MAX: u32 = 52;
@@ -140,7 +140,6 @@ pub struct RantNodeNet {
     pub multicast_ttl: u8,
     pub seed_peers: *const RantAddr,
     pub n_seed_peers: u16,
-    pub unicast_only: u8,
     pub recv_buffer_bytes: u32,
     pub send_buffer_bytes: u32,
     pub fragment_size: u16,

@@ -57,8 +57,6 @@ options! {
         discovery_port: u16 = 0,
         /// Hops an announce may travel. 0 = 1.
         multicast_ttl: u8 = 0,
-        /// No group join: seeds and relays only, also behind an outbound only NAT.
-        unicast_only: bool = false,
         /// Advertise this data port instead of the bound one.
         advertise_port: u16 = 0,
         /// UDP payload bytes per fragment. 0 = 1350.
@@ -665,7 +663,6 @@ impl Node {
                 multicast_ttl: o.multicast_ttl,
                 seed_peers: if inner.net.seeds.is_empty() { null() } else { inner.net.seeds.as_ptr() },
                 n_seed_peers: inner.net.seeds.len() as u16,
-                unicast_only: o.unicast_only as u8,
                 recv_buffer_bytes: o.recv_buffer_bytes,
                 send_buffer_bytes: o.send_buffer_bytes,
                 fragment_size: o.fragment_size,

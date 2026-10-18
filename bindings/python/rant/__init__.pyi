@@ -384,7 +384,7 @@ class Node:
                  disable_meta: bool = False, disable_error_logs: bool = False,
                  data_port: int = 0, discovery_group: str | None = None,
                  discovery_port: int = 0, multicast_ttl: int = 0,
-                 seed_peers: Iterable[str] = (), unicast_only: bool = False,
+                 seed_peers: Iterable[str] = (),
                  self_ip: str | None = None, advertise_port: int = 0, fragment_size: int = 0,
                  recv_buffer_bytes: int = 0, send_buffer_bytes: int = 0,
                  announce_interval: float = 0.0, peer_timeout: float = 0.0,

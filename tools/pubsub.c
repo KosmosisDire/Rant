@@ -159,8 +159,6 @@ static void usage(void){
         "opts: --domain N  --mcast (same-host: discovery on loopback)  --if <ip>  --peer <ip>  --best-effort  --wait MS  --file <name>  --max <size>\n"
         "      --rate HZ   (pub: repeat the text/--file payload at HZ; sub: bare --rate prints the measured receive rate)\n"
         "      --frag N    (UDP fragment payload bytes this node sends; advertised to peers. Build with -DRANT_FRAG_SIZE_MAX>=N)\n"
-        "      --unicast-only  (this host cannot multicast: announce only to --peer and peers already known,\n"
-        "                       and be re-announced onward by whoever hears us, so one --peer reaches the whole mesh)\n"
         "      --self-ip <ip>  (advertise THIS address as our locator instead of the one our packets come from:\n"
         "                       a static 1:1 mapping, or pinning which address a multihomed host advertises)\n");
 }
@@ -293,7 +291,7 @@ int main(int argc, char **argv){
     const char *mode = NULL, *if_ip = NULL, *peer_ip = NULL, *file_name = NULL, *self_ip = NULL;
     const char *pos[64]; int npos = 0;     /* positional args: mode, then topics or message words */
     uint16_t domain = 0;
-    int mcast = 0, reliable = 1, wait_ms = 5000, rate_set = 0, frag = 0, unicast_only = 0;
+    int mcast = 0, reliable = 1, wait_ms = 5000, rate_set = 0, frag = 0;
     double rate_hz = 0;                    /* --rate: pub repeats at N Hz, sub measures the rate */
     size_t cap = 4u<<20; int max_set = 0; /* --max: fixed message cap (else dynamic) */
     char msg[65536]; size_t msg_len = 0;  /* one shot publish text, if any */
@@ -309,7 +307,6 @@ int main(int argc, char **argv){
         if      (!strcmp(arg, "--domain") && i+1 < argc) domain  = (uint16_t)atoi(argv[++i]);
         else if (!strcmp(arg, "--if")     && i+1 < argc) if_ip   = argv[++i];
         else if (!strcmp(arg, "--peer")   && i+1 < argc) peer_ip = argv[++i];
-        else if (!strcmp(arg, "--unicast-only")) unicast_only = 1;
         else if (!strcmp(arg, "--self-ip") && i+1 < argc) self_ip = argv[++i];
         else if (!strcmp(arg, "--wait")   && i+1 < argc) wait_ms = atoi(argv[++i]);
         else if (!strcmp(arg, "--file")   && i+1 < argc) file_name = argv[++i];
@@ -395,7 +392,6 @@ int main(int argc, char **argv){
         seed.ip_len = 4;           /* port 0 = use the discovery port */
         opts.net.seed_peers = &seed; opts.net.n_seed_peers = 1;
     }
-    opts.net.unicast_only = (uint8_t)unicast_only;   /* no group join, a hearer relays us on */
     opts.net.self_ip = self_ip;                      /* state our locator (static 1:1 mapping) */
 
     /* Dynamic mode grows message buffers from the heap. Fixed mode (--max) is a static

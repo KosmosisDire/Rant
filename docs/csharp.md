@@ -29,7 +29,7 @@ pub.Send(new Conveyor(0.5, true, "bracket"));
 `new RantNode(name, options)` opens a node, both arguments optional. `NodeOptions` holds
 the C node options under C# names, where 0, false or null means the C default: `Domain`,
 `Prefix`, `MaxTopics`, `MulticastInterface`, `MatchWaitMs`, `FetchDetails`, the discovery options of
-docs/discovery.md (`SeedPeers` as "ip" or "ip:port" strings, `UnicastOnly`, `SelfIp` with
+docs/discovery.md (`SeedPeers` as "ip" or "ip:port" strings, `SelfIp` with
 `AdvertisePort`, `Bridge` with `BridgePassphrase`) and the rest. `node.OnEvent` carries peer lifecycle, loss and error
 events. It is optional: with no handler attached, error events print to stderr, and
 `LastError` records the last error either way, null before any. `Stats` reads the node's memory, backpressure and evicted unsent counters.

@@ -468,7 +468,6 @@ struct NodeOptions {
     std::string              multicast_interface;   /* empty = auto, "127.0.0.1" = single host */
     uint8_t                  multicast_ttl        = 0;   /* 0 = 1 hop */
     std::vector<std::string> seed_peers;   /* "ip" or "ip:port", unicast announce targets */
-    bool                     unicast_only         = false;   /* no group join, seeds relay us */
     uint16_t                 fragment_size        = 0;   /* UDP payload bytes per fragment */
     /* Data socket OS buffers. 0 = the OS default, which is too small to hold a multi
      * megabyte message whole, so raise both for big payloads. */
@@ -2966,7 +2965,6 @@ public:
         co.net.multicast_ttl       = o.multicast_ttl;
         co.net.seed_peers          = impl->seeds.empty() ? nullptr : impl->seeds.data();
         co.net.n_seed_peers        = static_cast<uint16_t>(impl->seeds.size());
-        co.net.unicast_only        = o.unicast_only ? 1 : 0;
         co.net.self_ip             = impl->self_ip.empty() ? nullptr : impl->self_ip.c_str();
         co.net.advertise_port      = o.advertise_port;
         co.net.bridge              = o.bridge.empty() ? nullptr : o.bridge.c_str();

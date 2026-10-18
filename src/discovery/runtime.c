@@ -17,7 +17,6 @@ struct i_RantDiscovery {
     i_RantIface            ifs[RANT_DISCOVERY_MAX_SUBNETS];    /* joined and announced out of */
     uint8_t                n_ifs;          /* 0 = none usable, the OS picks */
     uint8_t                pinned;         /* explicit multicast_interface, never rescanned */
-    uint8_t                unicast_only;   /* no joins and no group sends */
     uint64_t               if_scan_us;     /* next interface re enumeration */
     uint32_t               group_naddr;   /* network order */
     uint16_t               discovery_port;
@@ -43,18 +42,10 @@ static void i_rant_discovery_tx_to(i_RantDiscovery *d, const uint8_t *out, size_
     i_rant_discovery_tx1(d, out, n_bytes, addr->ip, addr->port ? addr->port : d->discovery_port);
 }
 
-/* An observed source exactly, else the locator. */
-static void i_rant_discovery_tx_peer(i_RantDiscovery *d, const uint8_t *out, size_t n_bytes,
-                          const RantAddr *addr, int kind){
-    if (kind == 2){ if (addr->ip_len == 4) i_rant_discovery_tx1(d, out, n_bytes, addr->ip, addr->port); }
-    else if (kind == 1) i_rant_discovery_tx_to(d, out, n_bytes, addr);
-}
-
 /* Out of every interface, so each copy carries the source correct for its path. A failed
  * sendto on one adapter does not stop the others. */
 static void i_rant_discovery_tx_group(i_RantDiscovery *d, const uint8_t *out, size_t n_bytes){
     uint8_t group_ip[4], i;
-    if (d->unicast_only) return;   /* seeds and known peers are the only paths */
     i_rant_plat_naddr_to_ip4(d->group_naddr, group_ip);
     if (!d->n_ifs){ i_rant_net_send(d->tunnel, d->fd, out, n_bytes, group_ip, d->discovery_port); return; }
     for (i = 0; i < d->n_ifs; i++){
@@ -63,10 +54,8 @@ static void i_rant_discovery_tx_group(i_RantDiscovery *d, const uint8_t *out, si
     }
 }
 
-/* The group, every seed and every known peer. skip_uuid leaves out a proxy's own origin,
- * whose self filter would only discard it. */
-static void i_rant_discovery_tx(i_RantDiscovery *d, const uint8_t *out, size_t n_bytes,
-                          const uint8_t *skip_uuid){
+/* The group, every seed and every known peer. */
+static void i_rant_discovery_tx(i_RantDiscovery *d, const uint8_t *out, size_t n_bytes){
     uint16_t s, discovery_port = d->discovery_port;
     RantAddr addr;
     i_rant_discovery_tx_group(d, out, n_bytes);
@@ -75,22 +64,13 @@ static void i_rant_discovery_tx(i_RantDiscovery *d, const uint8_t *out, size_t n
         if (seed->ip_len != 4) continue;
         i_rant_discovery_tx1(d, out, n_bytes, seed->ip, seed->port ? seed->port : discovery_port);
     }
-    for (s=0; s<d->max_peers; s++){
-        int kind;
-        if (skip_uuid){
-            i_RantDiscoveryPeerView v;
-            if (i_rant_discovery_peer_at(d->core, s, &v) && memcmp(v.uuid, skip_uuid, 16)==0)
-                continue;
-        }
-        kind = i_rant_discovery_peer_addr(d->core, s, &addr);
-        if (kind) i_rant_discovery_tx_peer(d, out, n_bytes, &addr, kind);
-    }
+    for (s=0; s<d->max_peers; s++)
+        if (i_rant_discovery_peer_addr(d->core, s, &addr)) i_rant_discovery_tx_to(d, out, n_bytes, &addr);
 }
 
 void i_rant_discovery_feed(i_RantDiscovery *d, const RantAddr *src, RantBytes datagram){
     if (!d) return;
-    /* the data socket is the DATA channel */
-    i_rant_discovery_on_datagram(d->core, src, RANT_DISCOVERY_VIA_DATA, datagram, i_rant_plat_now_us());
+    i_rant_discovery_on_datagram(d->core, src, datagram, i_rant_plat_now_us());
 }
 
 void i_rant_discovery_set_tx_fd(i_RantDiscovery *d, i_RantSock fd){
@@ -146,15 +126,12 @@ static uint8_t i_rant_discovery_if_apply(i_RantDiscovery *d, const i_RantIface *
     i_RantDiscoverySubnet nets[RANT_DISCOVERY_MAX_SUBNETS];
     uint8_t i, joined = 0;
     if (n_want > RANT_DISCOVERY_MAX_SUBNETS) n_want = RANT_DISCOVERY_MAX_SUBNETS;
-    if (d->unicast_only) joined = n_want;   /* no membership, but the core still gets our subnets */
-    else {
-        for (i = 0; i < d->n_ifs; i++)
-            if (!i_rant_discovery_if_has(want, n_want, d->ifs[i].addr))
-                i_rant_net_mcast_leave(d->tunnel, d->fd, d->group_naddr, d->ifs[i].addr);
-        for (i = 0; i < n_want; i++){
-            if (i_rant_discovery_if_has(d->ifs, d->n_ifs, want[i].addr)){ joined++; continue; }
-            if (i_rant_net_mcast_join(d->tunnel, d->fd, d->group_naddr, want[i].addr)) joined++;
-        }
+    for (i = 0; i < d->n_ifs; i++)
+        if (!i_rant_discovery_if_has(want, n_want, d->ifs[i].addr))
+            i_rant_net_mcast_leave(d->tunnel, d->fd, d->group_naddr, d->ifs[i].addr);
+    for (i = 0; i < n_want; i++){
+        if (i_rant_discovery_if_has(d->ifs, d->n_ifs, want[i].addr)){ joined++; continue; }
+        if (i_rant_net_mcast_join(d->tunnel, d->fd, d->group_naddr, want[i].addr)) joined++;
     }
     for (i = 0; i < n_want; i++){
         i_rant_plat_naddr_to_ip4(want[i].addr, nets[i].ip);
@@ -268,8 +245,6 @@ i_RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const i_RantDisco
     g_place_error = RANT_E_NONE; g_place_os_error = 0;
     c = *cfg;
     i_rant_discovery_config_defaults(&c);
-    /* a node with no multicast asks whoever hears it to announce it onward */
-    if (net->unicast_only) c.relay_me = 1;
     group = net->discovery_group ? net->discovery_group : RANT_DISCOVERY_GROUP;
     discovery_port = net->discovery_port ? net->discovery_port : RANT_DISCOVERY_PORT;
     ttl   = net->multicast_ttl ? net->multicast_ttl : 1;
@@ -312,7 +287,6 @@ i_RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const i_RantDisco
     d->tx_fd = fd;
     d->group_naddr = group_naddr;
     d->n_ifs = 0;
-    d->unicast_only = net->unicast_only ? 1u : 0u;
     d->pinned = net->multicast_interface ? 1u : 0u;
     if (d->pinned){
         want[0].addr = i_rant_plat_parse_ip(net->multicast_interface);
@@ -320,19 +294,17 @@ i_RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const i_RantDisco
         n_want = 1;
     } else n_want = i_rant_discovery_if_scan(tunnel, want, RANT_DISCOVERY_MAX_SUBNETS);
     joined = i_rant_discovery_if_apply(d, want, n_want);
-    if (!d->unicast_only){
-        if (!joined && !(n_want == 1 && want[0].addr == 0)){
-            i_RantIface any; any.addr = 0; any.mask = 0;        /* let the OS choose */
-            joined = i_rant_discovery_if_apply(d, &any, 1);
-        }
-        if (!joined){
-            int e=i_rant_net_last_error(tunnel);
-            i_rant_net_close(tunnel, fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_MCAST_JOIN, e);
-        }
-        i_rant_net_mcast_ttl(tunnel, fd, ttl);
-        /* loop stays on for several instances per host, the uuid filter drops the echoes */
-        i_rant_net_mcast_loop(tunnel, fd, 1);
-    }   /* unicast_only sets no group option, so a stack with no multicast opens */
+    if (!joined && !(n_want == 1 && want[0].addr == 0)){
+        i_RantIface any; any.addr = 0; any.mask = 0;        /* let the OS choose */
+        joined = i_rant_discovery_if_apply(d, &any, 1);
+    }
+    if (!joined){
+        int e=i_rant_net_last_error(tunnel);
+        i_rant_net_close(tunnel, fd); i_rant_plat_cleanup(); return i_rant_discovery_fail(RANT_E_MCAST_JOIN, e);
+    }
+    i_rant_net_mcast_ttl(tunnel, fd, ttl);
+    /* loop stays on for several instances per host, the uuid filter drops the echoes */
+    i_rant_net_mcast_loop(tunnel, fd, 1);
     i_rant_net_set_nonblock(tunnel, fd);     /* the drain's last recv must return would block */
     i_rant_net_suppress_connreset(tunnel, fd);     /* a dead peer's ICMP bounce must not disrupt RX */
 
@@ -379,7 +351,7 @@ i_RantDiscovery *i_rant_discovery_migrate(i_RantDiscovery *old, void *new_mem, s
 /* Drains to empty, capped by the burst guard. One recv per poll would let a slow poller's
  * backlog keep a dead peer alive. */
 #define RANT_DISCOVERY_RX_BURST 2048
-static int i_rant_discovery_rt_drain(i_RantDiscovery *d, i_RantSock fd, i_RantDiscoveryVia via){
+static int i_rant_discovery_rt_drain(i_RantDiscovery *d, i_RantSock fd){
     int got = 0, guard;
     for (guard = 0; guard < RANT_DISCOVERY_RX_BURST; guard++){
         RantAddr src;
@@ -389,7 +361,7 @@ static int i_rant_discovery_rt_drain(i_RantDiscovery *d, i_RantSock fd, i_RantDi
         if (n > 0){
             memset(&src, 0, sizeof src);
             memcpy(src.ip, src_ip, 4); src.ip_len = 4; src.port = src_port;
-            i_rant_discovery_on_datagram(d->core, &src, via, rant_bytes(d->rxbuf, (size_t)n), i_rant_plat_now_us());
+            i_rant_discovery_on_datagram(d->core, &src, rant_bytes(d->rxbuf, (size_t)n), i_rant_plat_now_us());
             got = 1;
         }
     }
@@ -401,9 +373,9 @@ static int i_rant_discovery_rt_drain(i_RantDiscovery *d, i_RantSock fd, i_RantDi
 int i_rant_discovery_service(i_RantDiscovery *d, int fd_readable){
     RantAddr to;
     uint64_t now;
-    int got = 0, exact; size_t n_bytes;
+    int got = 0; size_t n_bytes;
     if (!d) return 0;
-    if (fd_readable) got |= i_rant_discovery_rt_drain(d, d->fd, RANT_DISCOVERY_VIA_DISCOVERY);
+    if (fd_readable) got |= i_rant_discovery_rt_drain(d, d->fd);
 
     now = i_rant_plat_now_us();
     if (!d->pinned && now >= d->if_scan_us){    /* pick up an interface that came up since open */
@@ -412,21 +384,11 @@ int i_rant_discovery_service(i_RantDiscovery *d, int fd_readable){
     }
 
     n_bytes = i_rant_discovery_update(d->core, now, d->txbuf, d->wire_max);
-    if (n_bytes) i_rant_discovery_tx(d, d->txbuf, n_bytes, NULL);
+    if (n_bytes) i_rant_discovery_tx(d, d->txbuf, n_bytes);
 
     /* targeted unicast: replies to soliciters and re fetch requests */
-    while ((n_bytes = i_rant_discovery_poll_targeted(d->core, d->txbuf, d->wire_max, &to, &exact)) != 0)
-        i_rant_discovery_tx_peer(d, d->txbuf, n_bytes, &to, exact ? 2 : 1);
-
-    /* relay: proxied announces for peers that cannot multicast, out of every path. The
-       origin itself is skipped, bytes 8 to 23 carry its uuid. */
-    while ((n_bytes = i_rant_discovery_poll_relay(d->core, d->txbuf, d->wire_max)) != 0)
-        i_rant_discovery_tx(d, d->txbuf, n_bytes, d->txbuf + 8);
-
-    /* introductions: proxied announces of the peers we hear directly, unicast to one relay
-       me peer, which behind a NAT must always speak first */
-    while ((n_bytes = i_rant_discovery_poll_introduce(d->core, d->txbuf, d->wire_max, &to, &exact)) != 0)
-        i_rant_discovery_tx_peer(d, d->txbuf, n_bytes, &to, exact ? 2 : 1);
+    while ((n_bytes = i_rant_discovery_poll_targeted(d->core, d->txbuf, d->wire_max, &to)) != 0)
+        i_rant_discovery_tx_to(d, d->txbuf, n_bytes, &to);
     return got;
 }
 
@@ -446,7 +408,7 @@ void i_rant_discovery_close(i_RantDiscovery *d, int send_bye){
     if (send_bye){
         size_t n_bytes = i_rant_discovery_leave(d->core, d->txbuf, d->wire_max);
         int k;
-        for (k = 0; n_bytes && k < RANT_DISCOVERY_BYE_SENDS; k++) i_rant_discovery_tx(d, d->txbuf, n_bytes, NULL);
+        for (k = 0; n_bytes && k < RANT_DISCOVERY_BYE_SENDS; k++) i_rant_discovery_tx(d, d->txbuf, n_bytes);
     }
     i_rant_discovery_destroy(d->core);
     i_rant_net_close(d->tunnel, d->fd);

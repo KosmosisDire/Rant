@@ -69,7 +69,7 @@ program in this order.
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
 | `unit.tunnel` | hash, handshake, frame, json, batch |
 | `e2e.stream` | stream, scale, named, collision |
-| `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, prefix |
+| `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, prefix, self_ip |
 | `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema |
 | `e2e.detail` | detail_live, interest_external |
 | `e2e.shm` | shm_node |
@@ -78,7 +78,6 @@ program in this order.
 | `e2e.tasks` | task, task_matrix |
 | `e2e.entities` | reflect_dropped, churn, log_and_meta |
 | `e2e.matchwait` | matchwait |
-| `e2e.relay` | relay, nat, self_ip |
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
 | `bench.memscale` | `rant_bench memscale`, a steady state send never allocates |
@@ -129,26 +128,8 @@ What each phase pins, grouped by layer.
 - Lifecycle: two announces are two ups, silence past the timeout drops both but keeps
   their slots, the same uuid resumes under the same local id, and a new uuid from a held
   address evicts the predecessor as GONE because one socket is one process.
-- Relay: who enlists us, one hop only, and a proxied locator losing to a direct path we
-  still hear. PROXIED is the loop stop and defeats enlistment even with RELAY_ME set.
-  RELAY_ME rides along as origin information, so a stated locator is no endpoint identity.
-- Self ip: a stated locator rides our own announce and a relay propagates the stated
-  address, not the source it saw, or relaying would undo the override for third parties.
-- Observed sources: a unicast only peer behind a NAT advertises a fiction. Its RELAY_ME
-  announces carry the real return path, so the receiver binds one observed source per
-  local channel. Data goes there and never to the phantom, attribution refuses the
-  phantom, the discovery channel binds independently, and a quiet rebind after the NAT
-  expired sends at once with no peer up refire.
-- Ghost gate: relaying is sustained by direct liveness only. Proxies still refresh plain
-  liveness, so a dead origin outlives by one extra timeout and then dies, but proxies
-  never keep us relaying it, or a dead origin would be re announced forever mesh wide.
-- Unicast only receiver: a published port forward rewrites the source to the gateway on
-  our own subnet, which would win the locator ranking and black hole every send. So a
-  source never overrides a held locator there and binds as the observed return path
-  instead, for every direct peer.
-- Duplicate suppression: two or more foreign proxies for an origin within one announce
-  interval suppress our own emission, our own looped echo (told apart by the relayer uuid
-  trailer) never counts, and a changed origin re arms emission at once.
+- Self ip: a stated locator rides our own announce, and a peer holds the stated address,
+  not the source the announce arrived from.
 
 ### Node core and runtime
 
@@ -329,12 +310,6 @@ What each phase pins, grouped by layer.
 - NAMED and COLLISION: the cross peer identity is the name hash, independent of local
   handles. Two names with the same 64 bit identity, found by Pollard's rho against FNV-1a,
   fire the collision event and never cross wire.
-- Relay: a unicast only node seeded with one address reaches a third node through the
-  relay's proxied announces and then the two sustain each other directly. The control
-  with nobody to relay it is unreachable both ways.
-- NAT: the unicast only node advertises a black holed port bound by the test and never
-  read, so only observed sources carry the mesh, and the relay introduces its peers so the
-  NAT'd node speaks first to each.
 - Self ip: on one host the advertised port carries the proof. An unparseable locator is a
   config error, never a silent fallback.
 - Write timestamps: a delivered stamp lies within the send and delivery walls, the opt
@@ -461,7 +436,9 @@ as `fuzz_<name>`. Fuzzing itself runs by hand, never in CI.
 - `FUZZ_REQUIRE` states a property beyond not crashing. A failure aborts, which libFuzzer
   saves as a crash.
 - Once a crash is fixed, its input goes to `tests/fuzz/crashes/<name>/` under a name that
-  says what it caught, so every build replays it.
+  says what it caught, so every build replays it. A receive input opens with recorded
+  announces, so a `RANT_WIRE_VERSION` bump rewrites their version byte, or the peer is never
+  accepted and the input reaches nothing.
 - Found so far, fixed with their inputs saved: a zero length fragment of an empty sample
   offset a NULL buffer, the same empty sample offset NULL again in delivery, a DATA header
   claiming a sample longer than its fragments sized a 3 GB allocation, and a type name with
@@ -504,7 +481,7 @@ app that builds an expensive payload should gate on it.
 ## Live debugging
 
 A `probe.c` that defines `RANT_IMPLEMENTATION` against `dist/rant.h` can read every
-internal struct (discovery peer flags, observed sources). `tests/support/rant_impl.h` shows
+internal struct (discovery peer flags, locators and paths). `tests/support/rant_impl.h` shows
 how to route `sendto` and `recvfrom` through wrappers to log all discovery and detail
 traffic. Interest lines stuck at a fixed
 publish count while liveness continues mean the peer's detail egress is black holed. Do

@@ -116,7 +116,6 @@ int main(int argc, char **argv){
     FIELD(RantNodeNet, multicast_ttl)
     FIELD(RantNodeNet, seed_peers)
     FIELD(RantNodeNet, n_seed_peers)
-    FIELD(RantNodeNet, unicast_only)
     FIELD(RantNodeNet, recv_buffer_bytes)
     FIELD(RantNodeNet, send_buffer_bytes)
     FIELD(RantNodeNet, fragment_size)

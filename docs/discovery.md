@@ -3,8 +3,7 @@
 Nodes find each other with a UDP multicast announce every 3 s
 (`opts.discovery.announce_interval_us`). The announce carries the node's name, its data
 port, its fragment size, a host id for shared memory and its interest list. Data never
-uses multicast. spec/discovery.md explains how announces, peer state and relaying work
-inside.
+uses multicast. spec/discovery.md explains how announces and peer state work inside.
 
 ## Peer lifecycle
 
@@ -31,20 +30,13 @@ A peer heard on several paths is reached at the best ranked address: one on our 
 subnet first, then any routed address, then link local. At equal rank the address in use
 stays until it goes quiet, so a peer's address never flaps.
 
-## No multicast at all
+## No multicast or behind a NAT
 
-A node whose network gives it no multicast sets `opts.net.unicast_only`. It joins no group
-and announces only to `opts.net.seed_peers` and to peers it already knows. Any node that
-hears it directly re announces it on its behalf, one hop, so seeding one reachable node
-makes it discoverable mesh wide. The relay only introduces. Data is always direct, and
-once two nodes know each other they keep each other alive without it.
+A node whose network gives it no multicast, or that sits behind a NAT such as a rootless
+container, runs on a bridge's sockets (Through a bridge).
 
-The same flag covers a node behind an outbound only NAT, such as a rootless container.
-Peers reply to the address an announce actually arrived from, and relays introduce the
-NAT'd node to every peer they hear directly so it can speak first. Two NAT'd nodes cannot
-reach each other.
-
-`seed_peers` also helps a normal node where multicast is broken between two segments.
+`opts.net.seed_peers` also sends our announces by unicast, for two segments that multicast
+does not cross. A seeded node learns us and answers, but its other peers do not.
 
 ## Stating our own address
 
@@ -54,8 +46,7 @@ address peers treat as authoritative. Use them when the address peers must reach
 is not the one our packets appear to come from and the mapping is static and one to one:
 a cloud elastic IP, or a container published with `-p 7400:7400`. State the port whenever
 it is translated. One address goes to every peer. Neither option creates an inbound path.
-An unparseable address refuses the open with `RANT_E_BAD_ADDRESS`. A VLAN does not
-translate addresses, so it needs only the relay above.
+An unparseable address refuses the open with `RANT_E_BAD_ADDRESS`.
 
 ## Through a bridge
 
@@ -88,7 +79,6 @@ RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){
 | `multicast_interface` | pin discovery to one interface IP. NULL = all |
 | `multicast_ttl` | hops an announce may travel. 1 = same subnet |
 | `seed_peers`, `n_seed_peers` | addresses to also unicast announces to. Port 0 = the discovery port |
-| `unicast_only` | join no group. Rely on seeds and relays |
 | `recv_buffer_bytes`, `send_buffer_bytes` | data socket OS buffers. 0 = OS default |
 | `fragment_size` | UDP payload bytes per fragment. 0 = `RANT_FRAG_SIZE`. One size per node |
 | `self_ip`, `advertise_port` | state our own locator |

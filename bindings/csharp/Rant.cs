@@ -301,7 +301,6 @@ namespace Rant
         public byte multicast_ttl;
         public IntPtr seed_peers;              // const RantAddr*
         public ushort n_seed_peers;
-        public byte unicast_only;
         public uint recv_buffer_bytes;
         public uint send_buffer_bytes;
         public ushort fragment_size;
@@ -1039,8 +1038,6 @@ namespace Rant
         public byte MulticastTtl;
         /// <summary>"ip" or "ip:port" unicast announce targets.</summary>
         public string[] SeedPeers;
-        /// <summary>No group join, the seeds relay this node.</summary>
-        public bool UnicastOnly;
         /// <summary>UDP payload bytes per fragment, 0 = the default.</summary>
         public ushort FragmentSize;
         /// <summary>The data socket's OS receive buffer, 0 = the OS default. Raise it for
@@ -2698,7 +2695,6 @@ namespace Rant
             IntPtr seedBlock = SeedArray(o.SeedPeers, out nSeeds);   // copied by open, freed below
             co.net.seed_peers = seedBlock;
             co.net.n_seed_peers = nSeeds;
-            co.net.unicast_only = (byte)(o.UnicastOnly ? 1 : 0);
             // parsed into 4 bytes during open, never retained: free it right after (unlike
             // the group/interface strings, which the wrapper keeps for the node's life)
             IntPtr selfIpPtr = Codec.CStrPtr(o.SelfIp);
