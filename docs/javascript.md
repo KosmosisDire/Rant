@@ -34,7 +34,7 @@ node.subscriber("Line1/Conveyor", Conveyor, (c) => console.log(c.speed));
   64 bit integer fields are bigints.
 - The binding drives the node. Handlers run after a poll, never inside one, so a handler may
   create, call and close anything. A close from a handler happens once the handlers end.
-- `await version()` is the C library's version, such as `0.0.30`.
+- `await version()` is the C library's version, such as `0.0.31`.
 
 ## Schemas
 

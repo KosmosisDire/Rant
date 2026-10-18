@@ -181,7 +181,7 @@ type Val<S> = S extends Schema<any> ? Infer<S> : S extends null ? Uint8Array : u
 
 /* ---- the node ----------------------------------------------------------------------------- */
 
-/* The C library's version, such as "0.0.30". A promise, since the wasm loads first. */
+/* The C library's version, such as "0.0.31". A promise, since the wasm loads first. */
 export function version(): Promise<string> { return Native.version(); }
 
 /* Opens a node. In Node.js without a net it runs on this machine's UDP. The async step. */
