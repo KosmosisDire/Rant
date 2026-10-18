@@ -463,7 +463,7 @@ struct NodeOptions {
     bool                     disable_error_logs   = false; /* suppress the default mirroring of this
                                                               node's errors onto @rant/log/error */
     uint16_t                 data_port            = 0;   /* 0 = OS-assigned */
-    uint16_t                 discovery_port       = 0;   /* 0 = 7400 */
+    uint16_t                 discovery_port       = 0;   /* 0 = 6730 */
     std::string              multicast_interface;   /* empty = auto, "127.0.0.1" = single host */
     uint8_t                  multicast_ttl        = 0;   /* 0 = 1 hop */
     std::vector<std::string> seed_peers;   /* "ip" or "ip:port", unicast announce targets */

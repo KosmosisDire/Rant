@@ -33,7 +33,7 @@ namespace Rant
         }
 #endif
 
-        /// <summary>Opens the tunnel to the bridge at url, such as ws://192.168.1.20:7480, then calls
+        /// <summary>Opens the tunnel to the bridge at url, such as ws://192.168.1.20:6731, then calls
         /// done with null, or with why it failed. name is the session's name in the bridge's logs.</summary>
         public static void Connect(string url, string passphrase, string name, Action<string> done)
         {

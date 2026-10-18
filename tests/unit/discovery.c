@@ -61,14 +61,14 @@ static void disc_core_checks(void){
 
     /* Two peers announce: two ups, both ACTIVE */
     dc_up_n=dc_down_n=dc_refused_n=0;
-    n=dc_mk(buf,1,0,99,5001,1); dc_feed(st,sa,7400,buf,n,2000); idA=dc_up_id;
-    n=dc_mk(buf,2,0,99,5002,1); dc_feed(st,sb,7400,buf,n,2000); idB=dc_up_id;
+    n=dc_mk(buf,1,0,99,5001,1); dc_feed(st,sa,6730,buf,n,2000); idA=dc_up_id;
+    n=dc_mk(buf,2,0,99,5002,1); dc_feed(st,sb,6730,buf,n,2000); idB=dc_up_id;
     CHECK(dc_up_n==2 && i_rant_discovery_peer_count(st)==2,
              "disc-core: two peers up (ups=%u count=%u)", dc_up_n, i_rant_discovery_peer_count(st));
 
     /* A new peer is REFUSED when the table is full of ACTIVE peers */
     dc_up_n=dc_refused_n=0;
-    n=dc_mk(buf,3,0,99,5003,1); dc_feed(st,sc,7400,buf,n,2000);
+    n=dc_mk(buf,3,0,99,5003,1); dc_feed(st,sc,6730,buf,n,2000);
     CHECK(dc_refused_n==1 && dc_up_n==0 && i_rant_discovery_peer_count(st)==2,
              "disc-core: refuse new peer when full of active (refused=%u up=%u count=%u)",
              dc_refused_n, dc_up_n, i_rant_discovery_peer_count(st));
@@ -82,21 +82,21 @@ static void disc_core_checks(void){
 
     /* The same uuid returns: RESUME under the same local_id */
     dc_up_n=0;
-    n=dc_mk(buf,1,0,99,5001,1); dc_feed(st,sa,7400,buf,n,2100000);
+    n=dc_mk(buf,1,0,99,5001,1); dc_feed(st,sa,6730,buf,n,2100000);
     CHECK(dc_up_n==1 && dc_up_id==idA && i_rant_discovery_peer_count(st)==1,
              "disc-core: same uuid resumes same id (up=%u sameid=%d count=%u)",
              dc_up_n, dc_up_id==idA, i_rant_discovery_peer_count(st));
 
     /* A new peer now evicts the oldest DROPPED peer (B) as GONE */
     dc_down_n=dc_up_n=0;
-    n=dc_mk(buf,3,0,99,5003,1); dc_feed(st,sc,7400,buf,n,2100000);
+    n=dc_mk(buf,3,0,99,5003,1); dc_feed(st,sc,6730,buf,n,2100000);
     CHECK(dc_down_n==1 && dc_down_id==idB && dc_down_reason==(int)RANT_DISCOVERY_GONE && dc_up_n==1,
              "disc-core: new peer evicts oldest dropped as GONE (downs=%u sameid=%d reason=%d up=%u)",
              dc_down_n, dc_down_id==idB, dc_down_reason, dc_up_n);
 
     /* BYE is GONE */
     dc_down_n=0;
-    n=dc_mk(buf,1,0x01,99,5001,1); dc_feed(st,sa,7400,buf,n,2100000);
+    n=dc_mk(buf,1,0x01,99,5001,1); dc_feed(st,sa,6730,buf,n,2100000);
     CHECK(dc_down_n==1 && dc_down_id==idA && dc_down_reason==(int)RANT_DISCOVERY_GONE
              && i_rant_discovery_peer_count(st)==1,
              "disc-core: BYE is GONE (downs=%u sameid=%d reason=%d count=%u)",
@@ -108,9 +108,9 @@ static void disc_core_checks(void){
       st = i_rant_discovery_init(mem,sizeof mem,&c);              /* fresh receiver */
       i_rant_discovery_update(st, 1000, out, sizeof out);
       dc_up_n=dc_down_n=0;
-      n=dc_mk(buf,7,0,99,6001,1); dc_feed(st,sa,7400,buf,n,3000); idP=dc_up_id;
+      n=dc_mk(buf,7,0,99,6001,1); dc_feed(st,sa,6730,buf,n,3000); idP=dc_up_id;
       dc_up_n=dc_down_n=0;
-      n=dc_mk(buf,8,0,99,6001,1); dc_feed(st,sa,7400,buf,n,3100);  /* new uuid, same ip:port */
+      n=dc_mk(buf,8,0,99,6001,1); dc_feed(st,sa,6730,buf,n,3100);  /* new uuid, same ip:port */
       CHECK(dc_down_n==1 && dc_down_id==idP && dc_down_reason==(int)RANT_DISCOVERY_GONE
                && dc_up_n==1 && i_rant_discovery_peer_count(st)==1,
                "disc-core: new uuid at a held ip:port evicts the predecessor (downs=%u sameid=%d reason=%d up=%u count=%u)",
@@ -123,9 +123,9 @@ static void disc_core_checks(void){
     i_rant_discovery_update(st, 1000, out, sizeof out);
     dc_up_n=dc_wire_n=0;
     n=dc_mk(buf,9,0,99,6002,1); buf[4]=(uint8_t)(RANT_WIRE_VERSION+1);
-    dc_feed(st,sa,7400,buf,n,4000); dc_feed(st,sa,7400,buf,n,5000);
-    dc_feed(st,sb,7400,buf,8,6000);
-    n=dc_mk(buf,9,0,98,6002,1); buf[4]=(uint8_t)(RANT_WIRE_VERSION+1); dc_feed(st,sc,7400,buf,n,7000);
+    dc_feed(st,sa,6730,buf,n,4000); dc_feed(st,sa,6730,buf,n,5000);
+    dc_feed(st,sb,6730,buf,8,6000);
+    n=dc_mk(buf,9,0,98,6002,1); buf[4]=(uint8_t)(RANT_WIRE_VERSION+1); dc_feed(st,sc,6730,buf,n,7000);
     CHECK(dc_wire_n==2 && dc_up_n==0 && i_rant_discovery_peer_count(st)==0,
              "disc-core: another wire version is reported once per source, never a peer (reports=%u ups=%u)",
              dc_wire_n, dc_up_n);
@@ -136,18 +136,18 @@ static void disc_core_checks(void){
     { uint32_t idM, idN, got = 0;
       st = i_rant_discovery_init(mem,sizeof mem,&c);
       i_rant_discovery_update(st, 1000, out, sizeof out);
-      n=dc_mk(buf,10,0,99,6100,1); dc_feed(st,sa,7400,buf,n,2000); idM=dc_up_id;
-      dc_feed(st,sb,7400,buf,n,2000);
-      n=dc_mk(buf,11,0,99,6100,1); dc_feed(st,sc,7400,buf,n,2000); idN=dc_up_id;
+      n=dc_mk(buf,10,0,99,6100,1); dc_feed(st,sa,6730,buf,n,2000); idM=dc_up_id;
+      dc_feed(st,sb,6730,buf,n,2000);
+      n=dc_mk(buf,11,0,99,6100,1); dc_feed(st,sc,6730,buf,n,2000); idN=dc_up_id;
       CHECK(i_rant_discovery_id_for_addr(st,sa,4,6100,&got) && got==idM
                && i_rant_discovery_id_for_addr(st,sb,4,6100,&got) && got==idM
                && !i_rant_discovery_id_for_addr(st,sb,4,6101,&got),
                "disc-core: a peer heard on two paths is known from either");
-      dc_feed(st,sb,7400,buf,n,2500);
+      dc_feed(st,sb,6730,buf,n,2500);
       CHECK(!i_rant_discovery_id_for_addr(st,sb,4,6100,&got)
                && i_rant_discovery_id_for_addr(st,sc,4,6100,&got) && got==idN,
                "disc-core: a path two peers share is neither's");
-      n=dc_mk(buf,10,0,99,6100,1); dc_feed(st,sa,7400,buf,n,3500000);
+      n=dc_mk(buf,10,0,99,6100,1); dc_feed(st,sa,6730,buf,n,3500000);
       CHECK(i_rant_discovery_id_for_addr(st,sa,4,6100,&got) && got==idM
                && !i_rant_discovery_id_for_addr(st,sb,4,6100,&got),
                "disc-core: a path quiet for three intervals stops counting");
@@ -233,8 +233,8 @@ static void node_core_checks(void){
 
     /* Two peers announce: two ups, discovery assigns the ids, resolve each way */
     nc_up_n=nc_down_n=nc_refused_n=0;
-    n=nc_dgram(buf,1,0,99,5001,"nc-self",1); dc_feed(st,sa,7400,buf,n,2000); idA=nc_up_id;
-    n=nc_dgram(buf,2,0,99,5002,"nc-self",1); dc_feed(st,sb,7400,buf,n,2000); idB=nc_up_id;
+    n=nc_dgram(buf,1,0,99,5001,"nc-self",1); dc_feed(st,sa,6730,buf,n,2000); idA=nc_up_id;
+    n=nc_dgram(buf,2,0,99,5002,"nc-self",1); dc_feed(st,sb,6730,buf,n,2000); idB=nc_up_id;
     CHECK(nc_up_n==2, "node-core: two peers up (ups=%u)", nc_up_n);
     {   RantString pn = i_rant_node_core_peer_name(nc, idA);
         CHECK(pn.data && pn.len==7 && memcmp(pn.data,"nc-self",7)==0,
@@ -246,15 +246,15 @@ static void node_core_checks(void){
 
     /* a nameless announce falls back to "unknown-peer", never empty or NULL */
     {   RantString pn;
-        n=nc_dgram(buf,1,0,99,5001,NULL,2);     dc_feed(st,sa,7400,buf,n,2001);
+        n=nc_dgram(buf,1,0,99,5001,NULL,2);     dc_feed(st,sa,6730,buf,n,2001);
         pn = i_rant_node_core_peer_name(nc, idA);
         CHECK(pn.data && pn.len==12 && memcmp(pn.data,"unknown-peer",12)==0,
                  "node-core: nameless announce -> unknown-peer (%.*s)", (int)pn.len, pn.data?pn.data:"(null)");
-        n=nc_dgram(buf,1,0,99,5001,"nc-self",3); dc_feed(st,sa,7400,buf,n,2002); }
+        n=nc_dgram(buf,1,0,99,5001,"nc-self",3); dc_feed(st,sa,6730,buf,n,2002); }
 
     /* A third peer is REFUSED while the table is full of ACTIVE peers, the node forwards it */
     nc_refused_n=0;
-    n=nc_dgram(buf,3,0,99,5003,"three",1); dc_feed(st,sc,7400,buf,n,2003);
+    n=nc_dgram(buf,3,0,99,5003,"three",1); dc_feed(st,sc,6730,buf,n,2003);
     CHECK(nc_refused_n==1, "node-core: refused forwarded (refused=%u)", nc_refused_n);
 
     /* Silence past the timeout DROPS both: a PEER_DOWN each, but the slots are kept (resolve) */
@@ -265,12 +265,12 @@ static void node_core_checks(void){
 
     /* The same uuid returns: RESUME re fires PEER_UP under the same id */
     nc_up_n=0;
-    n=nc_dgram(buf,1,0,99,5001,"nc-self",4); dc_feed(st,sa,7400,buf,n,1100000);
+    n=nc_dgram(buf,1,0,99,5001,"nc-self",4); dc_feed(st,sa,6730,buf,n,1100000);
     CHECK(nc_up_n==1 && nc_up_id==idA, "node-core: resume re-ups same id (ups=%u id=%u)", nc_up_n, nc_up_id);
 
     /* GONE (BYE) on the active peer: one PEER_DOWN, and it does not resolve any more */
     nc_down_n=0;
-    n=nc_dgram(buf,1,0x01,99,5001,NULL,1); dc_feed(st,sa,7400,buf,n,1100001);
+    n=nc_dgram(buf,1,0x01,99,5001,NULL,1); dc_feed(st,sa,6730,buf,n,1100001);
     CHECK(nc_down_n==1, "node-core: GONE on active fires down (downs=%u)", nc_down_n);
     CHECK(i_rant_node_core_resolve(nc,idA,&d)==0, "node-core: GONE peer freed (no resolve)");
 }

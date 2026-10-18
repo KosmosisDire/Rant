@@ -8,7 +8,7 @@ clients. `RANT/bridge-rant` is the server, and this file is the protocol it serv
 
 ## Connection
 
-1. The client opens `ws://host:7480`, or `wss://` behind a TLS proxy.
+1. The client opens `ws://host:6731`, or `wss://` behind a TLS proxy.
 2. With `allowed_origins` set, a browser whose `Origin` is not listed is closed with 4003.
 3. The client asks for a challenge, then sends `open`. Nothing else is accepted before it.
 4. The bridge replies, then pings at the probe interval.
@@ -56,7 +56,7 @@ Every bridge with `advertise` on (the default) speaks mDNS on the interfaces it 
 `{"op":"bridges","seq":1}`, before or after `open` and with no passphrase, answers
 `{"bridges":[{"name","url","version","self"}]}`: this bridge once per interface, then the
 others. The list is no secret, since mDNS tells anyone on the network. `findBridges(url)`
-beside `TunnelNet` asks it, `ws://rant-bridges.local:7480` by default.
+beside `TunnelNet` asks it, `ws://rant-bridges.local:6731` by default.
 
 ## Sockets
 

@@ -53,7 +53,7 @@ options! {
         disable_error_logs: bool = false,
         /// The unicast data port. 0 = chosen by the OS.
         data_port: u16 = 0,
-        /// The discovery port. 0 = 7400.
+        /// The discovery port. 0 = 6730.
         discovery_port: u16 = 0,
         /// Hops an announce may travel. 0 = 1.
         multicast_ttl: u8 = 0,

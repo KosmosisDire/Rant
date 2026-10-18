@@ -55,7 +55,7 @@ The binding takes the net object as `openNode`'s `net` option. A C or C++ app ge
 import { TunnelNet } from "rant-middleware/tunnel";
 import createApp from "./app.mjs";     // built with -sMODULARIZE -sEXPORT_ES6
 
-const rantNet = await TunnelNet.connect("ws://192.168.1.20:7480", { passphrase: "..." });
+const rantNet = await TunnelNet.connect("ws://192.168.1.20:6731", { passphrase: "..." });
 await createApp({ rantNet });
 ```
 
@@ -83,7 +83,7 @@ session. A dropped connection reconnects on its own and keeps every socket.
 
 `findBridges(url?)` from `rant-middleware/tunnel` lists the bridges on the network as
 `[{ name, url, version, self }]`. Every bridge answers the name `rant-bridges.local` over
-mDNS and lists the others it hears, so the default `ws://rant-bridges.local:7480` reaches
+mDNS and lists the others it hears, so the default `ws://rant-bridges.local:6731` reaches
 one, with no passphrase.
 
 | `UdpNet.create(opts)` option | Meaning |

@@ -1024,7 +1024,7 @@ namespace Rant
         public bool DisableErrorLogs;
         /// <summary>The data socket port, 0 = OS assigned.</summary>
         public ushort DataPort;
-        /// <summary>0 = 7400.</summary>
+        /// <summary>0 = 6730.</summary>
         public ushort DiscoveryPort;
         /// <summary>Pin discovery to this interface IP, null = every interface. "127.0.0.1"
         /// keeps a node on one host.</summary>

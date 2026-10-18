@@ -49,7 +49,7 @@ It reaches a mesh on another network, or one its own host cannot join.
 
 ```c
 RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){
-    .net = { .bridge = "ws://192.168.1.20:7480", .bridge_passphrase = "secret" } });
+    .net = { .bridge = "ws://192.168.1.20:6731", .bridge_passphrase = "secret" } });
 ```
 
 - `RANT_BRIDGE` and `RANT_BRIDGE_PASSPHRASE` set them for a node whose code leaves them
@@ -63,12 +63,27 @@ RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){
 - The other network options apply on the bridge's host: `multicast_interface` names one
   of its interfaces, `127.0.0.1` its loopback.
 
+## Ports
+
+Rant's ports sit in 6730 to 6739, clear of DDS (7400 and up), Zenoh (7446, 7447) and LCM
+(7667). The data port is OS assigned unless a node sets `data_port`.
+
+| port | use |
+|---|---|
+| 6730 udp | discovery |
+| 6731 tcp | a bridge (`rant bridge enable`) |
+| 6732 tcp | the web explorer page (`rant explore web`) |
+| 6739 tcp | the HMI designer |
+
+Tools that ship with Rant take the next free port up from 6733. Separate packages take
+theirs down from 6739.
+
 ## Network options
 
 | option | meaning |
 |---|---|
 | `data_port` | the unicast data port. 0 = OS assigned |
-| `discovery_port` | the announce port (7400) |
+| `discovery_port` | the announce port (6730) |
 | `multicast_interface` | pin discovery to one interface IP. NULL = all |
 | `multicast_ttl` | hops an announce may travel. 1 = same subnet |
 | `seed_peers`, `n_seed_peers` | addresses to also unicast announces to. Port 0 = the discovery port |

@@ -164,7 +164,7 @@ misbehaves.
 
 ## Through a bridge
 
-With Bridge Url set, such as `ws://192.168.1.20:7480`, the node runs on the sockets a Rant
+With Bridge Url set, such as `ws://192.168.1.20:6731`, the node runs on the sockets a Rant
 bridge lends (`rant bridge enable` on a machine of the mesh), a node of that machine to the
 mesh. It reaches a mesh this machine cannot join, and a WebGL player needs it, since a page
 cannot open UDP sockets.

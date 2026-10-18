@@ -45,21 +45,21 @@ static void handshake_checks(void){
     const char *bad = "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: AAAA\r\n\r\n";
     const char *http = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 
-    CHECK(i_rant_ws_url("ws://192.168.1.20:7480", &u) && strcmp(u.host, "192.168.1.20") == 0
-          && u.port == 7480 && strcmp(u.path, "/") == 0, "url: host and port, path /");
+    CHECK(i_rant_ws_url("ws://192.168.1.20:6731", &u) && strcmp(u.host, "192.168.1.20") == 0
+          && u.port == 6731 && strcmp(u.path, "/") == 0, "url: host and port, path /");
     CHECK(i_rant_ws_url("ws://bridge.lan/rant?x=1", &u) && strcmp(u.host, "bridge.lan") == 0
           && u.port == 80 && strcmp(u.path, "/rant?x=1") == 0, "url: port 80 by default, path kept");
     CHECK(i_rant_ws_url("ws://h?q", &u) && strcmp(u.path, "/?q") == 0, "url: a query alone gets /");
     CHECK(!i_rant_ws_url("wss://h:1", &u), "url: wss refused");
-    CHECK(!i_rant_ws_url("ws://:7480", &u), "url: no host refused");
+    CHECK(!i_rant_ws_url("ws://:6731", &u), "url: no host refused");
     CHECK(!i_rant_ws_url("ws://h:70000", &u) && !i_rant_ws_url("ws://h:", &u) && !i_rant_ws_url("ws://h:7a", &u),
           "url: a bad port refused");
     CHECK(!i_rant_ws_url("http://h", &u) && !i_rant_ws_url(NULL, &u), "url: another scheme refused");
 
-    i_rant_ws_url("ws://h:7480", &u);
+    i_rant_ws_url("ws://h:6731", &u);
     CHECK(i_rant_ws_request(&u, key, req, sizeof req) > 0
           && strstr(req, "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n") != NULL
-          && strstr(req, "GET / HTTP/1.1\r\nHost: h:7480\r\n") == req
+          && strstr(req, "GET / HTTP/1.1\r\nHost: h:6731\r\n") == req
           && strcmp(req + strlen(req) - 4, "\r\n\r\n") == 0, "request: the key and the head");
     CHECK(i_rant_ws_request(&u, key, req, 40) == 0, "request: refuses a short buffer");
     CHECK(i_rant_ws_accept(key, ok, strlen(ok)) == (int)(strlen(ok) - 4), "accept: RFC 6455's example, header case and spaces aside");
@@ -132,9 +132,9 @@ static void batch_checks(void){
     const uint8_t ip1[4] = { 192, 168, 1, 5 }, ip2[4] = { 127, 0, 0, 1 };
     i_RantTunnelDgram d;
     b[0] = I_RANT_TUNNEL_UDP; b[1] = 0;
-    len += i_rant_tunnel_record(b + len, 3, ip1, 7400, 0, 4); memcpy(b + len, "ping", 4); len += 4;
+    len += i_rant_tunnel_record(b + len, 3, ip1, 6730, 0, 4); memcpy(b + len, "ping", 4); len += 4;
     len += i_rant_tunnel_record(b + len, 65535, ip2, 50000, 0, 0);
-    CHECK(i_rant_tunnel_next(b, len, &at, &d) && d.sock == 3 && memcmp(d.ip, ip1, 4) == 0 && d.port == 7400
+    CHECK(i_rant_tunnel_next(b, len, &at, &d) && d.sock == 3 && memcmp(d.ip, ip1, 4) == 0 && d.port == 6730
           && d.len == 4 && memcmp(d.data, "ping", 4) == 0, "batch: the first datagram");
     CHECK(i_rant_tunnel_next(b, len, &at, &d) && d.sock == 65535 && d.port == 50000 && d.len == 0, "batch: an empty one");
     CHECK(!i_rant_tunnel_next(b, len, &at, &d), "batch: then the end");

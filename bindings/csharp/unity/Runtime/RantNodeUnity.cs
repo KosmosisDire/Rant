@@ -36,7 +36,7 @@ namespace Rant
         [SerializeField] private bool logEvents = true;
         [Tooltip("Play mode: survive scene loads (DontDestroyOnLoad).")]
         [SerializeField] private bool persistAcrossScenes = true;
-        [Tooltip("The Rant bridge whose sockets the node uses, such as ws://192.168.1.20:7480, to reach a mesh this machine cannot join. Required in a WebGL player, which cannot open UDP sockets. Empty elsewhere means this machine's own.")]
+        [Tooltip("The Rant bridge whose sockets the node uses, such as ws://192.168.1.20:6731, to reach a mesh this machine cannot join. Required in a WebGL player, which cannot open UDP sockets. Empty elsewhere means this machine's own.")]
         [SerializeField] private string bridgeUrl = "";
         [Tooltip("The bridge's passphrase, empty when it asks for none.")]
         [SerializeField] private string bridgePassphrase = "";

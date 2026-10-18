@@ -49,7 +49,7 @@ export interface FoundBridge { name: string; url: string; version: string; self:
 
 /* The bridges on a network, as the bridge at url lists them. Every bridge answers the name
  * rant-bridges.local, so the default reaches whichever answers first. No passphrase needed. */
-export async function findBridges(url = "ws://rant-bridges.local:7480", timeoutMs = 3000): Promise<FoundBridge[]> {
+export async function findBridges(url = "ws://rant-bridges.local:6731", timeoutMs = 3000): Promise<FoundBridge[]> {
     const ws = new WebSocket(url);
     try {
         return await new Promise<FoundBridge[]>((resolve, reject) => {
