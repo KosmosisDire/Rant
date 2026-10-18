@@ -200,17 +200,26 @@ remote.set(2.0f);
 - A handle cannot close itself from inside its own callback.
 - A handle that outlives its node is safe. Its calls just fail.
 
-## Reflection and logs
+## Reflection, logs and status
 
 ```cpp
-node.log(rant::LogLevel::Info, "started");
-node.on_log([](const rant::LogLine& l) { /* ... */ });
+node.log(rant::Level::Info, "started");
+node.on_log([](const rant::LogLine& l) { /* l.level, l.origin, l.node, l.text */ });
+
+node.set_status("drive2", rant::Level::Error, "drive 2 tripped", /*clearable=*/true);
+node.clear_status("drive2");
+node.on_status([](const rant::StatusUpdate& u) { /* u.node, u.conditions */ });
 
 auto r = node.reflection();
 for (auto& p : r.peers()) std::printf("%s\n", p.name.c_str());
 ```
 
-- `on_log` receives every other node's log lines.
+- `on_log` receives every other node's log lines. `NodeOptions::log_level` is the lowest
+  level this node sends, empty takes `RANT_LOG_LEVEL`, else Info.
+- `set_status` raises or updates a condition, `clear_status` clears it. `on_status`
+  receives each node's whole set on every change, and an empty set when a node goes away.
+- `clear_peer_status(u.node_id, c.key, c.since_us)` asks another node to clear a clearable
+  condition. Its app sees `EventKind::StatusCleared` with the key in `detail()`.
 - `reflection()` lists peers, their entities and the whole mesh. `epoch()` changes when
   anything does.
 - `meta(peer)` asks a peer for its details.

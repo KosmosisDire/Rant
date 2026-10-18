@@ -150,6 +150,8 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
         p=i_rant_event_append_str(p,end,"bad-domain: RANT_DOMAIN is not a number from 0 to 65535, open refused"); break;
     case RANT_E_BAD_PREFIX:
         p=i_rant_event_append_str(p,end,"bad-prefix: RANT_PREFIX or opts.prefix holds '@', starts or ends with '/' or is too long, open refused"); break;
+    case RANT_E_BAD_LOG_LEVEL:
+        p=i_rant_event_append_str(p,end,"bad-log-level: RANT_LOG_LEVEL or opts.log_level is not debug, info, warn or error, open refused"); break;
     case RANT_E_WIRE_VERSION:
         p=i_rant_event_append_str(p,end,"wire-version: a node at "); p=i_rant_event_append_addr(p,end,ev);
         p=i_rant_event_append_str(p,end," speaks another Rant wire version than this node's ");
@@ -191,6 +193,11 @@ const char *rant_event_str(const RantEvent *ev, char *buf, size_t cap){
         break;
     case RANT_ERROR:
         p = i_rant_event_error_str(p, end, ev);
+        break;
+    case RANT_STATUS_CLEARED:
+        p = i_rant_event_append_str(p,end,"status-cleared ");
+        p = i_rant_event_append_str(p,end, ev->detail ? ev->detail : "?");
+        p = i_rant_event_append_str(p,end," by "); p = i_rant_event_append_peer(p,end,ev);
         break;
     }
     *p = '\0';                                     /* p is at most end, in range */

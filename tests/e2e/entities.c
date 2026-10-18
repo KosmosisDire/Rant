@@ -150,14 +150,14 @@ static void churn_checks(void){
     ch_send(beat, 4);
     for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,3,2);
     CHECK(ch_c_last == ch_seq, "churn: delivery across the warmup cycle");
-    {   /* saturate the @rant/log/error keep_last ring, which mirrors every retype refusal: its
-           16 slots fill once and plateau, so the baselines must include them at full size */
+    {   /* saturate the @rant/log keep_last ring, which mirrors every retype refusal: its 4
+           slots fill once and plateau, so the baselines must include them at full size */
         char big[200]; int k;
         memset(big, 'x', sizeof big - 1); big[sizeof big - 1] = 0;
-        for (k=0;k<20;k++){
-            rant_node_log(P, RANT_LOG_ERROR, "%s", big);
-            rant_node_log(C, RANT_LOG_ERROR, "%s", big);
-            rant_node_log(U, RANT_LOG_ERROR, "%s", big);
+        for (k=0;k<8;k++){
+            rant_node_log(P, RANT_LEVEL_ERROR, "%s", big);
+            rant_node_log(C, RANT_LEVEL_ERROR, "%s", big);
+            rant_node_log(U, RANT_LEVEL_ERROR, "%s", big);
         }
     }
     rant_node_mem_stats(P, &p_mem0, &peak, &calls);
@@ -314,22 +314,26 @@ static void churn_checks(void){
 }
 
 /* B's log lines as they reach on_message, and whether a queue dispatch ran them */
-static int ml_n, ml_boom0, ml_mirror, ml_live, ml_in_dispatch, ml_dispatching;
+static int ml_n, ml_boom0, ml_mirror, ml_live, ml_debug, ml_in_dispatch, ml_dispatching;
 static void ml_on_msg(const RantMsg *m){
     RantString txt = rant_get_string(m->data, m->schema, "text");
-    uint64_t wall = rant_get_uint(m->data, m->schema, "wall_us");
+    uint64_t level = rant_get_uint(m->data, m->schema, "level");
+    uint64_t origin = rant_get_uint(m->data, m->schema, "origin");
     char tb[64]; size_t tl = txt.len < sizeof tb - 1 ? txt.len : sizeof tb - 1;
     memcpy(tb, txt.data, tl); tb[tl] = '\0';
     ml_n++;
     if (ml_dispatching) ml_in_dispatch++;
-    if (strcmp(tb, "boom 0") == 0 && wall) ml_boom0 = 1;
-    if (strstr(tb, "unmatched-send")) ml_mirror = 1;
+    if (strcmp(tb, "boom 0") == 0 && level == RANT_LEVEL_WARN && origin == RANT_ORIGIN_APP
+        && m->written_us && !m->capture_us) ml_boom0 = 1;
+    if (strstr(tb, "unmatched-send") && level == RANT_LEVEL_ERROR && origin == RANT_ORIGIN_RANT
+        && m->capture_us && m->capture_us <= m->written_us) ml_mirror = 1;
+    if (strcmp(tb, "hidden") == 0) ml_debug = 1;
     if (strcmp(tb, "live") == 0) ml_live = 1;
 }
 
-/* The metalog phase: A logs before anyone listens and triggers a mirrored error, B late
- * joins the error level on a queue and reads both, then reads a live line inline, then
- * calls A's @rant/meta directed at A. */
+/* The metalog phase: A logs before anyone listens, below its level and triggers a mirrored
+ * error, B late joins the log on a queue and reads both, then reads a live line inline,
+ * then calls A's @rant/meta directed at A. */
 static void metalog_checks(void){
     RantAllocator aa = rant_allocator_heap(0);
     RantAllocator ba = rant_allocator_heap(0);
@@ -347,23 +351,26 @@ static void metalog_checks(void){
     if (!(A && B)){ if(A)rant_node_close(A,0); if(B)rant_node_close(B,0);
                     rant_allocator_reset(&ba); rant_allocator_reset(&aa); return; }
 
-    CHECK(rant_node_log_topic(A, RANT_LOG_ERROR) && rant_node_log_topic(A, RANT_LOG_WARN)
-             && rant_node_log_topic(A, RANT_LOG_INFO), "metalog: log topics exist");
+    CHECK(rant_node_log_topic(A) && rant_node_status_topic(A), "metalog: log and status topics exist");
     CHECK(rant_node_meta_function(A) != NULL && rant_node_meta_function(B) != NULL,
              "metalog: meta endpoint hosted");
+    CHECK(rant_node_log(A, (RantLevel)0, "x") == RANT_ERR_NO_TOPIC
+             && rant_node_log(A, (RantLevel)5, "x") == RANT_ERR_NO_TOPIC, "metalog: a bad level refused");
 
     /* log BEFORE any subscriber exists: the lines land in KEEP_LAST history and a late
-       joiner replays them (catch_up = keep_last) */
-    for (i=0;i<3;i++){
-        int lr = rant_node_log(A, RANT_LOG_ERROR, "boom %d", i);   /* a side effect, kept out of CHECK */
+       joiner replays them (catch_up = keep_last). Debug is below the default Info, so it
+       is accepted and never sent */
+    for (i=0;i<2;i++){
+        int lr = rant_node_log(A, RANT_LEVEL_WARN, "boom %d", i);   /* a side effect, kept out of CHECK */
         CHECK(lr == RANT_OK, "metalog: log %d accepted (%d)", i, lr);
     }
-    { uint64_t txm=0;
-      rant_topic_counts(rant_node_log_topic(A, RANT_LOG_ERROR), &txm, NULL, NULL, NULL);
-      CHECK(txm >= 3, "metalog: tx counter counts the lines (%u)", (unsigned)txm); }
+    { uint64_t txm=0; int lr = rant_node_log(A, RANT_LEVEL_DEBUG, "hidden");
+      CHECK(lr == RANT_OK, "metalog: a line below the level is accepted (%d)", lr);
+      rant_topic_counts(rant_node_log_topic(A), &txm, NULL, NULL, NULL);
+      CHECK(txm == 2, "metalog: tx counter counts the sent lines only (%u)", (unsigned)txm); }
 
-    /* an internal error mirrors onto @rant/log/error: an unmatched send right after open
-       (gather unsettled, wait disabled) fires RANT_E_UNMATCHED_SEND */
+    /* an internal error mirrors onto @rant/log: an unmatched send right after open (gather
+       unsettled, wait disabled) fires RANT_E_UNMATCHED_SEND */
     { RantTopic *src = rant_node_create_topic(A, "mirror-src", RANT_PUB_ONLY, NULL, NULL);
       uint8_t payload[4] = {1,2,3,4};
       CHECK(src != NULL, "metalog: mirror-src created");
@@ -372,8 +379,8 @@ static void metalog_checks(void){
     }
 
     /* late subscriber: B parks its log lines on a queue, then widens its own handle of the
-       error level to PUBSUB, so the replay parks and runs only at a dispatch */
-    { RantTopic *eh = rant_node_log_topic(B, RANT_LOG_ERROR);
+       log to PUBSUB, so the replay parks and runs only at a dispatch */
+    { RantTopic *eh = rant_node_log_topic(B);
       RantQueue *lq = rant_node_create_queue(B), *other = rant_node_create_queue(A);
       int rc = rant_node_set_log_queue(B, other);
       CHECK(rc == RANT_ERR_STATE, "metalog: another node's queue refused (%d)", rc);
@@ -387,15 +394,15 @@ static void metalog_checks(void){
           (void)rant_queue_dispatch(lq, 0, 0);
           ml_dispatching = 0;
       }
-      CHECK(ml_n >= 4 && ml_boom0 && ml_mirror && ml_in_dispatch == ml_n,
-               "metalog: replay + mirrored error dispatched (n=%d boom0=%d mirror=%d queued=%d)",
-               ml_n, ml_boom0, ml_mirror, ml_in_dispatch);
+      CHECK(ml_n >= 3 && ml_boom0 && ml_mirror && !ml_debug && ml_in_dispatch == ml_n,
+               "metalog: replay + mirrored error dispatched (n=%d boom0=%d mirror=%d debug=%d queued=%d)",
+               ml_n, ml_boom0, ml_mirror, ml_debug, ml_in_dispatch);
 
       /* NULL makes the lines inline again: a live line reaches on_message from the poll */
       rc = rant_node_set_log_queue(B, NULL);
       CHECK(rc == RANT_OK, "metalog: log queue cleared (%d)", rc);
       ml_in_dispatch = 0;
-      rc = rant_node_log(A, RANT_LOG_ERROR, "live");
+      rc = rant_node_log(A, RANT_LEVEL_INFO, "live");
       CHECK(rc == RANT_OK, "metalog: live line accepted (%d)", rc);
       PUMP_UNTIL(A, B, 6000, ml_live);
       CHECK(ml_live && ml_in_dispatch == 0, "metalog: live line delivered inline (%d)", ml_live); }
@@ -462,10 +469,170 @@ static void metalog_checks(void){
     rant_allocator_reset(&ba); rant_allocator_reset(&aa);
 }
 
+/* B's view of A's status, the latest set decoded, A's debug notes on B, and A's clear events */
+#define ST_MAX 4
+static int st_sets, st_count, st_notes, st_cleared;
+static char st_key[ST_MAX][RANT_STATUS_KEY_MAX + 1], st_text[ST_MAX][64], st_cleared_key[64];
+static uint64_t st_level[ST_MAX], st_origin[ST_MAX], st_clearable[ST_MAX], st_since[ST_MAX];
+static uint32_t st_cleared_by;
+static void st_copy(char *dst, size_t cap, RantString s){
+    size_t l = s.len < cap - 1 ? s.len : cap - 1;
+    memcpy(dst, s.data, l); dst[l] = '\0';
+}
+static void st_on_msg(const RantMsg *m){
+    char path[48]; uint32_t i, n;
+    if (m->topic_index != rant_topic_index(rant_node_status_topic(m->node))){
+        RantString t = rant_get_string(m->data, m->schema, "text"); char tb[192];
+        st_copy(tb, sizeof tb, t);
+        if (strstr(tb, "refused") && rant_get_uint(m->data, m->schema, "level") == RANT_LEVEL_DEBUG
+            && rant_get_uint(m->data, m->schema, "origin") == RANT_ORIGIN_RANT) st_notes++;
+        return;
+    }
+    n = rant_get_array_count(m->data, m->schema, "conditions");
+    st_count = (int)n;
+    for (i = 0; i < n && i < ST_MAX; i++){
+        snprintf(path, sizeof path, "conditions[%u].key", (unsigned)i);
+        st_copy(st_key[i], sizeof st_key[i], rant_get_string(m->data, m->schema, path));
+        snprintf(path, sizeof path, "conditions[%u].text", (unsigned)i);
+        st_copy(st_text[i], sizeof st_text[i], rant_get_string(m->data, m->schema, path));
+        snprintf(path, sizeof path, "conditions[%u].level", (unsigned)i);
+        st_level[i] = rant_get_uint(m->data, m->schema, path);
+        snprintf(path, sizeof path, "conditions[%u].origin", (unsigned)i);
+        st_origin[i] = rant_get_uint(m->data, m->schema, path);
+        snprintf(path, sizeof path, "conditions[%u].clearable", (unsigned)i);
+        st_clearable[i] = rant_get_uint(m->data, m->schema, path);
+        snprintf(path, sizeof path, "conditions[%u].since_us", (unsigned)i);
+        st_since[i] = rant_get_uint(m->data, m->schema, path);
+    }
+    st_sets++;
+}
+static void st_on_event(const RantEvent *e){
+    if (e->kind != RANT_STATUS_CLEARED) return;
+    st_cleared++; st_cleared_by = e->peer;
+    st_copy(st_cleared_key, sizeof st_cleared_key, rant_cstr(e->detail ? e->detail : ""));
+}
+static uint32_t st_peer_id(RantNode *at, const char *name){
+    const i_RantDiscoveryPeerView *ps; uint16_t cnt = 0, i;
+    ps = test_peers(at, &cnt);
+    for (i = 0; i < cnt; i++)
+        if (ps[i].name.len == strlen(name) && !memcmp(ps[i].name.data, name, ps[i].name.len)) return ps[i].id;
+    return 0;
+}
+
+/* The status phase: A raises two conditions before anyone listens and they coalesce into one
+ * set, B late joins and reads it, an update keeps since_us, refused clears leave a debug note
+ * and change nothing, an accepted clear tells A's app, and A's own clear empties the set. */
+static void status_checks(void){
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0), ca = rant_allocator_heap(0);
+    RantNodeOpts ao, bo, co; RantNode *A=NULL, *B=NULL, *C=NULL; RantAddr seed;
+    uint32_t idA, idB; uint64_t since_estop = 0, since_hot = 0; int t, rc, sets;
+    char key[64];
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=TEST_DOMAIN+43; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    bo=ao; co=ao;
+    ao.log_level = RANT_LEVEL_DEBUG;     /* A publishes its debug notes */
+    co.disable_status = 1;
+    A = rant_node_open(&aa, "status-a", NULL, st_on_event, &ao);
+    B = rant_node_open(&ba, "status-b", st_on_msg, NULL, &bo);
+    C = rant_node_open(&ca, "status-c", NULL, NULL, &co);
+    CHECK(A && B && C, "status: nodes open");
+    if (!(A && B && C)) goto done;
+
+    CHECK(!rant_node_status_topic(C)
+             && rant_node_set_status(C, "k", RANT_LEVEL_INFO, "x", NULL) == RANT_ERR_NOSYS
+             && rant_node_clear_status(C, "k") == RANT_ERR_NOSYS
+             && rant_node_clear_peer_status(C, 1, "k", 0) == RANT_ERR_NOSYS
+             && rant_node_set_status_queue(C, NULL) == RANT_ERR_NOSYS, "status: disable_status strips it");
+    rant_node_close(C, 0); C = NULL;
+    memset(key, 'k', RANT_STATUS_KEY_MAX + 1); key[RANT_STATUS_KEY_MAX + 1] = '\0';
+    CHECK(rant_node_set_status(A, "", RANT_LEVEL_INFO, "x", NULL) == RANT_ERR_NO_TOPIC
+             && rant_node_set_status(A, "k", (RantLevel)0, "x", NULL) == RANT_ERR_NO_TOPIC
+             && rant_node_set_status(A, key, RANT_LEVEL_INFO, "x", NULL) == RANT_ERR_TOO_BIG
+             && rant_node_clear_peer_status(A, 1, key, 0) == RANT_ERR_TOO_BIG,
+             "status: bad arguments refused");
+
+    /* raised before any subscriber: both land in one set, and the same values again send nothing */
+    { uint64_t txm = 0;
+      rc = rant_node_set_status(A, "estop", RANT_LEVEL_ERROR, "pressed", NULL);
+      CHECK(rc == RANT_OK, "status: estop raised (%d)", rc);
+      rc = rant_node_set_status(A, "overtemp", RANT_LEVEL_WARN, "motor hot", &(RantStatusOpts){ .clearable = 1 });
+      CHECK(rc == RANT_OK, "status: overtemp raised (%d)", rc);
+      rant_node_poll(A, 0);
+      rc = rant_node_set_status(A, "overtemp", RANT_LEVEL_WARN, "motor hot", &(RantStatusOpts){ .clearable = 1 });
+      rant_node_poll(A, 0);
+      rant_topic_counts(rant_node_status_topic(A), &txm, NULL, NULL, NULL);
+      CHECK(rc == RANT_OK && txm == 1, "status: one set for both raises, none for a repeat (%u)", (unsigned)txm); }
+
+    /* B late joins the status and A's log */
+    rc = rant_topic_set_role(rant_node_status_topic(B), RANT_PUBSUB);
+    rc |= rant_topic_set_role(rant_node_log_topic(B), RANT_PUBSUB);
+    CHECK(rc == 0, "status: B subscribes (%d)", rc);
+    PUMP_UNTIL(A, B, 6000, st_count == 2);
+    CHECK(st_count == 2 && !strcmp(st_key[0], "estop") && !strcmp(st_key[1], "overtemp")
+             && st_level[0] == RANT_LEVEL_ERROR && st_level[1] == RANT_LEVEL_WARN
+             && st_origin[0] == RANT_ORIGIN_APP && !st_clearable[0] && st_clearable[1]
+             && st_since[0] && st_since[1] && !strcmp(st_text[1], "motor hot"),
+             "status: the late joiner gets the whole set (n=%d)", st_count);
+    since_estop = st_since[0]; since_hot = st_since[1];
+    idA = st_peer_id(B, "status-a"); idB = st_peer_id(A, "status-b");
+    CHECK(idA && idB, "status: peer ids (%u %u)", idA, idB);
+
+    /* an update replaces the text and keeps since_us */
+    sets = st_sets;
+    rc = rant_node_set_status(A, "estop", RANT_LEVEL_ERROR, "pressed at door 3", NULL);
+    PUMP_UNTIL(A, B, 6000, st_sets > sets);
+    CHECK(rc == RANT_OK && st_count == 2 && !strcmp(st_text[0], "pressed at door 3") && st_since[0] == since_estop,
+             "status: an update keeps since_us (%s)", st_text[0]);
+
+    /* refused clears: not clearable, and an occurrence A no longer holds */
+    rc = rant_node_clear_peer_status(B, idA, "estop", since_estop);
+    rc |= rant_node_clear_peer_status(B, idA, "overtemp", since_hot + 1);
+    rc |= rant_node_clear_peer_status(B, idA, "nothing", 0);
+    PUMP_UNTIL(A, B, 6000, st_notes >= 3);
+    for (t = 0; t < 20; t++) test_pump(A, B, 2);
+    CHECK(rc == RANT_OK && st_notes == 3 && st_cleared == 0 && st_count == 2,
+             "status: refused clears change nothing and leave notes (notes=%d cleared=%d n=%d)",
+             st_notes, st_cleared, st_count);
+
+    /* an accepted clear removes it, tells A's app who cleared it, and B sees the smaller set */
+    rc = rant_node_clear_peer_status(B, idA, "overtemp", since_hot);
+    PUMP_UNTIL(A, B, 6000, st_cleared && st_count == 1);
+    CHECK(rc == RANT_OK && st_cleared == 1 && st_cleared_by == idB && !strcmp(st_cleared_key, "overtemp")
+             && st_count == 1 && !strcmp(st_key[0], "estop"),
+             "status: a peer clear lands (cleared=%d by=%u key=%s n=%d)", st_cleared, st_cleared_by,
+             st_cleared_key, st_count);
+
+    /* A's own clear empties the set, and a clear of nothing is fine */
+    rc = rant_node_clear_status(A, "estop");
+    rc |= rant_node_clear_status(A, "estop");
+    PUMP_UNTIL(A, B, 6000, st_count == 0);
+    CHECK(rc == RANT_OK && st_count == 0, "status: own clear empties the set (n=%d)", st_count);
+
+    /* the set holds RANT_STATUS_MAX conditions */
+    { int k, ok = 1;
+      for (k = 0; k < RANT_STATUS_MAX; k++){
+          snprintf(key, sizeof key, "k%d", k);
+          if (rant_node_set_status(A, key, RANT_LEVEL_INFO, "x", NULL) != RANT_OK) ok = 0;
+      }
+      rc = rant_node_set_status(A, "one-more", RANT_LEVEL_INFO, "x", NULL);
+      PUMP_UNTIL(A, B, 6000, st_count == RANT_STATUS_MAX);
+      CHECK(ok && rc == RANT_ERR_TOO_BIG && st_count == RANT_STATUS_MAX,
+               "status: a full set refuses one more (%d, n=%d)", rc, st_count); }
+
+done:
+    if (C) rant_node_close(C,0);
+    if (B) rant_node_close(B,1);
+    if (A) rant_node_close(A,1);
+    rant_allocator_reset(&ca); rant_allocator_reset(&ba); rant_allocator_reset(&aa);
+}
+
 static const TestCase cases[] = {
     { "reflect_dropped", reflect_dropped_checks },
     { "churn", churn_checks },
     { "log_and_meta", metalog_checks },
+    { "status", status_checks },
 };
 
 TEST_MAIN(cases)

@@ -16,7 +16,7 @@ extern "C" {
 /* What every discovery datagram carries in byte 4. Any change to what crosses the wire bumps
    it, discovery or not, so two nodes either speak one wire or one reports the other. */
 #ifndef RANT_WIRE_VERSION
-#define RANT_WIRE_VERSION 6
+#define RANT_WIRE_VERSION 7
 #endif
 
 #define RANT_DISCOVERY_META_MAX 64     /* default per peer overlay capacity */

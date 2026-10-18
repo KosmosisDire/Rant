@@ -219,6 +219,47 @@ static void launchdomain_checks(void){
     test_setenv("RANT_DOMAIN", "");
 }
 
+/* The launch log level phase: RANT_LOG_LEVEL in any case fills a level the code left at 0,
+ * never one it set, Info is the default, and a word or number that is no level refuses the open. */
+static void launchloglevel_checks(void){
+    static const char *bad[] = { "verbose", "3", "debugx", "warning" };
+    RantAllocator a = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *n; RantEvent err; size_t i;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+45; o.net.multicast_interface="127.0.0.1";
+    n = rant_node_open(&a, "ll", NULL, NULL, &o);
+    CHECK(n && n->log_level == RANT_LEVEL_INFO, "launchloglevel: Info by default (%d)", n ? n->log_level : -1);
+    if (n) rant_node_close(n, 0);
+    rant_allocator_reset(&a);
+    test_setenv("RANT_LOG_LEVEL", "DeBuG");
+    n = rant_node_open(&a, "ll", NULL, NULL, &o);
+    CHECK(n && n->log_level == RANT_LEVEL_DEBUG, "launchloglevel: RANT_LOG_LEVEL fills the default (%d)",
+             n ? n->log_level : -1);
+    if (n) rant_node_close(n, 0);
+    rant_allocator_reset(&a);
+    o.log_level = RANT_LEVEL_ERROR;
+    n = rant_node_open(&a, "ll", NULL, NULL, &o);
+    CHECK(n && n->log_level == RANT_LEVEL_ERROR, "launchloglevel: a level set in code stands (%d)",
+             n ? n->log_level : -1);
+    if (n) rant_node_close(n, 0);
+    rant_allocator_reset(&a);
+    o.log_level = 9;
+    n = rant_node_open(&a, "ll", NULL, NULL, &o);
+    err = rant_last_error(NULL);
+    CHECK(n == NULL && err.error == RANT_E_BAD_LOG_LEVEL, "launchloglevel: opts.log_level 9 refuses the open");
+    if (n) rant_node_close(n, 0);
+    rant_allocator_reset(&a);
+    o.log_level = 0;
+    for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
+        test_setenv("RANT_LOG_LEVEL", bad[i]);
+        n = rant_node_open(&a, "ll", NULL, NULL, &o);
+        err = rant_last_error(NULL);
+        CHECK(n == NULL && err.error == RANT_E_BAD_LOG_LEVEL, "launchloglevel: '%s' refuses the open", bad[i]);
+        if (n) rant_node_close(n, 0);
+        rant_allocator_reset(&a);
+    }
+    test_setenv("RANT_LOG_LEVEL", "");
+}
+
 static int st_name_is(RantTopic *t, const char *want){
     RantString s = i_rant_topic_name(t);
     return t && s.len == strlen(want) && memcmp(s.data, want, s.len) == 0;
@@ -336,6 +377,7 @@ static const TestCase cases[] = {
     { "dynamic_grow", dynamic_grow_checks },
     { "launch_name", launchname_checks },
     { "launch_domain", launchdomain_checks },
+    { "launch_log_level", launchloglevel_checks },
     { "prefix", prefix_checks },
     { "domain_groups", domaingroup_checks },
 };

@@ -69,14 +69,14 @@ program in this order.
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
 | `unit.tunnel` | hash, handshake, frame, json, batch |
 | `e2e.stream` | stream, scale, named, collision |
-| `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, prefix, domain_groups |
+| `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups |
 | `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema |
 | `e2e.detail` | detail_live, interest_external |
 | `e2e.shm` | shm_node |
 | `e2e.queues` | queue, pull, callback_queue, callback_pattern |
 | `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture |
 | `e2e.tasks` | task, task_matrix |
-| `e2e.entities` | reflect_dropped, churn, log_and_meta |
+| `e2e.entities` | reflect_dropped, churn, log_and_meta, status |
 | `e2e.matchwait` | matchwait |
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
@@ -314,8 +314,16 @@ What each phase pins, grouped by layer.
 - Write timestamps: a delivered stamp lies within the send and delivery walls, the opt
   out gives 0 with a byte identical payload, catch_up replay keeps the original stamp,
   and the queued path and the patterns layer carry the same value.
-- Logs and meta: history logged before anyone listens replays to a late joiner, a
-  mirrored internal error lands on the error level, and a directed meta call decodes.
+- Logs and meta: history logged before anyone listens replays to a late joiner, a line
+  below the log level is never sent, a mirrored internal error lands at Error with origin
+  Rant and the time it fired, and a directed meta call decodes.
+- Status: two raises before anyone listens coalesce into one set and a repeat sends
+  nothing, a late joiner gets the whole set, an update keeps `since_us`, a clear that is
+  not clearable, names an old raise or a missing key changes nothing and leaves a Debug
+  note, an accepted clear fires `RANT_STATUS_CLEARED` with the asker, and a full set
+  refuses one more.
+- Launch log level: `RANT_LOG_LEVEL` in any case fills a level the code left at 0, never
+  one it set, and a word that is no level, or a bad `opts.log_level`, refuses the open.
 
 ### Benches
 

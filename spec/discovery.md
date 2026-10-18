@@ -41,7 +41,7 @@ advertises is the node's data socket and it owns no unicast socket of its own.
 ## Wire format
 
 Every discovery datagram starts with a 24 byte header: the magic `uDSC`, the wire version
-(`RANT_WIRE_VERSION` = 6), a flags byte, the u16 domain and the sender's 16 byte uuid. Then `[u32 meta_version][u16 meta_len]` and the blob. The blob is
+(`RANT_WIRE_VERSION` = 7), a flags byte, the u16 domain and the sender's 16 byte uuid. Then `[u32 meta_version][u16 meta_len]` and the blob. The blob is
 the discovery section `[u16 data_port][u8 name_len][name]`
 followed by the opaque overlay. A steady state announce carries meta_len 0 and only the
 version. The flags are BYE 0x01 and REQ 0x02 (a solicit, recipients announce back now).

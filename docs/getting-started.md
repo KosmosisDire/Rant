@@ -52,6 +52,7 @@ Names are capped at `RANT_NODE_NAME_MAX` (32) bytes.
 | `RANT_NODE_NAME_PREFIX` | goes with `/` in front of the node name, cut to the 32 byte cap |
 | `RANT_DOMAIN` | the domain for a node whose code leaves `domain` at 0. Not a number from 0 to 65535 refuses the open with `RANT_E_BAD_DOMAIN` |
 | `RANT_PREFIX` | the outer name prefix, in front of `opts.prefix` (see Name prefix) |
+| `RANT_LOG_LEVEL` | `debug`, `info`, `warn` or `error`, the lowest level a node whose code leaves `log_level` at 0 logs. Any other word refuses the open with `RANT_E_BAD_LOG_LEVEL` |
 | `RANT_BRIDGE`, `RANT_BRIDGE_PASSPHRASE` | run a node whose code sets no `net.bridge` on a bridge's sockets (docs/discovery.md, Through a bridge) |
 
 All are read once at `rant_node_open`. Set `RANT_DOMAIN` machine wide, or per workspace,
@@ -94,7 +95,8 @@ event, never a silent truncation. spec/allocation.md lists what is allocated whe
 | `disable_shm` | force the wire path even to a same host peer |
 | `match_wait_ms` | first send match wait bound, 0 = 1 s, negative = off (docs/topics.md) |
 | `fetch_details` | fetch names and schemas for every topic every peer has, for observer tools |
-| `disable_logs`, `disable_meta`, `disable_error_logs` | strip the built in log topics and meta function (docs/node.md) |
+| `disable_logs`, `disable_status`, `disable_meta`, `disable_error_logs` | strip the built in log, status and meta (docs/node.md) |
+| `log_level` | the lowest `RantLevel` the log sends. 0 takes `RANT_LOG_LEVEL`, else Info |
 | `net` | ports, group, interface, seed peers, bridge (docs/discovery.md) |
 | `discovery` | announce interval, peer timeout, max peers (docs/discovery.md) |
 | `user_data` | surfaced as `RantMsg.user` and `RantEvent.user` |

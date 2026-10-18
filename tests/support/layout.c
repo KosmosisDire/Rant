@@ -130,6 +130,8 @@ int main(int argc, char **argv){
     FIELD(RantNodeOpts, disable_logs)
     FIELD(RantNodeOpts, disable_meta)
     FIELD(RantNodeOpts, disable_error_logs)
+    FIELD(RantNodeOpts, log_level)
+    FIELD(RantNodeOpts, disable_status)
     FIELD(RantNodeOpts, net)
     FIELD(RantNodeOpts, discovery)
     FIELD(RantNodeOpts, event_queue_bytes)

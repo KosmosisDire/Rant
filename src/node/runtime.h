@@ -31,9 +31,11 @@ typedef struct {
                                             for observer UIs. Costs memory per peer topic */
     int32_t               match_wait_ms; /* the send path match wait bound. 0 = RANT_MATCH_WAIT_MS,
                                             negative = disabled and such a send fires UNMATCHED_SEND */
-    uint8_t               disable_logs;  /* 1 = no @rant/log topics, rant_node_log gives NOSYS */
+    uint8_t               disable_logs;  /* 1 = no @rant/log topic, rant_node_log gives NOSYS */
     uint8_t               disable_meta;  /* 1 = no built in @rant/meta function */
-    uint8_t               disable_error_logs; /* 1 = do not mirror errors onto @rant/log/error */
+    uint8_t               disable_error_logs; /* 1 = do not mirror errors onto @rant/log */
+    uint8_t               log_level;     /* the lowest RantLevel published, 0 = RANT_LOG_LEVEL, else INFO */
+    uint8_t               disable_status; /* 1 = no @rant/status topics, rant_node_set_status gives NOSYS */
     RantNodeNet           net;
     RantNodeDiscovery     discovery;
     uint32_t              event_queue_bytes; /* the event ring cap once rant_node_set_event_queue is
@@ -177,6 +179,8 @@ RANT_API int        rant_node_set_event_queue(RantNode *n, RantQueue *q);
 /* Parks the log lines this node receives on q from now on, NULL = inline again and the
  * parked lines are dropped. RANT_ERR_STATE as above, RANT_ERR_NOSYS when logs are disabled. */
 RANT_API int        rant_node_set_log_queue(RantNode *n, RantQueue *q);
+/* The same for the status sets this node receives. RANT_ERR_NOSYS when status is disabled. */
+RANT_API int        rant_node_set_status_queue(RantNode *n, RantQueue *q);
 
 /* Pull topics (RantTopicOpts.pull). take pops the oldest waiting message, take_latest the
  * newest after dropping the older ones. The views stay valid until the topic's next take.
@@ -274,17 +278,43 @@ RANT_API void       rant_node_shm_stats(RantNode *n, uint32_t *sent, uint32_t *r
 RANT_API void       rant_topic_counts(RantTopic *topic, uint64_t *tx_msgs, uint64_t *tx_bytes,
                                     uint64_t *rx_msgs, uint64_t *rx_bytes);
 
-/* The built in @rant/log/{error,warn,info} topics. docs/node.md explains them. */
-typedef enum { RANT_LOG_ERROR = 0, RANT_LOG_WARN = 1, RANT_LOG_INFO = 2 } RantLogLevel;
+/* The built in @rant/log and @rant/status topics. docs/node.md explains them. */
+typedef enum { RANT_LEVEL_DEBUG = 1, RANT_LEVEL_INFO, RANT_LEVEL_WARN, RANT_LEVEL_ERROR } RantLevel;
+typedef enum { RANT_ORIGIN_APP = 0, RANT_ORIGIN_RANT = 1 } RantOrigin;   /* who wrote a line or condition */
 #ifndef RANT_LOG_MAX
 #define RANT_LOG_MAX 512     /* formatted log text bytes, longer is truncated */
 #endif
-/* printf style publish on the level's topic. RANT_ERR_NOSYS when the logs are disabled. */
-RANT_API int            rant_node_log(RantNode *n, RantLogLevel level, const char *fmt, ...);
+/* printf style publish of one line. A level below the node's log_level sends nothing and
+ * returns RANT_OK. RANT_ERR_NOSYS when the log is disabled. */
+RANT_API int            rant_node_log(RantNode *n, RantLevel level, const char *fmt, ...);
 /* Publishes an already formatted line, len negative = NUL terminated. The FFI entry. */
-RANT_API int            rant_node_log_text(RantNode *n, RantLogLevel level, const char *text, int len);
-/* The node's own handle for a level, NULL when disabled. */
-RANT_API RantTopic       *rant_node_log_topic(RantNode *n, RantLogLevel level);
+RANT_API int            rant_node_log_text(RantNode *n, RantLevel level, const char *text, int len);
+/* The node's own @rant/log handle, NULL when disabled. */
+RANT_API RantTopic       *rant_node_log_topic(RantNode *n);
+
+/* A node's status is its set of active conditions, published whole on @rant/status. The key
+ * and text caps are part of the wire schema, so they are fixed. */
+#define RANT_STATUS_KEY_MAX  48     /* key bytes, a longer key is refused */
+#define RANT_STATUS_TEXT_MAX 160    /* text bytes, longer is truncated */
+#ifndef RANT_STATUS_MAX
+#define RANT_STATUS_MAX      32     /* conditions per node */
+#endif
+typedef struct {
+    uint8_t clearable;   /* 1 = another node may clear it with rant_node_clear_peer_status */
+} RantStatusOpts;
+/* Raises the condition key, or updates it when it is active. since_us stays from the raise,
+ * and setting what it already holds sends nothing. The set publishes on the next poll pass.
+ * RANT_ERR_TOO_BIG for a key over its cap or past RANT_STATUS_MAX conditions. */
+RANT_API int            rant_node_set_status(RantNode *n, const char *key, RantLevel level,
+                                             const char *text, const RantStatusOpts *opts);
+/* Clears the condition key. RANT_OK whether or not it was active. */
+RANT_API int            rant_node_clear_status(RantNode *n, const char *key);
+/* Asks peer to clear its clearable condition key raised at since_us, as its last status set
+ * reported. Nothing answers: the peer's next set shows it gone, or still there when refused. */
+RANT_API int            rant_node_clear_peer_status(RantNode *n, uint32_t peer, const char *key,
+                                                    uint64_t since_us);
+/* The node's own @rant/status handle, NULL when disabled. */
+RANT_API RantTopic       *rant_node_status_topic(RantNode *n);
 
 /* The @rant/meta snapshot section mask, a 4 byte LE u32 request payload, 0 = everything.
  * The response is RantMeta { info: map } with one key per section. See docs/node.md. */

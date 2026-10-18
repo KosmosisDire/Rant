@@ -26,7 +26,7 @@ while (rant_node_mesh_next(n, &it3, &e)) ...                      /* the whole m
 
 An entity is never a channel. A function's request and response pair is one function, a
 task's three channels are one task, and a variable's set channel folds in as `writable`.
-The `@rant/` builtins (the log topics and the meta function) are listed like any entity.
+The `@rant/` builtins (the log and status topics and the meta function) are listed like any entity.
 
 `RantEntityInfo` carries the kind, name and hash, who provides and consumes it and how
 many, reliability, the attrs (`writable`, `forceable`, `cancellable`, `exclusive`,

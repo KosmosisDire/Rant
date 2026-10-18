@@ -86,14 +86,17 @@ struct RantTopic {
     char      name[RANT_TOPIC_NAME_MAX];
 };
 
-/* One pending error to log mirror entry. Errors fire deep inside receive processing where
- * a send may not re enter the transport, so emit records here and the poll pass publishes. */
+/* One pending line of Rant's own, a mirrored error or a note. Errors fire deep inside
+ * receive processing where a send may not re enter the transport, so emit records here and
+ * the poll pass publishes. */
 #define RANT_LOG_PEND 8
 typedef struct {
-    uint64_t wall_us, mono_us;   /* when the first occurrence fired */
+    uint64_t wall_us;            /* when the first occurrence fired */
     uint32_t peer, count;
     uint16_t topic;
     uint8_t  error;              /* RantErrorKind */
+    uint8_t  level;              /* RantLevel */
+    uint8_t  note;               /* 1 = a note, coalesced by its text rather than its event */
     char     text[192];
 } i_RantLogPend;
 
@@ -170,15 +173,23 @@ struct RantNode {
     char            last_error_topic[RANT_TOPIC_NAME_MAX + 1];
     char            last_error_peer[RANT_NODE_NAME_MAX + 1];
     char            last_error_detail[160];
-    /* the built in @rant/log topics and the error mirror ring */
-    RantTopic      *log_topics[3];       /* by RantLogLevel, all NULL under opts.disable_logs */
-    const RantSchema *log_schema;        /* RantLog { wall_us, mono_us, text } */
+    /* the built in @rant/log topic and the ring of Rant's own pending lines */
+    RantTopic      *log_topic;           /* NULL under opts.disable_logs */
+    const RantSchema *log_schema;        /* RantLog { level, origin, text } */
     i_RantRegistry  registry;            /* every schema this node compiled or registered */
+    uint8_t         log_level;           /* the lowest RantLevel published */
     uint8_t         log_errors;          /* the default on RANT_ERROR mirror */
     uint8_t         log_flushing;        /* reentrancy guard: a flush must not re enter the ring */
     uint8_t         log_pend_n;
     uint32_t        log_pend_dropped;    /* ring overflow between flushes, summarized, never silent */
-    i_RantLogPend *log_pend;             /* [RANT_LOG_PEND], allocated on the first recorded error */
+    i_RantLogPend *log_pend;             /* [RANT_LOG_PEND], allocated on the first recorded line */
+    /* the built in @rant/status topics. The node's set lives as its own RantStatus message */
+    RantTopic      *status_topic, *clear_topic;   /* NULL under opts.disable_status */
+    const RantSchema *status_schema;     /* RantStatus { conditions: RantCondition[] } */
+    uint32_t        status_elem;         /* one condition's bytes */
+    uint8_t        *status_msg;          /* allocated on the first raise, grown by need */
+    uint32_t        status_cap;
+    uint8_t         status_dirty;        /* changed since its last publish */
     /* the @rant/meta snapshot scratch, grown on demand */
     uint8_t      *snap_buf; uint32_t snap_cap;
     uint16_t     *snap_pend; uint16_t snap_pend_cap;   /* per topic pending counts, one walk */
@@ -347,7 +358,35 @@ static uint16_t i_rant_node_topic_hi(RantNode *n){
 
 static int i_rant_node_is_log_topic(RantNode *n, uint16_t topic_index){
     RantTopic *h = (topic_index < i_rant_node_topic_hi(n)) ? n->handles[topic_index] : NULL;
-    return h && (h == n->log_topics[0] || h == n->log_topics[1] || h == n->log_topics[2]);
+    return h && h == n->log_topic;
+}
+
+/* Records one line of Rant's own for the poll pass to publish: the error event e, or the
+ * note text when e is NULL. A repeat coalesces into a count. Lock held. */
+static void i_rant_node_note(RantNode *n, RantLevel level, const RantEvent *e, const char *text){
+    uint8_t i, err = e ? (uint8_t)e->error : (uint8_t)RANT_E_NONE;
+    uint16_t topic = e ? e->topic : 0;
+    uint32_t peer = e ? e->peer : 0;
+    if (!n->log_topic || n->log_flushing || (uint8_t)level < n->log_level) return;
+    if (!n->log_pend){                     /* the first line ever: allocate the ring */
+        n->log_pend = (i_RantLogPend*)i_rant_node_alloc(n, NULL, sizeof(i_RantLogPend) * RANT_LOG_PEND);
+        if (!n->log_pend){ n->log_pend_dropped++; return; }
+    }
+    for (i = 0; i < n->log_pend_n; i++){
+        const i_RantLogPend *p = &n->log_pend[i];
+        if (p->note != (e == NULL) || p->level != (uint8_t)level) continue;
+        if (e ? (p->error == err && p->topic == topic && p->peer == peer) : !strcmp(p->text, text)) break;
+    }
+    if (i < n->log_pend_n) n->log_pend[i].count++;
+    else if (n->log_pend_n < RANT_LOG_PEND){
+        i_RantLogPend *p = &n->log_pend[n->log_pend_n++];
+        p->error = err; p->level = (uint8_t)level; p->note = (uint8_t)(e == NULL);
+        p->topic = topic; p->peer = peer; p->count = 1;
+        p->wall_us = i_rant_plat_wall_us();
+        if (e) rant_event_str(e, p->text, sizeof p->text);
+        else { size_t tl = strlen(text); if (tl >= sizeof p->text) tl = sizeof p->text - 1;
+               memcpy(p->text, text, tl); p->text[tl] = '\0'; }
+    } else n->log_pend_dropped++;
 }
 
 /* copies src into buf and points *field at it, or clears the field when there is none */
@@ -372,28 +411,11 @@ static void i_rant_node_emit(RantNode *n, RantEvent *e){
         i_rant_node_keep_str(n->last_error_peer, sizeof n->last_error_peer, e->peer_name, &n->last_error.peer_name);
         i_rant_node_keep_str(n->last_error_detail, sizeof n->last_error_detail, e->detail, &n->last_error.detail);
     }
-    /* the error to log mirror records only, the poll pass publishes. Errors on a log
+    /* the error to log mirror records only, the poll pass publishes. Errors on the log
        topic itself are excluded, and nothing is recorded during a flush */
-    if (e->kind == RANT_ERROR && n->log_errors && !n->log_flushing
-        && !(e->topic_name && i_rant_node_is_log_topic(n, e->topic))){
-        uint8_t i;
-        if (!n->log_pend){                 /* the first error ever: allocate the mirror ring */
-            n->log_pend = (i_RantLogPend*)i_rant_node_alloc(n, NULL,
-                              sizeof(i_RantLogPend) * RANT_LOG_PEND);
-            if (!n->log_pend){ n->log_pend_dropped++; goto pend_done; }
-        }
-        for (i = 0; i < n->log_pend_n; i++)
-            if (n->log_pend[i].error == (uint8_t)e->error && n->log_pend[i].topic == e->topic
-                && n->log_pend[i].peer == e->peer) break;
-        if (i < n->log_pend_n) n->log_pend[i].count++;
-        else if (n->log_pend_n < RANT_LOG_PEND){
-            i_RantLogPend *p = &n->log_pend[n->log_pend_n++];
-            p->error = (uint8_t)e->error; p->topic = e->topic; p->peer = e->peer; p->count = 1;
-            p->wall_us = i_rant_plat_wall_us(); p->mono_us = i_rant_plat_now_us();
-            rant_event_str(e, p->text, sizeof p->text);
-        } else n->log_pend_dropped++;
-    }
-pend_done:
+    if (e->kind == RANT_ERROR && n->log_errors
+        && !(e->topic_name && i_rant_node_is_log_topic(n, e->topic)))
+        i_rant_node_note(n, RANT_LEVEL_ERROR, e, NULL);
     if (e->kind == RANT_PEER_UP || e->kind == RANT_PEER_DOWN || e->kind == RANT_PEER_INTEREST){
         n->settle_topology_us = i_rant_plat_now_us();     /* rant_node_settle's quiet window clock */
         n->match_epoch++;                                 /* stale the topics' converged memos */
@@ -952,6 +974,19 @@ static int i_rant_node_on_shm(void *u, uint16_t topic_index, uint32_t from, cons
 #endif
 
 static void i_rant_node_logs_open(RantNode *n);       /* defined with the log API below */
+static void i_rant_node_status_open(RantNode *n);     /* defined with the status API below */
+
+/* A RANT_LOG_LEVEL word in any case, 0 when it names no level */
+static uint8_t i_rant_level_parse(const char *s){
+    static const char *const names[4] = { "debug", "info", "warn", "error" };
+    int i; size_t k;
+    for (i = 0; i < 4; i++){
+        for (k = 0; names[i][k] && (char)(s[k] | 0x20) == names[i][k]; k++) {}
+        if (!names[i][k] && !s[k]) return (uint8_t)(RANT_LEVEL_DEBUG + i);
+    }
+    return 0;
+}
+static int i_rant_level_ok(int level){ return level >= RANT_LEVEL_DEBUG && level <= RANT_LEVEL_ERROR; }
 
 /* The build's features, listed in the magic */
 #ifdef RANT_THREADS
@@ -1022,7 +1057,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     char node_name[RANT_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;
     char launch_name[RANT_NODE_NAME_MAX + 1], launch_domain[32]; size_t len;
     char launch_prefix[RANT_TOPIC_NAME_MAX + 1], prefix[RANT_TOPIC_NAME_MAX + 1]; size_t prefix_len = 0;
-    char launch_bridge[512], launch_pass[256]; const char *bridge;
+    char launch_bridge[512], launch_pass[256], launch_level[8]; const char *bridge;
 
     /* a live reference, so a linker that drops unreferenced data keeps the magic */
     (void)*(const volatile char *)i_rant_magic;
@@ -1040,6 +1075,14 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
             return i_rant_node_open_fail(on_event, o.user_data, RANT_E_BAD_DOMAIN, 0, 0, 0);
         o.domain = (uint16_t)d;
     }
+    /* the lowest level the log publishes, for code that left the default. docs/node.md */
+    if (!o.log_level && (len = i_rant_plat_env("RANT_LOG_LEVEL", launch_level, sizeof launch_level))){
+        o.log_level = len < sizeof launch_level ? i_rant_level_parse(launch_level) : 0;
+        if (!o.log_level) return i_rant_node_open_fail(on_event, o.user_data, RANT_E_BAD_LOG_LEVEL, 0, 0, 0);
+    }
+    if (!o.log_level) o.log_level = RANT_LEVEL_INFO;
+    if (!i_rant_level_ok(o.log_level))
+        return i_rant_node_open_fail(on_event, o.user_data, RANT_E_BAD_LOG_LEVEL, 0, 0, 0);
     /* the launcher's prefix outside the code's own. spec/node.md, Name prefix */
     prefix[0] = '\0';
     len = i_rant_plat_env("RANT_PREFIX", launch_prefix, sizeof launch_prefix);
@@ -1066,7 +1109,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     if (!alloc) return i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, sizeof *n);
     user_topics = o.max_topics ? o.max_topics : 8;
     /* the builtins ride outside the app's budget, in a block above it */
-    max_topics = (uint16_t)(user_topics + (o.disable_logs ? 0 : 3));
+    max_topics = (uint16_t)(user_topics + (o.disable_logs ? 0 : 1) + (o.disable_status ? 0 : 2));
 #ifndef RANT_NO_PATTERNS
     max_topics = (uint16_t)(max_topics + (o.disable_meta ? 0 : 2));
 #endif
@@ -1264,9 +1307,11 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
 
     /* the builtins last, since they create topics. A failed creation degrades and never
        fails the open */
+    n->log_level = o.log_level;
     n->log_errors = (uint8_t)(!o.disable_error_logs && !o.disable_logs);
     n->creating_builtin = 1;               /* allocate from the builtin block */
     if (!o.disable_logs) i_rant_node_logs_open(n);
+    if (!o.disable_status) i_rant_node_status_open(n);
 #ifndef RANT_NO_PATTERNS
     if (!o.disable_meta) i_rant_patterns_meta_open(n);
 #endif
@@ -1597,85 +1642,283 @@ RantTopic *i_rant_node_create_pattern_topic(RantNode *n, const char *name, RantR
                                    on_msg, on_msg_user, 1);
 }
 
-/* the built in log topics */
+/* the built in log and status topics */
 
 static int i_rant_node_do_send(RantNode *n, uint16_t topic_index, RantBytes data,
                                uint64_t capture_us, int may_wait);
 
-static const char *const i_rant_log_topic_names[3] =
-    { "@rant/log/error", "@rant/log/warn", "@rant/log/info" };
+#define I_RANT_STR_(x) #x
+#define I_RANT_STR(x)  I_RANT_STR_(x)
+/* the vocabulary both builtins share, compiled in front of each. A repeat is a no op */
+#define I_RANT_LOG_VOCAB "RantLevel = enum<u8> { Debug = 1, Info, Warn, Error } " \
+                         "RantOrigin = enum<u8> { App, Rant } "
 
-/* Creates the three log topics at open: reliable, keep_last = catch_up as the replayable
- * history, publish only, and no backpressure wait. NULL handles on OOM, never a failed open. */
+/* Creates the log topic at open: reliable, keep_last = catch_up as the replayable history,
+ * publish only, and no backpressure wait. A NULL handle on OOM, never a failed open. */
 static void i_rant_node_logs_open(RantNode *n){
-    RantTopicOpts topt; int lvl;
-    n->log_schema = i_rant_registry_compile(&n->registry,
-        "RantLog { wall_us: u64, mono_us: u64, text: string }", NULL);
+    RantTopicOpts topt;
+    n->log_schema = i_rant_registry_compile(&n->registry, I_RANT_LOG_VOCAB
+        "RantLog { level: RantLevel, origin: RantOrigin, text: string }", NULL);
     if (!n->log_schema) return;
-    for (lvl = 0; lvl < 3; lvl++){
-        memset(&topt, 0, sizeof topt);
-        topt.qos.reliability = RANT_RELIABLE;
-        topt.qos.keep_last = topt.qos.catch_up = (lvl == RANT_LOG_INFO) ? 8 : 16;
-        /* backpressure_wait_us stays 0, so logs never block */
-        n->log_topics[lvl] = i_rant_node_create_impl(n, i_rant_log_topic_names[lvl],
-                                 RANT_PUB_ONLY, n->log_schema, &topt,
-                                 RANT_KIND_TOPIC, 0, 0, 0, NULL, NULL, 1);
-    }
+    memset(&topt, 0, sizeof topt);
+    topt.qos.reliability = RANT_RELIABLE;
+    topt.qos.keep_last = topt.qos.catch_up = 4;
+    /* backpressure_wait_us stays 0, so logs never block */
+    n->log_topic = i_rant_node_create_impl(n, "@rant/log", RANT_PUB_ONLY, n->log_schema, &topt,
+                                           RANT_KIND_TOPIC, 0, 0, 0, NULL, NULL, 1);
 }
 
-/* Builds one RantLog message and publishes it on the level's topic. locked = 1 is the
- * mirror flush under the node lock, 0 the public thread safe path. */
-static int i_rant_node_log_publish(RantNode *n, RantLogLevel level, const char *text,
-                                   size_t text_len, uint64_t wall_us, uint64_t mono_us,
-                                   int locked){
-    uint8_t msg[20u + RANT_LOG_MAX];     /* the fixed section (16) and the text frame header (4) */
+/* Builds one RantLog message and publishes it. capture_us is when the line happened, 0 =
+ * the send itself. locked = 1 is the flush under the node lock, 0 the public path. */
+static int i_rant_node_log_publish(RantNode *n, RantLevel level, RantOrigin origin, const char *text,
+                                   size_t text_len, uint64_t capture_us, int locked){
+    uint8_t msg[6u + RANT_LOG_MAX];      /* the fixed section (2) and the text frame header (4) */
+    RantSendOpts so;
     uint32_t len;
-    RantTopic *h = n->log_topics[level];
+    RantTopic *h = n->log_topic;
     if (!h || !n->log_schema) return RANT_ERR_NOSYS;
     if (!rant_schema_message_default(n->log_schema, msg, sizeof msg)) return RANT_ERR_OOM;
-    rant_set_uint(msg, sizeof msg, n->log_schema, "wall_us", wall_us);
-    rant_set_uint(msg, sizeof msg, n->log_schema, "mono_us", mono_us);
+    rant_set_uint(msg, sizeof msg, n->log_schema, "level", (uint64_t)level);
+    rant_set_uint(msg, sizeof msg, n->log_schema, "origin", (uint64_t)origin);
     if (!rant_set_string(msg, sizeof msg, n->log_schema, "text", rant_string(text, text_len)))
         return RANT_ERR_TOO_BIG;
     len = rant_schema_msg_len(n->log_schema, msg, sizeof msg);
-    if (locked) return i_rant_node_do_send(n, h->index, rant_bytes(msg, len), 0, 0);
-    return rant_topic_send(h, rant_bytes(msg, len), NULL);
+    if (locked) return i_rant_node_do_send(n, h->index, rant_bytes(msg, len), capture_us, 0);
+    so.capture_us = capture_us;
+    return rant_topic_send(h, rant_bytes(msg, len), &so);
 }
 
-int rant_node_log(RantNode *n, RantLogLevel level, const char *fmt, ...){
+int rant_node_log(RantNode *n, RantLevel level, const char *fmt, ...){
     char text[RANT_LOG_MAX]; int tn;
     va_list ap;
-    if (!n || (int)level < 0 || level > RANT_LOG_INFO || !fmt) return RANT_ERR_NO_TOPIC;
-    if (!n->log_topics[level]) return RANT_ERR_NOSYS;
+    if (!n || !i_rant_level_ok((int)level) || !fmt) return RANT_ERR_NO_TOPIC;
+    if (!n->log_topic) return RANT_ERR_NOSYS;
+    if ((uint8_t)level < n->log_level) return RANT_OK;
     va_start(ap, fmt);
     tn = vsnprintf(text, sizeof text, fmt, ap);
     va_end(ap);
     if (tn < 0) tn = 0;                                       /* an encoding error: an empty line */
     if (tn >= (int)sizeof text) tn = (int)sizeof text - 1;    /* truncated at RANT_LOG_MAX */
-    return i_rant_node_log_publish(n, level, text, (size_t)tn,
-                                   i_rant_plat_wall_us(), i_rant_plat_now_us(), 0);
+    return i_rant_node_log_publish(n, level, RANT_ORIGIN_APP, text, (size_t)tn, 0, 0);
 }
 
-int rant_node_log_text(RantNode *n, RantLogLevel level, const char *text, int len){
+int rant_node_log_text(RantNode *n, RantLevel level, const char *text, int len){
     size_t tl;
-    if (!n || (int)level < 0 || level > RANT_LOG_INFO || !text) return RANT_ERR_NO_TOPIC;
-    if (!n->log_topics[level]) return RANT_ERR_NOSYS;
+    if (!n || !i_rant_level_ok((int)level) || !text) return RANT_ERR_NO_TOPIC;
+    if (!n->log_topic) return RANT_ERR_NOSYS;
+    if ((uint8_t)level < n->log_level) return RANT_OK;
     tl = len < 0 ? strlen(text) : (size_t)len;
     if (tl >= RANT_LOG_MAX) tl = RANT_LOG_MAX - 1;       /* match the variadic path's truncation */
-    return i_rant_node_log_publish(n, level, text, tl,
-                                   i_rant_plat_wall_us(), i_rant_plat_now_us(), 0);
+    return i_rant_node_log_publish(n, level, RANT_ORIGIN_APP, text, tl, 0, 0);
 }
 
-RantTopic *rant_node_log_topic(RantNode *n, RantLogLevel level){
-    if (!n || (int)level < 0 || level > RANT_LOG_INFO) return NULL;
-    return n->log_topics[level];
+RantTopic *rant_node_log_topic(RantNode *n){
+    return n ? n->log_topic : NULL;
 }
 
-/* Publishes the pending error mirror ring under the lock. A coalesced burst appends its
- * count and overflow between flushes becomes one summary line. */
+static void i_rant_node_status_on_clear(void *user, const RantMsg *msg);   /* below */
+
+/* Creates the status topic and its clear request topic at open. Each set supersedes the
+ * last, so one message of history is the whole truth for a late subscriber. A clear is
+ * directed at the condition's node and never replays. NULL handles on OOM. */
+static void i_rant_node_status_open(RantNode *n){
+    RantTopicOpts topt;
+    const RantSchema *clear;
+    RantSchemaFieldInfo fi;
+    n->status_schema = i_rant_registry_compile(&n->registry, I_RANT_LOG_VOCAB
+        "RantCondition { key: string<" I_RANT_STR(RANT_STATUS_KEY_MAX) ">, level: RantLevel,"
+        " origin: RantOrigin, clearable: bool, since_us: u64,"
+        " text: string<" I_RANT_STR(RANT_STATUS_TEXT_MAX) "> }"
+        " RantStatus { conditions: RantCondition[] }", NULL);
+    clear = i_rant_registry_compile(&n->registry,
+        "RantClear { key: string<" I_RANT_STR(RANT_STATUS_KEY_MAX) ">, since_us: u64 }", NULL);
+    if (!n->status_schema || !clear
+        || !rant_schema_field_at(n->status_schema,
+                                 (uint16_t)rant_schema_field_index(n->status_schema, "conditions"), &fi))
+        return;
+    n->status_elem = fi.elem_size;
+    memset(&topt, 0, sizeof topt);
+    topt.qos.reliability = RANT_RELIABLE;
+    topt.qos.keep_last = topt.qos.catch_up = 1;
+    n->status_topic = i_rant_node_create_impl(n, "@rant/status", RANT_PUB_ONLY, n->status_schema,
+                                              &topt, RANT_KIND_TOPIC, 0, 0, 0, NULL, NULL, 1);
+    memset(&topt, 0, sizeof topt);
+    topt.qos.reliability = RANT_RELIABLE;
+    topt.qos.keep_last = 4;
+    n->clear_topic = i_rant_node_create_impl(n, "@rant/status/clear", RANT_PUBSUB, clear, &topt,
+                                             RANT_KIND_TOPIC, 0, 1, 0, i_rant_node_status_on_clear, n, 1);
+}
+
+/* the set as a message view, empty before the first raise */
+static RantBytes i_rant_node_status_view(RantNode *n){
+    if (!n->status_msg) return rant_bytes(NULL, 0);
+    return rant_bytes(n->status_msg, rant_schema_msg_len(n->status_schema, n->status_msg, n->status_cap));
+}
+
+/* the accessor path of one condition's member */
+static const char *i_rant_status_path(char *buf, size_t cap, uint32_t i, const char *member){
+    snprintf(buf, cap, "conditions[%u].%s", (unsigned)i, member);
+    return buf;
+}
+
+/* The index of the condition (origin, key), or -1. Lock held. */
+static int i_rant_node_status_find(RantNode *n, RantOrigin origin, RantString key){
+    const RantSchema *s = n->status_schema;
+    RantBytes m = i_rant_node_status_view(n);
+    uint32_t i, count = m.len ? rant_get_array_count(m, s, "conditions") : 0;
+    char path[48];
+    for (i = 0; i < count; i++){
+        RantString k = rant_get_string(m, s, i_rant_status_path(path, sizeof path, i, "key"));
+        if (k.len == key.len && !memcmp(k.data, key.data, key.len)
+            && rant_get_uint(m, s, i_rant_status_path(path, sizeof path, i, "origin")) == (uint64_t)origin)
+            return (int)i;
+    }
+    return -1;
+}
+
+/* Raises or updates one condition and marks the set for the next poll pass. Lock held. */
+static int i_rant_node_status_put(RantNode *n, RantOrigin origin, RantString key, RantLevel level,
+                                  RantString text, int clearable){
+    const RantSchema *s = n->status_schema;
+    char path[48];
+    int i;
+    if (!n->status_topic || !s) return RANT_ERR_NOSYS;
+    if (key.len > RANT_STATUS_KEY_MAX) return RANT_ERR_TOO_BIG;
+    if (text.len > RANT_STATUS_TEXT_MAX) text.len = RANT_STATUS_TEXT_MAX;
+    clearable = clearable ? 1 : 0;
+    i = i_rant_node_status_find(n, origin, key);
+    if (i >= 0){
+        RantBytes m = i_rant_node_status_view(n);
+        RantString t = rant_get_string(m, s, i_rant_status_path(path, sizeof path, (uint32_t)i, "text"));
+        if (rant_get_uint(m, s, i_rant_status_path(path, sizeof path, (uint32_t)i, "level")) == (uint64_t)level
+            && rant_get_uint(m, s, i_rant_status_path(path, sizeof path, (uint32_t)i, "clearable")) == (uint64_t)clearable
+            && t.len == text.len && !memcmp(t.data, text.data, text.len))
+            return RANT_OK;                /* the same values again send nothing */
+    } else {
+        uint32_t count = n->status_msg ? rant_get_array_count(i_rant_node_status_view(n), s, "conditions") : 0;
+        uint32_t need = rant_schema_msg_min(s) + (count + 1u) * n->status_elem;
+        if (count >= RANT_STATUS_MAX) return RANT_ERR_TOO_BIG;
+        if (need > n->status_cap){
+            uint8_t *nb = (uint8_t*)i_rant_node_alloc(n, n->status_msg, need);
+            if (!nb) return RANT_ERR_OOM;
+            if (!n->status_msg) rant_schema_message_default(s, nb, need);
+            n->status_msg = nb; n->status_cap = need;
+        }
+        if (!rant_set_array_count(n->status_msg, n->status_cap, s, "conditions", count + 1u))
+            return RANT_ERR_OOM;
+        i = (int)count;
+        rant_set_string(n->status_msg, n->status_cap, s, i_rant_status_path(path, sizeof path, (uint32_t)i, "key"), key);
+        rant_set_uint(n->status_msg, n->status_cap, s, i_rant_status_path(path, sizeof path, (uint32_t)i, "origin"), (uint64_t)origin);
+        rant_set_uint(n->status_msg, n->status_cap, s, i_rant_status_path(path, sizeof path, (uint32_t)i, "since_us"), i_rant_plat_wall_us());
+    }
+    rant_set_uint(n->status_msg, n->status_cap, s, i_rant_status_path(path, sizeof path, (uint32_t)i, "level"), (uint64_t)level);
+    rant_set_uint(n->status_msg, n->status_cap, s, i_rant_status_path(path, sizeof path, (uint32_t)i, "clearable"), (uint64_t)clearable);
+    rant_set_string(n->status_msg, n->status_cap, s, i_rant_status_path(path, sizeof path, (uint32_t)i, "text"), text);
+    n->status_dirty = 1;
+    return RANT_OK;
+}
+
+/* Drops condition i, the later ones moving down, and marks the set. Lock held. */
+static void i_rant_node_status_remove(RantNode *n, int i){
+    const RantSchema *s = n->status_schema;
+    RantBytes arr; uint32_t count; uint8_t *base;
+    if (i < 0) return;
+    arr = rant_get_array(i_rant_node_status_view(n), s, "conditions");
+    count = (uint32_t)(arr.len / n->status_elem);
+    if ((uint32_t)i >= count) return;
+    base = n->status_msg + (arr.data - n->status_msg);
+    memmove(base + (size_t)i * n->status_elem, base + (size_t)(i + 1) * n->status_elem,
+            (size_t)(count - (uint32_t)i - 1u) * n->status_elem);
+    rant_set_array_count(n->status_msg, n->status_cap, s, "conditions", count - 1u);
+    n->status_dirty = 1;
+}
+
+/* Publishes the whole set, the poll pass's step. Lock held. */
+static void i_rant_node_status_flush(RantNode *n){
+    RantBytes m = i_rant_node_status_view(n);
+    n->status_dirty = 0;
+    if (n->status_topic && m.len) (void)i_rant_node_do_send(n, n->status_topic->index, m, 0, 0);
+}
+
+/* A peer's RantClear, inside receive processing: clears an app condition that is clearable
+ * and still the occurrence the peer saw, then tells the app. Anything else is a debug note. */
+static void i_rant_node_status_on_clear(void *user, const RantMsg *msg){
+    RantNode *n = (RantNode*)user;
+    char key[RANT_STATUS_KEY_MAX + 1], path[48], note[192];
+    const char *why = NULL;
+    RantString k; uint64_t since; int i;
+    if (!msg->schema) return;
+    k = rant_get_string(msg->data, msg->schema, "key");
+    since = rant_get_uint(msg->data, msg->schema, "since_us");
+    if (k.len > RANT_STATUS_KEY_MAX) k.len = RANT_STATUS_KEY_MAX;
+    memcpy(key, k.data, k.len); key[k.len] = '\0';
+    i = i_rant_node_status_find(n, RANT_ORIGIN_APP, rant_string(key, k.len));
+    if (i < 0) why = "no such condition";
+    else {
+        RantBytes m = i_rant_node_status_view(n);
+        if (!rant_get_uint(m, n->status_schema, i_rant_status_path(path, sizeof path, (uint32_t)i, "clearable")))
+            why = "it is not clearable";
+        else if (rant_get_uint(m, n->status_schema, i_rant_status_path(path, sizeof path, (uint32_t)i, "since_us")) != since)
+            why = "it was raised again since";
+    }
+    if (why){
+        snprintf(note, sizeof note, "status clear of %s from %.*s refused: %s", key,
+                 (int)msg->publisher_name.len, msg->publisher_name.data, why);
+        i_rant_node_note(n, RANT_LEVEL_DEBUG, NULL, note);
+        return;
+    }
+    i_rant_node_status_remove(n, i);
+    {   RantEvent e; memset(&e, 0, sizeof e);
+        e.kind = RANT_STATUS_CLEARED; e.peer = msg->publisher_id; e.detail = key;
+        i_rant_node_emit(n, &e); }
+}
+
+int rant_node_set_status(RantNode *n, const char *key, RantLevel level, const char *text,
+                         const RantStatusOpts *opts){
+    int acquired, r;
+    if (!n || !key || !key[0] || !i_rant_level_ok((int)level)) return RANT_ERR_NO_TOPIC;
+    acquired = i_rant_node_lock(n);
+    r = i_rant_node_status_put(n, RANT_ORIGIN_APP, rant_cstr(key), level,
+                               rant_cstr(text ? text : ""), opts && opts->clearable);
+    if (n->status_dirty) i_rant_node_kick(n);
+    i_rant_node_unlock(n, acquired);
+    return r;
+}
+
+int rant_node_clear_status(RantNode *n, const char *key){
+    int acquired;
+    if (!n || !key) return RANT_ERR_NO_TOPIC;
+    acquired = i_rant_node_lock(n);
+    if (!n->status_topic){ i_rant_node_unlock(n, acquired); return RANT_ERR_NOSYS; }
+    i_rant_node_status_remove(n, i_rant_node_status_find(n, RANT_ORIGIN_APP, rant_cstr(key)));
+    if (n->status_dirty) i_rant_node_kick(n);
+    i_rant_node_unlock(n, acquired);
+    return RANT_OK;
+}
+
+int rant_node_clear_peer_status(RantNode *n, uint32_t peer, const char *key, uint64_t since_us){
+    uint8_t msg[64];
+    const RantSchema *s;
+    if (!n || !peer || !key || !key[0]) return RANT_ERR_NO_TOPIC;
+    if (strlen(key) > RANT_STATUS_KEY_MAX) return RANT_ERR_TOO_BIG;
+    if (!n->clear_topic) return RANT_ERR_NOSYS;
+    s = n->clear_topic->schema;
+    if (!rant_schema_message_default(s, msg, sizeof msg)
+        || !rant_set_string(msg, sizeof msg, s, "key", rant_cstr(key))
+        || !rant_set_uint(msg, sizeof msg, s, "since_us", since_us)) return RANT_ERR_OOM;
+    return i_rant_topic_send_to(n->clear_topic, peer, rant_bytes(NULL, 0),
+                                rant_bytes(msg, rant_schema_msg_len(s, msg, sizeof msg)));
+}
+
+RantTopic *rant_node_status_topic(RantNode *n){
+    return n ? n->status_topic : NULL;
+}
+
+/* Publishes the ring of Rant's own lines under the lock, each stamped with when it fired. A
+ * coalesced burst appends its count and overflow between flushes becomes one summary line. */
 static void i_rant_node_log_flush(RantNode *n){
     uint8_t i, cnt;
-    if (!n->log_topics[RANT_LOG_ERROR]){ n->log_pend_n = 0; n->log_pend_dropped = 0; return; }
+    if (!n->log_topic){ n->log_pend_n = 0; n->log_pend_dropped = 0; return; }
     n->log_flushing = 1;
     cnt = n->log_pend_n; n->log_pend_n = 0;
     for (i = 0; i < cnt; i++){
@@ -1685,15 +1928,16 @@ static void i_rant_node_log_flush(RantNode *n){
                             : snprintf(line, sizeof line, "%s", p->text);
         if (ln < 0) ln = 0;
         if (ln >= (int)sizeof line) ln = (int)sizeof line - 1;
-        i_rant_node_log_publish(n, RANT_LOG_ERROR, line, (size_t)ln, p->wall_us, p->mono_us, 1);
+        i_rant_node_log_publish(n, (RantLevel)p->level, RANT_ORIGIN_RANT, line, (size_t)ln,
+                                p->wall_us, 1);
     }
     if (n->log_pend_dropped){
         char line[64];
-        int ln = snprintf(line, sizeof line, "log mirror overflow: %u error events dropped",
+        int ln = snprintf(line, sizeof line, "log mirror overflow: %u lines dropped",
                           (unsigned)n->log_pend_dropped);
         n->log_pend_dropped = 0;
-        i_rant_node_log_publish(n, RANT_LOG_ERROR, line, (size_t)(ln < 0 ? 0 : ln),
-                                i_rant_plat_wall_us(), i_rant_plat_now_us(), 1);
+        i_rant_node_log_publish(n, RANT_LEVEL_ERROR, RANT_ORIGIN_RANT, line,
+                                (size_t)(ln < 0 ? 0 : ln), 0, 1);
     }
     n->log_flushing = 0;
 }
@@ -1886,8 +2130,10 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
     if (pfd[0].revents & RANT_POLLIN)
         i_rant_node_rx_drain(n, n->fd, i_rant_plat_now_us() + RANT_RX_BUDGET_US);
 
-    /* mirrored errors publish now, before the TX pull, so the lines ride this pass */
+    /* Rant's own lines and a changed status set publish now, before the TX pull, so they
+       ride this pass */
     if (n->log_pend_n || n->log_pend_dropped) i_rant_node_log_flush(n);
+    if (n->status_dirty) i_rant_node_status_flush(n);
 
     now=i_rant_plat_now_us();
     /* the detail requester: drain queued requests and rearm every active peer once per
@@ -3257,26 +3503,28 @@ int rant_topic_take_latest(RantTopic *topic, RantMsg *out, int timeout_ms){
     return i_rant_topic_take(topic, out, timeout_ms, 1);
 }
 
-int rant_node_set_log_queue(RantNode *n, RantQueue *q){
-    int acquired, lvl;
+/* Gives a builtin handle a ring on q, or drops it for NULL: the one handle queue that
+ * changes after creation. h NULL is a disabled builtin. */
+static int i_rant_node_set_builtin_queue(RantNode *n, RantTopic *h, RantQueue *q){
+    int acquired, r = RANT_OK;
     if (!n) return RANT_ERR_STATE;
     acquired = i_rant_node_lock(n);
     if (acquired) i_rant_node_callbacks_settle(n);
-    if (!acquired || (q && q->n != n)){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }
-    if (!n->log_topics[RANT_LOG_ERROR]){ i_rant_node_unlock(n, acquired); return RANT_ERR_NOSYS; }
-    for (lvl = 0; lvl < 3; lvl++){
-        RantTopic *h = n->log_topics[lvl];
-        if (h && h->q && h->q->busy){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }
-    }
-    for (lvl = 0; lvl < 3; lvl++){
-        RantTopic *h = n->log_topics[lvl];
-        if (!h) continue;
-        if (!q){ i_rant_node_queue_drop(n, h); h->queue = NULL; continue; }   /* the parked lines go */
-        if (!i_rant_node_queue_ensure(n, h, NULL)){ i_rant_node_unlock(n, acquired); return RANT_ERR_OOM; }
-        h->queue = q;
-    }
+    if (!acquired || (q && q->n != n) || (h && h->q && h->q->busy)) r = RANT_ERR_STATE;
+    else if (!h) r = RANT_ERR_NOSYS;
+    else if (!q){ i_rant_node_queue_drop(n, h); h->queue = NULL; }    /* the parked records go */
+    else if (!i_rant_node_queue_ensure(n, h, NULL)) r = RANT_ERR_OOM;
+    else h->queue = q;
     i_rant_node_unlock(n, acquired);
-    return RANT_OK;
+    return r;
+}
+
+int rant_node_set_log_queue(RantNode *n, RantQueue *q){
+    return i_rant_node_set_builtin_queue(n, n ? n->log_topic : NULL, q);
+}
+
+int rant_node_set_status_queue(RantNode *n, RantQueue *q){
+    return i_rant_node_set_builtin_queue(n, n ? n->status_topic : NULL, q);
 }
 
 void rant_queue_stats(RantQueue *g, uint32_t *waiting, uint32_t *dropped){

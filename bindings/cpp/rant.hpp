@@ -90,7 +90,8 @@ enum class EventKind {
     PeerDown,       /* a peer went silent or said bye */
     PeerInterest,   /* what we publish to or receive from a peer changed */
     MessageLost,    /* a best effort gap: lost_first() and lost_count() say which */
-    Error
+    Error,
+    StatusCleared   /* a peer cleared one of our clearable conditions: peer(), detail() the key */
 };
 
 /* The fault an EventKind::Error event carries. */
@@ -106,6 +107,7 @@ enum class ErrorKind {
     BadSchema,            /* schema text or wire that does not compile */
     BadDomain,            /* RANT_DOMAIN is not a number from 0 to 65535 */
     BadPrefix,            /* RANT_PREFIX or the prefix option holds '@', starts or ends with '/' or is too long */
+    BadLogLevel,          /* RANT_LOG_LEVEL or the log_level option is not a level */
     WireVersion,          /* a node of the domain speaks another wire version: ip, port. Once per source */
     Bridge                /* the bridge cannot be reached, refused, or its link dropped: detail() */
 };
@@ -132,19 +134,23 @@ enum class CallStatus {
 /* What a mesh entity is. Reflection shows folded entities, never their raw channels. */
 enum class EntityKind { Topic = 0, Function, Variable, Task };
 
-/* The severity of a line on the built in log topics. */
-enum class LogLevel { Error = 0, Warn = 1, Info = 2 };
+/* The severity of a log line or a status condition, rising. */
+enum class Level { Debug = 1, Info, Warn, Error };
+/* Who wrote a log line or a condition: the app, or Rant itself. */
+enum class Origin { App = 0, Rant = 1 };
 
 static_assert((int)Reliability::Reliable == detail::RANT_RELIABLE, "reliability enum drift");
 static_assert((int)Role::Inactive == detail::RANT_INACTIVE, "role enum drift");
 static_assert((int)SendStatus::NoSys == detail::RANT_ERR_NOSYS, "result enum drift");
 static_assert((int)SendStatus::Schema == detail::RANT_ERR_SCHEMA, "result enum drift");
 static_assert((int)EventKind::Error == detail::RANT_ERROR, "event enum drift");
+static_assert((int)EventKind::StatusCleared == detail::RANT_STATUS_CLEARED, "event enum drift");
 static_assert((int)ErrorKind::Waker == detail::RANT_E_WAKER, "error enum drift");
 static_assert((int)ErrorKind::BadAddress == detail::RANT_E_BAD_ADDRESS, "error enum drift");
 static_assert((int)ErrorKind::BadSchema == detail::RANT_E_BAD_SCHEMA, "error enum drift");
 static_assert((int)ErrorKind::BadDomain == detail::RANT_E_BAD_DOMAIN, "error enum drift");
 static_assert((int)ErrorKind::BadPrefix == detail::RANT_E_BAD_PREFIX, "error enum drift");
+static_assert((int)ErrorKind::BadLogLevel == detail::RANT_E_BAD_LOG_LEVEL, "error enum drift");
 static_assert((int)ErrorKind::Bridge == detail::RANT_E_BRIDGE, "error enum drift");
 static_assert((int)FieldType::Struct == detail::RANT_STRUCT, "field-type enum drift");
 static_assert((int)FieldType::String == detail::RANT_STR, "field-type enum drift");
@@ -161,7 +167,9 @@ static_assert((int)EntityKind::Topic == detail::RANT_ENTITY_TOPIC, "entity enum 
 static_assert((int)EntityKind::Variable == detail::RANT_ENTITY_VARIABLE, "entity enum drift");
 static_assert((int)EntityKind::Task == detail::RANT_ENTITY_TASK, "entity enum drift");
 #endif
-static_assert((int)LogLevel::Info == detail::RANT_LOG_INFO, "log-level enum drift");
+static_assert((int)Level::Debug == detail::RANT_LEVEL_DEBUG, "level enum drift");
+static_assert((int)Level::Error == detail::RANT_LEVEL_ERROR, "level enum drift");
+static_assert((int)Origin::Rant == detail::RANT_ORIGIN_RANT, "origin enum drift");
 
 /* forward decls. Every handle is a template over the message type, and the type argument
  * rant::Bytes is the raw form that carries a DSL schema and reads through MessageView. */
@@ -456,12 +464,15 @@ struct NodeOptions {
     bool                     fetch_details        = false;   /* fetch every peer topic's schema */
     std::chrono::milliseconds match_wait{ 0 };   /* 0 = 1 s, negative = drop loudly */
     /* networking (all optional) */
-    /* built in observability, all on by default (Node::log, Node::on_log, Reflection::meta) */
-    bool                     disable_logs         = false; /* strip the @rant/log/{error,warn,info}
-                                                              topics (saves their history memory) */
+    /* built in observability, all on by default (Node::log, Node::set_status, Reflection::meta) */
+    bool                     disable_logs         = false; /* strip the @rant/log topic (saves its
+                                                              history memory) */
+    std::optional<Level>     log_level;                    /* the lowest level published, empty
+                                                              takes RANT_LOG_LEVEL, else Info */
+    bool                     disable_status       = false; /* strip the @rant/status topics */
     bool                     disable_meta         = false; /* do not host the @rant/meta endpoint */
     bool                     disable_error_logs   = false; /* suppress the default mirroring of this
-                                                              node's errors onto @rant/log/error */
+                                                              node's errors onto @rant/log */
     uint16_t                 data_port            = 0;   /* 0 = OS-assigned */
     uint16_t                 discovery_port       = 0;   /* 0 = 6730 */
     std::string              multicast_interface;   /* empty = auto, "127.0.0.1" = single host */
@@ -983,7 +994,8 @@ public:
     /* PeerInterest: the topics we now publish to the peer and receive from it. */
     uint16_t         publish_topics() const { return ev_->publish_topics; }
     uint16_t         receive_topics() const { return ev_->receive_topics; }
-    /* SchemaMismatch and BadSchema: one line saying what went wrong (empty when none). */
+    /* SchemaMismatch and BadSchema: one line saying what went wrong (empty when none).
+       StatusCleared: the key of the condition. */
     std::string      detail()         const { return ev_->detail ? ev_->detail : ""; }
 
     /* A one-line human-readable rendering (uses the C formatter). */
@@ -1041,16 +1053,33 @@ struct Peer {
 };
 
 /* One line from another node's log, for a Node::on_log handler. The views are valid for the
- * callback only. wall_us is the sender's UTC clock, mono_us its monotonic one, recv_us ours. */
+ * callback only. wall_us is the sender's UTC clock when it logged, recv_us our monotonic one. */
 struct LogLine {
-    LogLevel         level = LogLevel::Info;
+    Level            level = Level::Info;
+    Origin           origin = Origin::App;
     std::string_view node;         /* the publishing node's name */
     uint32_t         node_id = 0;  /* the publishing peer id */
     uint64_t         wall_us = 0;
-    uint64_t         mono_us = 0;
     uint64_t         recv_us = 0;
-    uint64_t         written_us = 0;
     std::string_view text;
+};
+
+/* One active condition in a node's status. The views are valid for the callback only. */
+struct Condition {
+    std::string_view key;          /* its identity within the node */
+    Level            level = Level::Info;
+    Origin           origin = Origin::App;
+    bool             clearable = false;   /* Node::clear_peer_status may clear it */
+    uint64_t         since_us = 0; /* the owner's UTC clock when it was raised */
+    std::string_view text;
+};
+
+/* A node's whole status, for a Node::on_status handler: every condition active there now.
+ * Empty when the node cleared them all or went away. */
+struct StatusUpdate {
+    std::string_view       node;         /* the publishing node's name */
+    uint32_t               node_id = 0;  /* the publishing peer id */
+    std::vector<Condition> conditions;
 };
 
 /* The RANT_SCHEMA reflection and the typed codec. RANT_SCHEMA specializes rant::reflect<T>,
@@ -2157,6 +2186,7 @@ namespace priv {
 using MessageHandler = std::function<void(const MessageView&)>;
 using EventHandler   = std::function<void(const Event&)>;
 using LogHandler     = std::function<void(const LogLine&)>;
+using StatusHandler  = std::function<void(const StatusUpdate&)>;
 
 /* One name's topic slot and how many live handles hold each side of it. */
 struct TopicRec {
@@ -2177,7 +2207,10 @@ struct NodeImpl : std::enable_shared_from_this<NodeImpl> {
     /* read on the loop thread, swapped whole under reg_mu */
     std::shared_ptr<const EventHandler> on_event;
     std::shared_ptr<const LogHandler>   on_log;
-    bool                       log_bound = false;   /* the level topics hold our handler, under create_mu */
+    std::shared_ptr<const StatusHandler> on_status;
+    bool                       log_bound = false;    /* the log topic holds our handler, under create_mu */
+    bool                       status_bound = false; /* the status topic holds ours, under create_mu */
+    std::unordered_set<uint32_t> status_peers;       /* peers whose last set was not empty, under reg_mu */
     std::string                mcast_if;
     std::vector<detail::RantAddr> seeds;
 
@@ -2946,6 +2979,8 @@ public:
         co.fetch_details = o.fetch_details ? 1 : 0;
         co.match_wait_ms = priv::to_ms(o.match_wait);
         co.disable_logs  = o.disable_logs ? 1 : 0;
+        co.log_level     = o.log_level ? static_cast<uint8_t>(*o.log_level) : 0;
+        co.disable_status = o.disable_status ? 1 : 0;
         co.disable_meta  = o.disable_meta ? 1 : 0;
         co.disable_error_logs = o.disable_error_logs ? 1 : 0;
         co.user_data     = impl.get();
@@ -3104,20 +3139,20 @@ public:
         return Schema(s);
     }
 
-    /* Publish an already formatted line on a level's built in log topic, truncated at
-     * RANT_LOG_MAX. SendStatus::NoSys when logs are disabled. */
-    SendStatus log(LogLevel level, std::string_view text) {
+    /* Publish an already formatted line on the built in log, truncated at RANT_LOG_MAX. A
+     * level below the node's log_level sends nothing. SendStatus::NoSys when logs are disabled. */
+    SendStatus log(Level level, std::string_view text) {
         priv::Pass p = pass();
         if (!p) return SendStatus::State;
         return static_cast<SendStatus>(detail::rant_node_log_text(
-            impl_->node, static_cast<detail::RantLogLevel>(level),
+            impl_->node, static_cast<detail::RantLevel>(level),
             text.data(), static_cast<int>(text.size())));
     }
 
     /* printf style overloads with the C log API's bounded formatting: truncated at
      * RANT_LOG_MAX, and a formatting failure publishes an empty line. */
     template <class... Args>
-    SendStatus log(LogLevel level, const char* fmt, Args&&... args) {
+    SendStatus log(Level level, const char* fmt, Args&&... args) {
         if (!valid()) return SendStatus::State;
         if (!fmt) return SendStatus::NoTopic;
         char text[RANT_LOG_MAX];
@@ -3136,9 +3171,9 @@ public:
         if (!q) { priv::raise_last(impl_->node, "rant::Node::create_queue"); return {}; }
         return Queue(q, impl_);
     }
-    /* Every other node's log lines at every level, decoded to a LogLine, where the node's
-     * callbacks run. One handler: a later call replaces it and {} clears it. Throws, or
-     * returns false, when this node was opened with disable_logs. */
+    /* Every other node's log lines, decoded to a LogLine, where the node's callbacks run.
+     * One handler: a later call replaces it and {} clears it. Throws, or returns false, when
+     * this node was opened with disable_logs. */
     bool on_log(std::function<void(const LogLine&)> h) {
         if (!valid()) return false;
         std::shared_ptr<const LogHandler> p;
@@ -3151,48 +3186,112 @@ public:
         if (!hold) return false;
         std::lock_guard<std::mutex> g(impl_->create_mu);
         if (impl_->log_bound || !impl_->on_log) return true;
-        /* the queue first, so the catch up replay parks too */
-        if (impl_->queue && detail::rant_node_set_log_queue(impl_->node, impl_->queue) != 0) {
-            priv::raise_last(impl_->node, "rant::Node::on_log");
-            return false;
-        }
-        const LogLevel levels[] = { LogLevel::Error, LogLevel::Warn, LogLevel::Info };
-        for (LogLevel level : levels) {
-            detail::RantTopic* ch = detail::rant_node_log_topic(
-                impl_->node, static_cast<detail::RantLogLevel>(level));
-            if (!ch) { priv::raise_msg("rant::Node::on_log: logs are disabled on this node"); return false; }
-            if (detail::rant_topic_set_role(ch, detail::RANT_PUBSUB) != 0) {
-                priv::raise_last(impl_->node, "rant::Node::on_log");
-                return false;
+        Impl* impl = impl_.get();   /* the handler lives in impl, so no ownership here */
+        MessageHandler mh = [impl](const MessageView& m) {
+            std::shared_ptr<const LogHandler> f;
+            {
+                std::lock_guard<std::mutex> g2(impl->reg_mu);
+                f = impl->on_log;
             }
-            Impl* impl = impl_.get();   /* the handler lives in impl, so no ownership here */
-            MessageHandler mh = [impl, level](const MessageView& m) {
-                std::shared_ptr<const LogHandler> f;
-                {
-                    std::lock_guard<std::mutex> g2(impl->reg_mu);
-                    f = impl->on_log;
-                }
-                if (!f) return;
-                LogLine ln;
-                ln.level   = level;
-                ln.node    = m.publisher_name();
-                ln.node_id = m.publisher_id();
-                ln.wall_us = m.get_uint("wall_us");
-                ln.mono_us = m.get_uint("mono_us");
-                ln.recv_us = m.recv_us();
-                ln.written_us = m.written_us();
-                ln.text    = m.get_string("text");
-                (*f)(ln);
-            };
-            uint16_t idx = detail::rant_topic_index(ch);
-            std::lock_guard<std::mutex> g2(impl_->reg_mu);   /* leaf lock: never call C while held */
-            auto& slot = impl_->sub_handlers[idx];
-            auto nv = slot ? std::make_shared<std::vector<priv::SubHandler>>(*slot)
-                           : std::make_shared<std::vector<priv::SubHandler>>();
-            nv->push_back(priv::SubHandler{ 0, std::move(mh) });
-            slot = std::move(nv);
-        }
+            if (!f) return;
+            LogLine ln;
+            ln.level   = static_cast<Level>(m.get_uint("level"));
+            ln.origin  = static_cast<Origin>(m.get_uint("origin"));
+            ln.node    = m.publisher_name();
+            ln.node_id = m.publisher_id();
+            ln.wall_us = m.capture_us() ? m.capture_us() : m.written_us();
+            ln.recv_us = m.recv_us();
+            ln.text    = m.get_string("text");
+            (*f)(ln);
+        };
+        if (!bind_builtin(detail::rant_node_log_topic(impl_->node), &detail::rant_node_set_log_queue,
+                          std::move(mh), "rant::Node::on_log", "logs are disabled on this node"))
+            return false;
         impl_->log_bound = true;
+        return true;
+    }
+
+    /* Raise the condition key on this node's status, or update it while it is active: since_us
+     * stays from the raise, and the same values again send nothing. Readers see it after the
+     * next loop pass. TooBig for a key over 48 bytes or past 32 conditions, NoSys when status
+     * is disabled. clearable lets another node clear it with clear_peer_status. */
+    SendStatus set_status(std::string_view key, Level level, std::string_view text, bool clearable = false) {
+        priv::Pass p = pass();
+        if (!p) return SendStatus::State;
+        std::string k(key), t(text);
+        detail::RantStatusOpts so;
+        std::memset(&so, 0, sizeof so);
+        so.clearable = clearable ? 1 : 0;
+        return static_cast<SendStatus>(detail::rant_node_set_status(
+            impl_->node, k.c_str(), static_cast<detail::RantLevel>(level), t.c_str(), &so));
+    }
+    /* Clear the condition key, Ok whether or not it was active. */
+    SendStatus clear_status(std::string_view key) {
+        priv::Pass p = pass();
+        if (!p) return SendStatus::State;
+        std::string k(key);
+        return static_cast<SendStatus>(detail::rant_node_clear_status(impl_->node, k.c_str()));
+    }
+    /* Ask another node to clear its clearable condition key, the occurrence raised at
+     * since_us. Nothing answers: its next StatusUpdate shows it gone, or still there when it
+     * refused. */
+    SendStatus clear_peer_status(uint32_t node_id, std::string_view key, uint64_t since_us) {
+        priv::Pass p = pass();
+        if (!p) return SendStatus::State;
+        std::string k(key);
+        return static_cast<SendStatus>(detail::rant_node_clear_peer_status(impl_->node, node_id, k.c_str(), since_us));
+    }
+    /* Every other node's status, decoded to a StatusUpdate, where the node's callbacks run: on
+     * each change, each node's current set when this binds, and an empty set when a node goes
+     * away. One handler: a later call replaces it and {} clears it. Throws, or returns false,
+     * when this node was opened with disable_status. */
+    bool on_status(std::function<void(const StatusUpdate&)> h) {
+        if (!valid()) return false;
+        std::shared_ptr<const priv::StatusHandler> p;
+        if (h) p = std::make_shared<const priv::StatusHandler>(std::move(h));
+        {
+            std::lock_guard<std::mutex> g(impl_->reg_mu);
+            impl_->on_status = std::move(p);
+        }
+        priv::Pass hold = pass();
+        if (!hold) return false;
+        std::lock_guard<std::mutex> g(impl_->create_mu);
+        if (impl_->status_bound || !impl_->on_status) return true;
+        Impl* impl = impl_.get();
+        MessageHandler mh = [impl](const MessageView& m) {
+            StatusUpdate u;
+            u.node    = m.publisher_name();
+            u.node_id = m.publisher_id();
+            uint32_t n = m.get_array_count("conditions");
+            u.conditions.reserve(n);
+            for (uint32_t i = 0; i < n; i++) {
+                char path[48];
+                auto at = [&](const char* member) {
+                    std::snprintf(path, sizeof path, "conditions[%u].%s", static_cast<unsigned>(i), member);
+                    return path;
+                };
+                Condition c;
+                c.key       = m.get_string(at("key"));
+                c.level     = static_cast<Level>(m.get_uint(at("level")));
+                c.origin    = static_cast<Origin>(m.get_uint(at("origin")));
+                c.clearable = m.get_bool(at("clearable"));
+                c.since_us  = m.get_uint(at("since_us"));
+                c.text      = m.get_string(at("text"));
+                u.conditions.push_back(c);
+            }
+            std::shared_ptr<const priv::StatusHandler> f;
+            {
+                std::lock_guard<std::mutex> g2(impl->reg_mu);
+                f = impl->on_status;
+                if (n) impl->status_peers.insert(u.node_id);
+                else impl->status_peers.erase(u.node_id);
+            }
+            if (f) (*f)(u);
+        };
+        if (!bind_builtin(detail::rant_node_status_topic(impl_->node), &detail::rant_node_set_status_queue,
+                          std::move(mh), "rant::Node::on_status", "status is disabled on this node"))
+            return false;
+        impl_->status_bound = true;
         return true;
     }
 
@@ -3269,7 +3368,44 @@ private:
     }
     static void on_evt_tramp(const detail::RantEvent* e) {
         Impl* impl = static_cast<Impl*>(e->user);
-        if (impl) impl->emit(Event(e));
+        if (!impl) return;
+        if (e->kind == detail::RANT_PEER_DOWN) status_gone(impl, e);
+        impl->emit(Event(e));
+    }
+    /* A node that went away takes its conditions with it: on_status sees its set empty. */
+    static void status_gone(Impl* impl, const detail::RantEvent* e) {
+        std::shared_ptr<const priv::StatusHandler> f;
+        {
+            std::lock_guard<std::mutex> g(impl->reg_mu);
+            if (!impl->status_peers.erase(e->peer)) return;
+            f = impl->on_status;
+        }
+        if (!f) return;
+        priv::InCallback mark(impl);
+        StatusUpdate u;
+        if (e->peer_name) u.node = e->peer_name;
+        u.node_id = e->peer;
+        priv::guarded(impl, [&] { (*f)(u); });
+    }
+
+    /* Widens a builtin topic of this node to subscribe and routes its messages to mh, the
+     * queue first so the catch up replay parks too. ch NULL is a disabled builtin. Under create_mu. */
+    bool bind_builtin(detail::RantTopic* ch, int (*set_queue)(detail::RantNode*, detail::RantQueue*),
+                      MessageHandler mh, const char* what, const char* off) {
+        if (!ch) { priv::raise_msg((std::string(what) + ": " + off).c_str()); return false; }
+        if ((impl_->queue && set_queue(impl_->node, impl_->queue) != 0)
+            || detail::rant_topic_set_role(ch, detail::RANT_PUBSUB) != 0) {
+            priv::raise_last(impl_->node, what);
+            return false;
+        }
+        uint16_t idx = detail::rant_topic_index(ch);
+        std::lock_guard<std::mutex> g(impl_->reg_mu);   /* leaf lock: never call C while held */
+        auto& slot = impl_->sub_handlers[idx];
+        auto nv = slot ? std::make_shared<std::vector<priv::SubHandler>>(*slot)
+                       : std::make_shared<std::vector<priv::SubHandler>>();
+        nv->push_back(priv::SubHandler{ 0, std::move(mh) });
+        slot = std::move(nv);
+        return true;
     }
 
     /* a schema view from a walk, registered in the node so it outlives the poll */

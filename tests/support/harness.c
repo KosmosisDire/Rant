@@ -170,7 +170,7 @@ void test_on_event(const RantEvent *ev){
 }
 
 int test_builtin(const RantEntityInfo *e){
-    static const char *const primary[] = { "@rant/log/error", "@rant/log/warn", "@rant/log/info",
+    static const char *const primary[] = { "@rant/log", "@rant/status", "@rant/status/clear",
                                            "@rant/meta@req" };
     size_t i;
     if (e->name.len) return e->name.len >= 6 && memcmp(e->name.data, "@rant/", 6) == 0;

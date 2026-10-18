@@ -133,14 +133,15 @@ typedef struct {
     uint16_t              max_peers;         /* RANT_MAX_PEERS */
 } RantNodeDiscovery;
 
-/* The one event type, fired by every layer. Four lifecycle kinds plus RANT_ERROR, whose
- * .error says which fault. Read only the fields named for the kind. */
+/* The one event type, fired by every layer. Four lifecycle kinds, RANT_ERROR, whose .error
+ * says which fault, and a status clear. Read only the fields named for the kind. */
 typedef enum {
     RANT_PEER_UP,          /* discovered or resumed: .peer, .ip, .ip_len, .port */
     RANT_PEER_DOWN,        /* lost or fell silent: .peer */
     RANT_PEER_INTEREST,    /* interest applied: .peer, .publish_topics, .receive_topics */
     RANT_MSG_LOST,         /* seqnos skipped: .topic, .peer, .lost_first, .lost_count. Not an error */
-    RANT_ERROR             /* read .error and rant_event_str */
+    RANT_ERROR,            /* read .error and rant_event_str */
+    RANT_STATUS_CLEARED    /* a peer cleared one of our clearable conditions: .peer, .detail the key */
 } RantEventKind;
 
 /* The error carried by a RANT_ERROR event and returned by rant_last_error. Named RANT_E_*
@@ -180,6 +181,7 @@ typedef enum {
     RANT_E_BAD_DOMAIN,         /* RANT_DOMAIN is not a number from 0 to 65535, refused at open */
     RANT_E_BAD_PREFIX,         /* RANT_PREFIX or opts.prefix holds '@', starts or ends with '/' or
                                   leaves no room for a name, refused at open */
+    RANT_E_BAD_LOG_LEVEL,      /* RANT_LOG_LEVEL or opts.log_level is not a level, refused at open */
     /* a node this one cannot speak with */
     RANT_E_WIRE_VERSION,       /* a node of the domain speaks another wire version: .ip, .ip_len,
                                   .port. Once per source */
@@ -205,7 +207,7 @@ typedef struct {
     uint16_t   publish_topics; /* PEER_INTEREST: topics we now publish to this peer */
     uint16_t   receive_topics; /* PEER_INTEREST: topics we now receive from it */
     const char *detail;        /* SCHEMA_MISMATCH, BAD_SCHEMA and BRIDGE: one line saying what
-                                  went wrong and where, or NULL */
+                                  went wrong and where, or NULL. STATUS_CLEARED: the key */
     const char *peer_name;     /* the peer's node name, NULL when unknown. Prefer it over .peer */
 } RantEvent;
 typedef void (*RantEventFn)(const RantEvent *ev);

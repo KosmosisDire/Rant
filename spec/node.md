@@ -221,11 +221,13 @@ recorded per (peer, topic, direction) at detail intake. `RantEvent.peer_name` is
 once at the single emit point so `rant_event_str` never prints a bare id. `RantEvent` is
 returned by value, so every binding mirror must match it exactly (spec/bindings.md).
 Deferred on purpose: `RANT_E_SHM` (needs once only dedup) and `RANT_E_BAD_PACKET` (risks a
-flood from hostile traffic). Internal errors are mirrored to `@rant/log/error` through a
-fixed ring of 8 records (events fire mid receive where re entering the transport is
-unsafe, so the poll pass flushes them), duplicates coalesce into "(xN)", overflow becomes
-one summary line. The ring is allocated on the first error, so a healthy node never pays
-for it. `RANT_E_SEND` carries the datagram size and the first submessage's topic, so a
+flood from hostile traffic). Internal errors are mirrored to `@rant/log` at Error with
+origin Rant through a fixed ring of 8 records (events fire mid receive where re entering
+the transport is unsafe, so the poll pass flushes them), duplicates coalesce into "(xN)",
+overflow becomes one summary line. Rant's other lines, such as a refused status clear, ride
+the same ring as notes coalesced by text, and a note below the log level is never
+recorded. Each line goes out with the time it fired as `capture_us`. The ring is
+allocated on the first line, so a healthy node never pays for it. `RANT_E_SEND` carries the datagram size and the first submessage's topic, so a
 starved link (an ESP32 out of WiFi buffers reports ENOMEM) says which topic and how big.
 
 ## Name prefix
@@ -260,17 +262,45 @@ through `i_rant_node_topic_hi`.
 Builtins are hidden from every high level surface. Both entity walks skip them, the meta
 snapshot reports app topics only, and a leading `@` is refused in every public constructor
 so an app entity can never land in the hidden namespace. The raw interest walk still
-yields them. `rant_node_log_topic` and `rant_node_meta_function` are the way in.
+yields them. `rant_node_log_topic`, `rant_node_status_topic` and `rant_node_meta_function`
+are the way in.
 
-The three `@rant/log/{error,warn,info}` topics are reliable with `keep_last` = `catch_up` =
-16 (8 for info) and no backpressure wait, so a slow subscriber only loses old lines.
-Catch up replay is per writer lane, so a late subscriber gets each node's last lines per
-level. The record schema is `RantLog { wall_us: u64, mono_us: u64, text: string }`, and the
-text is capped at `RANT_LOG_MAX` (512) bytes. A node never delivers to itself, so
-consuming a level means reading every other node's lines.
-`rant_node_set_log_queue` gives the three log handles a ring and the queue after creation,
-the one handle queue that changes. A binding sets it before widening the role, so the
-catch up replay parks rather than landing inline.
+The log and status schemas share `RantLevel = enum<u8> { Debug = 1, Info, Warn, Error }`
+and `RantOrigin = enum<u8> { App, Rant }`. The level starts at 1 so that 0 in
+`opts.log_level` means the default.
+
+`@rant/log` is reliable with `keep_last` = `catch_up` = 4 and no backpressure wait, so a
+slow subscriber only loses old lines. Catch up replay is per writer lane, so a late
+subscriber gets each node's last 4 lines. The record schema is
+`RantLog { level: RantLevel, origin: RantOrigin, text: string }`, and the text is capped at
+`RANT_LOG_MAX` (512) bytes. The line's time is the message's `capture_us` when set (Rant's
+own lines, which flush after they fired), else its `written_us`. The level filter runs in
+the call, before formatting, so a Debug line below the level costs a compare. A node never
+delivers to itself, so consuming the log means reading every other node's lines.
+
+`@rant/status` carries the node's whole set as
+`RantStatus { conditions: RantCondition[] }`, reliable with `keep_last` = `catch_up` = 1.
+Each set supersedes the last, so the one retained message is the whole truth for a late
+subscriber and a lost one heals with the next. A periodic republish would add nothing:
+repair covers loss, catch up covers a late join, and `RANT_PEER_DOWN` covers a node that
+went away. The set lives as its own message in a node owned buffer, grown by one element
+per raise, so there is one copy and the flush sends it as is. A raise, update or clear
+edits it under the lock and marks it dirty, and the poll pass publishes it once, which
+coalesces a burst and keeps the calls safe mid receive. An update with the same level,
+text and clearable marks nothing. A condition is identified by origin and key, and since
+the key and text are `string<48>` and `string<160>` slots the caps are wire constants.
+
+`@rant/status/clear` carries `RantClear { key: string<48>, since_us: u64 }`, PUBSUB on every
+node like meta, directed at the owner, reliable with `catch_up` 0 so a clear never replays
+onto a node that restarted. The owner's handler runs mid receive: an app condition that is
+clearable and whose `since_us` matches is removed and `RANT_STATUS_CLEARED` fires with the
+asker as `.peer` and the key as `.detail`. Anything else becomes a Debug note. There is no
+reply, since the next set is the answer, and the `since_us` match keeps two operators'
+clears from landing on a later raise of the same key.
+
+`rant_node_set_log_queue` and `rant_node_set_status_queue` give their handle a ring and the
+queue after creation, the one handle queue that changes. A binding sets it before widening
+the role, so the catch up replay parks rather than landing inline.
 
 `@rant/meta` is one handle carrying both sides: PUBSUB channels, a handler plus a pending
 list, directed requests so a call aimed at one peer never wakes the rest, keep_last 2
