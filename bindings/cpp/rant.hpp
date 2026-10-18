@@ -3388,23 +3388,31 @@ private:
         priv::guarded(impl, [&] { (*f)(u); });
     }
 
-    /* Widens a builtin topic of this node to subscribe and routes its messages to mh, the
-     * queue first so the catch up replay parks too. ch NULL is a disabled builtin. Under create_mu. */
+    /* Widens a builtin topic of this node to subscribe and routes its messages to mh. The
+     * queue and the handler go first, so the catch up replay parks or lands on the handler.
+     * ch NULL is a disabled builtin. Under create_mu. */
     bool bind_builtin(detail::RantTopic* ch, int (*set_queue)(detail::RantNode*, detail::RantQueue*),
                       MessageHandler mh, const char* what, const char* off) {
         if (!ch) { priv::raise_msg((std::string(what) + ": " + off).c_str()); return false; }
-        if ((impl_->queue && set_queue(impl_->node, impl_->queue) != 0)
-            || detail::rant_topic_set_role(ch, detail::RANT_PUBSUB) != 0) {
+        if (impl_->queue && set_queue(impl_->node, impl_->queue) != 0) {
             priv::raise_last(impl_->node, what);
             return false;
         }
         uint16_t idx = detail::rant_topic_index(ch);
-        std::lock_guard<std::mutex> g(impl_->reg_mu);   /* leaf lock: never call C while held */
-        auto& slot = impl_->sub_handlers[idx];
-        auto nv = slot ? std::make_shared<std::vector<priv::SubHandler>>(*slot)
-                       : std::make_shared<std::vector<priv::SubHandler>>();
-        nv->push_back(priv::SubHandler{ 0, std::move(mh) });
-        slot = std::move(nv);
+        {
+            std::lock_guard<std::mutex> g(impl_->reg_mu);   /* leaf lock: never call C while held */
+            auto& slot = impl_->sub_handlers[idx];
+            auto nv = slot ? std::make_shared<std::vector<priv::SubHandler>>(*slot)
+                           : std::make_shared<std::vector<priv::SubHandler>>();
+            nv->push_back(priv::SubHandler{ 0, std::move(mh) });
+            slot = std::move(nv);
+        }
+        if (detail::rant_topic_set_role(ch, detail::RANT_PUBSUB) != 0) {
+            std::lock_guard<std::mutex> g(impl_->reg_mu);
+            impl_->sub_handlers.erase(idx);   /* only ours: a builtin has no other handler */
+            priv::raise_last(impl_->node, what);
+            return false;
+        }
         return true;
     }
 
