@@ -42,7 +42,8 @@ pub enum ErrorKind {
     Socket,
     /// Binding a port failed, it is in use.
     Bind,
-    /// Joining the discovery group failed.
+    /// Joining the discovery group failed: a bad interface, or no multicast here, where the
+    /// node runs on a bridge instead.
     McastJoin,
     /// A send failed hard.
     Send,

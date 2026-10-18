@@ -115,7 +115,8 @@ namespace Rant
         Socket,
         /// <summary>Binding failed, the port is in use: OsError.</summary>
         Bind,
-        /// <summary>Joining the discovery group failed, usually a bad interface: OsError.</summary>
+        /// <summary>Joining the discovery group failed, a bad interface or no multicast here,
+        /// where the node runs on a bridge instead: OsError.</summary>
         McastJoin,
         /// <summary>A send failed hard: Peer, Topic, TooBigBytes, OsError.</summary>
         Send,

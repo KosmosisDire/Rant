@@ -166,7 +166,8 @@ typedef enum {
     RANT_E_PLATFORM,           /* platform net init failed */
     RANT_E_SOCKET,             /* opening a UDP socket failed */
     RANT_E_BIND,               /* bind failed, the port is in use: .port */
-    RANT_E_MCAST_JOIN,         /* joining the discovery group failed, a bad interface */
+    RANT_E_MCAST_JOIN,         /* joining the discovery group failed: a bad interface, or no
+                                  multicast here, where the node runs on a bridge instead */
     RANT_E_SEND,               /* a send hard failed: .peer, .topic, .too_big_bytes = its size */
     RANT_E_RECV,               /* a receive hard failed */
     RANT_E_POLL,               /* the socket wait failed */

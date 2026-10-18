@@ -120,7 +120,8 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
         p=i_rant_event_append_str(p,end,"bind failed on port "); p=i_rant_event_append_u64(p,end,ev->port);
         p=i_rant_event_append_oserr(p,end,ev); break;
     case RANT_E_MCAST_JOIN:
-        p=i_rant_event_append_str(p,end,"multicast join failed"); p=i_rant_event_append_oserr(p,end,ev); break;
+        p=i_rant_event_append_str(p,end,"multicast join failed"); p=i_rant_event_append_oserr(p,end,ev);
+        p=i_rant_event_append_str(p,end,", a host without multicast runs on a bridge (net.bridge)"); break;
     case RANT_E_SEND:
         p=i_rant_event_append_str(p,end,"send failed to "); p=i_rant_event_append_peer(p,end,ev);
         if (ev->topic_name){ p=i_rant_event_append_str(p,end," "); p=i_rant_event_append_topic(p,end,ev); }

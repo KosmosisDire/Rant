@@ -36,7 +36,8 @@ stays until it goes quiet, so a peer's address never flaps.
 
 A node whose network gives it no multicast, or that sits behind a NAT such as a rootless
 container or a cloud host, runs on a bridge's sockets (Through a bridge). Peers reach a
-node at the address its announces arrive from.
+node at the address its announces arrive from. With no multicast and no bridge the open
+fails with `RANT_E_MCAST_JOIN`.
 
 `opts.net.seed_peers` also sends our announces by unicast, for two segments that multicast
 does not cross. A seeded node learns us and answers, but its other peers do not.
