@@ -1,9 +1,11 @@
 # Discovery
 
 Nodes find each other with a UDP multicast announce every 3 s
-(`opts.discovery.announce_interval_us`). The announce carries the node's name, its data
-port, its fragment size, a host id for shared memory and its interest list. Data never
-uses multicast. spec/discovery.md explains how announces and peer state work inside.
+(`opts.discovery.announce_interval_us`). Each domain announces on its own group,
+239.192.<domain high byte>.<domain low byte>, so the switch, the network card and the OS
+can drop other domains' announces. The announce carries the node's name, its data port,
+its fragment size, a host id for shared memory and its interest list. Data never uses
+multicast. spec/discovery.md explains how announces and peer state work inside.
 
 ## Peer lifecycle
 
@@ -66,7 +68,7 @@ RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){
 | option | meaning |
 |---|---|
 | `data_port` | the unicast data port. 0 = OS assigned |
-| `discovery_group`, `discovery_port` | the announce group and port (239.255.0.7, 7400) |
+| `discovery_port` | the announce port (7400) |
 | `multicast_interface` | pin discovery to one interface IP. NULL = all |
 | `multicast_ttl` | hops an announce may travel. 1 = same subnet |
 | `seed_peers`, `n_seed_peers` | addresses to also unicast announces to. Port 0 = the discovery port |

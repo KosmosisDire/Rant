@@ -144,8 +144,12 @@ prefix).
 
 ## Domains
 
-The u16 domain rides every announce and every uDTL header, and a datagram from another
-domain is dropped. `RANT_DOMAIN` in the environment, read through `i_rant_plat_env` at
+Each domain announces on its own group, `RANT_DISCOVERY_GROUP_BASE` (239.192.0.0) plus
+the domain, so an IGMP snooping switch, the network card's multicast filter and the
+kernel drop other domains' announces before Rant reads one. The /16 holds every u16 domain
+and stays clear of the top /24 of the scope, which RFC 2365 reserves (SSDP, SLP), and of
+239.255, where DDS, Gazebo Transport and LCM put their defaults. The u16 domain still rides
+every announce and every uDTL header, and a datagram from another domain is dropped. `RANT_DOMAIN` in the environment, read through `i_rant_plat_env` at
 open, sets the domain only when the code left `RantNodeOpts.domain` at 0. So a machine or a
 workspace puts every node on one domain, while a tool that picks its domain on purpose,
 like a test program or the explorer, keeps it. A value that is not a decimal number from 0

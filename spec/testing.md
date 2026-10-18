@@ -9,8 +9,8 @@ makes a test or a measurement trustworthy.
 - `tests/support/` is the harness every program shares: `test.h` compiles the whole
   implementation into the program so a case reaches every internal, `harness.c` holds the
   case runner, the checks, the pumps and the node helpers, and `wire_tap.c` wraps the
-  platform's `sendto`, `recvfrom` and `bind` to count datagrams by type, inject faults and
-  catch a socket bound outside loopback. `atomic.h` holds the loads, stores and adds for
+  platform's `sendto`, `recvfrom`, `bind` and `setsockopt` to count datagrams by type,
+  inject faults and catch a socket bound outside loopback. `atomic.h` holds the loads, stores and adds for
   state a service thread shares with the test.
 - `tests/interop/` holds one Tick program per language and the driver that runs a pair.
 - `tests/fuzz/` holds the libFuzzer targets, their replay driver and the inputs that once
@@ -135,8 +135,8 @@ What each phase pins, grouped by layer.
   sockets, clock or platform. A nameless announce becomes "unknown-peer". A third peer is
   refused while the table is full of active peers and the node forwards the event.
 - Open failure paths: a forced failure at each staged cleanup label returns NULL and
-  leaves the platform balanced. A non multicast group fails the join and
-  `rant_last_error(NULL)` names MCAST_JOIN. An occupied data port collides, since the
+  leaves the platform balanced. A join the wire tap fails (`fail_join`) unwinds the node
+  and `rant_last_error(NULL)` names MCAST_JOIN. An occupied data port collides, since the
   unicast bind takes no reuse, and names RANT_E_BIND with the port and errno. An over
   long topic name is refused at create and the node stays usable.
 - User data forwarding: a shared memory capable node rewraps the transport callbacks, and a

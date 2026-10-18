@@ -59,7 +59,7 @@ export interface NodeOptions {
     disableLogs?: boolean; disableMeta?: boolean; disableErrorLogs?: boolean;
     /* "127.0.0.1" keeps the node on this computer */
     multicastInterface?: string;
-    dataPort?: number; discoveryGroup?: string; discoveryPort?: number; multicastTtl?: number;
+    dataPort?: number; discoveryPort?: number; multicastTtl?: number;
     /* "ip" or "ip:port" */
     seedPeers?: string[];
     fragmentSize?: number;
@@ -277,7 +277,6 @@ export class RantNode {
             n.setU8(o + N.disable_error_logs, opts.disableErrorLogs ? 1 : 0);
             str(o + N.prefix, opts.prefix);
             n.setU16(net + NN.data_port, opts.dataPort ?? 0);
-            str(net + NN.discovery_group, opts.discoveryGroup);
             n.setU16(net + NN.discovery_port, opts.discoveryPort ?? 0);
             str(net + NN.multicast_interface, opts.multicastInterface);
             n.setU8(net + NN.multicast_ttl, opts.multicastTtl ?? 0);

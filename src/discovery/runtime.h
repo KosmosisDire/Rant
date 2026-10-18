@@ -24,7 +24,8 @@ i_RantDiscoveryState *i_rant_discovery_state(i_RantDiscovery *d);
 
 size_t       i_rant_discovery_placement_memory(const i_RantDiscoveryCoreConfig *cfg);
 /* Places a runtime in caller memory, which the caller owns. cfg is the core config, a zero
- * uuid is auto generated. net gives the group, port, ttl, interface and seeds. tunnel owns
+ * uuid is auto generated, and its domain picks the group. net gives the port, ttl, interface
+ * and seeds. tunnel owns
  * the sockets, NULL for the OS. NULL on failure, and i_rant_discovery_last_error names the
  * step. */
 i_RantDiscovery       *i_rant_discovery_place(void *mem, size_t mem_size,

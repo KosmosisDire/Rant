@@ -76,7 +76,6 @@ options! {
     }
     hand {
         prefix: Option<String> = None,
-        discovery_group: Option<String> = None,
         multicast_interface: Option<String> = None,
         seed_peers: Vec<String> = Vec::new(),
         bridge: Option<String> = None,
@@ -89,12 +88,6 @@ impl NodeOptions {
     /// Goes with '/' in front of every name this node creates, inside RANT_PREFIX.
     pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
         self.prefix = Some(prefix.into());
-        self
-    }
-
-    /// The discovery multicast group. The default is 239.255.0.7.
-    pub fn discovery_group(mut self, group: impl Into<String>) -> Self {
-        self.discovery_group = Some(group.into());
         self
     }
 
@@ -325,7 +318,6 @@ type EventFn = dyn FnMut(&Event) + Send;
 /// The strings and seeds the C node keeps pointing at, owned for its life.
 struct Net {
     prefix: Option<CString>,
-    group: Option<CString>,
     interface: Option<CString>,
     bridge: Option<CString>,
     bridge_passphrase: Option<CString>,
@@ -353,7 +345,6 @@ impl Net {
         }
         Ok(Net {
             prefix: c(&o.prefix, ErrorKind::BadPrefix, "prefix")?,
-            group: c(&o.discovery_group, ErrorKind::BadAddress, "discovery group")?,
             interface: c(&o.multicast_interface, ErrorKind::BadAddress, "multicast interface")?,
             bridge: c(&o.bridge, ErrorKind::Bridge, "bridge")?,
             bridge_passphrase: c(&o.bridge_passphrase, ErrorKind::Bridge, "bridge passphrase")?,
@@ -646,7 +637,6 @@ impl Node {
             prefix: c_ptr(&inner.net.prefix),
             net: ffi::RantNodeNet {
                 data_port: o.data_port,
-                discovery_group: c_ptr(&inner.net.group),
                 discovery_port: o.discovery_port,
                 multicast_interface: c_ptr(&inner.net.interface),
                 multicast_ttl: o.multicast_ttl,

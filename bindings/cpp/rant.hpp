@@ -463,7 +463,6 @@ struct NodeOptions {
     bool                     disable_error_logs   = false; /* suppress the default mirroring of this
                                                               node's errors onto @rant/log/error */
     uint16_t                 data_port            = 0;   /* 0 = OS-assigned */
-    std::string              discovery_group;            /* empty = "239.255.0.<domain>" default */
     uint16_t                 discovery_port       = 0;   /* 0 = 7400 */
     std::string              multicast_interface;   /* empty = auto, "127.0.0.1" = single host */
     uint8_t                  multicast_ttl        = 0;   /* 0 = 1 hop */
@@ -2179,7 +2178,6 @@ struct NodeImpl : std::enable_shared_from_this<NodeImpl> {
     std::shared_ptr<const EventHandler> on_event;
     std::shared_ptr<const LogHandler>   on_log;
     bool                       log_bound = false;   /* the level topics hold our handler, under create_mu */
-    std::string                disc_group;
     std::string                mcast_if;
     std::vector<detail::RantAddr> seeds;
 
@@ -2932,7 +2930,6 @@ public:
         std::shared_ptr<Impl> impl = std::make_shared<Impl>();
         impl->threading = o.threading;
         /* The node retains the net string/seed pointers, so own that storage. */
-        impl->disc_group = o.discovery_group;
         impl->mcast_if   = o.multicast_interface;
         for (const std::string& s : o.seed_peers) {
             detail::RantAddr a;
@@ -2953,7 +2950,6 @@ public:
         co.disable_error_logs = o.disable_error_logs ? 1 : 0;
         co.user_data     = impl.get();
         co.net.data_port           = o.data_port;
-        co.net.discovery_group     = impl->disc_group.empty() ? nullptr : impl->disc_group.c_str();
         co.net.discovery_port      = o.discovery_port;
         co.net.multicast_interface = impl->mcast_if.empty()   ? nullptr : impl->mcast_if.c_str();
         co.net.multicast_ttl       = o.multicast_ttl;

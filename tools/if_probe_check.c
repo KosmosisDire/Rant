@@ -12,12 +12,14 @@ static void show(const char *label, uint32_t naddr){
 }
 
 int main(void){
-    uint32_t grp = i_rant_plat_parse_ip("239.255.0.7");
+    uint32_t base = RANT_DISCOVERY_GROUP_BASE;     /* domain 0 */
+    uint32_t grp = i_rant_plat_ipv4((uint8_t)(base >> 24), (uint8_t)(base >> 16),
+                                    (uint8_t)(base >> 8), (uint8_t)base);
     i_RantIface ifs[16];
     int n, i;
     i_rant_plat_startup();
-    show("route_src(group):",     i_rant_plat_route_src(grp, 7400));
-    show("route_src(192.0.2.1):", i_rant_plat_route_src(i_rant_plat_ipv4(192,0,2,1), 7400));
+    show("route_src(group):",     i_rant_plat_route_src(grp, RANT_DISCOVERY_PORT));
+    show("route_src(192.0.2.1):", i_rant_plat_route_src(i_rant_plat_ipv4(192,0,2,1), RANT_DISCOVERY_PORT));
     n = i_rant_plat_local_ifaces(ifs, 16);
     printf("discovery uses all %d interface(s):\n", n);
     for (i = 0; i < n; i++){

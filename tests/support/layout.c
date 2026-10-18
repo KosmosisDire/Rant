@@ -110,7 +110,6 @@ int main(int argc, char **argv){
     FIELD(RantNodeDiscovery, max_peers)
     SIZE(RantNodeNet)
     FIELD(RantNodeNet, data_port)
-    FIELD(RantNodeNet, discovery_group)
     FIELD(RantNodeNet, discovery_port)
     FIELD(RantNodeNet, multicast_interface)
     FIELD(RantNodeNet, multicast_ttl)

@@ -6,14 +6,16 @@
 
 #include "wire_tap.h"
 
-#define bind     wire_tap_bind
-#define sendto   wire_tap_sendto
-#define recvfrom wire_tap_recvfrom
+#define bind       wire_tap_bind
+#define sendto     wire_tap_sendto
+#define recvfrom   wire_tap_recvfrom
+#define setsockopt wire_tap_setsockopt
 #define RANT_IMPLEMENTATION
 #include "rant.h"
 #undef RANT_IMPLEMENTATION
 #undef bind
 #undef sendto
 #undef recvfrom
+#undef setsockopt
 
 #endif /* RANT_IMPL_H */

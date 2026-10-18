@@ -96,8 +96,9 @@ typedef enum {
     RANT_PEER_DROPPED = 1       /* silent, state kept, the same uuid may return */
 } RantPeerLiveness;
 
-/* The discovery defaults, stated once for every layer. */
-#define RANT_DISCOVERY_GROUP      "239.255.0.7"
+/* The discovery defaults, stated once for every layer. A domain announces on its own group,
+   the base plus the domain: 239.192.<domain high byte>.<domain low byte>. */
+#define RANT_DISCOVERY_GROUP_BASE 0xEFC00000u  /* 239.192.0.0 */
 #define RANT_DISCOVERY_PORT       7400
 #define RANT_ANNOUNCE_INTERVAL_US 3000000u     /* 3 s. The peer timeout defaults to 4 of them */
 #define RANT_MAX_PEERS            16
@@ -106,7 +107,6 @@ typedef enum {
  * explains the options. */
 typedef struct {
     uint16_t              data_port;         /* the unicast data port, 0 = OS assigned */
-    const char           *discovery_group;   /* RANT_DISCOVERY_GROUP */
     uint16_t              discovery_port;    /* RANT_DISCOVERY_PORT */
     const char           *multicast_interface;/* pin discovery to this interface IP. NULL = every
                                                 interface, "127.0.0.1" = single host, where no

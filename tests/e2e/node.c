@@ -27,13 +27,15 @@ static void open_fail_checks(void){
         if (n) rant_node_close(n, 0);
     }
 
-    /* a non multicast discovery group fails the IGMP join, so the node unwinds through
-       fail_sock and rant_last_error(NULL) names MCAST_JOIN with no handle to query */
+    /* a failed multicast join unwinds the node through fail_sock, and rant_last_error(NULL)
+       names MCAST_JOIN with no handle to query */
     {   RantAllocator a = rant_allocator_static(mem, sizeof mem);
         RantEvent err; char line[160];
+        wire_tap_write(&wire_tap.fail_join, 1);
         n = rant_node_open(&a, NULL, NULL, NULL, &(RantNodeOpts){ .domain=TEST_DOMAIN,
-            .net={ .multicast_interface="127.0.0.1", .discovery_group="1.2.3.4" } });
-        CHECK(n == NULL, "open-fail: non-multicast discovery group -> NULL");
+            .net={ .multicast_interface="127.0.0.1" } });
+        wire_tap_write(&wire_tap.fail_join, 0);
+        CHECK(n == NULL, "open-fail: a failed multicast join -> NULL");
         err = rant_last_error(NULL);
         CHECK(err.kind == RANT_ERROR && err.error == RANT_E_MCAST_JOIN,
                  "open-fail: last_error is RANT_E_MCAST_JOIN (%s)", rant_event_str(&err, line, sizeof line));
@@ -64,8 +66,10 @@ static void open_fail_checks(void){
     /* an on_event handler also receives the open failure directly (no handle needed): the
        node fires it on the passed-in callback before returning NULL. */
     {   RantAllocator a = rant_allocator_static(mem, sizeof mem);
+        wire_tap_write(&wire_tap.fail_join, 1);
         n = rant_node_open(&a, NULL, NULL, of_on_event, &(RantNodeOpts){ .domain=TEST_DOMAIN,
-            .net={ .multicast_interface="127.0.0.1", .discovery_group="1.2.3.4" } });
+            .net={ .multicast_interface="127.0.0.1" } });
+        wire_tap_write(&wire_tap.fail_join, 0);
         CHECK(n == NULL, "open-fail: open still returns NULL with on_event set");
         CHECK(of_seen_error == RANT_E_MCAST_JOIN,
                  "open-fail: on_event received the failure (error=%d)", of_seen_error);

@@ -382,7 +382,7 @@ class Node:
                  match_wait: float | None = 0.0, disable_shm: bool = False,
                  fetch_details: bool = False, disable_logs: bool = False,
                  disable_meta: bool = False, disable_error_logs: bool = False,
-                 data_port: int = 0, discovery_group: str | None = None,
+                 data_port: int = 0,
                  discovery_port: int = 0, multicast_ttl: int = 0,
                  seed_peers: Iterable[str] = (),
                  fragment_size: int = 0,

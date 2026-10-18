@@ -159,6 +159,14 @@ int wire_tap_bind(SOCKET s, const struct sockaddr *addr, int len){
     return r;
 }
 
+int wire_tap_setsockopt(SOCKET s, int level, int name, const char *value, int len){
+    if (level == IPPROTO_IP && name == IP_ADD_MEMBERSHIP && test_atomic_load(&wire_tap.fail_join)){
+        WSASetLastError(WSAEADDRNOTAVAIL);
+        return -1;
+    }
+    return setsockopt(s, level, name, value, len);
+}
+
 int wire_tap_sendto(SOCKET s, const char *buf, int len, int flags, const struct sockaddr *to, int tolen){
     long long a;
     int r, would_block, e;
@@ -206,6 +214,14 @@ int wire_tap_bind(int s, const struct sockaddr *addr, socklen_t len){
     if (r == 0) tap_bound(addr);
     errno = e;
     return r;
+}
+
+int wire_tap_setsockopt(int s, int level, int name, const void *value, socklen_t len){
+    if (level == IPPROTO_IP && name == IP_ADD_MEMBERSHIP && test_atomic_load(&wire_tap.fail_join)){
+        errno = EADDRNOTAVAIL;
+        return -1;
+    }
+    return setsockopt(s, level, name, value, len);
 }
 
 ssize_t wire_tap_sendto(int s, const void *buf, size_t len, int flags, const struct sockaddr *to,

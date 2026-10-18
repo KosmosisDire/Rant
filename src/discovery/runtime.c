@@ -237,15 +237,14 @@ i_RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const i_RantDisco
     i_RantSock fd;
     int allzero = 1, i;
     uint8_t ttl, n_want, joined;
-    uint32_t group_naddr, bind_naddr;
+    uint32_t group, group_naddr, bind_naddr;
     i_RantIface want[RANT_DISCOVERY_MAX_SUBNETS];
-    const char *group;
 
     if (!mem || !cfg || !net) return i_rant_discovery_fail(RANT_E_OOM, 0);
     g_place_error = RANT_E_NONE; g_place_os_error = 0;
     c = *cfg;
     i_rant_discovery_config_defaults(&c);
-    group = net->discovery_group ? net->discovery_group : RANT_DISCOVERY_GROUP;
+    group = RANT_DISCOVERY_GROUP_BASE | c.domain_id;     /* one group per domain */
     discovery_port = net->discovery_port ? net->discovery_port : RANT_DISCOVERY_PORT;
     ttl   = net->multicast_ttl ? net->multicast_ttl : 1;
 
@@ -282,7 +281,8 @@ i_RantDiscovery *i_rant_discovery_place(void *mem, size_t cap, const i_RantDisco
     i_rant_net_mcast_own_groups(tunnel, fd);
 
     /* Join and announce on every interface. A pinned interface means exactly that one. */
-    group_naddr = i_rant_plat_parse_ip(group);
+    group_naddr = i_rant_plat_ipv4((uint8_t)(group >> 24), (uint8_t)(group >> 16),
+                                   (uint8_t)(group >> 8), (uint8_t)group);
     d->fd = fd;
     d->tx_fd = fd;
     d->group_naddr = group_naddr;

@@ -105,7 +105,6 @@ def seed_addrs(seeds):
 class RantNodeNet(Structure):
     _fields_ = [
         ("data_port", c_uint16),
-        ("discovery_group", c_char_p),
         ("discovery_port", c_uint16),
         ("multicast_interface", c_char_p),
         ("multicast_ttl", c_uint8),

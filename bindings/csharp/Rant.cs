@@ -295,7 +295,6 @@ namespace Rant
     internal struct RantNodeNet
     {
         public ushort data_port;
-        public IntPtr discovery_group;         // const char*
         public ushort discovery_port;
         public IntPtr multicast_interface;     // const char*
         public byte multicast_ttl;
@@ -1025,8 +1024,6 @@ namespace Rant
         public bool DisableErrorLogs;
         /// <summary>The data socket port, 0 = OS assigned.</summary>
         public ushort DataPort;
-        /// <summary>The discovery multicast group, null = 239.255.0.[domain].</summary>
-        public string DiscoveryGroup;
         /// <summary>0 = 7400.</summary>
         public ushort DiscoveryPort;
         /// <summary>Pin discovery to this interface IP, null = every interface. "127.0.0.1"
@@ -2595,8 +2592,7 @@ namespace Rant
         private IntPtr _handle;
         private long _id;
         private RantAllocator _alloc;
-        private IntPtr _discGroup;   // native strings the node retains for its lifetime
-        private IntPtr _mcastIf;
+        private IntPtr _mcastIf;     // a native string the node retains for its lifetime
         private RantQueue _queue;         // the node's own queue under Threading.Dispatch
         private bool _pumpInDispatch;     // no service thread: Dispatch() polls first
         private readonly Dictionary<ushort, Type> _topicTypes = new Dictionary<ushort, Type>();
@@ -2674,12 +2670,10 @@ namespace Rant
                 disable_error_logs = (byte)(o.DisableErrorLogs ? 1 : 0),
                 user_data = (IntPtr)_id,
             };
-            // The node retains these pointers for its lifetime, so keep them alive
-            // (freed in Close), matching the C++ wrapper.
-            _discGroup = Codec.CStrPtr(o.DiscoveryGroup);
+            // The node retains this pointer for its lifetime, so keep it alive (freed in
+            // Close), matching the C++ wrapper.
             _mcastIf = Codec.CStrPtr(o.MulticastInterface);
             co.net.data_port = o.DataPort;
-            co.net.discovery_group = _discGroup;
             co.net.discovery_port = o.DiscoveryPort;
             co.net.multicast_interface = _mcastIf;
             co.net.multicast_ttl = o.MulticastTtl;
@@ -2711,7 +2705,7 @@ namespace Rant
             if (h == IntPtr.Zero)
             {
                 lock (s_reg) { var next = new Dictionary<long, RantNode>(s_nodes); next.Remove(_id); s_nodes = next; }
-                Codec.FreeCStr(_discGroup); Codec.FreeCStr(_mcastIf);
+                Codec.FreeCStr(_mcastIf);
                 // the node does not exist, so read the reason from the process-global slot
                 RantEvent err = LastOpenError();
                 throw new RantException("node open failed", err);
@@ -3372,7 +3366,6 @@ namespace Rant
                 _schemas.Clear();
                 _msgSchemas.Clear();
             }
-            Codec.FreeCStr(_discGroup); _discGroup = IntPtr.Zero;
             Codec.FreeCStr(_mcastIf); _mcastIf = IntPtr.Zero;
             return true;
         }

@@ -8,7 +8,7 @@ pub const RANT_FRAG_SIZE_MIN: u32 = 1350;
 pub const RANT_MESSAGE_MAX: u32 = 88472250;
 pub const RANT_TOPIC_NAME_MAX: u32 = 64;
 pub const RANT_NODE_NAME_MAX: u32 = 32;
-pub const RANT_DISCOVERY_GROUP: &[u8; 12] = b"239.255.0.7\0";
+pub const RANT_DISCOVERY_GROUP_BASE: u32 = 4022337536;
 pub const RANT_DISCOVERY_PORT: u32 = 7400;
 pub const RANT_ANNOUNCE_INTERVAL_US: u32 = 3000000;
 pub const RANT_MAX_PEERS: u32 = 16;
@@ -134,7 +134,6 @@ pub type RantPeerLiveness = ::std::os::raw::c_uint;
 #[derive(Copy, Clone)]
 pub struct RantNodeNet {
     pub data_port: u16,
-    pub discovery_group: *const ::std::os::raw::c_char,
     pub discovery_port: u16,
     pub multicast_interface: *const ::std::os::raw::c_char,
     pub multicast_ttl: u8,

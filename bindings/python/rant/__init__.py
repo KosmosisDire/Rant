@@ -2065,7 +2065,7 @@ class Node:
     def __init__(self, name=None, *, on_event=None, domain=0, prefix=None,
                  multicast_interface=None, max_topics=0, match_wait=0.0, disable_shm=False,
                  fetch_details=False, disable_logs=False, disable_meta=False,
-                 disable_error_logs=False, data_port=0, discovery_group=None,
+                 disable_error_logs=False, data_port=0,
                  discovery_port=0, multicast_ttl=0, seed_peers=(),
                  fragment_size=0, recv_buffer_bytes=0,
                  send_buffer_bytes=0, announce_interval=0.0, peer_timeout=0.0, max_peers=0,
@@ -2117,7 +2117,6 @@ class Node:
         co.disable_error_logs = 1 if disable_error_logs else 0
         co.user_data = _c.c_void_p(self._id)
         co.net.data_port = data_port
-        co.net.discovery_group = discovery_group.encode() if discovery_group else None
         co.net.discovery_port = discovery_port
         co.net.multicast_interface = multicast_interface.encode() if multicast_interface else None
         co.net.multicast_ttl = multicast_ttl
