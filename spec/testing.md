@@ -69,7 +69,7 @@ program in this order.
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
 | `unit.tunnel` | hash, handshake, frame, json, batch |
 | `e2e.stream` | stream, scale, named, collision |
-| `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, prefix |
+| `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, prefix, domain_groups |
 | `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema |
 | `e2e.detail` | detail_live, interest_external |
 | `e2e.shm` | shm_node |
@@ -134,6 +134,9 @@ What each phase pins, grouped by layer.
 - The node core drives its peer table over a transport and a real discovery core with no
   sockets, clock or platform. A nameless announce becomes "unknown-peer". A third peer is
   refused while the table is full of active peers and the node forwards the event.
+- Domain groups: two domains on one host each discover themselves, and no announce of the
+  other domain reaches either discovery socket. On Linux this fails without
+  `IP_MULTICAST_ALL` off. Other programs' unicast seeds to the discovery port are not counted.
 - Open failure paths: a forced failure at each staged cleanup label returns NULL and
   leaves the platform balanced. A join the wire tap fails (`fail_join`) unwinds the node
   and `rant_last_error(NULL)` names MCAST_JOIN. An occupied data port collides, since the

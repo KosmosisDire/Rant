@@ -276,6 +276,60 @@ static void prefix_checks(void){
     test_setenv("RANT_PREFIX", "");
 }
 
+/* Two domains on one host: each discovery socket receives its own domain's group only. The
+ * other domain's nodes send nothing unicast, so its announces could only come by the group.
+ * Other programs' seeds reach port 6730 by unicast, so their domains are not counted. */
+static long long dg_sock[2];
+static uint16_t  dg_dom[2];
+static int       dg_own[2], dg_foreign[2];
+static void dg_on_recv(long long sock, const unsigned char *buf, long len, const struct sockaddr *from){
+    int i;
+    uint16_t dom;
+    (void)from;
+    if (len < 8 || memcmp(buf, "uDSC", 4) != 0) return;
+    dom = (uint16_t)(buf[6] | (buf[7] << 8));
+    for (i = 0; i < 2; i++){
+        if (sock != dg_sock[i]) continue;
+        if (dom == dg_dom[i]) dg_own[i]++;
+        else if (dom == dg_dom[1 - i]) dg_foreign[i]++;
+    }
+}
+static void domaingroup_checks(void){
+    RantAllocator aa = rant_allocator_heap(0), ab = rant_allocator_heap(0), ba = rant_allocator_heap(0);
+    RantNodeOpts o;
+    RantNode *A = NULL, *A2 = NULL, *B = NULL;
+    memset(&o, 0, sizeof o);
+    o.disable_shm = 1; o.discovery.max_peers = 4; o.discovery.announce_interval_us = 200000;
+    o.net.multicast_interface = "127.0.0.1";
+    dg_dom[0] = (uint16_t)(TEST_DOMAIN + 40); dg_dom[1] = (uint16_t)(TEST_DOMAIN + 41);
+    memset(dg_own, 0, sizeof dg_own); memset(dg_foreign, 0, sizeof dg_foreign);
+    dg_sock[0] = dg_sock[1] = -1;
+    wire_tap_on_recv = dg_on_recv;
+    o.domain = dg_dom[0];
+    A  = rant_node_open(&aa, "dg-a", NULL, NULL, &o);
+    A2 = rant_node_open(&ab, "dg-a2", NULL, NULL, &o);
+    o.domain = dg_dom[1];
+    B  = rant_node_open(&ba, "dg-b", NULL, NULL, &o);
+    CHECK(A && A2 && B, "domaingroup: three nodes on two domains open");
+    if (A && A2 && B){
+        uint16_t c = 0;
+        dg_sock[0] = (long long)i_rant_discovery_fd(A->discovery);
+        dg_sock[1] = (long long)i_rant_discovery_fd(B->discovery);
+        test_pump3(A, A2, B, 1500);                  /* several announce intervals each */
+        test_peers(A, &c);
+        CHECK(c == 1 && dg_own[0] > 0, "domaingroup: a domain still discovers itself (peers=%u own=%d)",
+              (unsigned)c, dg_own[0]);
+        CHECK(dg_foreign[0] == 0 && dg_foreign[1] == 0,
+              "domaingroup: no announce of the other domain reaches a discovery socket (%d, %d)",
+              dg_foreign[0], dg_foreign[1]);
+    }
+    if (A) rant_node_close(A, 1);
+    if (A2) rant_node_close(A2, 1);
+    if (B) rant_node_close(B, 1);
+    wire_tap_on_recv = NULL;
+    rant_allocator_reset(&aa); rant_allocator_reset(&ab); rant_allocator_reset(&ba);
+}
+
 static const TestCase cases[] = {
     { "open_fail", open_fail_checks },
     { "event_user", event_user_checks },
@@ -283,6 +337,7 @@ static const TestCase cases[] = {
     { "launch_name", launchname_checks },
     { "launch_domain", launchdomain_checks },
     { "prefix", prefix_checks },
+    { "domain_groups", domaingroup_checks },
 };
 
 TEST_MAIN(cases)
