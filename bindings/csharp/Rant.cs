@@ -2706,7 +2706,7 @@ namespace Rant
             if (h == IntPtr.Zero)
             {
                 lock (s_reg) { var next = new Dictionary<long, RantNode>(s_nodes); next.Remove(_id); s_nodes = next; }
-                Codec.FreeCStr(_mcastIf);
+                Codec.FreeCStr(_mcastIf); _mcastIf = IntPtr.Zero;   // the finalizer frees it again otherwise
                 // the node does not exist, so read the reason from the process-global slot
                 RantEvent err = LastOpenError();
                 throw new RantException("node open failed", err);
