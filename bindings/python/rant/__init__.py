@@ -20,13 +20,13 @@ __all__ = [
     "Node", "Publisher", "Subscriber", "Message", "Event", "NodeStats", "TopicCounts",
     "Queue", "QueueStats", "Schema", "dsl", "types",
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "string", "enum",
-    "Threading", "SendStatus", "CallStatus", "LogLevel", "MetaSection", "EventKind",
+    "Threading", "SendStatus", "CallStatus", "Level", "Origin", "MetaSection", "EventKind",
     "ErrorKind", "PeerLiveness", "EntityKind",
     "Error", "SchemaError", "CallError", "CancelledError",
     "FunctionDefinition", "RemoteFunction", "Request", "Response", "Deferred",
     "TaskDefinition", "RemoteTask", "TaskContext", "Progress",
     "Variable", "VariableDefinition", "RemoteVariable", "VariableUpdate",
-    "LogLine", "Reflection", "Peer", "Entity", "MetaSnapshot", "version",
+    "LogLine", "Condition", "StatusUpdate", "Reflection", "Peer", "Entity", "MetaSnapshot", "version",
 ]
 
 
@@ -71,11 +71,18 @@ class CallStatus(_pyenum.IntEnum):
     NO_PROVIDER = 7      # the timeout passed with no definition ever matched
 
 
-class LogLevel(_pyenum.IntEnum):
-    """Severity of a built-in @rant/log line. Mirrors RantLogLevel."""
-    ERROR = 0
-    WARN = 1
+class Level(_pyenum.IntEnum):
+    """The severity of a log line or a status condition, rising. Mirrors RantLevel."""
+    DEBUG = 1
     INFO = 2
+    WARN = 3
+    ERROR = 4
+
+
+class Origin(_pyenum.IntEnum):
+    """Who wrote a log line or a condition. Mirrors RantOrigin."""
+    APP = 0
+    RANT = 1
 
 
 class MetaSection(_pyenum.IntFlag):
@@ -93,6 +100,7 @@ class EventKind(_pyenum.IntEnum):
     PEER_INTEREST = 2
     MSG_LOST = 3
     ERROR = 4       # something went wrong, read Event.error
+    STATUS_CLEARED = 5   # a peer cleared one of our clearable conditions: peer, detail the key
 
 
 class ErrorKind(_pyenum.IntEnum):
@@ -125,8 +133,9 @@ class ErrorKind(_pyenum.IntEnum):
     BAD_SCHEMA = 25      # a create refused: the schema failed to parse
     BAD_DOMAIN = 26      # an open refused: RANT_DOMAIN is not a number from 0 to 65535
     BAD_PREFIX = 27      # an open refused: RANT_PREFIX or prefix holds '@', starts or ends with '/' or is too long
-    WIRE_VERSION = 28    # a node of the domain speaks another wire version: ip, port. Once per source
-    BRIDGE = 29          # the bridge cannot be reached or refused, or its link dropped: detail says why
+    BAD_LOG_LEVEL = 28   # an open refused: RANT_LOG_LEVEL or log_level is not a level
+    WIRE_VERSION = 29    # a node of the domain speaks another wire version: ip, port. Once per source
+    BRIDGE = 30          # the bridge cannot be reached or refused, or its link dropped: detail says why
 
 
 class PeerLiveness(_pyenum.IntEnum):
@@ -196,16 +205,35 @@ class CancelledError(Exception):
 
 @_dataclasses.dataclass
 class LogLine:
-    """One decoded @rant/log line for a node.log.on handler. wall_us is epoch us, mono_us the
-        publisher's monotonic clock and recv_us this node's clock at receipt."""
-    level: LogLevel
+    """One decoded @rant/log line for a node.on_log handler. wall_us is epoch us when it was
+        logged and recv_us this node's clock at receipt."""
+    level: Level
+    origin: Origin      # the app wrote it, or Rant itself
     node: str           # the publishing node's name
     node_id: int        # the publishing peer id
     wall_us: int
-    mono_us: int
     recv_us: int
-    written_us: int    # the carrying message's source stamp (see Message.written_us)
     text: str
+
+
+@_dataclasses.dataclass
+class Condition:
+    """One active condition in a node's status."""
+    key: str            # its identity within the node
+    level: Level
+    origin: Origin      # the app raised it, or Rant itself
+    clearable: bool     # another node may clear it with node.clear_peer_status
+    since_us: int       # the owner's epoch us when it was raised
+    text: str
+
+
+@_dataclasses.dataclass
+class StatusUpdate:
+    """A node's whole status for a node.on_status handler: every condition active there
+        now. Empty when the node cleared them all or went away."""
+    node: str           # the publishing node's name
+    node_id: int        # the publishing peer id
+    conditions: list = _dataclasses.field(default_factory=list)
 
 
 @_dataclasses.dataclass
@@ -1589,6 +1617,16 @@ def _from_decoded(spec, d):
 
 # The public runtime API.
 
+def _level(v):
+    """A wire level as a Level, the number when it names none."""
+    return Level(v) if v in Level._value2member_map_ else int(v or 0)
+
+
+def _origin(v):
+    """A wire origin as an Origin, the number when it names none."""
+    return Origin(v) if v in Origin._value2member_map_ else int(v or 0)
+
+
 def _send_status(r):
     return SendStatus(r) if r in SendStatus._value2member_map_ else r
 
@@ -2058,14 +2096,15 @@ class Node:
 
     # No attribute may point back at the node, so dropping the last reference closes it at once
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_evt", "_on_log", "_log_bound",
+                 "_on_status", "_status_bound", "_status_peers", "_status_lock",
                  "_topic_specs", "_topics_by_name", "_create_lock",
                  "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock", "_name",
                  "_threading", "_queue", "_pump", "_gate", "_close_lock", "__weakref__")
 
     def __init__(self, name=None, *, on_event=None, domain=0, prefix=None,
                  multicast_interface=None, max_topics=0, match_wait=0.0, disable_shm=False,
-                 fetch_details=False, disable_logs=False, disable_meta=False,
-                 disable_error_logs=False, data_port=0,
+                 fetch_details=False, disable_logs=False, log_level=None,
+                 disable_status=False, disable_meta=False, disable_error_logs=False, data_port=0,
                  discovery_port=0, multicast_ttl=0, seed_peers=(),
                  fragment_size=0, recv_buffer_bytes=0,
                  send_buffer_bytes=0, announce_interval=0.0, peer_timeout=0.0, max_peers=0,
@@ -2073,7 +2112,8 @@ class Node:
         """Open a node. name None = auto generated. on_event receives every peer, loss and
                 error event, printed to stderr when None. The options are
                 docs/getting-started.md's, durations in seconds and 0 = the default.
-                match_wait None = off. seed_peers are "ip" or "ip:port" strings. bridge is the
+                match_wait None = off. log_level None takes RANT_LOG_LEVEL, else INFO.
+                seed_peers are "ip" or "ip:port" strings. bridge is the
                 ws:// URL of a Rant bridge whose sockets the node runs on, None takes
                 RANT_BRIDGE. The service thread runs from here unless threading is MANUAL."""
         self._lib = None
@@ -2089,6 +2129,10 @@ class Node:
         self._on_evt = on_event
         self._on_log = None
         self._log_bound = False
+        self._on_status = None
+        self._status_bound = False
+        self._status_peers = set()        # peers whose last set was not empty
+        self._status_lock = _threading.Lock()
         self._topic_specs = {}
         self._topics_by_name = {}   # name to _TopicRec
         self._create_lock = _threading.Lock()
@@ -2115,6 +2159,8 @@ class Node:
         co.disable_logs = 1 if disable_logs else 0
         co.disable_meta = 1 if disable_meta else 0
         co.disable_error_logs = 1 if disable_error_logs else 0
+        co.log_level = 0 if log_level is None else int(log_level)
+        co.disable_status = 1 if disable_status else 0
         co.user_data = _c.c_void_p(self._id)
         co.net.data_port = data_port
         co.net.discovery_port = discovery_port
@@ -2365,56 +2411,117 @@ class Node:
         with self._gate.use(self._h) as h:
             return h is not None and self._lib.rant_node_settle(h, _ms(timeout)) == 1
 
-    # ---- logs, reflection, diagnostics ----
+    # ---- log, status, reflection, diagnostics ----
 
     def log(self, level, text):
-        """Publish a log line at a LogLevel, truncated at RANT_LOG_MAX. Returns a SendStatus,
-                NOSYS when logs are disabled."""
+        """Publish a log line at a Level, truncated at RANT_LOG_MAX. A level below the node's
+                log_level sends nothing. Returns a SendStatus, NOSYS when logs are disabled."""
         b = text.encode("utf-8") if isinstance(text, str) else bytes(text)
         with self._gate.use(self._h) as h:
             return _send_status(self._lib.rant_node_log_text(h, int(level), b, len(b)))
 
     def on_log(self, handler):
-        """Deliver every other node's log lines at every level to handler as a LogLine, on the
-                polling thread, or at dispatch() under Threading.DISPATCH. A later call
-                rebinds, None stops delivery. Returns handler, so it works as a decorator.
-                Raises Error when logs are disabled on this node."""
+        """Deliver every other node's log lines to handler as a LogLine, on the polling
+                thread, or at dispatch() under Threading.DISPATCH. A later call rebinds, None
+                stops delivery. Returns handler, so it works as a decorator. Raises Error when
+                logs are disabled on this node."""
         if handler is not None and not self._log_bound:
-            self._bind_log()
+            self._bind_builtin("on_log", self._lib.rant_node_log_topic,
+                               self._lib.rant_node_set_log_queue, self._deliver_log)
             self._log_bound = True
         self._on_log = handler
         return handler
 
-    def _bind_log(self):
-        # one subscription per level topic for the node's life, fanning into the handler. The
-        # queue goes first, so the catch up replay parks rather than landing inline
+    def _deliver_log(self, m):
+        handler = self._on_log
+        if handler is None:
+            return
+        f = m.value if isinstance(m.value, dict) else {}
+        handler(LogLine(level=_level(f.get("level")), origin=_origin(f.get("origin")),
+                        node=m.publisher_name, node_id=m.publisher_id,
+                        wall_us=m.capture_us or m.written_us, recv_us=m.recv_us,
+                        text=f.get("text", "") or ""))
+
+    def set_status(self, key, level, text, clearable=False):
+        """Raise the condition key on this node's status, or update it while it is active:
+                since_us stays from the raise, and the same values again send nothing. Readers
+                see it after the next loop pass. Returns a SendStatus, TOO_BIG for a key over 48
+                bytes or past 32 conditions, NOSYS when status is disabled. A clearable one may
+                be cleared by another node with clear_peer_status, and this node then gets an
+                EventKind.STATUS_CLEARED event."""
+        opts = _c.RantStatusOpts(clearable=1 if clearable else 0)
+        with self._gate.use(self._h) as h:
+            return _send_status(self._lib.rant_node_set_status(
+                h, key.encode("utf-8"), int(level), (text or "").encode("utf-8"), _c.byref(opts)))
+
+    def clear_status(self, key):
+        """Clear the condition key, OK whether or not it was active."""
+        with self._gate.use(self._h) as h:
+            return _send_status(self._lib.rant_node_clear_status(h, key.encode("utf-8")))
+
+    def clear_peer_status(self, node_id, key, since_us):
+        """Ask another node to clear its clearable condition key, the occurrence raised at
+                since_us. Nothing answers: its next StatusUpdate shows it gone, or still there
+                when it refused."""
+        with self._gate.use(self._h) as h:
+            return _send_status(self._lib.rant_node_clear_peer_status(h, node_id, key.encode("utf-8"), since_us))
+
+    def on_status(self, handler):
+        """Deliver every other node's status to handler as a StatusUpdate, where the node's
+                callbacks run: on each change, each node's current set when this binds, and an
+                empty set when a node goes away. A later call rebinds, None stops delivery.
+                Returns handler. Raises Error when status is disabled on this node."""
+        if handler is not None and not self._status_bound:
+            self._bind_builtin("on_status", self._lib.rant_node_status_topic,
+                               self._lib.rant_node_set_status_queue, self._deliver_status)
+            self._status_bound = True
+        self._on_status = handler
+        return handler
+
+    def _deliver_status(self, m):
+        f = m.value if isinstance(m.value, dict) else {}
+        conditions = [Condition(key=c.get("key", ""), level=_level(c.get("level")),
+                                origin=_origin(c.get("origin")), clearable=bool(c.get("clearable")),
+                                since_us=int(c.get("since_us", 0)), text=c.get("text", ""))
+                      for c in f.get("conditions", ()) or ()]
+        with self._status_lock:
+            if conditions:
+                self._status_peers.add(m.publisher_id)
+            else:
+                self._status_peers.discard(m.publisher_id)
+        handler = self._on_status
+        if handler is not None:
+            handler(StatusUpdate(node=m.publisher_name, node_id=m.publisher_id, conditions=conditions))
+
+    def _status_gone(self, peer, name):
+        # a node that went away takes its conditions with it: on_status sees its set empty
+        with self._status_lock:
+            if peer not in self._status_peers:
+                return
+            self._status_peers.discard(peer)
+        handler = self._on_status
+        if handler is not None:
+            handler(StatusUpdate(node=name, node_id=peer))
+
+    def _bind_builtin(self, what, topic, set_queue, deliver):
+        # widens a builtin topic of this node to subscribe for its life. The queue and the
+        # handler go first, so the catch up replay parks or lands on the handler
         with self._gate.use(self._h) as nh:
             if not nh:
-                raise Error("on_log: node is closed")
+                raise Error("%s: node is closed" % what)
+            h = topic(nh)
+            if not h:
+                raise Error("%s: the builtin is disabled on this node" % what)
             if self._queue is not None:
-                rc = self._lib.rant_node_set_log_queue(nh, self._queue._q)
+                rc = set_queue(nh, self._queue._q)
                 if rc != 0:
-                    raise Error("on_log: log queue refused: %s" % _send_status(rc), self.last_error)
-            for level in (LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO):
-                h = self._lib.rant_node_log_topic(nh, int(level))
-                if not h:
-                    raise Error("on_log: logs are disabled on this node")
-                rc = self._lib.rant_topic_set_role(h, _ROLE_PUBSUB)
-                if rc != 0:
-                    raise Error("on_log: subscribe refused: %s" % _send_status(rc), self.last_error)
-                self._add_sub_handler(self._lib.rant_topic_index(h), self._log_line(level))
-
-    def _log_line(self, level):
-        def deliver(m):
-            handler = self._on_log
-            if handler is None:
-                return
-            f = m.value if isinstance(m.value, dict) else {}
-            handler(LogLine(level=level, node=m.publisher_name, node_id=m.publisher_id,
-                            wall_us=int(f.get("wall_us", 0)), mono_us=int(f.get("mono_us", 0)),
-                            recv_us=m.recv_us, written_us=m.written_us,
-                            text=f.get("text", "") or ""))
-        return deliver
+                    raise Error("%s: queue refused: %s" % (what, _send_status(rc)), self.last_error)
+            index = self._lib.rant_topic_index(h)
+            self._add_sub_handler(index, deliver)
+            rc = self._lib.rant_topic_set_role(h, _ROLE_PUBSUB)
+            if rc != 0:
+                self._remove_sub_handler(index, deliver)
+                raise Error("%s: subscribe refused: %s" % (what, _send_status(rc)), self.last_error)
 
     @property
     def reflection(self):
@@ -3789,6 +3896,8 @@ def _on_event(ev_ptr):
         node = _NODES.get(e.user)
         if node is not None:
             with node._gate.running():
+                if e.kind == EventKind.PEER_DOWN:
+                    node._status_gone(e.peer, e.peer_name.decode("utf-8", "replace") if e.peer_name else None)
                 (node._on_evt or node._print_event)(Event._from_c(e))
     except Exception:
         _traceback.print_exc()

@@ -137,11 +137,17 @@ class RantNodeOpts(Structure):
         ("disable_logs", c_uint8),
         ("disable_meta", c_uint8),
         ("disable_error_logs", c_uint8),
+        ("log_level", c_uint8),
+        ("disable_status", c_uint8),
         ("net", RantNodeNet),
         ("discovery", RantNodeDiscovery),
         ("event_queue_bytes", c_uint32),
         ("prefix", c_char_p),
     ]
+
+
+class RantStatusOpts(Structure):
+    _fields_ = [("clearable", c_uint8)]
 
 
 class RantMsg(Structure):
@@ -450,7 +456,12 @@ def bind(lib):
     F("rant_topic_counts", [c_void_p, POINTER(c_uint64), POINTER(c_uint64),
                             POINTER(c_uint64), POINTER(c_uint64)], None)
     F("rant_node_log_text", [c_void_p, c_int, c_char_p, c_int], c_int)
-    F("rant_node_log_topic", [c_void_p, c_int], c_void_p)
+    F("rant_node_log_topic", [c_void_p], c_void_p)
+    F("rant_node_set_status", [c_void_p, c_char_p, c_int, c_char_p, POINTER(RantStatusOpts)], c_int)
+    F("rant_node_clear_status", [c_void_p, c_char_p], c_int)
+    F("rant_node_clear_peer_status", [c_void_p, c_uint32, c_char_p, c_uint64], c_int)
+    F("rant_node_status_topic", [c_void_p], c_void_p)
+    F("rant_node_set_status_queue", [c_void_p, c_void_p], c_int)
     F("rant_node_meta_function", [c_void_p], c_void_p)
     F("rant_event_str", [POINTER(RantEvent), c_char_p, c_size_t], c_char_p)
     F("rant_node_settle", [c_void_p, c_int], c_int)

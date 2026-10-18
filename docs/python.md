@@ -46,7 +46,7 @@ on it one at a time. `threading=rant.Threading.MANUAL` leaves the loop to your o
 instead: call `poll()` from it and handlers fire there. A build without threads refuses
 the service thread with `rant.Error`, and MANUAL is the way in.
 `threading=rant.Threading.DISPATCH` runs the service thread but parks every handler,
-response, log line and event on the node's queue until your thread calls `node.dispatch()`,
+response, log line, status set and event on the node's queue until your thread calls `node.dispatch()`,
 the one liner for a frame paced app. `node.create_queue()` makes another `rant.Queue`,
 and a handle created with `queue=` set to it parks its callbacks there alone until
 `queue.dispatch()`. Same name topic handles must agree on the queue. From inside a handler,
@@ -225,9 +225,23 @@ scalars are fields and whose full body is `info`. The schemas on an `Entity` are
 copies, None when untyped or not fetched, and `fetch_details` on the node is what makes
 them arrive.
 
-## Logs
+## Log and status
 
-`node.log(level, text)` publishes a line at a `LogLevel`, truncated at RANT_LOG_MAX, and
-`node.on_log(handler)` delivers every other node's lines at every level as a `LogLine`
-carrying its `level`, at `dispatch()` under DISPATCH. It raises `rant.Error` on a node
-opened with `disable_logs`.
+`node.log(level, text)` publishes a line at a `rant.Level`, truncated at RANT_LOG_MAX, and
+a level below the node's `log_level` sends nothing. `node.on_log(handler)` delivers every
+other node's lines as a `LogLine` (`level`, `origin`, `node`, `node_id`, `wall_us`,
+`recv_us`, `text`), at `dispatch()` under DISPATCH. It raises `rant.Error` on a node opened
+with `disable_logs`.
+
+```python
+node.set_status("drive2", rant.Level.ERROR, "drive 2 tripped", clearable=True)
+node.clear_status("drive2")
+node.on_status(lambda u: print(u.node, len(u.conditions)))
+```
+
+- `set_status` raises or updates a condition, `clear_status` clears it.
+- `on_status` delivers each node's whole set as a `StatusUpdate` of `Condition` rows on
+  every change, and an empty set when a node goes away. It raises on a node opened with
+  `disable_status`.
+- `clear_peer_status(u.node_id, c.key, c.since_us)` asks another node to clear a clearable
+  condition. Its app sees an `EventKind.STATUS_CLEARED` event with the key in `detail`.

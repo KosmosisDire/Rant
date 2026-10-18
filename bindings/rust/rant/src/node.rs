@@ -1,5 +1,5 @@
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_void};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
@@ -13,7 +13,8 @@ use crate::callback::{Callback, Refused, Registry, in_callback_of};
 use crate::error::{Error, ErrorKind, SendError, event_text};
 use crate::ffi;
 use crate::gate::{Gate, Pass};
-use crate::logs::LogFn;
+use crate::logs::{Level, LogFn};
+use crate::status::StatusFn;
 use crate::message::{Codec, Payload};
 use crate::options::{Qos, options, to_ms, to_us};
 use crate::schema::{MessageView, Schema};
@@ -45,11 +46,13 @@ options! {
         disable_shm: bool = false,
         /// Fetch and cache every topic every peer advertises, for observer tools.
         fetch_details: bool = false,
-        /// No `@rant/log` topics.
+        /// No `@rant/log` topic.
         disable_logs: bool = false,
+        /// No `@rant/status` topics.
+        disable_status: bool = false,
         /// No built in `@rant/meta` function.
         disable_meta: bool = false,
-        /// Do not mirror this node's errors onto `@rant/log/error`.
+        /// Do not mirror this node's errors onto `@rant/log`.
         disable_error_logs: bool = false,
         /// The unicast data port. 0 = chosen by the OS.
         data_port: u16 = 0,
@@ -81,6 +84,7 @@ options! {
         bridge: Option<String> = None,
         bridge_passphrase: Option<String> = None,
         match_wait: Option<Duration> = None,
+        log_level: Option<Level> = None,
     }
 }
 
@@ -116,6 +120,12 @@ impl NodeOptions {
         self
     }
 
+    /// The lowest level [`Node::log`] sends. Left out takes RANT_LOG_LEVEL, else Info.
+    pub fn log_level(mut self, level: Level) -> Self {
+        self.log_level = Some(level);
+        self
+    }
+
     /// How long a send that would reach nobody waits for a match still resolving. Zero
     /// never waits and raises an UnmatchedSend error instead. The default is 1 s.
     pub fn match_wait(mut self, wait: Duration) -> Self {
@@ -138,6 +148,8 @@ pub enum EventKind {
     MessageLost,
     /// A fault, named by `error`.
     Error,
+    /// A peer cleared one of this node's clearable conditions: `peer`, and `detail` the key.
+    StatusCleared,
     /// A kind this binding does not know yet.
     Unknown,
 }
@@ -175,6 +187,7 @@ pub struct Event {
     /// PeerInterest: the topics we now receive from the peer.
     pub receive_topics: u16,
     /// SchemaMismatch: what was incompatible. For a handler that panicked: its text.
+    /// StatusCleared: the key.
     pub detail: Option<String>,
     text: String,
 }
@@ -195,6 +208,7 @@ impl Event {
                 ffi::RANT_PEER_INTEREST => EventKind::PeerInterest,
                 ffi::RANT_MSG_LOST => EventKind::MessageLost,
                 ffi::RANT_ERROR => EventKind::Error,
+                ffi::RANT_STATUS_CLEARED => EventKind::StatusCleared,
                 _ => EventKind::Unknown,
             },
             error: ErrorKind::from_c(ev.error),
@@ -396,6 +410,10 @@ pub(crate) struct NodeInner {
     kept: Mutex<HashMap<u64, Box<dyn Any + Send + Sync>>>,
     pub(crate) on_log: Mutex<Option<Arc<Callback<LogFn>>>>,
     pub(crate) log_bound: AtomicBool,
+    pub(crate) on_status: Mutex<Option<Arc<Callback<StatusFn>>>>,
+    pub(crate) status_bound: AtomicBool,
+    /// peers whose last status set was not empty
+    pub(crate) status_peers: Mutex<HashSet<u32>>,
     /// static mode's one block, which the C allocates from until the state is freed
     memory: Option<*mut [u8]>,
 }
@@ -546,7 +564,8 @@ impl NodeInner {
         let kept = std::mem::take(&mut *lock(&self.kept));
         let on_event = lock(&self.on_event).take();
         let on_log = lock(&self.on_log).take();
-        drop((handlers, kept, on_event, on_log));
+        let on_status = lock(&self.on_status).take();
+        drop((handlers, kept, on_event, on_log, on_status));
         Ok(())
     }
 }
@@ -584,7 +603,11 @@ unsafe extern "C" fn on_event(ev: *const ffi::RantEvent) {
         return;
     }
     let inner = unsafe { &*(ev.user as *const NodeInner) };
-    inner.emit(&Event::from_c(ev));
+    let ev = Event::from_c(ev);
+    if ev.kind == EventKind::PeerDown {
+        crate::status::gone(inner, ev.peer, ev.peer_name.as_deref());
+    }
+    inner.emit(&ev);
 }
 
 /// One participant on the mesh. Its factories make every handle, it runs the loop as
@@ -617,6 +640,9 @@ impl Node {
             kept: Mutex::new(HashMap::new()),
             on_log: Mutex::new(None),
             log_bound: AtomicBool::new(false),
+            on_status: Mutex::new(None),
+            status_bound: AtomicBool::new(false),
+            status_peers: Mutex::new(HashSet::new()),
             memory: (o.memory > 0).then(|| Box::into_raw(vec![0u8; o.memory].into_boxed_slice())),
         });
 
@@ -634,6 +660,8 @@ impl Node {
             disable_logs: o.disable_logs as u8,
             disable_meta: o.disable_meta as u8,
             disable_error_logs: o.disable_error_logs as u8,
+            log_level: o.log_level.map_or(0, |l| l.to_c() as u8),
+            disable_status: o.disable_status as u8,
             prefix: c_ptr(&inner.net.prefix),
             net: ffi::RantNodeNet {
                 data_port: o.data_port,

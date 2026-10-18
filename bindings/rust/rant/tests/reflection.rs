@@ -1,4 +1,4 @@
-// Reflection, meta snapshots, the built in logs and static memory mode.
+// Reflection, meta snapshots, the built in log and status, and static memory mode.
 
 mod common;
 
@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use common::{block_on, domain, node, options, wait_for};
 use rant::{
-    CallOptions, EntityKind, ErrorKind, FunctionOptions, LogLevel, MetaSections, Node, NodeOptions, Qos, Request, SendError, TaskOptions,
-    TaskRequest, Threading, VariableOptions,
+    CallOptions, EntityKind, ErrorKind, EventKind, FunctionOptions, Level, MetaSections, Node, NodeOptions, Origin, Qos, Request,
+    SendError, StatusOptions, TaskOptions, TaskRequest, Threading, VariableOptions,
 };
 
 #[derive(rant::Message, Clone, Debug, PartialEq)]
@@ -96,18 +96,84 @@ fn logs_cross_nodes_but_not_back() {
     let b = node("log_b", 42);
     let lines = Arc::new(Mutex::new(Vec::new()));
     let l = Arc::clone(&lines);
-    a.on_log(move |line| l.lock().unwrap().push((line.level, line.node.to_owned(), line.text.into_owned()))).unwrap();
+    a.on_log(move |line| {
+        if line.origin == Origin::App && line.wall_us != 0 {
+            l.lock().unwrap().push((line.level, line.node.to_owned(), line.text.into_owned()));
+        }
+    })
+    .unwrap();
     assert!(wait_for(4000, None, || a.reflection().peers().iter().any(|p| p.name == "log_b" && p.active)));
     std::thread::sleep(Duration::from_millis(300));
-    b.log(LogLevel::Warn, "pressure high").unwrap();
-    a.log(LogLevel::Info, "my own").unwrap();
-    let want = (LogLevel::Warn, "log_b".to_owned(), "pressure high".to_owned());
+    b.log(Level::Debug, "below the level").unwrap();
+    b.log(Level::Warn, "pressure high").unwrap();
+    a.log(Level::Info, "my own").unwrap();
+    let want = (Level::Warn, "log_b".to_owned(), "pressure high".to_owned());
     assert!(wait_for(4000, None, || lines.lock().unwrap().contains(&want)), "{:?}", lines.lock().unwrap());
     assert!(!lines.lock().unwrap().iter().any(|l| l.2 == "my own"), "a node never receives its own lines");
+    assert!(!lines.lock().unwrap().iter().any(|l| l.2 == "below the level"), "a line below the level is never sent");
 
     let mute = Node::new("log_off", options(42, Threading::ServiceThread).disable_logs(true)).unwrap();
-    assert_eq!(mute.log(LogLevel::Info, "x"), Err(SendError::NoSys));
+    assert_eq!(mute.log(Level::Info, "x"), Err(SendError::NoSys));
     assert!(mute.on_log(|_| {}).is_err());
+    let loud = Node::new("log_debug", options(42, Threading::ServiceThread).log_level(Level::Debug)).unwrap();
+    assert_eq!(loud.log(Level::Debug, "x"), Ok(()));
+}
+
+#[test]
+fn status_reaches_late_binders_and_clears() {
+    type Seen = Vec<(String, Level, bool, u64, String)>;
+    let a = node("status_a", 44);
+    let b = node("status_b", 44);
+    let cleared = Arc::new(Mutex::new(Vec::new()));
+    let c = Arc::clone(&cleared);
+    a.on_event(move |e| {
+        if e.kind == EventKind::StatusCleared {
+            c.lock().unwrap().push(e.detail.clone().unwrap_or_default());
+        }
+    });
+    a.set_status("estop", Level::Error, "pressed", StatusOptions::new()).unwrap();
+    a.set_status("hot", Level::Warn, "motor hot", StatusOptions::new().clearable(true)).unwrap();
+    assert_eq!(a.set_status(&"k".repeat(49), Level::Info, "x", StatusOptions::new()), Err(SendError::TooBig));
+
+    let seen: Arc<Mutex<(u32, usize, Seen)>> = Arc::new(Mutex::new((0, 0, Vec::new())));
+    let s = Arc::clone(&seen);
+    b.on_status(move |u| {
+        if u.node != "status_a" {
+            return;
+        }
+        let mut g = s.lock().unwrap();
+        g.0 = u.node_id;
+        g.1 += 1;
+        g.2 = u.conditions.iter().map(|c| (c.key.to_string(), c.level, c.clearable, c.since_us, c.text.to_string())).collect();
+    })
+    .unwrap();
+    let count = || seen.lock().unwrap().2.len();
+    assert!(wait_for(4000, None, || count() == 2), "{:?}", seen.lock().unwrap());
+    let (from, hot_since) = {
+        let g = seen.lock().unwrap();
+        assert_eq!(g.2[0].0, "estop");
+        assert_eq!((g.2[0].1, g.2[0].2), (Level::Error, false));
+        assert_eq!((g.2[1].0.as_str(), g.2[1].1, g.2[1].2, g.2[1].4.as_str()), ("hot", Level::Warn, true, "motor hot"));
+        assert!(g.2[1].3 > 0);
+        (g.0, g.2[1].3)
+    };
+    b.clear_peer_status(from, "hot", hot_since).unwrap();
+    assert!(wait_for(4000, None, || *cleared.lock().unwrap() == ["hot"]), "{:?}", cleared.lock().unwrap());
+    assert!(wait_for(4000, None, || count() == 1));
+    a.clear_status("estop").unwrap();
+    assert!(wait_for(4000, None, || count() == 0));
+    a.set_status("estop", Level::Error, "pressed again", StatusOptions::new()).unwrap();
+    assert!(wait_for(4000, None, || count() == 1));
+    let before = seen.lock().unwrap().1;
+    drop(a);
+    assert!(wait_for(8000, None, || {
+        let g = seen.lock().unwrap();
+        g.1 > before && g.2.is_empty()
+    }), "a node that went away reads as empty");
+
+    let off = Node::new("status_off", options(44, Threading::ServiceThread).disable_status(true)).unwrap();
+    assert_eq!(off.set_status("k", Level::Info, "x", StatusOptions::new()), Err(SendError::NoSys));
+    assert!(off.on_status(|_| {}).is_err());
 }
 
 #[test]

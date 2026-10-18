@@ -195,18 +195,26 @@ remote.set(&2.0)?;
 - A handle cannot close inside its own callback. It then stays until the node closes.
 - A handle that outlives its node is safe. Its calls answer `NoTopic`.
 
-## Reflection and logs
+## Reflection, log and status
 
 ```rust
-node.log(LogLevel::Info, "started")?;
+node.log(Level::Info, "started")?;
 node.on_log(|line| println!("{}: {}", line.node, line.text))?;
+
+node.set_status("drive2", Level::Error, "drive 2 tripped", StatusOptions::new().clearable(true))?;
+node.clear_status("drive2")?;
+node.on_status(|u| println!("{}: {} active", u.node, u.conditions.len()))?;
 
 for peer in node.reflection().peers() {
     println!("{}", peer.name);
 }
 ```
 
-- `on_log` receives every other node's log lines.
+- `on_log` receives every other node's log lines. `NodeOptions::log_level` is the lowest
+  level this node sends, left out takes `RANT_LOG_LEVEL`, else Info.
+- `on_status` receives each node's whole set on every change, and an empty set when a node
+  goes away. `clear_peer_status(u.node_id, &c.key, c.since_us)` asks another node to clear a
+  clearable condition, whose app then sees `EventKind::StatusCleared`.
 - `reflection()` lists `peers()`, one peer's `entities(id)` and the whole `mesh()`.
   `epoch()` changes when anything does.
 - `meta(peer, sections, timeout)` asks a peer for its runtime snapshot, and `meta_async`

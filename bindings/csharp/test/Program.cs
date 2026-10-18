@@ -1120,7 +1120,7 @@ static class Program
 
         int logId = 0; string logText = null;
         cli.OnLog += l => { logId = Thread.CurrentThread.ManagedThreadId; logText = l.Text; };
-        srv.Log(LogLevel.Info, "dispatched line");
+        srv.Log(Rant.Level.Info, "dispatched line");
         deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline && logText != "dispatched line") { Drain(); Thread.Sleep(5); }
         Check("log line arrived", logText == "dispatched line");
@@ -1155,17 +1155,23 @@ static class Program
         using var a = new RantNode("lsrc", Local(8));
         using var b = new RantNode("lsink", Local(8));
         var lines = new System.Collections.Concurrent.ConcurrentQueue<RantLogLine>();
-        a.Log(LogLevel.Warn, "before");
+        a.Log(Rant.Level.Warn, "before");
+        a.Log(Rant.Level.Debug, "hidden");
         b.OnLog += l => lines.Enqueue(l);
-        bool Has(string t, LogLevel lv) { foreach (var l in lines) if (l.Text == t && l.Level == lv && l.Node == "lsrc") return true; return false; }
+        bool Has(string t, Rant.Level lv)
+        {
+            foreach (var l in lines)
+                if (l.Text == t && l.Level == lv && l.Origin == Origin.App && l.Node == "lsrc" && l.WallUs != 0) return true;
+            return false;
+        }
         var deadline = DateTime.UtcNow.AddSeconds(8);
-        while (DateTime.UtcNow < deadline && !Has("before", LogLevel.Warn)) Thread.Sleep(5);
-        Check("a line logged before the subscribe replays", Has("before", LogLevel.Warn));
-        a.Log(LogLevel.Error, "live");
+        while (DateTime.UtcNow < deadline && !Has("before", Rant.Level.Warn)) Thread.Sleep(5);
+        Check("a line logged before the subscribe replays", Has("before", Rant.Level.Warn));
+        a.Log(Rant.Level.Error, "live");
         deadline = DateTime.UtcNow.AddSeconds(8);
-        while (DateTime.UtcNow < deadline && !Has("live", LogLevel.Error)) Thread.Sleep(5);
-        Check("a live line arrives with its level and node",
-              Has("live", LogLevel.Error));
+        while (DateTime.UtcNow < deadline && !Has("live", Rant.Level.Error)) Thread.Sleep(5);
+        Check("a live line arrives with its level, origin and node", Has("live", Rant.Level.Error));
+        Check("a line below the level never arrives", !Has("hidden", Rant.Level.Debug));
 
         var o = Local(8); o.DisableLogs = true;
         using var c = new RantNode("lnone", o);
@@ -1173,7 +1179,72 @@ static class Program
         try { c.OnLog += l => { }; } catch (RantException) { threw = true; }
         Check("OnLog on a node without logs throws", threw);
 
+        var bad = Local(8); bad.LogLevel = (Rant.Level)9;
+        threw = false;
+        try { using var d = new RantNode("lbad", bad); } catch (RantException) { threw = true; }
+        Check("a bad LogLevel refuses the open", threw);
+
         Console.WriteLine(ok ? "log: PASS\n" : "log: FAIL\n");
+        return ok;
+    }
+
+    // OnStatus: A raises before B listens, B binds late and sees the whole set, B clears the
+    // clearable one and A's event names it, and A closing empties B's view
+    static bool StatusLeg()
+    {
+        Console.WriteLine("status leg: two nodes, loopback");
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+        bool Until(int ms, Func<bool> f)
+        {
+            var end = DateTime.UtcNow.AddMilliseconds(ms);
+            while (DateTime.UtcNow < end) { if (f()) return true; Thread.Sleep(5); }
+            return f();
+        }
+
+        var a = new RantNode("ssrc", Local(16));
+        using var b = new RantNode("ssink", Local(16));
+        object mu = new object();
+        RantStatusUpdate last = null; int updates = 0;
+        string clearedKey = null;
+        a.OnEvent += e => { if (e.Kind == EventKind.StatusCleared) lock (mu) clearedKey = e.Detail; };
+        Check("raised before anyone listens",
+              a.SetStatus("estop", Rant.Level.Error, "pressed") == SendStatus.Ok
+              && a.SetStatus("hot", Rant.Level.Warn, "motor hot", clearable: true) == SendStatus.Ok);
+        Check("a long key is refused", a.SetStatus(new string('k', 49), Rant.Level.Info, "x") == SendStatus.TooBig);
+        b.OnStatus += u => { if (u.Node == "ssrc") lock (mu) { last = u; updates++; } };
+        int Count() { lock (mu) return last == null ? -1 : last.Conditions.Count; }
+        Check("the late binder gets the whole set", Until(8000, () => Count() == 2));
+        RantCondition hot = null;
+        lock (mu)
+        {
+            var c = last.Conditions;
+            Check("the set decodes", c.Count == 2 && c[0].Key == "estop" && c[0].Level == Rant.Level.Error
+                  && !c[0].Clearable && c[1].Key == "hot" && c[1].Text == "motor hot" && c[1].Clearable
+                  && c[1].SinceUs != 0 && c[1].Origin == Origin.App);
+            if (c.Count == 2) hot = c[1];
+        }
+        uint from; lock (mu) from = last.NodeId;
+        Check("a peer clear is sent", hot != null && b.ClearPeerStatus(from, "hot", hot.SinceUs) == SendStatus.Ok);
+        Check("A's app hears which was cleared", Until(8000, () => { lock (mu) return clearedKey == "hot"; }));
+        Check("B sees the smaller set", Until(8000, () => Count() == 1));
+        Check("an own clear", a.ClearStatus("estop") == SendStatus.Ok);
+        Check("B sees it empty", Until(8000, () => Count() == 0));
+        a.SetStatus("estop", Rant.Level.Error, "pressed again");
+        Check("raised again", Until(8000, () => Count() == 1));
+        int before; lock (mu) before = updates;
+        a.Dispose();
+        Check("a node that went away reads as empty",
+              Until(8000, () => { lock (mu) return updates > before && last.Conditions.Count == 0; }));
+
+        var o = Local(16); o.DisableStatus = true;
+        using var c2 = new RantNode("snone", o);
+        bool threw = false;
+        try { c2.OnStatus += u => { }; } catch (RantException) { threw = true; }
+        Check("OnStatus on a node without status throws", threw);
+        Check("SetStatus on a node without status is NoSys", c2.SetStatus("k", Rant.Level.Info, "x") == SendStatus.NoSys);
+
+        Console.WriteLine(ok ? "status: PASS\n" : "status: FAIL\n");
         return ok;
     }
 
@@ -1739,6 +1810,7 @@ static class Program
         ("tasks", Tasks),
         ("dispatch", DispatchLeg),
         ("log", LogLeg),
+        ("status", StatusLeg),
         ("pull", PullLeg),
         ("reflect", ReflectLeg),
         ("dispose", DisposeLeg),

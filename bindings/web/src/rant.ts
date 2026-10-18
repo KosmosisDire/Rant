@@ -6,7 +6,8 @@ export {
     TaskDefinition, RemoteTask, Variable, VariableDefinition, RemoteVariable, RantError, CancelledError, AppError, MetaSection,
     type SchemaArg, type NodeOptions, type TopicOptions, type FunctionOptions, type TaskOptions, type VariableOptions,
     type Message, type Request, type TaskContext, type TaskCall, type Response, type Progress, type VariableUpdate,
-    type SendStatus, type CallStatus, type CancelStatus, type LogLevel, type LogLine, type EntityKind, type EventKind,
+    type SendStatus, type CallStatus, type CancelStatus, type Level, type Origin, type LogLine, type Condition,
+    type StatusUpdate, type EntityKind, type EventKind,
     type ErrorKind, type RantEvent, type TopicCounts, type QueueStats, type NodeStats, type Peer, type Entity, type MetaSnapshot,
 } from "./node.js";
 

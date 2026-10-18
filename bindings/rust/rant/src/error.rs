@@ -65,6 +65,8 @@ pub enum ErrorKind {
     BadDomain,
     /// The prefix holds '@', starts or ends with '/' or is too long.
     BadPrefix,
+    /// RANT_LOG_LEVEL or the log_level option is not a level.
+    BadLogLevel,
     /// A node of the domain speaks another wire version. Once per source.
     WireVersion,
     /// The bridge cannot be reached or refused, or its link dropped. The detail says why.
@@ -105,6 +107,7 @@ impl ErrorKind {
             ffi::RANT_E_BAD_SCHEMA => BadSchema,
             ffi::RANT_E_BAD_DOMAIN => BadDomain,
             ffi::RANT_E_BAD_PREFIX => BadPrefix,
+            ffi::RANT_E_BAD_LOG_LEVEL => BadLogLevel,
             ffi::RANT_E_WIRE_VERSION => WireVersion,
             ffi::RANT_E_BRIDGE => Bridge,
             _ => Unknown,
@@ -142,6 +145,7 @@ impl ErrorKind {
             BadSchema => ffi::RANT_E_BAD_SCHEMA,
             BadDomain => ffi::RANT_E_BAD_DOMAIN,
             BadPrefix => ffi::RANT_E_BAD_PREFIX,
+            BadLogLevel => ffi::RANT_E_BAD_LOG_LEVEL,
             WireVersion => ffi::RANT_E_WIRE_VERSION,
             Bridge => ffi::RANT_E_BRIDGE,
         }

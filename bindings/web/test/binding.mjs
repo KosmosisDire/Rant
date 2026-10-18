@@ -175,9 +175,33 @@ await check("log lines arrive", async () => {
     const lines = [];
     b.onLog((l) => lines.push(l));
     await new Promise((r) => setTimeout(r, 300));
+    a.log("debug", "below the level");
     a.log("warn", "careful");
     await until(() => lines.find((l) => l.text === "careful"));
-    assert.equal(lines.find((l) => l.text === "careful").level, "warn");
+    const line = lines.find((l) => l.text === "careful");
+    assert.equal(line.level, "warn");
+    assert.equal(line.origin, "app");
+    assert.ok(line.wallUs > 0);
+    assert.ok(!lines.find((l) => l.text === "below the level"));
+});
+
+await check("status reaches a late binder and clears", async () => {
+    assert.equal(a.setStatus("estop", "error", "pressed"), "ok");
+    assert.equal(a.setStatus("hot", "warn", "motor hot", { clearable: true }), "ok");
+    assert.equal(a.setStatus("k".repeat(49), "info", "x"), "too_big");
+    let last = null;
+    b.onStatus((u) => { if (u.node === "a") last = u; });
+    await until(() => last?.conditions.length === 2);
+    const [estop, hot] = last.conditions;
+    assert.deepEqual([estop.key, estop.level, estop.clearable], ["estop", "error", false]);
+    assert.deepEqual([hot.key, hot.level, hot.clearable, hot.text, hot.origin], ["hot", "warn", true, "motor hot", "app"]);
+    assert.ok(hot.sinceUs > 0);
+    assert.equal(b.clearPeerStatus(last.nodeId, "hot", hot.sinceUs), "ok");
+    await until(() => last.conditions.length === 1);
+    assert.equal(last.conditions[0].key, "estop");
+    assert.ok(events.find((e) => e.kind === "status_cleared" && e.detail === "hot"));
+    assert.equal(a.clearStatus("estop"), "ok");
+    await until(() => last.conditions.length === 0);
 });
 
 await check("a handler may close its own handle", async () => {

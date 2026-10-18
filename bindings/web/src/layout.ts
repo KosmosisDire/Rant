@@ -23,7 +23,7 @@ export const RantNodeDiscovery = { sizeof: 12, announce_interval_us: 0, peer_tim
 
 export const RantNodeNet = { sizeof: 40, data_port: 0, discovery_port: 2, multicast_interface: 4, multicast_ttl: 8, seed_peers: 12, n_seed_peers: 16, recv_buffer_bytes: 20, send_buffer_bytes: 24, fragment_size: 28, bridge: 32, bridge_passphrase: 36 } as const;
 
-export const RantNodeOpts = { sizeof: 80, domain: 0, max_topics: 2, user_data: 4, disable_shm: 8, fetch_details: 9, match_wait_ms: 12, disable_logs: 16, disable_meta: 17, disable_error_logs: 18, net: 20, discovery: 60, event_queue_bytes: 72, prefix: 76 } as const;
+export const RantNodeOpts = { sizeof: 84, domain: 0, max_topics: 2, user_data: 4, disable_shm: 8, fetch_details: 9, match_wait_ms: 12, disable_logs: 16, disable_meta: 17, disable_error_logs: 18, log_level: 19, disable_status: 20, net: 24, discovery: 64, event_queue_bytes: 76, prefix: 80 } as const;
 
 export const RantPeerInfo = { sizeof: 72, id: 0, uuid: 4, name: 20, address: 28, liveness: 36, last_heard_us: 40, epoch: 48, catching_up: 52, fragment_size: 54, rtt_us: 56, rtt_jitter_us: 60, rtt_min_us: 64, rtt_samples: 68 } as const;
 
@@ -38,6 +38,8 @@ export const RantResponse = { sizeof: 40, status: 0, data: 4, schema: 12, provid
 export const RantSchemaFieldInfo = { sizeof: 48, name: 0, type_name: 8, elem_name: 16, kind: 24, elem: 25, count: 26, depth: 28, str_cap: 30, arr_parent: 32, arr_depth: 34, offset: 36, size: 40, elem_size: 44 } as const;
 
 export const RantSendOpts = { sizeof: 8, capture_us: 0 } as const;
+
+export const RantStatusOpts = { sizeof: 1, clearable: 0 } as const;
 
 export const RantString = { sizeof: 8, data: 0, len: 4 } as const;
 

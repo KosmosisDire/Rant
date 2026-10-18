@@ -35,6 +35,7 @@ mod options;
 mod pattern;
 mod reflect;
 mod schema;
+mod status;
 mod string;
 mod task;
 mod topic;
@@ -43,7 +44,7 @@ mod variable;
 
 pub use error::{Error, ErrorKind, SendError};
 pub use function::{Deferred, FunctionDefinition, FunctionOptions, RemoteFunction, Request};
-pub use logs::{LogLevel, LogLine};
+pub use logs::{Level, LogLine, Origin};
 pub use map::{MapItem, MapReader, MapValue, MapWriter};
 pub use message::{Bytes, Message, Payload};
 pub use node::{Event, EventKind, Node, NodeOptions, NodeStats, Queue, QueueStats, Threading};
@@ -52,6 +53,7 @@ pub use pattern::{CallError, CallOptions, CallStatus, IntoReply, PendingCall, Pr
 pub use rant_macros::{Enum, Message};
 pub use reflect::{Entity, EntityKind, MetaNode, MetaProcess, MetaSections, MetaSnapshot, Peer, Reflection};
 pub use schema::{EnumVariant, Field, FieldType, FieldView, MessageBuilder, MessageView, Schema};
+pub use status::{Condition, StatusOptions, StatusUpdate};
 pub use string::String;
 pub use task::{PendingTask, RemoteTask, TaskDefinition, TaskOptions, TaskRequest};
 pub use topic::{Publisher, Received, Subscriber, TopicCounts, TopicQueueStats};

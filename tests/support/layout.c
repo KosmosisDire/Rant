@@ -203,6 +203,8 @@ int main(int argc, char **argv){
     FIELD(RantSchemaFieldInfo, elem_size)
     SIZE(RantSendOpts)
     FIELD(RantSendOpts, capture_us)
+    SIZE(RantStatusOpts)
+    FIELD(RantStatusOpts, clearable)
     SIZE(RantString)
     FIELD(RantString, data)
     FIELD(RantString, len)

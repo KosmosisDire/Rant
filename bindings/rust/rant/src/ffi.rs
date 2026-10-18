@@ -13,7 +13,7 @@ pub const RANT_DISCOVERY_PORT: u32 = 6730;
 pub const RANT_ANNOUNCE_INTERVAL_US: u32 = 3000000;
 pub const RANT_MAX_PEERS: u32 = 16;
 pub const RANT_ALLOCATOR_PAGE: u32 = 65536;
-pub const RANT_WIRE_VERSION: u32 = 6;
+pub const RANT_WIRE_VERSION: u32 = 7;
 pub const RANT_DISCOVERY_META_MAX: u32 = 64;
 pub const RANT_DISCOVERY_META_OFF: u32 = 30;
 pub const RANT_DISCOVERY_DISC_MAX: u32 = 35;
@@ -46,6 +46,9 @@ pub const RANT_MATCH_WAIT_MS: u32 = 1000;
 pub const RANT_QUEUE_CAP: u32 = 1048576;
 pub const RANT_QUEUES_MAX: u32 = 8;
 pub const RANT_LOG_MAX: u32 = 512;
+pub const RANT_STATUS_KEY_MAX: u32 = 48;
+pub const RANT_STATUS_TEXT_MAX: u32 = 160;
+pub const RANT_STATUS_MAX: u32 = 32;
 pub const RANT_META_NODE: u32 = 1;
 pub const RANT_META_PROC: u32 = 2;
 pub const RANT_META_TOPICS: u32 = 4;
@@ -166,6 +169,7 @@ pub const RANT_PEER_DOWN: RantEventKind = 1;
 pub const RANT_PEER_INTEREST: RantEventKind = 2;
 pub const RANT_MSG_LOST: RantEventKind = 3;
 pub const RANT_ERROR: RantEventKind = 4;
+pub const RANT_STATUS_CLEARED: RantEventKind = 5;
 pub type RantEventKind = ::std::os::raw::c_uint;
 pub const RANT_E_NONE: RantErrorKind = 0;
 pub const RANT_E_NAME_COLLISION: RantErrorKind = 1;
@@ -195,8 +199,9 @@ pub const RANT_E_STATE: RantErrorKind = 24;
 pub const RANT_E_BAD_SCHEMA: RantErrorKind = 25;
 pub const RANT_E_BAD_DOMAIN: RantErrorKind = 26;
 pub const RANT_E_BAD_PREFIX: RantErrorKind = 27;
-pub const RANT_E_WIRE_VERSION: RantErrorKind = 28;
-pub const RANT_E_BRIDGE: RantErrorKind = 29;
+pub const RANT_E_BAD_LOG_LEVEL: RantErrorKind = 28;
+pub const RANT_E_WIRE_VERSION: RantErrorKind = 29;
+pub const RANT_E_BRIDGE: RantErrorKind = 30;
 pub type RantErrorKind = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -829,6 +834,8 @@ pub struct RantNodeOpts {
     pub disable_logs: u8,
     pub disable_meta: u8,
     pub disable_error_logs: u8,
+    pub log_level: u8,
+    pub disable_status: u8,
     pub net: RantNodeNet,
     pub discovery: RantNodeDiscovery,
     pub event_queue_bytes: u32,
@@ -920,10 +927,19 @@ pub struct RantPumpSample {
 pub type RantPumpProbeFn = ::std::option::Option<
     unsafe extern "C" fn(user: *mut ::std::os::raw::c_void, s: *const RantPumpSample),
 >;
-pub const RANT_LOG_ERROR: RantLogLevel = 0;
-pub const RANT_LOG_WARN: RantLogLevel = 1;
-pub const RANT_LOG_INFO: RantLogLevel = 2;
-pub type RantLogLevel = ::std::os::raw::c_uint;
+pub const RANT_LEVEL_DEBUG: RantLevel = 1;
+pub const RANT_LEVEL_INFO: RantLevel = 2;
+pub const RANT_LEVEL_WARN: RantLevel = 3;
+pub const RANT_LEVEL_ERROR: RantLevel = 4;
+pub type RantLevel = ::std::os::raw::c_uint;
+pub const RANT_ORIGIN_APP: RantOrigin = 0;
+pub const RANT_ORIGIN_RANT: RantOrigin = 1;
+pub type RantOrigin = ::std::os::raw::c_uint;
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct RantStatusOpts {
+    pub clearable: u8,
+}
 pub const RANT_CALL_OK: RantCallStatus = 0;
 pub const RANT_CALL_APP_ERROR: RantCallStatus = 1;
 pub const RANT_CALL_NO_HANDLER: RantCallStatus = 2;
@@ -1494,6 +1510,10 @@ unsafe extern "C" {
         n: *mut RantNode,
         q: *mut RantQueue,
     ) -> ::std::os::raw::c_int;
+    pub fn rant_node_set_status_queue(
+        n: *mut RantNode,
+        q: *mut RantQueue,
+    ) -> ::std::os::raw::c_int;
     pub fn rant_topic_take(
         topic: *mut RantTopic,
         out: *mut RantMsg,
@@ -1592,17 +1612,35 @@ unsafe extern "C" {
     );
     pub fn rant_node_log(
         n: *mut RantNode,
-        level: RantLogLevel,
+        level: RantLevel,
         fmt: *const ::std::os::raw::c_char,
         ...
     ) -> ::std::os::raw::c_int;
     pub fn rant_node_log_text(
         n: *mut RantNode,
-        level: RantLogLevel,
+        level: RantLevel,
         text: *const ::std::os::raw::c_char,
         len: ::std::os::raw::c_int,
     ) -> ::std::os::raw::c_int;
-    pub fn rant_node_log_topic(n: *mut RantNode, level: RantLogLevel) -> *mut RantTopic;
+    pub fn rant_node_log_topic(n: *mut RantNode) -> *mut RantTopic;
+    pub fn rant_node_set_status(
+        n: *mut RantNode,
+        key: *const ::std::os::raw::c_char,
+        level: RantLevel,
+        text: *const ::std::os::raw::c_char,
+        opts: *const RantStatusOpts,
+    ) -> ::std::os::raw::c_int;
+    pub fn rant_node_clear_status(
+        n: *mut RantNode,
+        key: *const ::std::os::raw::c_char,
+    ) -> ::std::os::raw::c_int;
+    pub fn rant_node_clear_peer_status(
+        n: *mut RantNode,
+        peer: u32,
+        key: *const ::std::os::raw::c_char,
+        since_us: u64,
+    ) -> ::std::os::raw::c_int;
+    pub fn rant_node_status_topic(n: *mut RantNode) -> *mut RantTopic;
     pub fn rant_node_create_function_definition(
         n: *mut RantNode,
         name: *const ::std::os::raw::c_char,

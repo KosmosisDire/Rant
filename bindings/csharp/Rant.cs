@@ -71,7 +71,10 @@ namespace Rant
         /// error.</summary>
         MessageLost,
         /// <summary>A fault, which Error names.</summary>
-        Error
+        Error,
+        /// <summary>A peer cleared one of this node's clearable conditions: Peer, PeerName,
+        /// Detail the key.</summary>
+        StatusCleared
     }
 
     /// <summary>The fault an EventKind.Error event carries, also in RantEvent.Error and
@@ -139,6 +142,8 @@ namespace Rant
         /// <summary>RANT_PREFIX or Prefix holds '@', starts or ends with '/' or is too long, so
         /// the open was refused.</summary>
         BadPrefix,
+        /// <summary>RANT_LOG_LEVEL or LogLevel is not a level, so the open was refused.</summary>
+        BadLogLevel,
         /// <summary>A node of the domain speaks another wire version: Ip, Port. Once per
         /// source.</summary>
         WireVersion,
@@ -213,15 +218,26 @@ namespace Rant
         NoProvider = 7
     }
 
-    /// <summary>The severity of a line on the built in log topic.</summary>
-    public enum LogLevel
+    /// <summary>The severity of a log line or a status condition, rising.</summary>
+    public enum Level
     {
-        /// <summary>Something failed.</summary>
-        Error = 0,
-        /// <summary>Something is wrong but work goes on.</summary>
-        Warn = 1,
+        /// <summary>Detail for whoever debugs, sent only when the node's LogLevel allows it.</summary>
+        Debug = 1,
         /// <summary>Normal progress.</summary>
-        Info = 2
+        Info,
+        /// <summary>Something is wrong but work goes on.</summary>
+        Warn,
+        /// <summary>Something failed.</summary>
+        Error
+    }
+
+    /// <summary>Who wrote a log line or a condition.</summary>
+    public enum Origin
+    {
+        /// <summary>The app.</summary>
+        App = 0,
+        /// <summary>Rant itself.</summary>
+        Rant = 1
     }
 
     /// <summary>The sections a meta request asks for. Combine the bits, All asks for every
@@ -333,13 +349,21 @@ namespace Rant
         public byte disable_shm;
         public byte fetch_details;
         public int match_wait_ms;              // send path match wait, 0 = 1 s, negative = off
-        public byte disable_logs;              // strip the built-in @rant/log topics
+        public byte disable_logs;              // strip the built-in @rant/log topic
         public byte disable_meta;              // do not host the @rant/meta endpoint
-        public byte disable_error_logs;   // no error mirroring onto @rant/log/error
+        public byte disable_error_logs;   // no error mirroring onto @rant/log
+        public byte log_level;                 // the lowest Level published, 0 = RANT_LOG_LEVEL
+        public byte disable_status;            // strip the built-in @rant/status topics
         public RantNodeNet net;
         public RantNodeDiscovery discovery;
         public uint event_queue_bytes;
         public IntPtr prefix;                  // copied at open
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RantStatusOpts
+    {
+        public byte clearable;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -687,7 +711,18 @@ namespace Rant
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_node_log_text(IntPtr node, int level, byte[] text, int len);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern IntPtr rant_node_log_topic(IntPtr node, int level);
+        internal static extern IntPtr rant_node_log_topic(IntPtr node);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_node_set_status(IntPtr node, byte[] key, int level, byte[] text,
+            ref RantStatusOpts opts);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_node_clear_status(IntPtr node, byte[] key);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_node_clear_peer_status(IntPtr node, uint peer, byte[] key, ulong since_us);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr rant_node_status_topic(IntPtr node);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_node_set_status_queue(IntPtr node, IntPtr q);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern IntPtr rant_node_meta_function(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
@@ -1017,11 +1052,15 @@ namespace Rant
         /// <summary>The send path match wait bound. 0 = 1 s, negative = off, and such a send
         /// fires UnmatchedSend instead of waiting.</summary>
         public int MatchWaitMs;
-        /// <summary>No @rant/log topics: Log returns NoSys.</summary>
+        /// <summary>No @rant/log topic: Log returns NoSys.</summary>
         public bool DisableLogs;
+        /// <summary>The lowest level Log sends, null takes RANT_LOG_LEVEL, else Info.</summary>
+        public Level? LogLevel;
+        /// <summary>No @rant/status topics: SetStatus returns NoSys.</summary>
+        public bool DisableStatus;
         /// <summary>No built in @rant/meta function.</summary>
         public bool DisableMeta;
-        /// <summary>Do not mirror this node's errors onto @rant/log/error.</summary>
+        /// <summary>Do not mirror this node's errors onto @rant/log.</summary>
         public bool DisableErrorLogs;
         /// <summary>The data socket port, 0 = OS assigned.</summary>
         public ushort DataPort;
@@ -2027,7 +2066,7 @@ namespace Rant
         /// <summary>The byte count behind MessageTooBig, PeerMetaTooBig, Oom and Send.</summary>
         public ulong TooBigBytes;
         /// <summary>For SchemaMismatch and BadSchema, one line saying what was refused and
-        /// where, else null.</summary>
+        /// where. For StatusCleared, the key of the condition. Else null.</summary>
         public string Detail;
         /// <summary>The peer's node name, else null.</summary>
         public string PeerName;
@@ -2086,28 +2125,58 @@ namespace Rant
     }
 
     /// <summary>One decoded @rant/log line for a RantNode.OnLog handler. WallUs is epoch us,
-    /// MonoUs the publisher's monotonic clock, RecvUs this node's clock at receipt.</summary>
+    /// RecvUs this node's clock at receipt.</summary>
     public sealed class RantLogLine
     {
         /// <summary>The line's severity.</summary>
-        public LogLevel Level;
+        public Level Level;
+        /// <summary>The app wrote it, or Rant itself.</summary>
+        public Origin Origin;
         /// <summary>The publishing node's name.</summary>
         public string Node;
         /// <summary>The publishing peer's id.</summary>
         public uint NodeId;
         /// <summary>When it was logged, microseconds since the Unix epoch UTC.</summary>
         public ulong WallUs;
-        /// <summary>When it was logged, on the publisher's monotonic clock in microseconds.</summary>
-        public ulong MonoUs;
         /// <summary>When it arrived, on this node's monotonic clock in microseconds.</summary>
         public ulong RecvUs;
-        /// <summary>The carrying message's source stamp (see RantMessage.WrittenUs).</summary>
-        public ulong WrittenUs;
         /// <summary>The logged text.</summary>
         public string Text;
 
         /// <summary>The level, the node and the text on one line.</summary>
         public override string ToString() => $"[{Level}] {Node}: {Text}";
+    }
+
+    /// <summary>One active condition in a node's status.</summary>
+    public sealed class RantCondition
+    {
+        /// <summary>Its identity within the node.</summary>
+        public string Key;
+        /// <summary>How serious it is.</summary>
+        public Level Level;
+        /// <summary>The app raised it, or Rant itself.</summary>
+        public Origin Origin;
+        /// <summary>Another node may clear it with RantNode.ClearPeerStatus.</summary>
+        public bool Clearable;
+        /// <summary>When it was raised on the owner's clock, microseconds since the Unix epoch UTC.</summary>
+        public ulong SinceUs;
+        /// <summary>What a person reads.</summary>
+        public string Text;
+
+        /// <summary>The level, the key and the text on one line.</summary>
+        public override string ToString() => $"[{Level}] {Key}: {Text}";
+    }
+
+    /// <summary>A node's whole status for a RantNode.OnStatus handler: every condition active
+    /// there now. Empty when the node cleared them all or went away.</summary>
+    public sealed class RantStatusUpdate
+    {
+        /// <summary>The publishing node's name.</summary>
+        public string Node;
+        /// <summary>The publishing peer's id.</summary>
+        public uint NodeId;
+        /// <summary>Its active conditions.</summary>
+        public List<RantCondition> Conditions = new List<RantCondition>();
     }
 
     /// <summary>A decoded @rant/meta reply. The node and proc scalars are fields, the full
@@ -2669,6 +2738,8 @@ namespace Rant
                 disable_logs = (byte)(o.DisableLogs ? 1 : 0),
                 disable_meta = (byte)(o.DisableMeta ? 1 : 0),
                 disable_error_logs = (byte)(o.DisableErrorLogs ? 1 : 0),
+                log_level = (byte)(o.LogLevel.HasValue ? (int)o.LogLevel.Value : 0),
+                disable_status = (byte)(o.DisableStatus ? 1 : 0),
                 user_data = (IntPtr)_id,
             };
             // The node retains this pointer for its lifetime, so keep it alive (freed in
@@ -3091,11 +3162,12 @@ namespace Rant
                                                    Schema schema = null)
             => new RemoteVariable<T>(this, name, options, schema);
 
-        // ---- built-in logs (the @rant/log/{error,warn,info} topics) --------------------
+        // ---- built-in log and status ---------------------------------------------------
 
         /// <summary>Publish a log line at a level (already formatted text, truncated at
-        /// RANT_LOG_MAX). SendStatus.NoSys when logs are disabled. Thread safe.</summary>
-        public SendStatus Log(LogLevel level, string text)
+        /// RANT_LOG_MAX). A level below the node's LogLevel sends nothing. SendStatus.NoSys
+        /// when logs are disabled. Thread safe.</summary>
+        public SendStatus Log(Level level, string text)
         {
             byte[] b = Encoding.UTF8.GetBytes(text ?? "");
             using (Pass p = Gate.Enter())
@@ -3105,9 +3177,9 @@ namespace Rant
         private Action<RantLogLine> _onLog;
         private bool _logBound;
 
-        /// <summary>Every other node's log lines at every level as a RantLogLine, on the
-        /// service or polling thread, or at Dispatch() under Threading.Dispatch. Throws
-        /// RantException when logs are disabled on this node.</summary>
+        /// <summary>Every other node's log lines as a RantLogLine, on the service or polling
+        /// thread, or at Dispatch() under Threading.Dispatch. Throws RantException when logs
+        /// are disabled on this node.</summary>
         public event Action<RantLogLine> OnLog
         {
             add
@@ -3119,7 +3191,7 @@ namespace Rant
                     if (_logBound) return;
                     _logBound = true;
                 }
-                try { BindLog(); }
+                try { BindBuiltin("OnLog", Native.rant_node_log_topic, Native.rant_node_set_log_queue, DeliverLog); }
                 catch
                 {
                     lock (_subLock) { _onLog -= value; _logBound = false; }
@@ -3129,51 +3201,151 @@ namespace Rant
             remove { lock (_subLock) _onLog -= value; }
         }
 
-        // One subscription per level topic for the node's life, fanning into the event.
-        private void BindLog()
+        private void DeliverLog(RantMessage m)
+        {
+            Action<RantLogLine> h = _onLog;
+            if (h == null) return;
+            var f = m.Value as Dictionary<string, object>;
+            h(new RantLogLine
+            {
+                Level = (Level)FieldI(f, "level"), Origin = (Origin)FieldI(f, "origin"),
+                Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
+                WallUs = m.CaptureUs != 0 ? m.CaptureUs : m.WrittenUs,
+                Text = FieldS(f, "text"),
+            });
+        }
+
+        /// <summary>Raise the condition key on this node's status, or update it while it is
+        /// active: SinceUs stays from the raise, and the same values again send nothing.
+        /// Readers see it after the next loop pass. TooBig for a key over 48 bytes or past 32
+        /// conditions, NoSys when status is disabled. A clearable condition may be cleared by
+        /// another node with ClearPeerStatus, and this node then sees EventKind.StatusCleared.</summary>
+        public SendStatus SetStatus(string key, Level level, string text, bool clearable = false)
+        {
+            var so = new RantStatusOpts { clearable = (byte)(clearable ? 1 : 0) };
+            using (Pass p = Gate.Enter())
+                return p.Ok ? (SendStatus)Native.rant_node_set_status(_handle, Codec.CStr(key ?? ""), (int)level,
+                                                                       Codec.CStr(text ?? ""), ref so)
+                            : SendStatus.State;
+        }
+
+        /// <summary>Clear the condition key, Ok whether or not it was active.</summary>
+        public SendStatus ClearStatus(string key)
+        {
+            using (Pass p = Gate.Enter())
+                return p.Ok ? (SendStatus)Native.rant_node_clear_status(_handle, Codec.CStr(key ?? "")) : SendStatus.State;
+        }
+
+        /// <summary>Ask another node to clear its clearable condition key, the occurrence
+        /// raised at sinceUs. Nothing answers: its next RantStatusUpdate shows it gone, or
+        /// still there when it refused.</summary>
+        public SendStatus ClearPeerStatus(uint nodeId, string key, ulong sinceUs)
+        {
+            using (Pass p = Gate.Enter())
+                return p.Ok ? (SendStatus)Native.rant_node_clear_peer_status(_handle, nodeId, Codec.CStr(key ?? ""), sinceUs)
+                            : SendStatus.State;
+        }
+
+        private Action<RantStatusUpdate> _onStatus;
+        private bool _statusBound;
+        private readonly HashSet<uint> _statusPeers = new HashSet<uint>();   // last set not empty, under _subLock
+
+        /// <summary>Every other node's status as a RantStatusUpdate where the node's callbacks
+        /// run: on each change, each node's current set when this binds, and an empty set when
+        /// a node goes away. Throws RantException when status is disabled on this node.</summary>
+        public event Action<RantStatusUpdate> OnStatus
+        {
+            add
+            {
+                if (value == null) return;
+                lock (_subLock)
+                {
+                    _onStatus += value;
+                    if (_statusBound) return;
+                    _statusBound = true;
+                }
+                try { BindBuiltin("OnStatus", Native.rant_node_status_topic, Native.rant_node_set_status_queue, DeliverStatus); }
+                catch
+                {
+                    lock (_subLock) { _onStatus -= value; _statusBound = false; }
+                    throw;
+                }
+            }
+            remove { lock (_subLock) _onStatus -= value; }
+        }
+
+        private void DeliverStatus(RantMessage m)
+        {
+            var u = new RantStatusUpdate { Node = m.PublisherName, NodeId = m.PublisherId };
+            var f = m.Value as Dictionary<string, object>;
+            if (f != null && f.TryGetValue("conditions", out var o) && o is List<Dictionary<string, object>> list)
+                foreach (var c in list)
+                    u.Conditions.Add(new RantCondition
+                    {
+                        Key = FieldS(c, "key"), Level = (Level)FieldI(c, "level"), Origin = (Origin)FieldI(c, "origin"),
+                        Clearable = c.TryGetValue("clearable", out var cl) && cl is bool b && b,
+                        SinceUs = (ulong)FieldI(c, "since_us"), Text = FieldS(c, "text"),
+                    });
+            Action<RantStatusUpdate> h;
+            lock (_subLock)
+            {
+                h = _onStatus;
+                if (u.Conditions.Count > 0) _statusPeers.Add(u.NodeId);
+                else _statusPeers.Remove(u.NodeId);
+            }
+            h?.Invoke(u);
+        }
+
+        // A node that went away takes its conditions with it: OnStatus sees its set empty.
+        private void StatusGone(uint peer, string name)
+        {
+            Action<RantStatusUpdate> h;
+            lock (_subLock)
+            {
+                if (!_statusPeers.Remove(peer)) return;
+                h = _onStatus;
+            }
+            if (h == null) return;
+            using (Gate.Running())
+            {
+                try { h(new RantStatusUpdate { Node = name, NodeId = peer }); }
+                catch (Exception ex) { Console.Error.WriteLine("rant on_status: " + ex); }
+            }
+        }
+
+        // Widens a builtin topic of this node to subscribe for the node's life. The queue and
+        // the handler go first, so the catch up replay parks or lands on the handler.
+        private void BindBuiltin(string what, Func<IntPtr, IntPtr> topic, Func<IntPtr, IntPtr, int> setQueue,
+                                 Action<RantMessage> deliver)
         {
             using (Pass p = Gate.Enter())
             {
-                if (!p.Ok) throw new RantException(SendStatus.State, "OnLog: the node is closed");
-                BindLogTopics();
-            }
-        }
-
-        private void BindLogTopics()
-        {
-            // the queue goes first, so the catch up replay parks rather than landing inline
-            if (_queue != null)
-            {
-                int qrc = Native.rant_node_set_log_queue(_handle, _queue.Handle);
-                if (qrc != 0) throw new RantException((SendStatus)qrc, "log queue: " + (SendStatus)qrc);
-            }
-            foreach (LogLevel level in new[] { LogLevel.Error, LogLevel.Warn, LogLevel.Info })
-            {
-                IntPtr ch = Native.rant_node_log_topic(_handle, (int)level);
+                if (!p.Ok) throw new RantException(SendStatus.State, what + ": the node is closed");
+                IntPtr ch = topic(_handle);
                 if (ch == IntPtr.Zero)
-                    throw new RantException(SendStatus.NoSys, "OnLog: logs are disabled on this node");
-                int rc = Native.rant_topic_set_role(ch, (int)Role.PubSub);
-                if (rc != 0) throw new RantException((SendStatus)rc, "OnLog subscribe: " + (SendStatus)rc);
-                LogLevel lv = level;
-                AddSubHandler(Native.rant_topic_index(ch), m =>
+                    throw new RantException(SendStatus.NoSys, what + ": the builtin is disabled on this node");
+                if (_queue != null)
                 {
-                    Action<RantLogLine> h = _onLog;
-                    if (h == null) return;
-                    var f = m.Value as Dictionary<string, object>;
-                    h(new RantLogLine
-                    {
-                        Level = lv, Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
-                        WrittenUs = m.WrittenUs,
-                        WallUs = LogFieldU(f, "wall_us"), MonoUs = LogFieldU(f, "mono_us"),
-                        Text = f != null && f.TryGetValue("text", out var t) ? t as string ?? "" : "",
-                    });
-                });
+                    int qrc = setQueue(_handle, _queue.Handle);
+                    if (qrc != 0) throw new RantException((SendStatus)qrc, what + " queue: " + (SendStatus)qrc);
+                }
+                ushort index = Native.rant_topic_index(ch);
+                AddSubHandler(index, deliver);
+                int rc = Native.rant_topic_set_role(ch, (int)Role.PubSub);
+                if (rc != 0)
+                {
+                    RemoveSubHandler(index, deliver);
+                    throw new RantException((SendStatus)rc, what + " subscribe: " + (SendStatus)rc);
+                }
             }
         }
 
-        private static ulong LogFieldU(Dictionary<string, object> f, string k)
+        private static long FieldI(Dictionary<string, object> f, string k)
             => f != null && f.TryGetValue(k, out var o)
-               ? (o is ulong u ? u : o is long l ? (ulong)l : 0UL) : 0UL;
+               ? (o is long l ? l : o is ulong u ? (long)u : 0L) : 0L;
+
+        private static string FieldS(Dictionary<string, object> f, string k)
+            => f != null && f.TryGetValue(k, out var o) ? o as string ?? "" : "";
 
         /// <summary>The mesh as this node sees it: peers, their entities, the folded mesh
         /// and the @rant/meta snapshots (<see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>).</summary>
@@ -3405,6 +3577,8 @@ namespace Rant
                 RantNode node;
                 s_nodes.TryGetValue((long)e.user, out node);
                 if (node == null) return;
+                if (e.kind == (int)EventKind.PeerDown)
+                    node.StatusGone(e.peer, e.peer_name != IntPtr.Zero ? Codec.PtrToStr(e.peer_name) : null);
                 if (node.OnEvent == null && e.kind != (int)EventKind.Error) return;
                 node.EmitEvent(RantEvent.FromNative(evPtr, ref e));
             }

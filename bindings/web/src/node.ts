@@ -13,28 +13,36 @@ import { encodeUtf8, Native, scoped, type Scope } from "./wasm.js";
 export type SendStatus = "ok" | "no_topic" | "too_big" | "role" | "oom" | "state" | "nosys" | "schema";
 export type CallStatus = "ok" | "app_error" | "no_handler" | "timeout" | "peer_lost" | "cancelled" | "running" | "no_provider";
 export type CancelStatus = "ok" | "no_cancel" | "not_pending";
-export type LogLevel = "error" | "warn" | "info";
+/* the severity of a log line or a status condition, rising */
+export type Level = "debug" | "info" | "warn" | "error";
+/* who wrote a log line or a condition */
+export type Origin = "app" | "rant";
 export type EntityKind = "topic" | "function" | "variable" | "task";
-export type EventKind = "peer_up" | "peer_down" | "peer_interest" | "msg_lost" | "error";
+export type EventKind = "peer_up" | "peer_down" | "peer_interest" | "msg_lost" | "error" | "status_cleared";
 export type ErrorKind =
     | "none" | "name_collision" | "qos_incompatible" | "kind_mismatch" | "schema_mismatch" | "interest_overflow"
     | "meta_truncated_interest" | "peer_meta_too_big" | "msg_too_big" | "peer_refused" | "evicted_unsent"
     | "unmatched_send" | "duplicate_authority" | "oom" | "platform" | "socket" | "bind" | "mcast_join" | "send"
     | "recv" | "poll" | "waker" | "bad_address" | "bad_name" | "state" | "bad_schema" | "bad_domain"
-    | "bad_prefix" | "wire_version" | "bridge";
+    | "bad_prefix" | "bad_log_level" | "wire_version" | "bridge";
 
 const SEND: Record<number, SendStatus> = { 0: "ok", [-1]: "no_topic", [-2]: "too_big", [-3]: "role", [-4]: "oom", [-5]: "state", [-6]: "nosys", [-7]: "schema" };
 const CALL: CallStatus[] = ["ok", "app_error", "no_handler", "timeout", "peer_lost", "cancelled", "running", "no_provider"];
 const CALL_NUMBER: Record<CallStatus, number> = { ok: 0, app_error: 1, no_handler: 2, timeout: 3, peer_lost: 4, cancelled: 5, running: 6, no_provider: 7 };
-const LEVELS: LogLevel[] = ["error", "warn", "info"];
+const LEVELS: Level[] = ["debug", "info", "warn", "error"];      /* the C numbers them from 1 */
+/* a decoded enum is its option name, a number past the known ones reads as the nearest */
+const levelOf = (v: unknown): Level => typeof v === "string" ? (v.toLowerCase() as Level)
+    : LEVELS[Math.min(Math.max(Number(v ?? 2), 1), 4) - 1];
+const originOf = (v: unknown): Origin => (typeof v === "string" ? v.toLowerCase() === "rant" : Number(v ?? 0) === 1)
+    ? "rant" : "app";
 const ENTITY: EntityKind[] = ["topic", "function", "variable", "task"];
-const EVENT: EventKind[] = ["peer_up", "peer_down", "peer_interest", "msg_lost", "error"];
+const EVENT: EventKind[] = ["peer_up", "peer_down", "peer_interest", "msg_lost", "error", "status_cleared"];
 const ERROR: ErrorKind[] = [
     "none", "name_collision", "qos_incompatible", "kind_mismatch", "schema_mismatch", "interest_overflow",
     "meta_truncated_interest", "peer_meta_too_big", "msg_too_big", "peer_refused", "evicted_unsent",
     "unmatched_send", "duplicate_authority", "oom", "platform", "socket", "bind", "mcast_join", "send", "recv",
-    "poll", "waker", "bad_address", "bad_name", "state", "bad_schema", "bad_domain", "bad_prefix", "wire_version",
-    "bridge"];
+    "poll", "waker", "bad_address", "bad_name", "state", "bad_schema", "bad_domain", "bad_prefix", "bad_log_level",
+    "wire_version", "bridge"];
 const sendStatus = (r: number): SendStatus => SEND[r] ?? "state";
 
 /* The section mask of a meta snapshot, 0 for all of them. */
@@ -56,7 +64,9 @@ export interface NodeOptions {
     /* where the sockets come from: TunnelNet in a page, UdpNet or nothing for this machine's own in Node.js */
     net?: NetObject;
     domain?: number; prefix?: string; maxTopics?: number; fetchDetails?: boolean;
-    disableLogs?: boolean; disableMeta?: boolean; disableErrorLogs?: boolean;
+    disableLogs?: boolean; disableStatus?: boolean; disableMeta?: boolean; disableErrorLogs?: boolean;
+    /* the lowest level log() sends, unset takes RANT_LOG_LEVEL in Node.js, else "info" */
+    logLevel?: Level;
     /* "127.0.0.1" keeps the node on this computer */
     multicastInterface?: string;
     dataPort?: number; discoveryPort?: number; multicastTtl?: number;
@@ -156,8 +166,18 @@ export interface Entity {
 }
 
 export interface LogLine {
-    level: LogLevel; node: string; nodeId: number; text: string; wallUs: number; monoUs: number; recvUs: number; writtenUs: number;
+    level: Level; origin: Origin; node: string; nodeId: number; text: string;
+    /* the sender's UTC clock when it logged, and this node's monotonic clock at receipt */
+    wallUs: number; recvUs: number;
 }
+
+/* One active condition in a node's status. sinceUs is the owner's UTC clock at the raise. */
+export interface Condition {
+    key: string; level: Level; origin: Origin; clearable: boolean; sinceUs: number; text: string;
+}
+
+/* A node's whole status: every condition active there now, empty when it cleared them all or went away. */
+export interface StatusUpdate { node: string; nodeId: number; conditions: Condition[] }
 
 export interface MetaSnapshot { valid: boolean; status: CallStatus; provider: number; info: Record<string, unknown> }
 
@@ -242,7 +262,11 @@ export class RantNode {
     private readonly id: number;
     private eventHandler: ((e: RantEvent) => void) | null;
     private logHandler: ((l: LogLine) => void) | null = null;
-    private logIndex = new Map<number, LogLevel>();
+    private logIndex = -1;
+    private statusHandler: ((u: StatusUpdate) => void) | null = null;
+    private statusIndex = -1;
+    /* peers whose last status set was not empty */
+    private statusPeers = new Set<number>();
     private topics = new Map<string, TopicRec>();
     private byIndex = new Map<number, TopicRec>();
     private tables = new Map<number, Table>();
@@ -275,6 +299,8 @@ export class RantNode {
             n.setU8(o + N.disable_logs, opts.disableLogs ? 1 : 0);
             n.setU8(o + N.disable_meta, opts.disableMeta ? 1 : 0);
             n.setU8(o + N.disable_error_logs, opts.disableErrorLogs ? 1 : 0);
+            n.setU8(o + N.log_level, opts.logLevel ? LEVELS.indexOf(opts.logLevel) + 1 : 0);
+            n.setU8(o + N.disable_status, opts.disableStatus ? 1 : 0);
             str(o + N.prefix, opts.prefix);
             n.setU16(net + NN.data_port, opts.dataPort ?? 0);
             n.setU16(net + NN.discovery_port, opts.discoveryPort ?? 0);
@@ -388,6 +414,8 @@ export class RantNode {
     /* ---- callbacks ---- */
 
     /** @internal */ emit(e: RantEvent): void {
+        if (e.kind === "peer_down" && this.statusPeers.delete(e.peer))   /* its conditions went with it */
+            this.deliverStatus({ node: e.peerName ?? "", nodeId: e.peer, conditions: [] });
         if (this.eventHandler) {
             try { this.eventHandler(e); }
             catch (err) { console.error("rant: the event handler threw:", err); }
@@ -402,8 +430,8 @@ export class RantNode {
     private onMessage(p: number): void {
         const n = this.n, M = L.RantMsg;
         const index = n.u16(p + M.topic_index);
-        const level = this.logIndex.get(index);
-        if (level !== undefined) { this.deliverLog(level, p); return; }
+        if (index === this.logIndex) { this.deliverLog(p); return; }
+        if (index === this.statusIndex) { this.statusFrom(p); return; }
         const rec = this.byIndex.get(index);
         if (!rec) return;
         const data = n.u32(p + M.data), len = n.u32(p + M.data + 4), schema = n.u32(p + M.schema);
@@ -426,18 +454,54 @@ export class RantNode {
         }
     }
 
-    private deliverLog(level: LogLevel, p: number): void {
+    /* a builtin message's fields, empty when it does not decode */
+    private builtinFields(p: number): Record<string, unknown> {
+        const n = this.n, M = L.RantMsg, schema = n.u32(p + M.schema);
+        try {
+            if (schema) return this.decodeAt(schema, n.u32(p + M.data), n.u32(p + M.data + 4), null) as Record<string, unknown>;
+        } catch { /* it still says who sent it */ }
+        return {};
+    }
+
+    private deliverLog(p: number): void {
         const h = this.logHandler;
         if (!h) return;
-        const n = this.n, M = L.RantMsg, schema = n.u32(p + M.schema);
-        let f: Record<string, unknown> = {};
+        const n = this.n, M = L.RantMsg, f = this.builtinFields(p);
+        const capture = n.us(p + M.capture_us);
         try {
-            if (schema) f = this.decodeAt(schema, n.u32(p + M.data), n.u32(p + M.data + 4), null) as Record<string, unknown>;
-        } catch { /* a line that does not decode still says who sent it */ }
-        try {
-            h({ level, node: n.strAt(p + M.publisher_name), nodeId: n.u32(p + M.publisher_id), text: String(f.text ?? ""),
-                wallUs: Number(f.wall_us ?? 0), monoUs: Number(f.mono_us ?? 0), recvUs: n.us(p + M.recv_us), writtenUs: n.us(p + M.written_us) });
+            h({ level: levelOf(f.level), origin: originOf(f.origin), node: n.strAt(p + M.publisher_name),
+                nodeId: n.u32(p + M.publisher_id), text: String(f.text ?? ""),
+                wallUs: capture || n.us(p + M.written_us), recvUs: n.us(p + M.recv_us) });
         } catch (e) { console.error("rant: the log handler threw:", e); }
+    }
+
+    private statusFrom(p: number): void {
+        const n = this.n, M = L.RantMsg, f = this.builtinFields(p);
+        const rows = Array.isArray(f.conditions) ? f.conditions as Record<string, unknown>[] : [];
+        const conditions = rows.map((c) => ({ key: String(c.key ?? ""), level: levelOf(c.level), origin: originOf(c.origin),
+                                              clearable: !!c.clearable, sinceUs: Number(c.since_us ?? 0), text: String(c.text ?? "") }));
+        const nodeId = n.u32(p + M.publisher_id);
+        if (conditions.length) this.statusPeers.add(nodeId);
+        else this.statusPeers.delete(nodeId);
+        this.deliverStatus({ node: n.strAt(p + M.publisher_name), nodeId, conditions });
+    }
+
+    private deliverStatus(u: StatusUpdate): void {
+        const h = this.statusHandler;
+        if (!h) return;
+        try { h(u); }
+        catch (e) { console.error("rant: the status handler threw:", e); }
+    }
+
+    /* Widens a builtin topic of this node to subscribe for its life, the queue first so the catch up replay parks. */
+    private bindBuiltin(what: string, topic: number, setQueue: (h: number, q: number) => number): number {
+        const h = this.live();
+        const r = setQueue(h, this.queue);
+        if (r !== 0 || !topic) throw new RantError(`${what}: ${r === -6 || !topic ? "the builtin is disabled on this node" : sendStatus(r)}`);
+        const index = this.n.c.rant_topic_index(topic);
+        const rr = this.n.c.rant_topic_set_role(topic, 0);
+        if (rr !== 0) throw new RantError(`${what}: subscribe refused: ${sendStatus(rr)}`);
+        return index;
     }
 
     /* ---- schemas ---- */
@@ -617,11 +681,11 @@ export class RantNode {
         return this.until(() => !!this.h && this.n.c.rant_node_settle(this.h, 0) === 1, timeoutMs);
     }
 
-    /* Publishes a log line, truncated at 512 bytes. "nosys" when logs are disabled. */
-    log(level: LogLevel, text: string): SendStatus {
+    /* Publishes a log line, truncated at 512 bytes. A level below logLevel sends nothing. "nosys" when logs are disabled. */
+    log(level: Level, text: string): SendStatus {
         const h = this.live();
         const b = encodeUtf8(text);
-        const r = scoped(this.n, (sc) => this.n.c.rant_node_log_text(h, LEVELS.indexOf(level), sc.data(b), b.length));
+        const r = scoped(this.n, (sc) => this.n.c.rant_node_log_text(h, LEVELS.indexOf(level) + 1, sc.data(b), b.length));
         this.n.wake();
         return sendStatus(r);
     }
@@ -629,17 +693,48 @@ export class RantNode {
     /* Every other node's log lines. A later call replaces the handler, null stops them. */
     onLog(handler: ((line: LogLine) => void) | null): void {
         const h = this.live();
-        if (handler && !this.logIndex.size) {
-            const r = this.n.c.rant_node_set_log_queue(h, this.queue);
-            if (r !== 0) throw new RantError(`onLog: ${r === -6 ? "logs are disabled on this node" : sendStatus(r)}`);
-            LEVELS.forEach((level, i) => {
-                const t = this.n.c.rant_node_log_topic(h, i);
-                const rr = t ? this.n.c.rant_topic_set_role(t, 0) : -6;
-                if (rr !== 0) throw new RantError(`onLog: the ${level} topic refused: ${sendStatus(rr)}`);
-                this.logIndex.set(this.n.c.rant_topic_index(t), level);
-            });
-        }
+        if (handler && this.logIndex < 0)
+            this.logIndex = this.bindBuiltin("onLog", this.n.c.rant_node_log_topic(h), this.n.c.rant_node_set_log_queue);
         this.logHandler = handler;
+    }
+
+    /* Raises the condition key on this node's status, or updates it while active: sinceUs stays from the raise and the
+     * same values again send nothing. "too_big" for a key over 48 bytes or past 32 conditions, "nosys" when disabled. */
+    setStatus(key: string, level: Level, text: string, opts: { clearable?: boolean } = {}): SendStatus {
+        const h = this.live();
+        const r = scoped(this.n, (sc) => {
+            const so = sc.alloc(L.RantStatusOpts.sizeof);
+            this.n.setU8(so + L.RantStatusOpts.clearable, opts.clearable ? 1 : 0);
+            return this.n.c.rant_node_set_status(h, sc.cstr(key), LEVELS.indexOf(level) + 1, sc.cstr(text), so);
+        });
+        this.n.wake();
+        return sendStatus(r);
+    }
+
+    /* Clears the condition key, "ok" whether or not it was active. */
+    clearStatus(key: string): SendStatus {
+        const h = this.live();
+        const r = scoped(this.n, (sc) => this.n.c.rant_node_clear_status(h, sc.cstr(key)));
+        this.n.wake();
+        return sendStatus(r);
+    }
+
+    /* Asks another node to clear its clearable condition key, the occurrence raised at sinceUs. Nothing answers:
+     * its next status shows it gone, or still there when it refused. */
+    clearPeerStatus(nodeId: number, key: string, sinceUs: number): SendStatus {
+        const h = this.live();
+        const r = scoped(this.n, (sc) => this.n.c.rant_node_clear_peer_status(h, nodeId, sc.cstr(key), BigInt(sinceUs)));
+        this.n.wake();
+        return sendStatus(r);
+    }
+
+    /* Every other node's status on each change, each node's current set when this binds, and an empty set when a
+     * node goes away. A later call replaces the handler, null stops them. */
+    onStatus(handler: ((update: StatusUpdate) => void) | null): void {
+        const h = this.live();
+        if (handler && this.statusIndex < 0)
+            this.statusIndex = this.bindBuiltin("onStatus", this.n.c.rant_node_status_topic(h), this.n.c.rant_node_set_status_queue);
+        this.statusHandler = handler;
     }
 
     get stats(): NodeStats {

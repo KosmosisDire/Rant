@@ -61,10 +61,15 @@ class CallStatus(IntEnum):
     RUNNING = 6
     NO_PROVIDER = 7
 
-class LogLevel(IntEnum):
-    ERROR = 0
-    WARN = 1
+class Level(IntEnum):
+    DEBUG = 1
     INFO = 2
+    WARN = 3
+    ERROR = 4
+
+class Origin(IntEnum):
+    APP = 0
+    RANT = 1
 
 class MetaSection(IntFlag):
     NODE = 1
@@ -79,6 +84,7 @@ class EventKind(IntEnum):
     PEER_INTEREST = 2
     MSG_LOST = 3
     ERROR = 4
+    STATUS_CLEARED = 5
 
 class ErrorKind(IntEnum):
     NONE = 0
@@ -109,8 +115,9 @@ class ErrorKind(IntEnum):
     BAD_SCHEMA = 25
     BAD_DOMAIN = 26
     BAD_PREFIX = 27
-    WIRE_VERSION = 28
-    BRIDGE = 29
+    BAD_LOG_LEVEL = 28
+    WIRE_VERSION = 29
+    BRIDGE = 30
 
 class PeerLiveness(IntEnum):
     ACTIVE = 0
@@ -256,14 +263,26 @@ class Queue:
     def stats(self) -> tuple[int, int]: ...
 
 class LogLine:
-    level: LogLevel
+    level: Level
+    origin: Origin
     node: str
     node_id: int
     wall_us: int
-    mono_us: int
     recv_us: int
-    written_us: int
     text: str
+
+class Condition:
+    key: str
+    level: Level
+    origin: Origin
+    clearable: bool
+    since_us: int
+    text: str
+
+class StatusUpdate:
+    node: str
+    node_id: int
+    conditions: list[Condition]
 
 class Peer:
     """One discovered peer. A dropped peer stays listed, so gate on active."""
@@ -381,6 +400,7 @@ class Node:
                  multicast_interface: str | None = None, max_topics: int = 0,
                  match_wait: float | None = 0.0, disable_shm: bool = False,
                  fetch_details: bool = False, disable_logs: bool = False,
+                 log_level: Level | None = None, disable_status: bool = False,
                  disable_meta: bool = False, disable_error_logs: bool = False,
                  data_port: int = 0,
                  discovery_port: int = 0, multicast_ttl: int = 0,
@@ -489,9 +509,13 @@ class Node:
     def dispatch(self, max_callbacks: int = 0, timeout: float | None = 0.0) -> int: ...
     def create_queue(self) -> Queue: ...
     def settle(self, timeout: float | None = None) -> bool: ...
-    def log(self, level: LogLevel, text: str | bytes) -> SendStatus: ...
+    def log(self, level: Level, text: str | bytes) -> SendStatus: ...
     def on_event(self, handler: Callable[[Event], object] | None) -> Callable[[Event], object] | None: ...
     def on_log(self, handler: Callable[[LogLine], object] | None) -> Callable[[LogLine], object] | None: ...
+    def set_status(self, key: str, level: Level, text: str, clearable: bool = False) -> SendStatus: ...
+    def clear_status(self, key: str) -> SendStatus: ...
+    def clear_peer_status(self, node_id: int, key: str, since_us: int) -> SendStatus: ...
+    def on_status(self, handler: Callable[[StatusUpdate], object] | None) -> Callable[[StatusUpdate], object] | None: ...
     def close(self, send_bye: bool = True) -> bool: ...
     def __enter__(self) -> Node: ...
     def __exit__(self, *exc: object) -> None: ...

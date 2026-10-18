@@ -57,7 +57,7 @@ Where anything else disagrees about a wrapper API, this file wins.
   subscriber takes its handler at creation in every binding, and a subscriber created
   without one is pulled: `take` and `latest` in Python, `TryTake` and `TryTakeLatest` in
   C#, `take` and `take_latest` in C++. C# node and variable handlers are events
-  (`OnChange`, `OnWrite`, `OnEvent`, `OnLog`) whose delegate takes the value and the
+  (`OnChange`, `OnWrite`, `OnEvent`, `OnLog`, `OnStatus`) whose delegate takes the value and the
   envelope, discarded with `_` when unwanted. Rust has one form that is both, a value
   that reads as the payload through `Deref` and carries the envelope, since a closure's
   type cannot be inferred across two, and its pulled subscriber has a factory of its own,
@@ -106,6 +106,12 @@ Where anything else disagrees about a wrapper API, this file wins.
   point is reachable from every binding the moment it is declared. Bindings format log
   text in their own runtime and call `rant_node_log_text`, never the variadic
   `rant_node_log` over FFI.
+- A binding reads the log and status builtins by registering its handler for the topic's
+  index first, then widening the role. The other order lets the catch up replay land
+  before the handler exists, which first call compilation in C# made happen most runs. A
+  status handler also sees an empty set for a node that went away: the binding remembers
+  which peers last sent a set that was not empty and delivers one on their
+  `RANT_PEER_DOWN`.
 - A thrown handler in C++, C#, Python or TypeScript, or a panicking one in Rust, answers APP_ERROR
   with its text.
 - Every wait is a probe plus an event plus a bounded block. No blocking only APIs.
@@ -138,7 +144,8 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   `TaskDefinition<Req, Prg, Rsp>`, `RemoteTask<Req, Prg, Rsp>`, `VariableDefinition<T>`,
   `RemoteVariable<T>`, `Request`, `Deferred`, `TaskRequest`, `PendingTask`, `Response`,
   `ResponseView`, `ProgressView`, `Schema`, `MessageBuilder`, `MessageView`, `FieldView`,
-  `MapWriter`, `MapReader`, `Event`, `Peer`, `Entity`, `LogLine`, `MetaSnapshot`, `Bytes`,
+  `MapWriter`, `MapReader`, `Event`, `Peer`, `Entity`, `LogLine`, `Condition`, `StatusUpdate`,
+  `MetaSnapshot`, `Bytes`,
   `Qos`, `NodeOptions`, `Queue`, `Error`. `rant::Bytes` as every type argument is the raw
   form, an explicit specialization the typed templates build on. There is no separate
   untyped tier.
@@ -149,8 +156,8 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   `rant::Bytes` form takes schemas or `reflect_from_mesh`. A failed factory throws
   `rant::Error`, or without exceptions returns an invalid handle with `last_error()` set.
 - `NodeOptions::threading` is `ServiceThread`, `Manual` or `Dispatch`. Dispatch creates
-  one queue at open, hands it to every handle made without one and to the events and
-  logs, and `node.dispatch()` drains it. `create_queue()` gives a handle a thread of its
+  one queue at open, hands it to every handle made without one and to the events, log and
+  status, and `node.dispatch()` drains it. `create_queue()` gives a handle a thread of its
   own through its options. A blocking call from an inline callback throws, since it
   would stall the loop it waits on.
 - Durations are `std::chrono`: timeouts are `milliseconds` with `rant::forever` as the

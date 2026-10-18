@@ -46,7 +46,7 @@ rather than reading freed memory. `Close()` first waits until the calls other th
 making on the node return, and a pattern handle's `Dispose()` until those on it return.
 
 Every call is thread safe. `NodeOptions.Threading` says where every callback runs:
-subscriber handlers, OnEvent, OnLog, function and task handlers, progress, OnChange,
+subscriber handlers, OnEvent, OnLog, OnStatus, function and task handlers, progress, OnChange,
 OnWrite and awaited call results.
 
 - `ServiceThread`, the default: the service thread runs the loop from construction and
@@ -229,7 +229,7 @@ refused set.
 `OnChange` fires on every state change and replays the current value to a handler as it is
 added. `OnWrite` fires on every applied write, identical bytes or not, with no replay.
 
-## Reflection and logs
+## Reflection, log and status
 
 The walks of docs/reflection.md live on `node.Reflection` and return copied snapshots, so
 they outlive the loop and need no lock. `Peers()` lists every discovered peer as a
@@ -247,6 +247,21 @@ blocking form.
 `Schema.EnumVariants(field)` the options of an enum field, for a tool that renders a
 schema it has never seen.
 
-`node.Log(level, text)` publishes a line at a `LogLevel`, and the `node.OnLog` event
-delivers every other node's lines at every level as a `RantLogLine`, at `Dispatch()` under
-`Threading.Dispatch` like every other handler. It throws on a node opened with `DisableLogs`.
+`node.Log(level, text)` publishes a line at a `Level`, and a level below
+`NodeOptions.LogLevel` sends nothing. The `node.OnLog` event delivers every other node's
+lines as a `RantLogLine` (`Level`, `Origin`, `Node`, `NodeId`, `WallUs`, `RecvUs`, `Text`),
+at `Dispatch()` under `Threading.Dispatch` like every other handler. It throws on a node
+opened with `DisableLogs`.
+
+```csharp
+node.SetStatus("drive2", Level.Error, "drive 2 tripped", clearable: true);
+node.ClearStatus("drive2");
+node.OnStatus += u => Console.WriteLine($"{u.Node}: {u.Conditions.Count} active");
+```
+
+- `SetStatus` raises or updates a condition, `ClearStatus` clears it.
+- `OnStatus` delivers each node's whole set as a `RantStatusUpdate` of `RantCondition`
+  rows on every change, and an empty set when a node goes away. It throws on a node opened
+  with `DisableStatus`.
+- `ClearPeerStatus(u.NodeId, c.Key, c.SinceUs)` asks another node to clear a clearable
+  condition. Its app sees `EventKind.StatusCleared` with the key in `Detail`.

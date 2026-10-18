@@ -24,10 +24,11 @@ node.subscriber("Line1/Conveyor", Conveyor, (c) => console.log(c.speed));
   pass `await TunnelNet.connect(url, { passphrase })` from `rant-middleware/tunnel`, which
   borrows them from a bridge (docs/web.md).
 - The other options are docs/getting-started.md's in camelCase: `domain`, `prefix`,
-  `multicastInterface`, `maxTopics`, `fetchDetails`, `disableLogs`, `disableMeta`,
-  `disableErrorLogs`, `seedPeers` as "ip" or "ip:port", `dataPort`,
+  `multicastInterface`, `maxTopics`, `fetchDetails`, `disableLogs`, `logLevel`,
+  `disableStatus`, `disableMeta`, `disableErrorLogs`, `seedPeers` as "ip" or "ip:port", `dataPort`,
   `discoveryPort`, `multicastTtl`, `fragmentSize`, `recvBufferBytes`, `sendBufferBytes`, `announceIntervalMs`,
-  `peerTimeoutMs`, `maxPeers`. In Node.js `RANT_DOMAIN` and `RANT_PREFIX` apply as anywhere.
+  `peerTimeoutMs`, `maxPeers`. In Node.js `RANT_DOMAIN`, `RANT_PREFIX` and `RANT_LOG_LEVEL`
+  apply as anywhere.
 - `onEvent` in the options, or `node.onEvent(handler)` later, gets every event. With none,
   errors print to the console.
 - Durations are milliseconds and end in `Ms`. Timestamps are microseconds as numbers, and
@@ -106,8 +107,14 @@ const r = await add.call({ a: 2, b: 3 });     // r.status "ok", r.value { sum: 5
 ## The rest
 
 - `settle(timeoutMs?)` resolves once discovery and matching settle.
-- `log(level, text)` publishes a line. `onLog(handler)` gets every other node's as a
-  `LogLine`: `level`, `node`, `nodeId`, `text`, `wallUs`, `monoUs`, `recvUs`, `writtenUs`.
+- `log(level, text)` publishes a line at `"debug"`, `"info"`, `"warn"` or `"error"`.
+  `onLog(handler)` gets every other node's as a `LogLine`: `level`, `origin`, `node`,
+  `nodeId`, `text`, `wallUs`, `recvUs`.
+- `setStatus(key, level, text, { clearable })` raises or updates a condition,
+  `clearStatus(key)` clears it. `onStatus(handler)` gets each node's whole set as a
+  `StatusUpdate` (`node`, `nodeId`, `conditions`) on every change, and an empty set when a
+  node goes away. `clearPeerStatus(nodeId, key, sinceUs)` asks another node to clear a
+  clearable condition, whose app then sees a `"status_cleared"` event.
 - `node.reflection`: `peers()`, `entities(peer = 0)`, `mesh()`, `find(kind, name)`,
   `epoch`, `meta(peer, { sections, timeoutMs })`.
 - `stats`, `lastError`, `close(sendBye?)`. Every handle has `name`, `closed`, `close()` and

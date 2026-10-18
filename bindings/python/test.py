@@ -667,7 +667,7 @@ def handles():
         check("epoch is a counter", isinstance(a.reflection.epoch, int))
         check("the function definition closes", fn.close())
 
-        check("log writes", a.log(rant.LogLevel.INFO, "hello") == rant.SendStatus.OK)
+        check("log writes", a.log(rant.Level.INFO, "hello") == rant.SendStatus.OK)
         handler = lambda line: None
         check("on_log binds and returns the handler", a.on_log(handler) is handler)
         st = a.stats
@@ -1390,7 +1390,7 @@ def dispatch_leg():
 
     lines = []
     cli.on_log(lambda line: (mark("log"), lines.append(line.text)))
-    srv.log(rant.LogLevel.INFO, "dispatched line")
+    srv.log(rant.Level.INFO, "dispatched line")
     check("the log line arrived", wait(lambda: "dispatched line" in lines))
     check("the event arrived", wait(lambda: "event" in seen))
 
@@ -1475,6 +1475,94 @@ def on_pose(pose, m):
 
 def on_event(tag):
     return lambda e: print("event(%s):" % tag, e)
+
+
+def log_status():
+    """A line logged before the subscribe replays with its level and origin and one below the
+    level never arrives. A status raised before anyone listens reaches a late binder whole, a
+    peer clear of a clearable condition lands and A's app hears it, and a node that went away
+    reads as empty."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    def until(seconds, done):
+        deadline = time.time() + seconds
+        while time.time() < deadline and not done():
+            time.sleep(0.005)
+        return done()
+
+    cleared = []
+    opts = dict(domain=DOMAIN + 17, multicast_interface=IFACE)
+    a = rant.Node("lsa", on_event=lambda e: cleared.append(e.detail)
+                  if e.kind == rant.EventKind.STATUS_CLEARED else None, **opts)
+    b = rant.Node("lsb", on_event=lambda e: None, **opts)
+    try:
+        a.log(rant.Level.WARN, "before")
+        a.log(rant.Level.DEBUG, "hidden")
+        lines = []
+        b.on_log(lambda line: lines.append(line) if line.node == "lsa" else None)
+
+        def has(text, level):
+            return any(x.text == text and x.level == level and x.origin == rant.Origin.APP and x.wall_us
+                       for x in lines)
+        check("a line logged before the subscribe replays", until(8, lambda: has("before", rant.Level.WARN)))
+        a.log(rant.Level.ERROR, "live")
+        check("a live line arrives with its level and origin", until(8, lambda: has("live", rant.Level.ERROR)))
+        check("a line below the level never arrives", not any(x.text == "hidden" for x in lines))
+
+        check("raised before anyone listens",
+              a.set_status("estop", rant.Level.ERROR, "pressed") == rant.SendStatus.OK
+              and a.set_status("hot", rant.Level.WARN, "motor hot", clearable=True) == rant.SendStatus.OK)
+        check("a long key is refused", a.set_status("k" * 49, rant.Level.INFO, "x") == rant.SendStatus.TOO_BIG)
+        seen = []
+        b.on_status(lambda u: seen.append(u) if u.node == "lsa" else None)
+
+        def count():
+            return len(seen[-1].conditions) if seen else -1
+        check("the late binder gets the whole set", until(8, lambda: count() == 2))
+        c = seen[-1].conditions if seen else []
+        check("the set decodes", len(c) == 2 and c[0].key == "estop" and c[0].level == rant.Level.ERROR
+              and not c[0].clearable and c[1].key == "hot" and c[1].text == "motor hot" and c[1].clearable
+              and c[1].since_us > 0 and c[1].origin == rant.Origin.APP)
+        if len(c) == 2:
+            check("a peer clear is sent",
+                  b.clear_peer_status(seen[-1].node_id, "hot", c[1].since_us) == rant.SendStatus.OK)
+        check("A's app hears which was cleared", until(8, lambda: cleared == ["hot"]))
+        check("B sees the smaller set", until(8, lambda: count() == 1))
+        check("an own clear", a.clear_status("estop") == rant.SendStatus.OK)
+        check("B sees it empty", until(8, lambda: count() == 0))
+        a.set_status("estop", rant.Level.ERROR, "pressed again")
+        check("raised again", until(8, lambda: count() == 1))
+        before = len(seen)
+        a.close()
+        check("a node that went away reads as empty",
+              until(8, lambda: len(seen) > before and count() == 0))
+
+        try:
+            rant.Node("lbad", on_event=lambda e: None, log_level=9, **opts)
+            raised = False
+        except rant.Error:
+            raised = True
+        check("a bad log_level refuses the open", raised)
+        quiet = rant.Node("lnone", on_event=lambda e: None, disable_status=True, **opts)
+        try:
+            quiet.on_status(lambda u: None)
+            raised = False
+        except rant.Error:
+            raised = True
+        check("on_status on a node without status raises", raised)
+        check("set_status on a node without status is NOSYS",
+              quiet.set_status("k", rant.Level.INFO, "x") == rant.SendStatus.NOSYS)
+        quiet.close()
+    finally:
+        a.close()
+        b.close()
+    print("log_status: PASS\n" if ok else "log_status: FAIL\n")
+    return ok
 
 
 def version_leg():
@@ -1589,6 +1677,7 @@ LEGS = [
     ("patterns", patterns),
     ("tasks", tasks),
     ("dispatch", dispatch_leg),
+    ("log_status", log_status),
     ("rebind", rebind),
     ("close_race", close_race),
     ("handle_gate", handle_gate),

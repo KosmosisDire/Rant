@@ -138,11 +138,7 @@ impl TopicCore {
         let index = unsafe { ffi::rant_topic_index(self.raw) };
         if self.handler != 0 {
             // the handler leaves first, so a refused retire still stops its deliveries
-            let mut handlers = lock(&self.inner.handlers);
-            if let Some(list) = handlers.get(&index) {
-                let rest: Vec<SubHandler> = list.iter().filter(|h| h.id != self.handler).map(SubHandler::share).collect();
-                handlers.insert(index, rest.into());
-            }
+            self.inner.remove_handler(index, self.handler);
         }
         let Some(mut topics) = self.inner.topics.enter() else {
             self.inner.report_close_refused(&self.name);
@@ -250,6 +246,15 @@ impl NodeInner {
         list.push(h);
         handlers.insert(index, list.into());
         id
+    }
+
+    /// Drops the handler `id` from the topic at `index`.
+    pub(crate) fn remove_handler(&self, index: u16, id: u64) {
+        let mut handlers = lock(&self.handlers);
+        if let Some(list) = handlers.get(&index) {
+            let rest: Vec<SubHandler> = list.iter().filter(|h| h.id != id).map(SubHandler::share).collect();
+            handlers.insert(index, rest.into());
+        }
     }
 }
 
