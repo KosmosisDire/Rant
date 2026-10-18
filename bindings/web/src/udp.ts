@@ -85,7 +85,6 @@ export class UdpNet implements NetObject {
     setMulticastInterface(id: number, ifNaddr: number): void { this.when(id, (k) => k.setMulticastInterface(dotted(ifNaddr))); }
     setMulticastTTL(id: number, ttl: number): void { this.when(id, (k) => k.setMulticastTTL(ttl)); }
     setMulticastLoopback(id: number, on: boolean): void { this.when(id, (k) => k.setMulticastLoopback(on)); }
-    ownGroupsOnly(_id: number): void { /* Node has no IP_MULTICAST_ALL, and only Linux needs it */ }
     setReceiveBufferSize(id: number, bytes: number): void { this.when(id, (k) => k.setRecvBufferSize(bytes)); }
     setSendBufferSize(id: number, bytes: number): void { this.when(id, (k) => k.setSendBufferSize(bytes)); }
 

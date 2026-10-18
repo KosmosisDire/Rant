@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#define I_RANT_TUNNEL_PROTO      14
+#define I_RANT_TUNNEL_PROTO      15
 #define I_RANT_TUNNEL_UDP        9      /* a batch [u8 9][u8 flags] then records */
 #define I_RANT_TUNNEL_PING       7      /* [u8 7][u32 seq][u32 us][u32 jitter_us][u32 samples][u32 missed] */
 #define I_RANT_TUNNEL_PONG       8      /* [u8 8][u32 seq] */

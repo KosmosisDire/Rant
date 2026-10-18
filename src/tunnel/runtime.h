@@ -33,7 +33,6 @@ void       i_rant_net_suppress_connreset(i_RantTunnel *t, i_RantSock s);
 void       i_rant_net_mcast_setif(i_RantTunnel *t, i_RantSock s, uint32_t if_naddr);
 void       i_rant_net_mcast_ttl(i_RantTunnel *t, i_RantSock s, uint8_t ttl);
 void       i_rant_net_mcast_loop(i_RantTunnel *t, i_RantSock s, int on);
-void       i_rant_net_mcast_own_groups(i_RantTunnel *t, i_RantSock s);
 int        i_rant_net_mcast_join(i_RantTunnel *t, i_RantSock s, uint32_t group_naddr, uint32_t if_naddr);
 void       i_rant_net_mcast_leave(i_RantTunnel *t, i_RantSock s, uint32_t group_naddr, uint32_t if_naddr);
 int        i_rant_net_send(i_RantTunnel *t, i_RantSock s, const void *buf, size_t len,

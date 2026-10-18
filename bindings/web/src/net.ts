@@ -18,7 +18,6 @@ export interface NetObject {
     setMulticastInterface(id: number, ifNaddr: number): void;
     setMulticastTTL(id: number, ttl: number): void;
     setMulticastLoopback(id: number, on: boolean): void;
-    ownGroupsOnly(id: number): void;
     setReceiveBufferSize?(id: number, bytes: number): void;
     setSendBufferSize?(id: number, bytes: number): void;
     /* true when the socket will join or leave */

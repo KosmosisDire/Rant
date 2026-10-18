@@ -21,19 +21,19 @@ characters good for the next open on this connection only, and the open proves t
 passphrase on it:
 
 ```json
-{"op":"open","seq":2,"proto":14,"proof":"5bdc...","name":"page"}
+{"op":"open","seq":2,"proto":15,"proof":"5bdc...","name":"page"}
 ```
 
 | Key | Meaning |
 |---|---|
-| `proto` | 14. Any other is refused and the socket closed with 4001. |
+| `proto` | 15. Any other is refused and the socket closed with 4001. |
 | `proof` | HMAC SHA-256 of the nonce's text keyed with the passphrase, 64 lowercase hex characters. A wrong one, or an open with no challenge before it, is refused after 1 s and closed with 4001. A bridge with no passphrase reads none. |
 | `resume` | The token from an earlier reply, to take that session back. |
 | `name` | The session's name in the bridge's logs. |
 | `probe_interval_ms` | How often the bridge pings. Default 250, minimum 10. |
 
 ```json
-{"op":"reply","seq":2,"ok":true,"proto":14,"webrtc":true,"resumed":false,
+{"op":"reply","seq":2,"ok":true,"proto":15,"webrtc":true,"resumed":false,
  "resume_token":"9f...","grace_ms":10000,
  "interfaces":[{"addr":"192.168.1.20","mask":"255.255.255.0"}],"group_binds_any":true}
 ```
@@ -66,11 +66,12 @@ Sockets are numbered by the client, 1 to 65535, at most 16 at once.
 |---|---|---|
 | `udp_bind` | `sock`, `port` (0 for any), `if` (dotted, default any), `reuse` | `{port}`, the bound port. A bound `sock` is bound again. |
 | `udp_member` | `sock`, `group`, `if`, `join` (default true) | `{}` |
-| `udp_option` | `sock`, any of `ttl`, `loop`, `own_groups` | `{}` |
+| `udp_option` | `sock`, any of `ttl`, `loop` | `{}` |
 | `udp_close` | `sock` | `{}` |
 
 Every op may run twice with the same result, so a client repeats what a dropped connection
-left unanswered.
+left unanswered. On Linux the bridge turns off `IP_MULTICAST_ALL` with every join, so a
+socket hears only the groups it joined itself.
 
 ## Datagrams
 

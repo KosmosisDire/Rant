@@ -5,7 +5,7 @@
 import { dotted, naddr, type Interface, type NetObject, type Sink } from "./net.js";
 import { passphraseProof } from "./proof.js";
 
-const PROTOCOL = 14;
+const PROTOCOL = 15;
 const UDP = 9;
 const PING = 7;             /* [u8 7][u32 seq][u32 us][u32 jitter_us][u32 samples][u32 missed] */
 const PONG = 8;             /* [u8 8][u32 seq] */
@@ -174,7 +174,6 @@ export class TunnelNet implements NetObject {
     }
     setMulticastTTL(id: number, ttl: number): void { this.option(id, { ttl }); }
     setMulticastLoopback(id: number, on: boolean): void { this.option(id, { loop: on }); }
-    ownGroupsOnly(id: number): void { this.option(id, { own_groups: true }); }
 
     membership(id: number, group: number, ifNaddr: number, join: boolean): boolean {
         const s = this.sockets.get(id);

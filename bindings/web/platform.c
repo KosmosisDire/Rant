@@ -25,7 +25,7 @@ extern void rant_net_wait(int ms);
 /* An environment variable's full length, written cut to fit. Node.js has them, a page none. */
 extern int  rant_web_env(const char *name, char *buf, int cap);
 
-enum { NET_SETIF = 1, NET_TTL = 2, NET_LOOP = 3, NET_OWN_GROUPS = 4, NET_RCVBUF = 5, NET_SNDBUF = 6 };
+enum { NET_SETIF = 1, NET_TTL = 2, NET_LOOP = 3, NET_RCVBUF = 4, NET_SNDBUF = 5 };
 
 typedef struct Packet {
     struct Packet *next;
@@ -174,7 +174,6 @@ void i_rant_plat_set_sndbuf(i_RantSock s, int bytes){
 void i_rant_plat_mcast_setif(i_RantSock s, uint32_t if_naddr){ rant_net_option((int)s, NET_SETIF, (int)if_naddr); }
 void i_rant_plat_mcast_ttl(i_RantSock s, uint8_t ttl){ rant_net_option((int)s, NET_TTL, ttl); }
 void i_rant_plat_mcast_loop(i_RantSock s, int on){ rant_net_option((int)s, NET_LOOP, on); }
-void i_rant_plat_mcast_own_groups(i_RantSock s){ rant_net_option((int)s, NET_OWN_GROUPS, 1); }
 
 int i_rant_plat_mcast_join(i_RantSock s, uint32_t group_naddr, uint32_t if_naddr){
     return rant_net_membership((int)s, group_naddr, if_naddr, 1);

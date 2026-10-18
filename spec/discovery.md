@@ -111,8 +111,9 @@ that comes up later is joined and one that goes away drops its membership.
 so the ranking works). A loopback pin is single host: the data socket binds 127.0.0.1, and
 the discovery socket does too on Windows. POSIX stacks hand group traffic only to a socket
 bound to INADDR_ANY, so discovery stays there, and no POSIX firewall prompts for it. Linux
-would also hand that socket every group another socket on the host joined, so the discovery
-socket turns off `IP_MULTICAST_ALL` and hears only its own groups.
+would also hand that socket every group another socket on the host joined, another
+domain's included, so every join also turns off `IP_MULTICAST_ALL`, and a bridge does the
+same for the sockets it lends.
 
 An announce carries no address of its own, so each copy arrives with the source address
 correct for its path. A peer heard on several paths has several candidate locators, and

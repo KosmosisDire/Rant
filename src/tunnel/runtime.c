@@ -30,7 +30,7 @@ typedef struct {
     uint8_t  reuse;
     uint32_t via;               /* the interface group datagrams leave by, sent with each */
     int16_t  ttl;               /* options to set again on a new session, -1 = never set */
-    int8_t   loop, own_groups;
+    int8_t   loop;
     struct { uint32_t group, if_naddr; } groups[I_RANT_TUNNEL_GROUPS];
     uint8_t  n_groups;
     /* received: [u16 len][4 ip][u16 port][payload] from q_head to q_tail */
@@ -197,8 +197,7 @@ static void i_rant_tunnel_ask_option(i_RantTunnel *t, i_RantTunnelSock *k){
     char body[160]; int n;
     n = snprintf(body, sizeof body, "\"op\":\"udp_option\",\"sock\":%u", (unsigned)k->sock);
     if (k->ttl >= 0) n += snprintf(body + n, sizeof body - (size_t)n, ",\"ttl\":%d", k->ttl);
-    if (k->loop >= 0) n += snprintf(body + n, sizeof body - (size_t)n, ",\"loop\":%s", k->loop ? "true" : "false");
-    if (k->own_groups > 0) snprintf(body + n, sizeof body - (size_t)n, ",\"own_groups\":true");
+    if (k->loop >= 0) snprintf(body + n, sizeof body - (size_t)n, ",\"loop\":%s", k->loop ? "true" : "false");
     i_rant_tunnel_ask(t, body);
 }
 
@@ -226,7 +225,7 @@ static void i_rant_tunnel_restore(i_RantTunnel *t){
         i_RantTunnelSock *k = &t->socks[i];
         if (!k->used || !k->bound) continue;
         i_rant_tunnel_ask_bind(t, k);
-        if (k->ttl >= 0 || k->loop >= 0 || k->own_groups > 0) i_rant_tunnel_ask_option(t, k);
+        if (k->ttl >= 0 || k->loop >= 0) i_rant_tunnel_ask_option(t, k);
         for (g = 0; g < k->n_groups; g++) i_rant_tunnel_ask_member(t, k, k->groups[g].group, k->groups[g].if_naddr, 1);
     }
 }
@@ -827,14 +826,13 @@ void i_rant_net_mcast_setif(i_RantTunnel *t, i_RantSock s, uint32_t if_naddr){
 
 #ifdef RANT_TUNNEL
 /* An option is kept for a new session and sent now. */
-static void i_rant_tunnel_option(i_RantTunnel *t, i_RantSock s, int ttl, int loop, int own_groups){
+static void i_rant_tunnel_option(i_RantTunnel *t, i_RantSock s, int ttl, int loop){
     i_RantTunnelSock *k;
     i_rant_tunnel_lock(t);
     k = i_rant_tunnel_sock(t, s);
     if (k){
         if (ttl >= 0) k->ttl = (int16_t)ttl;
         if (loop >= 0) k->loop = (int8_t)loop;
-        if (own_groups > 0) k->own_groups = 1;
         if (k->bound && t->state == I_RANT_LINK_OPEN) i_rant_tunnel_ask_option(t, k);
     }
     i_rant_tunnel_unlock(t);
@@ -843,7 +841,7 @@ static void i_rant_tunnel_option(i_RantTunnel *t, i_RantSock s, int ttl, int loo
 
 void i_rant_net_mcast_ttl(i_RantTunnel *t, i_RantSock s, uint8_t ttl){
 #ifdef RANT_TUNNEL
-    if (t){ i_rant_tunnel_option(t, s, ttl, -1, 0); return; }
+    if (t){ i_rant_tunnel_option(t, s, ttl, -1); return; }
 #endif
     (void)t;
     i_rant_plat_mcast_ttl(s, ttl);
@@ -851,18 +849,10 @@ void i_rant_net_mcast_ttl(i_RantTunnel *t, i_RantSock s, uint8_t ttl){
 
 void i_rant_net_mcast_loop(i_RantTunnel *t, i_RantSock s, int on){
 #ifdef RANT_TUNNEL
-    if (t){ i_rant_tunnel_option(t, s, -1, on ? 1 : 0, 0); return; }
+    if (t){ i_rant_tunnel_option(t, s, -1, on ? 1 : 0); return; }
 #endif
     (void)t;
     i_rant_plat_mcast_loop(s, on);
-}
-
-void i_rant_net_mcast_own_groups(i_RantTunnel *t, i_RantSock s){
-#ifdef RANT_TUNNEL
-    if (t){ i_rant_tunnel_option(t, s, -1, -1, 1); return; }
-#endif
-    (void)t;
-    i_rant_plat_mcast_own_groups(s);
 }
 
 int i_rant_net_mcast_join(i_RantTunnel *t, i_RantSock s, uint32_t group_naddr, uint32_t if_naddr){
