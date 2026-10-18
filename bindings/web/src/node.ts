@@ -62,7 +62,7 @@ export interface NodeOptions {
     dataPort?: number; discoveryGroup?: string; discoveryPort?: number; multicastTtl?: number;
     /* "ip" or "ip:port" */
     seedPeers?: string[];
-    selfIp?: string; advertisePort?: number; fragmentSize?: number;
+    fragmentSize?: number;
     recvBufferBytes?: number; sendBufferBytes?: number;
     announceIntervalMs?: number; peerTimeoutMs?: number; maxPeers?: number;
     onEvent?: (e: RantEvent) => void;
@@ -291,8 +291,6 @@ export class RantNode {
             n.setU32(net + NN.recv_buffer_bytes, opts.recvBufferBytes ?? 0);
             n.setU32(net + NN.send_buffer_bytes, opts.sendBufferBytes ?? 0);
             n.setU16(net + NN.fragment_size, opts.fragmentSize ?? 0);
-            str(net + NN.self_ip, opts.selfIp);
-            n.setU16(net + NN.advertise_port, opts.advertisePort ?? 0);
             n.setU32(disc + D.announce_interval_us, (opts.announceIntervalMs ?? 0) * 1000);
             n.setU32(disc + D.peer_timeout_us, (opts.peerTimeoutMs ?? 0) * 1000);
             n.setU16(disc + D.max_peers, opts.maxPeers ?? 0);

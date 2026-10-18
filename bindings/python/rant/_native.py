@@ -114,8 +114,6 @@ class RantNodeNet(Structure):
         ("recv_buffer_bytes", c_uint32),
         ("send_buffer_bytes", c_uint32),
         ("fragment_size", c_uint16),
-        ("self_ip", c_char_p),
-        ("advertise_port", c_uint16),
         ("bridge", c_char_p),
         ("bridge_passphrase", c_char_p),
     ]

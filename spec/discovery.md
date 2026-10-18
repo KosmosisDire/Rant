@@ -42,7 +42,7 @@ advertises is the node's data socket and it owns no unicast socket of its own.
 
 Every discovery datagram starts with a 24 byte header: the magic `uDSC`, the wire version
 (`RANT_WIRE_VERSION` = 6), a flags byte, the u16 domain and the sender's 16 byte uuid. Then `[u32 meta_version][u16 meta_len]` and the blob. The blob is
-the discovery section `[u16 data_port][u8 self_ip_len][self_ip][u8 name_len][name]`
+the discovery section `[u16 data_port][u8 name_len][name]`
 followed by the opaque overlay. A steady state announce carries meta_len 0 and only the
 version. The flags are BYE 0x01 and REQ 0x02 (a solicit, recipients announce back now).
 Version history: v3 added the versioned blob, v4 and v5 relaying, which v6 removed. Since
@@ -129,12 +129,6 @@ whichever address its route to our locator picks, which need not be the one we c
 Each peer keeps the sources of its last announces, up to 4 paths. A datagram is the
 peer's when it comes from the locator, else from its data port on a path heard within three
 announce intervals. A path two peers share attributes to neither.
-
-## Stated locators
-
-`self_ip` and `advertise_port` put a locator in the announce that peers treat as
-authoritative. It skips the ranking. One locator goes to every peer. An unparseable
-address refuses the open with `RANT_E_BAD_ADDRESS`.
 
 ## Node names
 

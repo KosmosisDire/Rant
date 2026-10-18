@@ -16,7 +16,7 @@ pub const RANT_ALLOCATOR_PAGE: u32 = 65536;
 pub const RANT_WIRE_VERSION: u32 = 6;
 pub const RANT_DISCOVERY_META_MAX: u32 = 64;
 pub const RANT_DISCOVERY_META_OFF: u32 = 30;
-pub const RANT_DISCOVERY_DISC_MAX: u32 = 52;
+pub const RANT_DISCOVERY_DISC_MAX: u32 = 35;
 pub const RANT_DISCOVERY_WIRE_MAX: u32 = 128;
 pub const RANT_DISCOVERY_MAX_SUBNETS: u32 = 16;
 pub const RANT_POLLIN: u32 = 1;
@@ -143,8 +143,6 @@ pub struct RantNodeNet {
     pub recv_buffer_bytes: u32,
     pub send_buffer_bytes: u32,
     pub fragment_size: u16,
-    pub self_ip: *const ::std::os::raw::c_char,
-    pub advertise_port: u16,
     pub bridge: *const ::std::os::raw::c_char,
     pub bridge_passphrase: *const ::std::os::raw::c_char,
 }

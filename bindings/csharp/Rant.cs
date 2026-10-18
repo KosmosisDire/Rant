@@ -304,8 +304,6 @@ namespace Rant
         public uint recv_buffer_bytes;
         public uint send_buffer_bytes;
         public ushort fragment_size;
-        public IntPtr self_ip;                 // const char*
-        public ushort advertise_port;
         public IntPtr bridge;                  // const char*
         public IntPtr bridge_passphrase;       // const char*
     }
@@ -1046,12 +1044,6 @@ namespace Rant
         /// <summary>The data socket's OS send buffer, 0 = the OS default. Raise it for big
         /// payloads.</summary>
         public uint SendBufferBytes;
-        /// <summary>Advertise this IP to every peer instead of letting each learn it from the
-        /// datagram source, for a cloud IP or a published container port.</summary>
-        public string SelfIp;
-        /// <summary>Advertise this data port instead of the bound one, for a published
-        /// container port.</summary>
-        public ushort AdvertisePort;
         /// <summary>Run on the sockets of the Rant bridge at this ws:// URL, a node of its host
         /// to the mesh. Null takes RANT_BRIDGE, else this host's own.</summary>
         public string Bridge;
@@ -2695,13 +2687,8 @@ namespace Rant
             IntPtr seedBlock = SeedArray(o.SeedPeers, out nSeeds);   // copied by open, freed below
             co.net.seed_peers = seedBlock;
             co.net.n_seed_peers = nSeeds;
-            // parsed into 4 bytes during open, never retained: free it right after (unlike
-            // the group/interface strings, which the wrapper keeps for the node's life)
-            IntPtr selfIpPtr = Codec.CStrPtr(o.SelfIp);
-            co.net.self_ip = selfIpPtr;
             IntPtr prefixPtr = Codec.CStrPtr(o.Prefix);     // copied by open, freed below
             co.prefix = prefixPtr;
-            co.net.advertise_port = o.AdvertisePort;
             IntPtr bridgePtr = Codec.CStrPtr(o.Bridge);     // copied by open, freed below
             IntPtr bridgePassPtr = Codec.CStrPtr(o.BridgePassphrase);
             co.net.bridge = bridgePtr;
@@ -2717,7 +2704,6 @@ namespace Rant
             byte[] cname = string.IsNullOrEmpty(name) ? null : Codec.CStr(name);
             IntPtr h = Native.rant_node_open(ref _alloc, cname, s_onMsg, s_onEvt, ref co);
             if (seedBlock != IntPtr.Zero) Marshal.FreeHGlobal(seedBlock);
-            Codec.FreeCStr(selfIpPtr);
             Codec.FreeCStr(prefixPtr);
             Codec.FreeCStr(bridgePtr);
             Codec.FreeCStr(bridgePassPtr);

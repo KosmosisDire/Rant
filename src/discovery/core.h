@@ -22,8 +22,8 @@ extern "C" {
 #define RANT_DISCOVERY_META_MAX 64     /* default per peer overlay capacity */
 /* The fixed header is 24 bytes, then [u32 meta_version][u16 meta_len][meta]. */
 #define RANT_DISCOVERY_META_OFF 30
-/* Largest discovery section of the blob: port, self ip and name. The overlay follows. */
-#define RANT_DISCOVERY_DISC_MAX (2u + 1u + 16u + 1u + RANT_NODE_NAME_MAX)
+/* Largest discovery section of the blob: port and name. The overlay follows. */
+#define RANT_DISCOVERY_DISC_MAX (2u + 1u + RANT_NODE_NAME_MAX)
 /* Smallest datagram buffer. The runtime grows it to fit meta_cap. */
 #define RANT_DISCOVERY_WIRE_MAX 128
 
@@ -56,8 +56,6 @@ typedef struct {
     uint8_t  uuid[16];      /* unique per process instance */
     uint16_t domain_id;
     uint16_t data_port;     /* unicast port we advertise */
-    uint8_t  self_ip[16];   /* optional stated IP. len 0 means peers use the source address */
-    uint8_t  self_ip_len;   /* 0, 4 or 16 */
     uint32_t announce_interval_us;
     uint32_t peer_timeout_us;    /* drop a peer after this much silence */
     uint32_t gone_timeout_us;    /* DROPPED to GONE this long after the drop, 0 = never */

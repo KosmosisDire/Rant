@@ -385,7 +385,7 @@ class Node:
                  data_port: int = 0, discovery_group: str | None = None,
                  discovery_port: int = 0, multicast_ttl: int = 0,
                  seed_peers: Iterable[str] = (),
-                 self_ip: str | None = None, advertise_port: int = 0, fragment_size: int = 0,
+                 fragment_size: int = 0,
                  recv_buffer_bytes: int = 0, send_buffer_bytes: int = 0,
                  announce_interval: float = 0.0, peer_timeout: float = 0.0,
                  max_peers: int = 0, bridge: str | None = None,

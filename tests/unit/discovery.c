@@ -1,6 +1,6 @@
-/* The discovery core and the node core, sans IO: peer lifecycle, paths, stated locators,
- * and the node's peer table over a real discovery core with no sockets. spec/testing.md
- * says what each case pins. */
+/* The discovery core and the node core, sans IO: peer lifecycle, paths, and the node's
+ * peer table over a real discovery core with no sockets. spec/testing.md says what each
+ * case pins. */
 #include "support/test.h"
 
 /* the discovery core's callbacks, recorded for the lifecycle checks */
@@ -17,7 +17,7 @@ static void dc_error(const RantEvent *ev){
     if (ev->error==RANT_E_WIRE_VERSION) dc_wire_n++;
 }
 
-/* craft a v3 announce for sender `uid` (uuid = all uid bytes), meta_len 0 */
+/* craft an announce for sender `uid` (uuid = all uid bytes) with no name and no overlay */
 static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port, uint32_t mver){
     size_t off = RANT_DISCOVERY_META_OFF;
     uint8_t *b = p + off;
@@ -29,30 +29,10 @@ static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16
     memset(p+8, uid, 16);                         /* a distinct uuid per uid */
     p[off-6]=(uint8_t)mver; p[off-5]=(uint8_t)(mver>>8);
     p[off-4]=(uint8_t)(mver>>16); p[off-3]=(uint8_t)(mver>>24);
-    /* blob = the discovery section [u16 data_port][u8 self_ip_len 0][u8 name_len 0], no
-       overlay. self_ip_len 0 means the receiver uses the datagram source ip. */
-    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=0; b[3]=0;
-    p[off-2]=4; p[off-1]=0;                        /* meta_len = 4 (the discovery section) */
-    return off + 4;
-}
-
-/* craft an announce that states its locator: [u16 port][u8 ip_len 4][ip][u8 name_len 0] */
-static size_t dc_mk_ip(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port,
-                       uint32_t mver, const uint8_t ip[4]){
-    size_t off = RANT_DISCOVERY_META_OFF;
-    uint8_t *b = p + off;
-    memset(p, 0, off);
-    p[0]='u';p[1]='D';p[2]='S';p[3]='C';
-    p[4]=(uint8_t)RANT_WIRE_VERSION;
-    p[5]=flags;
-    p[6]=(uint8_t)dom; p[7]=(uint8_t)(dom>>8);
-    memset(p+8, uid, 16);
-    p[off-6]=(uint8_t)mver; p[off-5]=(uint8_t)(mver>>8);
-    p[off-4]=(uint8_t)(mver>>16); p[off-3]=(uint8_t)(mver>>24);
-    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=4;
-    memcpy(b+3, ip, 4); b[7]=0;                    /* name_len 0, no overlay */
-    p[off-2]=8; p[off-1]=0;                        /* meta_len = 8 */
-    return off + 8;
+    /* blob = the discovery section [u16 data_port][u8 name_len 0], no overlay */
+    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=0;
+    p[off-2]=3; p[off-1]=0;                        /* meta_len = 3 (the discovery section) */
+    return off + 3;
 }
 
 /* feed one crafted datagram to a core as if received from (ip, sport) */
@@ -172,33 +152,6 @@ static void disc_core_checks(void){
                && !i_rant_discovery_id_for_addr(st,sb,4,6100,&got),
                "disc-core: a path quiet for three intervals stops counting");
     }
-
-    /* SELF-IP: a node states its locator outright. It rides our own announce, and a peer
-       holds the stated address, not the source the announce arrived from. */
-    { i_RantDiscoveryCoreConfig sc2; i_RantDiscoveryState *s2; RantAddr a;
-      uint8_t pub_ip[4]={203,0,113,7}; uint32_t id12;
-      sc2 = c;                                     /* same domain/timing, our own uuid */
-      memcpy(sc2.self_ip, pub_ip, 4); sc2.self_ip_len = 4; sc2.data_port = 7400;
-      s2 = i_rant_discovery_init(mem,sizeof mem,&sc2);
-      CHECK(s2!=NULL, "disc-core: self-ip core init");
-      if (s2){
-          n = i_rant_discovery_update(s2, 1000, out, sizeof out);          /* start: solicit + blob */
-          CHECK(n > (size_t)RANT_DISCOVERY_META_OFF + 3 &&
-                   out[RANT_DISCOVERY_META_OFF+2]==4 &&
-                   memcmp(out+RANT_DISCOVERY_META_OFF+3, pub_ip, 4)==0,
-                   "disc-core: our announce states the configured self ip");
-      }
-      /* the receiving side: peer 12 announces FROM sa while STATING pub_ip */
-      st = i_rant_discovery_init(mem+4096,sizeof mem-4096,&c);
-      i_rant_discovery_update(st, 1000, out, sizeof out);
-      n=dc_mk_ip(buf,12,0,99,7400,1,pub_ip);
-      dc_feed(st,sa,7400,buf,n,4000);      /* source sa, states pub_ip */
-      id12=dc_up_id;
-      memset(&a,0,sizeof a); i_rant_discovery_addr_of_id(st, id12, &a);
-      CHECK(memcmp(a.ip, pub_ip, 4)==0,
-               "disc-core: a stated locator beats the source it arrived from (%u.%u.%u.%u)",
-               a.ip[0], a.ip[1], a.ip[2], a.ip[3]);
-    }
 }
 
 /* node core peer lifecycle, sans IO: drive the peer up, down and refused hooks directly
@@ -216,7 +169,7 @@ static size_t nc_dgram(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uin
     size_t off = RANT_DISCOVERY_META_OFF;
     uint8_t *b = p + off;
     uint8_t nl = name ? (uint8_t)strlen(name) : 0;
-    uint16_t ml = (uint16_t)(4u + nl);
+    uint16_t ml = (uint16_t)(3u + nl);
     memset(p, 0, off);
     p[0]='u';p[1]='D';p[2]='S';p[3]='C';
     p[4]=(uint8_t)RANT_WIRE_VERSION;
@@ -225,8 +178,8 @@ static size_t nc_dgram(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uin
     memset(p+8, uid, 16);                          /* a distinct uuid per uid */
     p[off-6]=(uint8_t)mver; p[off-5]=(uint8_t)(mver>>8);
     p[off-4]=(uint8_t)(mver>>16); p[off-3]=(uint8_t)(mver>>24);
-    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=0; b[3]=nl;   /* port, no self ip, name_len */
-    if (nl) memcpy(b+4, name, nl);
+    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=nl;   /* port, name_len */
+    if (nl) memcpy(b+3, name, nl);
     p[off-2]=(uint8_t)ml; p[off-1]=(uint8_t)(ml>>8);
     return off + ml;
 }

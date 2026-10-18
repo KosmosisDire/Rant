@@ -119,8 +119,6 @@ int main(int argc, char **argv){
     FIELD(RantNodeNet, recv_buffer_bytes)
     FIELD(RantNodeNet, send_buffer_bytes)
     FIELD(RantNodeNet, fragment_size)
-    FIELD(RantNodeNet, self_ip)
-    FIELD(RantNodeNet, advertise_port)
     FIELD(RantNodeNet, bridge)
     FIELD(RantNodeNet, bridge_passphrase)
     SIZE(RantNodeOpts)

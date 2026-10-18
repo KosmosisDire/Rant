@@ -21,9 +21,9 @@ export const RantMsg = { sizeof: 80, node: 0, user: 4, topic_index: 8, publisher
 
 export const RantNodeDiscovery = { sizeof: 12, announce_interval_us: 0, peer_timeout_us: 4, max_peers: 8 } as const;
 
-export const RantNodeNet = { sizeof: 56, data_port: 0, discovery_group: 4, discovery_port: 8, multicast_interface: 12, multicast_ttl: 16, seed_peers: 20, n_seed_peers: 24, recv_buffer_bytes: 28, send_buffer_bytes: 32, fragment_size: 36, self_ip: 40, advertise_port: 44, bridge: 48, bridge_passphrase: 52 } as const;
+export const RantNodeNet = { sizeof: 48, data_port: 0, discovery_group: 4, discovery_port: 8, multicast_interface: 12, multicast_ttl: 16, seed_peers: 20, n_seed_peers: 24, recv_buffer_bytes: 28, send_buffer_bytes: 32, fragment_size: 36, bridge: 40, bridge_passphrase: 44 } as const;
 
-export const RantNodeOpts = { sizeof: 96, domain: 0, max_topics: 2, user_data: 4, disable_shm: 8, fetch_details: 9, match_wait_ms: 12, disable_logs: 16, disable_meta: 17, disable_error_logs: 18, net: 20, discovery: 76, event_queue_bytes: 88, prefix: 92 } as const;
+export const RantNodeOpts = { sizeof: 88, domain: 0, max_topics: 2, user_data: 4, disable_shm: 8, fetch_details: 9, match_wait_ms: 12, disable_logs: 16, disable_meta: 17, disable_error_logs: 18, net: 20, discovery: 68, event_queue_bytes: 80, prefix: 84 } as const;
 
 export const RantPeerInfo = { sizeof: 72, id: 0, uuid: 4, name: 20, address: 28, liveness: 36, last_heard_us: 40, epoch: 48, catching_up: 52, fragment_size: 54, rtt_us: 56, rtt_jitter_us: 60, rtt_min_us: 64, rtt_samples: 68 } as const;
 

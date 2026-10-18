@@ -2067,7 +2067,7 @@ class Node:
                  fetch_details=False, disable_logs=False, disable_meta=False,
                  disable_error_logs=False, data_port=0, discovery_group=None,
                  discovery_port=0, multicast_ttl=0, seed_peers=(),
-                 self_ip=None, advertise_port=0, fragment_size=0, recv_buffer_bytes=0,
+                 fragment_size=0, recv_buffer_bytes=0,
                  send_buffer_bytes=0, announce_interval=0.0, peer_timeout=0.0, max_peers=0,
                  bridge=None, bridge_passphrase=None, threading=Threading.SERVICE_THREAD):
         """Open a node. name None = auto generated. on_event receives every peer, loss and
@@ -2125,8 +2125,6 @@ class Node:
         if n_seeds:
             co.net.seed_peers = _c.cast(seeds, _c.c_void_p)
             co.net.n_seed_peers = n_seeds
-        co.net.self_ip = self_ip.encode() if self_ip else None
-        co.net.advertise_port = advertise_port
         co.net.bridge = bridge.encode("utf-8") if bridge else None   # copied by open
         co.net.bridge_passphrase = bridge_passphrase.encode("utf-8") if bridge_passphrase is not None else None
         co.net.fragment_size = fragment_size

@@ -118,11 +118,6 @@ typedef struct {
     uint32_t              send_buffer_bytes; /* the data socket SO_SNDBUF, 0 = OS default */
     uint16_t              fragment_size;     /* UDP payload bytes per fragment, 0 = RANT_FRAG_SIZE.
                                                 Clamped to [MIN, MAX]. One size per node */
-    /* Stating our own locator. The default states nothing and peers record the source an
-     * announce arrived from. Use these for a static one to one mapping. */
-    const char           *self_ip;           /* advertise this IPv4 address. Unparseable refuses the
-                                                open with RANT_E_BAD_ADDRESS */
-    uint16_t              advertise_port;    /* advertise this data port instead of the bound one */
     /* Running on another host's sockets. docs/discovery.md, Through a bridge */
     const char           *bridge;            /* the ws:// URL of a Rant bridge whose sockets this node
                                                 uses, a node of that host to the mesh. NULL takes

@@ -25,9 +25,8 @@ node.subscriber("Line1/Conveyor", Conveyor, (c) => console.log(c.speed));
   borrows them from a bridge (docs/web.md).
 - The other options are docs/getting-started.md's in camelCase: `domain`, `prefix`,
   `multicastInterface`, `maxTopics`, `fetchDetails`, `disableLogs`, `disableMeta`,
-  `disableErrorLogs`, `seedPeers` as "ip" or "ip:port", `selfIp`,
-  `advertisePort`, `dataPort`, `discoveryGroup`, `discoveryPort`, `multicastTtl`,
-  `fragmentSize`, `recvBufferBytes`, `sendBufferBytes`, `announceIntervalMs`,
+  `disableErrorLogs`, `seedPeers` as "ip" or "ip:port", `dataPort`, `discoveryGroup`,
+  `discoveryPort`, `multicastTtl`, `fragmentSize`, `recvBufferBytes`, `sendBufferBytes`, `announceIntervalMs`,
   `peerTimeoutMs`, `maxPeers`. In Node.js `RANT_DOMAIN` and `RANT_PREFIX` apply as anywhere.
 - `onEvent` in the options, or `node.onEvent(handler)` later, gets every event. With none,
   errors print to the console.

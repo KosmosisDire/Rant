@@ -69,7 +69,7 @@ program in this order.
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
 | `unit.tunnel` | hash, handshake, frame, json, batch |
 | `e2e.stream` | stream, scale, named, collision |
-| `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, prefix, self_ip |
+| `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, prefix |
 | `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema |
 | `e2e.detail` | detail_live, interest_external |
 | `e2e.shm` | shm_node |
@@ -128,8 +128,6 @@ What each phase pins, grouped by layer.
 - Lifecycle: two announces are two ups, silence past the timeout drops both but keeps
   their slots, the same uuid resumes under the same local id, and a new uuid from a held
   address evicts the predecessor as GONE because one socket is one process.
-- Self ip: a stated locator rides our own announce, and a peer holds the stated address,
-  not the source the announce arrived from.
 
 ### Node core and runtime
 
@@ -310,8 +308,6 @@ What each phase pins, grouped by layer.
 - NAMED and COLLISION: the cross peer identity is the name hash, independent of local
   handles. Two names with the same 64 bit identity, found by Pollard's rho against FNV-1a,
   fire the collision event and never cross wire.
-- Self ip: on one host the advertised port carries the proof. An unparseable locator is a
-  config error, never a silent fallback.
 - Write timestamps: a delivered stamp lies within the send and delivery walls, the opt
   out gives 0 with a byte identical payload, catch_up replay keeps the original stamp,
   and the queued path and the patterns layer carry the same value.

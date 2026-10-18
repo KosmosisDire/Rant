@@ -1233,20 +1233,8 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     i_rant_net_suppress_connreset(n->tunnel, fd);    /* suppress WSAECONNRESET from a bounced send */
     if (o.net.recv_buffer_bytes) i_rant_net_set_rcvbuf(n->tunnel, fd, (int)o.net.recv_buffer_bytes);
     if (o.net.send_buffer_bytes) i_rant_net_set_sndbuf(n->tunnel, fd, (int)o.net.send_buffer_bytes);
-    /* our advertised locator: the port we really bound and no address, unless the caller
-       states one outright. See docs/discovery.md */
-    dc.data_port = o.net.advertise_port ? o.net.advertise_port : local_port;
-    if (o.net.self_ip){
-        uint32_t naddr = i_rant_plat_parse_ip(o.net.self_ip);
-        /* 0 and 0xFFFFFFFF are inet_addr's failure value and the broadcast address, neither
-           a unicast locator, so a bad string is a config error */
-        if (!naddr || naddr == 0xFFFFFFFFu){
-            (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_BAD_ADDRESS, 0, 0, 0);
-            goto fail_sock;
-        }
-        i_rant_plat_naddr_to_ip4(naddr, dc.self_ip);
-        dc.self_ip_len = 4;
-    }
+    /* we advertise the port we really bound and no address, peers take the source */
+    dc.data_port = local_port;
 
     i_rant_node_core_discovery_hooks(n->core, &dc);   /* peer lifecycle and errors */
     dc.alloc_user = n;               /* the blob hook allocates from the node's pool */

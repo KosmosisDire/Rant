@@ -1,6 +1,5 @@
 /* Opening a node: the staged cleanup on every failure, events reaching the app's user
- * data, growth past the topic reserve, the launcher's environment variables and a stated
- * locator.
+ * data, growth past the topic reserve, and the launcher's environment variables.
  * spec/testing.md says what each case pins. */
 #include "support/test.h"
 
@@ -273,56 +272,6 @@ static void prefix_checks(void){
     test_setenv("RANT_PREFIX", "");
 }
 
-/* Stating our own locator. On one host the advertised port carries the proof, it is
- * deliberately not the port A bound. */
-static int sip_addr_of(RantNode *n, const char *name, RantAddr *out){
-    uint16_t c = 0, i; size_t nl = strlen(name);
-    const i_RantDiscoveryPeerView *p = test_peers(n, &c);
-    for (i=0;i<c;i++)
-        if (p[i].liveness == RANT_PEER_ACTIVE && p[i].name.len == nl &&
-            memcmp(p[i].name.data, name, nl) == 0){ *out = p[i].addr; return 1; }
-    return 0;
-}
-static void selfip_checks(void){
-    const uint16_t ADV_PORT = (uint16_t)(45000u + test_domain_base % 15000u);
-    /* (a) peers record what we STATE, not where our packets came from */
-    { RantAllocator aa = rant_allocator_heap(0);
-      RantAllocator ba = rant_allocator_heap(0);
-      RantNodeOpts ao, bo; RantNode *A=NULL, *B=NULL; RantAddr got;
-      memset(&bo,0,sizeof bo); bo.domain=TEST_DOMAIN+29; bo.disable_shm=1; bo.discovery.max_peers=4;
-      bo.discovery.announce_interval_us=200000; bo.net.multicast_interface="127.0.0.1";
-      ao=bo; ao.net.self_ip="127.0.0.1"; ao.net.advertise_port=ADV_PORT;
-      A = rant_node_open(&aa, "sip-a", NULL, NULL, &ao);
-      B = rant_node_open(&ba, "sip-b", NULL, NULL, &bo);
-      CHECK(A && B, "selfip: pair up");
-      if (A && B){
-          memset(&got,0,sizeof got);
-          PUMP_UNTIL(A, B, 24000, sip_addr_of(B,"sip-a",&got));
-          CHECK(got.ip_len==4 && got.ip[0]==127 && got.ip[3]==1 && got.port==ADV_PORT,
-                   "selfip: peers record the stated locator (%u.%u.%u.%u:%u, want 127.0.0.1:%u)",
-                   got.ip[0], got.ip[1], got.ip[2], got.ip[3],
-                   (unsigned)got.port, (unsigned)ADV_PORT);
-      }
-      if (A) rant_node_close(A,1);
-      if (B) rant_node_close(B,1);
-      rant_allocator_reset(&aa); rant_allocator_reset(&ba);
-    }
-    /* (b) an unparseable locator is a config error, never a silent fallback to the default:
-       a node advertising an unreachable address would look healthy and receive nothing */
-    { RantAllocator aa = rant_allocator_heap(0);
-      RantNodeOpts o; RantNode *n; RantEvent err; char line[160];
-      memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+29; o.net.multicast_interface="127.0.0.1";
-      o.net.self_ip="not-an-ip";
-      n = rant_node_open(&aa, "sip-bad", NULL, NULL, &o);
-      CHECK(n==NULL, "selfip: unparseable self ip refuses the open");
-      err = rant_last_error(NULL);
-      CHECK(err.kind==RANT_ERROR && err.error==RANT_E_BAD_ADDRESS,
-               "selfip: ...and says why (%s)", rant_event_str(&err, line, sizeof line));
-      if (n) rant_node_close(n,1);
-      rant_allocator_reset(&aa);
-    }
-}
-
 static const TestCase cases[] = {
     { "open_fail", open_fail_checks },
     { "event_user", event_user_checks },
@@ -330,7 +279,6 @@ static const TestCase cases[] = {
     { "launch_name", launchname_checks },
     { "launch_domain", launchdomain_checks },
     { "prefix", prefix_checks },
-    { "self_ip", selfip_checks },
 };
 
 TEST_MAIN(cases)

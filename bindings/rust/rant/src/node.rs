@@ -57,8 +57,6 @@ options! {
         discovery_port: u16 = 0,
         /// Hops an announce may travel. 0 = 1.
         multicast_ttl: u8 = 0,
-        /// Advertise this data port instead of the bound one.
-        advertise_port: u16 = 0,
         /// UDP payload bytes per fragment. 0 = 1350.
         fragment_size: u16 = 0,
         /// The data socket's receive buffer. 0 = the OS default, too small for big messages.
@@ -80,7 +78,6 @@ options! {
         prefix: Option<String> = None,
         discovery_group: Option<String> = None,
         multicast_interface: Option<String> = None,
-        self_ip: Option<String> = None,
         seed_peers: Vec<String> = Vec::new(),
         bridge: Option<String> = None,
         bridge_passphrase: Option<String> = None,
@@ -104,12 +101,6 @@ impl NodeOptions {
     /// Pin discovery to the interface with this IP. "127.0.0.1" keeps the node on one host.
     pub fn multicast_interface(mut self, ip: impl Into<String>) -> Self {
         self.multicast_interface = Some(ip.into());
-        self
-    }
-
-    /// Advertise this IPv4 address to every peer, for a static mapping such as a cloud IP.
-    pub fn self_ip(mut self, ip: impl Into<String>) -> Self {
-        self.self_ip = Some(ip.into());
         self
     }
 
@@ -336,7 +327,6 @@ struct Net {
     prefix: Option<CString>,
     group: Option<CString>,
     interface: Option<CString>,
-    self_ip: Option<CString>,
     bridge: Option<CString>,
     bridge_passphrase: Option<CString>,
     seeds: Vec<ffi::RantAddr>,
@@ -365,7 +355,6 @@ impl Net {
             prefix: c(&o.prefix, ErrorKind::BadPrefix, "prefix")?,
             group: c(&o.discovery_group, ErrorKind::BadAddress, "discovery group")?,
             interface: c(&o.multicast_interface, ErrorKind::BadAddress, "multicast interface")?,
-            self_ip: c(&o.self_ip, ErrorKind::BadAddress, "self ip")?,
             bridge: c(&o.bridge, ErrorKind::Bridge, "bridge")?,
             bridge_passphrase: c(&o.bridge_passphrase, ErrorKind::Bridge, "bridge passphrase")?,
             seeds,
@@ -666,8 +655,6 @@ impl Node {
                 recv_buffer_bytes: o.recv_buffer_bytes,
                 send_buffer_bytes: o.send_buffer_bytes,
                 fragment_size: o.fragment_size,
-                self_ip: c_ptr(&inner.net.self_ip),
-                advertise_port: o.advertise_port,
                 bridge: c_ptr(&inner.net.bridge),
                 bridge_passphrase: c_ptr(&inner.net.bridge_passphrase),
             },

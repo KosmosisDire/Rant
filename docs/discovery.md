@@ -33,20 +33,11 @@ stays until it goes quiet, so a peer's address never flaps.
 ## No multicast or behind a NAT
 
 A node whose network gives it no multicast, or that sits behind a NAT such as a rootless
-container, runs on a bridge's sockets (Through a bridge).
+container or a cloud host, runs on a bridge's sockets (Through a bridge). Peers reach a
+node at the address its announces arrive from.
 
 `opts.net.seed_peers` also sends our announces by unicast, for two segments that multicast
 does not cross. A seeded node learns us and answers, but its other peers do not.
-
-## Stating our own address
-
-By default a node announces no address and every peer records the source an announce
-arrived from. `opts.net.self_ip` and `opts.net.advertise_port` override that with an
-address peers treat as authoritative. Use them when the address peers must reach us at
-is not the one our packets appear to come from and the mapping is static and one to one:
-a cloud elastic IP, or a container published with `-p 7400:7400`. State the port whenever
-it is translated. One address goes to every peer. Neither option creates an inbound path.
-An unparseable address refuses the open with `RANT_E_BAD_ADDRESS`.
 
 ## Through a bridge
 
@@ -81,7 +72,6 @@ RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){
 | `seed_peers`, `n_seed_peers` | addresses to also unicast announces to. Port 0 = the discovery port |
 | `recv_buffer_bytes`, `send_buffer_bytes` | data socket OS buffers. 0 = OS default |
 | `fragment_size` | UDP payload bytes per fragment. 0 = `RANT_FRAG_SIZE`. One size per node |
-| `self_ip`, `advertise_port` | state our own locator |
 | `bridge`, `bridge_passphrase` | run on a bridge's sockets (Through a bridge) |
 
 `opts.discovery` holds `announce_interval_us` (3 s), `peer_timeout_us` (12 s) and

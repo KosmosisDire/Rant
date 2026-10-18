@@ -308,12 +308,9 @@ static size_t i_rant_discovery_build(i_RantDiscoveryState *st, uint8_t flags, in
     memcpy(p+8, st->cfg.uuid, 16);
     if (with_blob){
         uint8_t *b = p + RANT_DISCOVERY_META_OFF, *bend = p + cap;
-        uint8_t ipl = (st->cfg.self_ip_len==4 || st->cfg.self_ip_len==16) ? st->cfg.self_ip_len : 0;
-        size_t need = 2u + 1u + (size_t)ipl + 1u + st->self_name_len + st->self_meta.len;
+        size_t need = 2u + 1u + st->self_name_len + st->self_meta.len;
         if ((size_t)(bend - b) < need) return 0;
-        i_rant_le_w16(b, st->cfg.data_port); b += 2;              /* discovery section: locator */
-        *b++ = ipl;
-        if (ipl){ memcpy(b, st->cfg.self_ip, ipl); b += ipl; }
+        i_rant_le_w16(b, st->cfg.data_port); b += 2;              /* discovery section: data port */
         *b++ = st->self_name_len;                             /* name */
         if (st->self_name_len){ memcpy(b, st->self_name, st->self_name_len); b += st->self_name_len; }
         if (st->self_meta.len){ memcpy(b, st->self_meta.data, st->self_meta.len); b += st->self_meta.len; }
@@ -394,8 +391,8 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     RantAddr addr; int idx, addr_changed, first_contact=0, blob_changed=0, revived=0;
     i_RantDiscoveryPeer *peer;
     /* the blob's discovery section, valid when have_disc. disc_name is not NUL terminated */
-    int have_disc=0; uint16_t disc_port=0; uint8_t disc_ip_len=0;
-    const uint8_t *disc_ip=NULL; RantBytes overlay = {NULL, 0}; RantString disc_name = {NULL, 0};
+    int have_disc=0; uint16_t disc_port=0;
+    RantBytes overlay = {NULL, 0}; RantString disc_name = {NULL, 0};
 
     st->now_us = now;
     /* the magic, the wire version, the flags and the domain keep bytes 0 to 7 in every
@@ -425,19 +422,15 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     /* the discovery section, then the opaque overlay. A malformed blob drops the datagram */
     if (meta_len){
         const uint8_t *b = blob, *bend = blob + meta_len;
-        if (b + 3 > bend) return;                          /* port(2) ip_len(1) */
+        if (b + 3 > bend) return;                          /* port(2) name_len(1) */
         disc_port = i_rant_le_r16(b); b += 2;
-        disc_ip_len = *b++;
-        if (disc_ip_len==4 || disc_ip_len==16){ if (b + disc_ip_len > bend) return; disc_ip = b; b += disc_ip_len; }
-        else disc_ip_len = 0;
-        if (b + 1 > bend) return;                          /* name_len(1) */
         {   uint8_t dnl = *b++;
             if (dnl){ if (b + dnl > bend) return; disc_name = rant_string((const char*)b, dnl); b += dnl; } }
         overlay = rant_bytes(b, (size_t)(bend - b));
         if (overlay.len > st->meta_cap){   /* this side can never hold it, so say so */
             RantAddr a; int at = i_rant_discovery_find(st, uuid);
             memset(&a, 0, sizeof a);
-            if (disc_ip_len){ memcpy(a.ip, disc_ip, disc_ip_len); a.ip_len = disc_ip_len; }
+            if (src_ip){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
             a.port = disc_port;
             i_rant_discovery_fire_error(st, RANT_E_PEER_META_TOO_BIG,
                                         at >= 0 ? st->peers[at].local_id : 0, &a, overlay.len);
@@ -453,11 +446,10 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
         return;
     }
 
-    /* The IP is a candidate from the source, or a stated self_ip. See spec/discovery.md. */
+    /* The IP is a candidate from the source. See spec/discovery.md. */
     memset(&addr, 0, sizeof addr);
     if (have_disc){
-        if (disc_ip_len){ addr.ip_len = disc_ip_len; memcpy(addr.ip, disc_ip, disc_ip_len); }
-        else if (src_ip && (src_ip_len==4 || src_ip_len==16)){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
+        if (src_ip && (src_ip_len==4 || src_ip_len==16)){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
         else return;
         addr.port = disc_port;
     } else if (idx >= 0){
@@ -496,9 +488,9 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     peer->last_heard_us = now;
     if (src_ip) i_rant_discovery_note_path(peer, src_ip, src_ip_len, now);
 
-    /* Rank the candidate against the incumbent so a multi path locator never flaps. A
-       stated self_ip skips this. See spec/discovery.md. */
-    if (!disc_ip_len && peer->ip_len == 4 && addr.ip_len == 4 && memcmp(peer->ip, addr.ip, 4) != 0){
+    /* Rank the candidate against the incumbent so a multi path locator never flaps. See
+       spec/discovery.md. */
+    if (peer->ip_len == 4 && addr.ip_len == 4 && memcmp(peer->ip, addr.ip, 4) != 0){
         int rank_new = i_rant_discovery_addr_rank(st, addr.ip, 4);
         int rank_old = i_rant_discovery_addr_rank(st, peer->ip, 4);
         if (rank_new < rank_old ||

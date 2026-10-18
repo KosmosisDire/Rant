@@ -473,10 +473,6 @@ struct NodeOptions {
      * megabyte message whole, so raise both for big payloads. */
     uint32_t                 recv_buffer_bytes    = 0;
     uint32_t                 send_buffer_bytes    = 0;
-    /* Advertise this locator to every peer instead of letting each learn it from the datagram
-     * source. For a static 1:1 mapping such as a cloud IP or a published container port. */
-    std::string              self_ip;   /* "203.0.113.7", empty = learn per path */
-    uint16_t                 advertise_port       = 0;   /* 0 = the port we actually bound */
     /* Run on the sockets of the Rant bridge at this ws:// URL, a node of its host to the mesh.
      * Empty takes RANT_BRIDGE, else this host's own. */
     std::string              bridge;
@@ -2185,7 +2181,6 @@ struct NodeImpl : std::enable_shared_from_this<NodeImpl> {
     bool                       log_bound = false;   /* the level topics hold our handler, under create_mu */
     std::string                disc_group;
     std::string                mcast_if;
-    std::string                self_ip;
     std::vector<detail::RantAddr> seeds;
 
     /* wrapper registries. create_mu serializes wrapper side creates and closes. reg_mu is a
@@ -2939,7 +2934,6 @@ public:
         /* The node retains the net string/seed pointers, so own that storage. */
         impl->disc_group = o.discovery_group;
         impl->mcast_if   = o.multicast_interface;
-        impl->self_ip    = o.self_ip;
         for (const std::string& s : o.seed_peers) {
             detail::RantAddr a;
             if (parse_addr(s, a)) impl->seeds.push_back(a);
@@ -2965,8 +2959,6 @@ public:
         co.net.multicast_ttl       = o.multicast_ttl;
         co.net.seed_peers          = impl->seeds.empty() ? nullptr : impl->seeds.data();
         co.net.n_seed_peers        = static_cast<uint16_t>(impl->seeds.size());
-        co.net.self_ip             = impl->self_ip.empty() ? nullptr : impl->self_ip.c_str();
-        co.net.advertise_port      = o.advertise_port;
         co.net.bridge              = o.bridge.empty() ? nullptr : o.bridge.c_str();
         co.net.bridge_passphrase   = o.bridge_passphrase.empty() ? nullptr : o.bridge_passphrase.c_str();
         co.net.fragment_size       = o.fragment_size;
