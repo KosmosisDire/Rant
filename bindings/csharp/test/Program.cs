@@ -1267,9 +1267,10 @@ static class Program
         for (int i = 1; i <= 3; i++) pub.Send(new Level { Value = i });
         Level v;
         Check("TryTake waits for the oldest", sub.TryTake(out v, 2000) && v.Value == 1);
+        // the taken record stays counted until the next take, so 3 means 2 and 3 have arrived
         deadline = DateTime.UtcNow.AddSeconds(8);
-        while (DateTime.UtcNow < deadline && sub.QueueStats().Messages < 2) Thread.Sleep(5);
-        Check("the node's Dispatch leaves it waiting", b.Dispatch() >= 0 && sub.QueueStats().Messages >= 2);
+        while (DateTime.UtcNow < deadline && sub.QueueStats().Messages < 3) Thread.Sleep(5);
+        Check("the node's Dispatch leaves it waiting", b.Dispatch() >= 0 && sub.QueueStats().Messages >= 3);
         Check("TryTakeLatest returns the newest", sub.TryTakeLatest(out v) && v.Value == 3);
         Check("and dropped the older ones", !sub.TryTake(out v));
 

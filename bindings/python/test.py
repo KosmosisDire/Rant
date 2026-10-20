@@ -1429,7 +1429,8 @@ def dispatch_leg():
         pub3.send(Level(value=v))
     first = pulled.take(timeout=2.0)
     check("take returns the oldest", first is not None and first.value == 1)
-    wait(lambda: pulled.queue_stats.messages >= 2)
+    # the taken record stays counted until the next take, so 3 means 2 and 3 have arrived
+    check("the rest arrived", wait(lambda: pulled.queue_stats.messages >= 3))
     newest = pulled.latest()
     check("latest returns the newest and drops the rest",
           newest is not None and newest.value == 3 and pulled.take() is None)
