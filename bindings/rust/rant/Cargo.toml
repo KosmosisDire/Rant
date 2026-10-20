@@ -14,7 +14,7 @@ include = ["src/**", "csrc/rant.h", "csrc/rant.c", "build.rs", "dist.rs", "Cargo
 name = "rant"
 
 [dependencies]
-rant-macros = { path = "../rant-macros", version = "=0.0.31" }
+rant-macros = { path = "../rant-macros", version = "=0.0.32" }
 
 [build-dependencies]
 cc = "1.2"
