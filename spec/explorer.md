@@ -52,8 +52,10 @@ Observers key cached reflection walks on the per peer interest epoch alone.
 
 Meta: the watched node's `@rant/meta` is polled once per second with a directed call. The
 poll sends a section mask: node, proc and peers every time, topics every fifth poll (the
-section is about 250 B per topic). The log sidebar drains the three `@rant/log` topics,
-widened to PUBSUB at `cap_start`, into a 512 line ring.
+section is about 250 B per topic). The log sidebar takes every node's `@rant/log` lines into a
+512 line ring, filtered by level, with Rant's own lines tagged. Each node's `@rant/status`
+set is kept by peer id: the node list colours a node by its most serious condition, and the
+node detail lists its conditions first, most serious first.
 
 The topic list VALUE column renders the newest value per standard type (Color swatch,
 Matrix heat grid, else text). A bare root shows its single value, raw bytes show their
