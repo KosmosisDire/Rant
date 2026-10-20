@@ -1,5 +1,5 @@
 use std::any::{TypeId, type_name};
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
@@ -23,6 +23,58 @@ pub trait Message: Sized + Send + 'static {
     fn __encode(&self, e: &mut Encoder<'_>) -> Result<(), String>;
     #[doc(hidden)]
     fn __decode(d: &mut Decoder<'_>) -> Result<Self, String>;
+    /// A variable array's elements as the wire packs them, one after another. A number's
+    /// slice goes at once, since walking 6 MB of pixels one element at a time is slow.
+    #[doc(hidden)]
+    fn __pack(items: &[Self]) -> Result<Cow<'_, [u8]>, String> {
+        pack_each(items)
+    }
+    /// `n` elements from a variable array's packed bytes.
+    #[doc(hidden)]
+    fn __unpack(packed: &[u8], n: usize) -> Result<Vec<Self>, String> {
+        unpack_each(packed, n)
+    }
+}
+
+fn pack_each<E: Message>(items: &[E]) -> Result<Cow<'_, [u8]>, String> {
+    let mut packed = Vec::new();
+    let mut e = Encoder { buf: &mut packed, mode: EncodeMode::Append };
+    items.iter().try_for_each(|x| x.__encode(&mut e))?;
+    Ok(Cow::Owned(packed))
+}
+
+fn unpack_each<E: Message>(packed: &[u8], n: usize) -> Result<Vec<E>, String> {
+    let mut d = Decoder { data: packed, mode: DecodeMode::Packed { pos: 0 } };
+    (0..n).map(|_| E::__decode(&mut d)).collect()
+}
+
+/// A primitive number: no padding, and every bit pattern is a value.
+///
+/// # Safety
+/// Only for the integer and float primitives, whose memory may be read and written as bytes.
+unsafe trait Number: Message + Copy {}
+
+/// On a little endian target a slice of numbers is already its wire packing.
+fn pack_numbers<T: Number>(items: &[T]) -> Result<Cow<'_, [u8]>, String> {
+    if cfg!(target_endian = "big") {
+        return pack_each(items);
+    }
+    // SAFETY: a Number's memory is initialised bytes with no padding, little endian here
+    Ok(Cow::Borrowed(unsafe { std::slice::from_raw_parts(items.as_ptr().cast::<u8>(), std::mem::size_of_val(items)) }))
+}
+
+fn unpack_numbers<T: Number>(packed: &[u8], n: usize) -> Result<Vec<T>, String> {
+    if cfg!(target_endian = "big") {
+        return unpack_each(packed, n);
+    }
+    let len = n.checked_mul(std::mem::size_of::<T>()).filter(|&len| len <= packed.len()).ok_or("an array lies past the message")?;
+    let mut v = Vec::<T>::with_capacity(n);
+    // SAFETY: the copy fills all n elements, and any bytes are a Number's value
+    unsafe {
+        std::ptr::copy_nonoverlapping(packed.as_ptr(), v.as_mut_ptr().cast::<u8>(), len);
+        v.set_len(n);
+    }
+    Ok(v)
 }
 
 mod sealed {
@@ -758,8 +810,14 @@ impl<'a> Encoder<'a> {
     fn grow(buf: &mut Vec<u8>, schema: *const ffi::RantSchema, extra: usize) {
         // SAFETY: the buffer is a live message of the schema, held open by the caller
         let used = unsafe { ffi::rant_schema_msg_len(schema, buf.as_ptr().cast(), buf.len()) } as usize;
-        if buf.len() < used + extra {
-            buf.resize(used + extra, 0);
+        if let Some(add) = (used + extra).checked_sub(buf.len()).filter(|&add| add > 0) {
+            buf.reserve(add);
+            // SAFETY: the reserve made room, and the zeros land before the length covers them. A
+            // memset, where resize writes byte by byte in an unoptimised build
+            unsafe {
+                std::ptr::write_bytes(buf.as_mut_ptr().add(buf.len()), 0, add);
+                buf.set_len(buf.len() + add);
+            }
         }
     }
 
@@ -775,16 +833,12 @@ impl<'a> Encoder<'a> {
     }
 
     /// The next variable array, from its elements in order.
-    pub fn sequence<'x, E: Message + 'x>(&mut self, items: impl ExactSizeIterator<Item = &'x E>) -> Result<(), String> {
+    pub fn sequence<E: Message>(&mut self, items: &[E]) -> Result<(), String> {
         let (schema, op, place) = self.tail()?;
         let path = op.path.as_ptr();
         match (&op.shape, place) {
             (Shape::VarArray { .. }, _) => {
-                let mut packed = Vec::new();
-                let mut sub = Encoder { buf: &mut packed, mode: EncodeMode::Append };
-                for item in items {
-                    item.__encode(&mut sub)?;
-                }
+                let packed = E::__pack(items)?;
                 Encoder::grow(self.buf, schema, packed.len());
                 // SAFETY: as var_string
                 let ok = unsafe { ffi::rant_set_array(self.buf.as_mut_ptr().cast(), self.buf.len(), schema, path, c_bytes(&packed)) } != 0;
@@ -803,7 +857,7 @@ impl<'a> Encoder<'a> {
                     return Err("a Vec of structs found no frame".to_owned());
                 }
                 let at = frame.data as usize - self.buf.as_ptr() as usize;
-                for (k, item) in items.enumerate() {
+                for (k, item) in items.iter().enumerate() {
                     let base = at + k * *elem_wire as usize;
                     let mut e = Encoder { buf: &mut *self.buf, mode: EncodeMode::Ops { schema, ops: sub, places: sub_places, base, i: 0, elem: 0 } };
                     item.__encode(&mut e)?;
@@ -892,9 +946,7 @@ impl<'a> Decoder<'a> {
         match (&op.shape, place) {
             (&Shape::VarArray { elem, cap }, _) => {
                 let size = if elem == kind::STR { 2 + cap as usize } else { kind::size(elem) };
-                let n = frame.len().checked_div(size).unwrap_or(0);
-                let mut sub = Decoder { data: frame, mode: DecodeMode::Packed { pos: 0 } };
-                (0..n).map(|_| E::__decode(&mut sub)).collect()
+                E::__unpack(frame, frame.len().checked_div(size).unwrap_or(0))
             }
             (Shape::VecStruct { sub }, Place::VecStruct { elem_wire, sub: sub_places }) => {
                 let n = frame.len().checked_div(*elem_wire as usize).unwrap_or(0);
@@ -924,7 +976,16 @@ macro_rules! scalar {
                 let b = d.leaf(std::mem::size_of::<$t>())?;
                 Ok(<$t>::from_le_bytes(b.try_into().map_err(|_| "a short number")?))
             }
+            fn __pack(items: &[Self]) -> Result<Cow<'_, [u8]>, String> {
+                pack_numbers(items)
+            }
+            fn __unpack(packed: &[u8], n: usize) -> Result<Vec<Self>, String> {
+                unpack_numbers(packed, n)
+            }
         }
+
+        // SAFETY: an integer or float primitive
+        unsafe impl Number for $t {}
     )*};
 }
 
@@ -959,7 +1020,7 @@ impl<E: Message> Message for Vec<E> {
         s.var_array::<E>()
     }
     fn __encode(&self, e: &mut Encoder<'_>) -> Result<(), String> {
-        e.sequence(self.iter())
+        e.sequence(self)
     }
     fn __decode(d: &mut Decoder<'_>) -> Result<Self, String> {
         d.sequence::<E>()

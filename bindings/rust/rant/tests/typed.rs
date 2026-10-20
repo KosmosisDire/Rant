@@ -156,6 +156,42 @@ fn bare_roots_round_trip() {
     assert_eq!(round_trip(32, "c", corners.clone()), corners);
 }
 
+/// One list of every number type, which pack as a whole slice, beside bools, which do not.
+#[derive(rant::Message, Clone, Debug, PartialEq)]
+struct Lists {
+    a: Vec<i8>,
+    b: Vec<u16>,
+    c: Vec<i16>,
+    d: Vec<u32>,
+    e: Vec<i32>,
+    f: Vec<u64>,
+    g: Vec<i64>,
+    h: Vec<f32>,
+    i: Vec<f64>,
+    j: Vec<bool>,
+    k: Vec<u8>,
+}
+
+#[test]
+fn every_number_list_round_trips() {
+    let lists = Lists {
+        a: vec![i8::MIN, -1, 0, i8::MAX],
+        b: vec![0, 0x1234, u16::MAX],
+        c: vec![i16::MIN, -2, i16::MAX],
+        d: vec![0xdead_beef, 1],
+        e: vec![i32::MIN, -3, i32::MAX],
+        f: vec![u64::MAX, 0x0102_0304_0506_0708],
+        g: vec![i64::MIN, -4, i64::MAX],
+        h: vec![-1.5, f32::MAX, f32::MIN_POSITIVE],
+        i: vec![std::f64::consts::PI, -0.0, f64::MAX],
+        j: vec![true, false, true],
+        k: (0..=255).collect(),
+    };
+    assert_eq!(round_trip(36, "lists", lists.clone()), lists);
+    let empty = Lists { a: vec![], b: vec![], c: vec![], d: vec![], e: vec![], f: vec![], g: vec![], h: vec![], i: vec![], j: vec![], k: vec![] };
+    assert_eq!(round_trip(37, "empty_lists", empty.clone()), empty);
+}
+
 #[derive(rant::Message, Debug, PartialEq)]
 #[rant(name = "Reading")]
 struct ReadingSubset {
