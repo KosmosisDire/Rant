@@ -1942,6 +1942,7 @@ static void i_rant_pat_problem(i_RantPatterns *pm, i_RantProblems *ps, RantTopic
     RantString nm = i_rant_topic_name(primary), pn = i_rant_node_sys_peer_name(pm->n, peer);
     size_t len = nm.len;
     uint32_t idb[2];
+    if (!nm.data) nm = rant_cstr("");
     if (len >= 5 && nm.data[len - 4] == '@') len -= 4;   /* the entity's base name */
     snprintf(text, sizeof text, "%.*s is also %s by %.*s", (int)len, nm.data, role, (int)pn.len, pn.data);
     idb[0] = i_rant_node_problem_id(nm.data, len); idb[1] = peer;
@@ -1964,6 +1965,7 @@ static void i_rant_pat_problems(i_RantPatterns *pm){
         RantString nm, by;
         if (!v->is_owner || !v->forced) continue;
         nm = i_rant_topic_name(v->value);
+        if (!nm.data) nm = rant_cstr("");
         by = v->forced_by ? i_rant_node_sys_peer_name(pm->n, v->forced_by) : rant_cstr("this node");
         snprintf(text, sizeof text, "%.*s is forced by %.*s, forcing is for debugging only",
                  (int)nm.len, nm.data, (int)by.len, by.data);

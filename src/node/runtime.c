@@ -2138,7 +2138,7 @@ static void i_rant_node_problems_rebuild(RantNode *n){
     if (n->tunnel){
         char why[300];
         if (!i_rant_tunnel_link_up(n->tunnel, why, sizeof why)){
-            snprintf(text, sizeof text, "the link to the bridge at %s", why);
+            snprintf(text, sizeof text, "the link to the bridge at %.130s", why);   /* the cap's room */
             i_rant_node_problem(&one, 0, RANT_LEVEL_ERROR, text);
             aging = 1;     /* it reconnects on its own and says nothing when it does */
         }
