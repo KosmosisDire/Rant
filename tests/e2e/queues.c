@@ -196,6 +196,50 @@ done:
     rant_allocator_reset(&aa); rant_allocator_reset(&ba);
 }
 
+/* A pull reader still holding the view of a big message keeps the next one, below the
+ * default cap and above it, since a view pins the ring against the grow the next needs */
+static uint8_t pv_payload[1536u * 1024u];
+static void pull_view_checks(void){
+    const uint32_t sizes[2] = { 600u * 1024u, 1536u * 1024u };
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0);
+    RantNodeOpts o; RantTopicOpts co;
+    RantNode *a, *b; RantTopic *pub = NULL, *pl = NULL;
+    RantMsg m; int s, r;
+    memset(&o, 0, sizeof o); memset(&m, 0, sizeof m);
+    o.domain = TEST_DOMAIN+54; o.discovery.max_peers = 4; o.max_topics = 4;
+    o.net.multicast_interface = "127.0.0.1";
+    o.net.recv_buffer_bytes = 8u << 20;   /* without shm a 1.5 MB burst must fit the socket */
+    a = rant_node_open(&aa, "pv-a", NULL, NULL, &o);
+    b = rant_node_open(&ba, "pv-b", NULL, NULL, &o);
+    memset(&co, 0, sizeof co);
+    if (a) pub = rant_node_create_topic(a, "pv/x", RANT_PUB_ONLY, NULL, &co);
+    co.pull = 1;
+    if (b) pl = rant_node_create_topic(b, "pv/x", RANT_SUB_ONLY, NULL, &co);
+    CHECK(a && b && pub && pl, "pull view: nodes and topics open");
+    if (!(a && b && pub && pl)) goto done;
+    PUMP_UNTIL(a, b, 10000, rant_topic_match_count(pub) >= 1);
+    for (s = 0; s < 2; s++){
+        uint32_t n = sizes[s], waiting = 0, before = 0, dropped = 0;
+        rant_topic_queue_stats(pl, NULL, NULL, NULL, &before);
+        i_rant_le_w32(pv_payload, 2u * (uint32_t)s);
+        rant_topic_send(pub, rant_bytes(pv_payload, n), NULL);
+        PUMP_UNTIL(a, b, 5000, (rant_topic_queue_stats(pl, &waiting, NULL, NULL, NULL), waiting >= 1));
+        r = rant_topic_take(pl, &m, 0);
+        CHECK(r == 1 && m.data.len == n, "pull view: a %u byte message arrives (r=%d)", n, r);
+        i_rant_le_w32(pv_payload, 2u * (uint32_t)s + 1u);
+        rant_topic_send(pub, rant_bytes(pv_payload, n), NULL);
+        PUMP_UNTIL(a, b, 5000, (rant_topic_queue_stats(pl, &waiting, NULL, NULL, &dropped), waiting >= 2 || dropped > before));
+        CHECK(dropped == before, "pull view: the next %u byte message fits beside the held view (dropped %u)", n, dropped - before);
+        r = rant_topic_take(pl, &m, 0);
+        CHECK(r == 1 && i_rant_le_r32(m.data.data) == 2u * (uint32_t)s + 1u, "pull view: the next take returns it (r=%d)", r);
+        rant_topic_take(pl, &m, 0);   /* lets go of the view */
+    }
+done:
+    if (a) rant_node_close(a, 1);
+    if (b) rant_node_close(b, 1);
+    rant_allocator_reset(&aa); rant_allocator_reset(&ba);
+}
+
 /* The callback queue phases (spec/testing.md): a pub only A and a sub only B whose topics
  * cq/x and cq/y share one queue while cq/in stays inline. */
 static RantNode  *cq_b;
@@ -642,6 +686,7 @@ static void queued_retire_checks(void){
 static const TestCase cases[] = {
     { "queue", queue_checks },
     { "pull", pull_checks },
+    { "pull_view", pull_view_checks },
     { "callback_queue", callback_queue_checks },
     { "callback_pattern", callback_pattern_checks },
     { "queued_retire", queued_retire_checks },

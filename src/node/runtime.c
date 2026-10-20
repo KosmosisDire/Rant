@@ -508,8 +508,8 @@ static int i_rant_q_fit(i_RantMsgQueue *q, uint32_t need, uint32_t *at){
     return 0;                                                    /* full (head == tail) */
 }
 
-/* Relinearizes into a bigger ring, doubling toward cap_limit. One over cap message still
- * fits. 0 = cannot grow now: at the cap, OOM, or a record in dispatch pins the ring. */
+/* Relinearizes into a bigger ring, doubling toward cap_limit. Two over cap messages still
+ * fit. 0 = cannot grow now: at the cap, OOM, or a record in dispatch pins the ring. */
 static int i_rant_q_grow(RantNode *n, i_RantMsgQueue *q, uint32_t need_total, uint32_t need_one){
     uint32_t target = q->cap ? q->cap * 2u : 4096u;
     uint8_t *nb;
@@ -517,7 +517,8 @@ static int i_rant_q_grow(RantNode *n, i_RantMsgQueue *q, uint32_t need_total, ui
     if (target < 4096u) target = 4096u;
     while (target < need_total && target < 0x80000000u) target *= 2u;
     if (target > q->cap_limit) target = q->cap_limit;
-    if (target < need_one) target = RANT__QALIGN(need_one);        /* one message always fits */
+    /* two always fit, since a pinned record blocks the grow its successor would need */
+    if (target / 2u < RANT__QALIGN(need_one)) target = 2u * RANT__QALIGN(need_one);
     if (target <= q->cap) return 0;
     nb = (uint8_t*)i_rant_node_alloc(n, NULL, target);
     if (!nb) return 0;

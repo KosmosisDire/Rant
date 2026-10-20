@@ -73,7 +73,7 @@ program in this order.
 | `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema |
 | `e2e.detail` | detail_live, interest_external |
 | `e2e.shm` | shm_node |
-| `e2e.queues` | queue, pull, callback_queue, callback_pattern |
+| `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
 | `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate |
 | `e2e.tasks` | task, task_matrix |
 | `e2e.entities` | reflect_dropped, churn, log_and_meta, status, rant_conditions, rant_refused, rant_cap |
@@ -243,7 +243,9 @@ What each phase pins, grouped by layer.
   dispatch loop still receives everything in order.
 - Pull topics: polling only holds, take returns the oldest with its stamps and names,
   take_latest returns the newest and drops the rest, a timed take drives the loop, and
-  take on a topic created without pull and pull with a queue are refused.
+  take on a topic created without pull and pull with a queue are refused. A reader still
+  holding the view of a 600 KB or 1.5 MB message keeps the next one, below the default cap
+  and above it.
 
 ### Patterns
 

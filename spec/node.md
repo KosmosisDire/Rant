@@ -152,7 +152,9 @@ A queued handle's messages are copied by the poll thread into a per handle byte 
 (`i_RantMsgQueue`: a record header holding its size, the payload length, the two stamps and
 the publisher id and name length, then the copied sender name, then an 8 aligned payload.
 Records never wrap). The ring starts small and grows to `qos.queue_bytes`. An explicit
-value pre allocates the ring in full. One bigger message still fits.
+value pre allocates the ring in full. A grow always makes room for two of the message that
+needed it, past the cap if it must, since the record a view or a callback pins blocks every
+grow until it is released, and its successor must fit beside it.
 
 A pull topic (`RantTopic.pull`) has the same ring with no callback queue: `rant_topic_take`
 views the tail record until the next take, and `take_latest` pops all but the newest first,

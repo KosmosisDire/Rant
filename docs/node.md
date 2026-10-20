@@ -61,7 +61,7 @@ same way, and from anywhere else it drops the unrun records. `rant_node_close` i
 while any queue is being dispatched.
 
 Each queued handle has its own ring. It starts small and grows to `qos.queue_bytes` (0 =
-`RANT_QUEUE_CAP`, 1 MB), and one bigger message still fits. At the cap the reliability QoS
+`RANT_QUEUE_CAP`, 1 MB), and two bigger messages still fit. At the cap the reliability QoS
 decides: best effort overwrites the oldest and fires `RANT_MSG_LOST`, reliable parks
 delivery so the publisher's send blocks on normal flow control, and dispatching unparks
 it. Size the ring to cover the writer's burst (at least `keep_last` times the message
