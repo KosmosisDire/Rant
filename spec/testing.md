@@ -74,7 +74,7 @@ program in this order.
 | `e2e.detail` | detail_live, interest_external |
 | `e2e.shm` | shm_node |
 | `e2e.queues` | queue, pull, callback_queue, callback_pattern |
-| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture |
+| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce |
 | `e2e.tasks` | task, task_matrix |
 | `e2e.entities` | reflect_dropped, churn, log_and_meta, status |
 | `e2e.matchwait` | matchwait |

@@ -611,7 +611,7 @@ static void i_rant_func_drop_parked(RantFunction *fn){
 
 /* Creates the channels for a function or task. mode 1 = a definition, 0 = a remote, 2 =
  * both sides in one handle (the @rant/meta shape). topts non NULL = the task shape. */
-static RantFunction *i_rant_function_new(RantNode *n, const char *name,
+static RantFunction *i_rant_function_open(RantNode *n, const char *name,
                     const RantSchema *req_schema, const RantSchema *rsp_schema,
                     RantRequestFn on_request, void *user, const RantFunctionOpts *opts, int mode,
                     const RantSchema *prg_schema, const RantTaskOpts *topts){
@@ -712,6 +712,21 @@ static RantFunction *i_rant_function_new(RantNode *n, const char *name,
         i_rant_pat_dup_sweep(n, fn->req, topts ? RANT_ENTITY_TASK : RANT_ENTITY_FUNCTION,
                              &fn->dup_peers, &fn->dup_n, &fn->dup_cap);
     i_rant_node_sys_unlock(n, acquired);
+    return fn;
+}
+
+/* The channels reach peers in one announce, never one by one: a provider that knew only a
+ * caller's req would answer into rsp and prg lanes that do not exist yet. */
+static RantFunction *i_rant_function_new(RantNode *n, const char *name,
+                    const RantSchema *req_schema, const RantSchema *rsp_schema,
+                    RantRequestFn on_request, void *user, const RantFunctionOpts *opts, int mode,
+                    const RantSchema *prg_schema, const RantTaskOpts *topts){
+    RantFunction *fn;
+    if (!n) return NULL;
+    i_rant_node_advertise_hold(n);
+    fn = i_rant_function_open(n, name, req_schema, rsp_schema, on_request, user, opts, mode,
+                              prg_schema, topts);
+    i_rant_node_advertise_release(n);
     return fn;
 }
 
@@ -872,9 +887,11 @@ int rant_function_retire(RantFunction *fn){
     i_rant_func_drain_defers(fn, "provider retired");
     i_rant_node_sys_unlock(n, acquired);
     i_rant_node_flush_tx(n);
+    i_rant_node_advertise_hold(n);
     r = i_rant_pat_park_channels(fn->req, fn->rsp);
+    if (r == 0 && fn->prg) (void)rant_topic_set_role(fn->prg, RANT_INACTIVE);
+    i_rant_node_advertise_release(n);
     if (r != 0) return r;
-    if (fn->prg) (void)rant_topic_set_role(fn->prg, RANT_INACTIVE);
     acquired = i_rant_node_sys_lock(n);
     i_rant_pat_clear_channels(fn->req, fn->rsp);
     if (fn->prg) i_rant_topic_clear_sys(fn->prg);
@@ -891,8 +908,10 @@ int rant_function_retire(RantFunction *fn){
     if (fn->dup_peers) i_rant_node_sys_alloc(n, fn->dup_peers, 0);
     i_rant_node_sys_alloc(n, fn, 0);
     i_rant_node_sys_unlock(n, acquired);
+    i_rant_node_advertise_hold(n);
     i_rant_pat_release_channels(req, rsp);
     if (prg) (void)rant_topic_retire(prg);
+    i_rant_node_advertise_release(n);
     return RANT_OK;
 }
 
@@ -927,14 +946,12 @@ int rant_function_refresh(RantFunction *fn){
     i_rant_func_drop_parked(fn);
     i_rant_node_sys_unlock(n, acquired);
     i_rant_node_flush_tx(n);
+    i_rant_node_advertise_hold(n);
     r = i_rant_topic_retype(fn->req, rq, RANT_RELIABLE);
+    if (r == 0) r = i_rant_topic_retype(fn->rsp, rs, RANT_RELIABLE);
+    if (r == 0 && fn->prg) r = i_rant_topic_retype(fn->prg, pg, i_rant_topic_reliability(fn->prg));
+    i_rant_node_advertise_release(n);
     if (r != 0) return r;
-    r = i_rant_topic_retype(fn->rsp, rs, RANT_RELIABLE);
-    if (r != 0) return r;
-    if (fn->prg){
-        r = i_rant_topic_retype(fn->prg, pg, i_rant_topic_reliability(fn->prg));
-        if (r != 0) return r;
-    }
     fn->generation = gen;
     return 1;
 }
@@ -1434,8 +1451,8 @@ static void i_rant_var_on_value(void *user, const RantMsg *msg){
     }
 }
 
-static RantVariable *i_rant_variable_new(RantNode *n, const char *name, const RantSchema *schema,
-                                         const RantVariableOpts *opts, int owner){
+static RantVariable *i_rant_variable_open(RantNode *n, const char *name, const RantSchema *schema,
+                                          const RantVariableOpts *opts, int owner){
     i_RantPatterns *pm; RantVariable *v;
     char sn[RANT_TOPIC_NAME_MAX + 1]; size_t nl;
     RantTopicOpts vopt, sopt; int acquired, readonly, make_set;
@@ -1499,6 +1516,17 @@ static RantVariable *i_rant_variable_new(RantNode *n, const char *name, const Ra
     i_rant_node_sys_unlock(n, acquired);
     if (owner && opts && opts->initial.len)   /* seed the store and history */
         rant_variable_set(v, opts->initial);
+    return v;
+}
+
+/* The value and set channels reach peers in one announce, as a function's do. */
+static RantVariable *i_rant_variable_new(RantNode *n, const char *name, const RantSchema *schema,
+                                         const RantVariableOpts *opts, int owner){
+    RantVariable *v;
+    if (!n) return NULL;
+    i_rant_node_advertise_hold(n);
+    v = i_rant_variable_open(n, name, schema, opts, owner);
+    i_rant_node_advertise_release(n);
     return v;
 }
 
@@ -1637,7 +1665,9 @@ int rant_variable_retire(RantVariable *var){
     if (!var) return RANT_ERR_NO_TOPIC;
     pm = var->pm; n = var->n;
     if (i_rant_topic_busy(var->value)) return RANT_ERR_STATE;   /* its dispatched callback runs */
+    i_rant_node_advertise_hold(n);
     r = i_rant_pat_park_channels(var->value, var->set);     /* set is NULL on a read only owner */
+    i_rant_node_advertise_release(n);
     if (r != 0) return r;
     acquired = i_rant_node_sys_lock(n);
     i_rant_node_sys_settle(n, &var->cb_out);      /* an observer out on another thread */
@@ -1649,7 +1679,9 @@ int rant_variable_retire(RantVariable *var){
     if (var->dup_peers) i_rant_node_sys_alloc(n, var->dup_peers, 0);
     i_rant_node_sys_alloc(n, var, 0);
     i_rant_node_sys_unlock(n, acquired);
+    i_rant_node_advertise_hold(n);
     i_rant_pat_release_channels(value, set);
+    i_rant_node_advertise_release(n);
     return RANT_OK;
 }
 
@@ -1666,12 +1698,11 @@ int rant_variable_refresh(RantVariable *var){
     if (!i_rant_node_reflect_pick(n, RANT_ENTITY_VARIABLE, i_rant_pat_base_name(var->value), 0,
                                   var->is_owner, &ms, NULL, &gen)
         || gen == var->generation) return 0;
+    i_rant_node_advertise_hold(n);
     r = i_rant_topic_retype(var->value, ms, RANT_RELIABLE);
+    if (r == 0 && var->set) r = i_rant_topic_retype(var->set, ms, RANT_RELIABLE);
+    i_rant_node_advertise_release(n);
     if (r != 0) return r;
-    if (var->set){
-        r = i_rant_topic_retype(var->set, ms, RANT_RELIABLE);
-        if (r != 0) return r;
-    }
     var->generation = gen;
     return 1;
 }

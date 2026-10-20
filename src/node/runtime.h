@@ -349,6 +349,10 @@ int  i_rant_node_reflect_pick(RantNode *n, RantEntityKind kind, const char *name
 int  i_rant_topic_send_hdr(RantTopic *topic, RantBytes hdr, RantBytes data);
 /* Publishes hdr plus payload to one peer, for function replies. */
 int  i_rant_topic_send_to(RantTopic *topic, uint32_t to_peer, RantBytes hdr, RantBytes data);
+/* Holds the re advertise of every create, role flip, retype and retire until the release,
+ * so a pattern handle's channels reach peers in one announce. Nests. Takes the node lock. */
+void i_rant_node_advertise_hold   (RantNode *n);
+void i_rant_node_advertise_release(RantNode *n);
 /* Clears a pattern topic's routing before its handle is freed. Under the node lock. */
 void i_rant_topic_clear_sys(RantTopic *topic);
 /* Callback queue seams. A pattern topic created with opts.queue keeps inline delivery: its

@@ -167,6 +167,8 @@ struct RantNode {
     uint64_t         open_us;         /* when the node opened, the gather anchor */
     uint8_t          gather_done;     /* latched once the post open gather settles */
     uint32_t         match_epoch;     /* bumps on peer or interest change, create and set_role */
+    uint16_t         advertise_hold;  /* i_rant_node_advertise_hold nesting, see spec/patterns.md */
+    uint8_t          advertise_pending; /* an interest change waits for the hold's release */
     void            *patterns;        /* the patterns layer's per node manager, opaque here */
     RantEvent       last_error;  /* the most recent RANT_ERROR, RANT_E_NONE until one fires */
     /* last_error's strings, copied so the by value event outlives a retire or a peer drop */
@@ -1437,6 +1439,27 @@ static void i_rant_node_readvertise(RantNode *n){
     i_rant_node_kick(n);
 }
 
+/* Our interest changed: re advertise now, or at the release of a hold. Lock held. */
+static void i_rant_node_interest_changed(RantNode *n){
+    if (n->advertise_hold){ n->advertise_pending = 1; return; }
+    i_rant_node_readvertise(n);
+}
+
+void i_rant_node_advertise_hold(RantNode *n){
+    int acquired = i_rant_node_lock(n);
+    n->advertise_hold++;
+    i_rant_node_unlock(n, acquired);
+}
+
+void i_rant_node_advertise_release(RantNode *n){
+    int acquired = i_rant_node_lock(n);
+    if (n->advertise_hold && --n->advertise_hold == 0 && n->advertise_pending){
+        n->advertise_pending = 0;
+        i_rant_node_readvertise(n);
+    }
+    i_rant_node_unlock(n, acquired);
+}
+
 /* The shared topic create: the public create and the patterns layer's both funnel here.
  * kind, prefix_bytes and directed stamp the entity, allow_at permits the reserved '@'. */
 /* Records why a create refused: the last error slot, and the RANT_ERROR event when the
@@ -1604,7 +1627,7 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
     else if (!reuse) n->n_created++;   /* a reused slot is already inside the dense region */
     /* the handle is installed before the publish: the replay fires peer events into the
        patterns layer and the app, which must never see a half created topic */
-    i_rant_node_readvertise(n);
+    i_rant_node_interest_changed(n);
     i_rant_node_unlock(n, acquired);
     return h;
 }
@@ -2710,7 +2733,7 @@ int rant_topic_set_role(RantTopic *topic, RantRole role){
     if (r == 0){
         topic->role = (uint8_t)role;
         topic->came_up_us = i_rant_plat_now_us();
-        i_rant_node_readvertise(topic->n);     /* a role flip may raise fresh candidates */
+        i_rant_node_interest_changed(topic->n);     /* a role flip may raise fresh candidates */
     }
     i_rant_node_unlock(topic->n, acquired);
     return r;
@@ -2742,7 +2765,7 @@ int rant_topic_retire(RantTopic *topic){
     n->handles[idx] = NULL;
     i_rant_node_alloc(n, topic, 0);           /* the handle is invalid from here */
     /* the slot rides the announce as a hole from the next blob on */
-    i_rant_node_readvertise(n);
+    i_rant_node_interest_changed(n);
     i_rant_node_unlock(n, acquired);
     return RANT_OK;
 }
@@ -2839,7 +2862,7 @@ int i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reli
     i_rant_node_core_topic_rebound(n->core, idx);
     i_rant_node_core_set_topic_schema(n->core, idx, topic->schema);
     topic->came_up_us = i_rant_plat_now_us();
-    i_rant_node_readvertise(n);
+    i_rant_node_interest_changed(n);
     return RANT_OK;
 }
 

@@ -88,6 +88,20 @@ Statuses `OK`, `APP_ERROR`, `NO_HANDLER`, `CANCELLED` and `RUNNING` are wire car
 status. Descriptive facts (cancellable, exclusive, multi, forceable, no timestamp) ride
 the detail attrs byte, not the announce.
 
+## One announce per handle
+
+A handle's channels reach peers together. Its create, its refresh, and each of its two
+retire steps (park, then release) run under `i_rant_node_advertise_hold`, so every create,
+role flip, retype or retire of a channel in between only marks the interest dirty, and the
+release re advertises once. Without it each channel announced alone, and a provider could
+match a caller's `@req` before it knew the caller's `@rsp` and `@prg`. A call made in that
+gap reached the provider, and its RUNNING, progress and answer went to a peer with no lane,
+mostly silently, since the topic looked converged. A binding with work between the creates
+(C# measured it) hit that on a few percent of fresh calls. The same hold keeps a caller
+from matching a new definition's `@req` before its `@rsp` exists. The detail exchange then
+asks for all of a peer's channels in one request, so their verdicts land in one pass. The
+`one_announce` case of `e2e.patterns` pins one version step per create.
+
 ## One outcome per call
 
 Every call gets exactly one terminal response at every exit. A returning handler with no

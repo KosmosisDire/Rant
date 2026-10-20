@@ -1095,6 +1095,47 @@ static void sync_capture_checks(void){
 #endif
 }
 
+
+/* The one announce phase: a pattern handle's channels reach peers together, so a provider
+ * never knows a caller's req without its rsp and prg. Each create, and each step of a
+ * retire, moves the announce version once however many channels it touches. */
+static uint32_t oa_version(RantNode *n){ return i_rant_discovery_meta_version(i_rant_discovery_state(n->discovery)); }
+static void oa_answer(RantRequest *r, void *user){ (void)user; rant_request_reply(r, rant_bytes(NULL, 0)); }
+static void one_announce_checks(void){
+    RantAllocator aa = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *A; uint32_t v; RantFunction *f; RantVariable *var;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+24; o.net.multicast_interface="127.0.0.1"; o.max_topics=32;
+    A = rant_node_open(&aa, "oa-a", NULL, NULL, &o);
+    CHECK(A != NULL, "one_announce: node open");
+    if (!A) return;
+    v = oa_version(A);
+    f = rant_node_create_remote_task(A, "oa/rt", NULL, NULL, NULL, NULL);
+    CHECK(f && oa_version(A) == v + 1, "one_announce: a remote task's 3 channels in one announce (+%u)", oa_version(A) - v);
+    v = oa_version(A);
+    CHECK(rant_function_retire(f) == RANT_OK && oa_version(A) == v + 2,
+             "one_announce: its retire parks all at once, then frees all at once (+%u)", oa_version(A) - v);
+    v = oa_version(A);
+    f = rant_node_create_task_definition(A, "oa/td", NULL, NULL, NULL, oa_answer, NULL, NULL);
+    CHECK(f && oa_version(A) == v + 1, "one_announce: a task definition in one announce (+%u)", oa_version(A) - v);
+    v = oa_version(A);
+    CHECK(rant_node_create_remote_function(A, "oa/rf", NULL, NULL, NULL) && oa_version(A) == v + 1,
+             "one_announce: a remote function in one announce (+%u)", oa_version(A) - v);
+    v = oa_version(A);
+    CHECK(rant_node_create_function_definition(A, "oa/fd", NULL, NULL, oa_answer, NULL, NULL) && oa_version(A) == v + 1,
+             "one_announce: a function definition in one announce (+%u)", oa_version(A) - v);
+    v = oa_version(A);
+    var = rant_node_create_remote_variable(A, "oa/rv", NULL, NULL);
+    CHECK(var && oa_version(A) == v + 1, "one_announce: a remote variable in one announce (+%u)", oa_version(A) - v);
+    v = oa_version(A);
+    CHECK(rant_variable_retire(var) == RANT_OK && oa_version(A) == v + 2,
+             "one_announce: a variable retire in two whole steps (+%u)", oa_version(A) - v);
+    v = oa_version(A);
+    CHECK(rant_node_create_topic(A, "oa/t", RANT_PUB_ONLY, NULL, NULL) && oa_version(A) == v + 1,
+             "one_announce: a plain topic still announces at once (+%u)", oa_version(A) - v);
+    rant_node_close(A, 0);
+    rant_allocator_reset(&aa);
+}
+
 static const TestCase cases[] = {
     { "patterns", patterns_checks },
     { "variable_wait", varwait_checks },
@@ -1103,6 +1144,7 @@ static const TestCase cases[] = {
     { "reflect_reuse", reflect_reuse_checks },
     { "loud", loud_checks },
     { "sync_capture", sync_capture_checks },
+    { "one_announce", one_announce_checks },
 };
 
 TEST_MAIN(cases)
