@@ -90,6 +90,17 @@ await check("standard types and raw bytes", async () => {
     assert.equal(raw.send("text"), "schema");
 });
 
+await check("a topic reports its schema until it closes", async () => {
+    const pub = a.publisher("Schema/Pub", Point), sub = a.subscriber("Schema/Sub", Point);
+    assert.equal(pub.schema.hash, a.schema(Point).hash);
+    assert.equal(sub.schema.hash, a.schema(Point).hash);
+    assert.equal(a.publisher("Schema/Raw", null).schema, null);
+    pub.close();
+    sub.close();
+    assert.equal(pub.schema, null);
+    assert.equal(sub.schema, null);
+});
+
 const AddReq = struct("AddReq", { a: i32, b: i32 });
 const AddRsp = struct("AddRsp", { sum: i32 });
 
