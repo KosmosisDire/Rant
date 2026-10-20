@@ -82,6 +82,9 @@ the wire names and a dictionary source may spell its keys any way. `__rant_name_
 class overrides the wire type name. `rant.dsl(source)` gives the DSL text of a class, a bare type, a compiled
 `Schema` or DSL text, with no library load, for display or for pasting into a C node.
 
+A numeric array field takes a list, bytes or any buffer such as `array.array` or a NumPy array,
+copied at once when its element type matches the field and converted otherwise.
+
 A nested class, alone or as `list[Cls]` for an array of structs, takes its class name on
 the wire: the reflected text defines it once above its first use, as
 `Code { type: string<16>, angle: f32 }`, and each use is the name, so `codes: list[Code]`

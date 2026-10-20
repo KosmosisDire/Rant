@@ -1143,9 +1143,42 @@ def _get(container, name):
     return getattr(container, spec.attrs.get(name, name) if spec is not None else name, None)
 
 
+# struct letters by (kind, itemsize) for a buffer element: the char's nominal size is no guide
+# (l is 4 bytes on Windows, 8 on Linux), the itemsize is
+_BUF_LETTER = {"u": {1: "B", 2: "H", 4: "I", 8: "Q"}, "i": {1: "b", 2: "h", 4: "i", 8: "q"},
+               "f": {2: "e", 4: "f", 8: "d"}, "b": {1: "?"}}
+_BUF_CHAR_KIND = {**dict.fromkeys("BHILQN", "u"), **dict.fromkeys("bhilqn", "i"),
+                  **dict.fromkeys("efd", "f"), "?": "b"}
+_ELEM_BUF_KIND = {_U8: "u", _U16: "u", _U32: "u", _U64: "u", _I8: "i", _I16: "i", _I32: "i",
+                  _I64: "i", _F32: "f", _F64: "f", _BOOL: "b"}
+
+
+def _buffer_view(val):
+    """(memoryview, kind, big endian) of a buffer protocol object, None for anything else."""
+    try:
+        mv = memoryview(val)
+    except TypeError:
+        return None
+    fmt = mv.format
+    big = fmt[:1] in (">", "!")
+    kind = _BUF_CHAR_KIND.get(fmt.lstrip("@<>=!"))
+    if kind is None or mv.itemsize not in _BUF_LETTER[kind]:
+        raise SchemaError("an array field cannot take a buffer of format %r" % fmt)
+    return mv, kind, big and mv.itemsize > 1
+
+
 def _pack_array(elem_kind, val):
-    if isinstance(val, (bytes, bytearray, memoryview)):
+    """The wire bytes of a numeric array field. A buffer of the field's own element type is
+        copied at once and any other is converted element by element."""
+    if isinstance(val, (bytes, bytearray)):
         return bytes(val)
+    view = _buffer_view(val)
+    if view is not None:
+        mv, kind, big = view
+        if kind == _ELEM_BUF_KIND[elem_kind] and mv.itemsize == _SCALAR_SIZE[elem_kind] and not big:
+            return mv.tobytes()
+        letter = ("<>"[big]) + _BUF_LETTER[kind][mv.itemsize]
+        val = [x for (x,) in _struct.iter_unpack(letter, mv.tobytes())]
     fmt = _FMT[elem_kind]
     if elem_kind in _FLOATK:
         return _struct.pack("<%d%s" % (len(val), fmt), *(float(x) for x in val))

@@ -5,6 +5,7 @@ import ctypes
 import enum as _enum
 import inspect
 import os
+import struct
 import subprocess
 import sys
 import threading
@@ -1481,6 +1482,122 @@ def on_event(tag):
     return lambda e: print("event(%s):" % tag, e)
 
 
+def array_buffers():
+    """A numeric array field takes any buffer: copied at once when its element type matches,
+    converted element by element otherwise. Two nodes, domain +7, loopback."""
+    print("array buffers leg: two nodes, loopback")
+    import array
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+    dsl = ("Bufs { a_u8: u8[], a_u16: u16[], a_u32: u32[], a_u64: u64[], a_i8: i8[], "
+           "a_i16: i16[], a_i32: i32[], a_i64: i64[], a_f32: f32[], a_f64: f64[], "
+           "a_bool: bool[], fx: f32[3], img: Image }")
+    a = rant.Node("BufA", on_event=on_event("BufA"), domain=DOMAIN + 7, multicast_interface=IFACE,
+                  threading=rant.Threading.MANUAL)
+    b = rant.Node("BufB", on_event=on_event("BufB"), domain=DOMAIN + 7, multicast_interface=IFACE,
+                  threading=rant.Threading.MANUAL)
+    got = []
+    try:
+        pub = a.publisher("bufs", dsl, reliable=True, keep_last=8)
+        b.subscriber("bufs", dsl, got.append, reliable=True, keep_last=8)
+        deadline = time.time() + 8.0
+        while time.time() < deadline and pub.match_count == 0:
+            a.poll(0.001)
+            b.poll(0.001)
+        check("pair matched", pub.match_count == 1)
+
+        def trip(**fields):
+            got.clear()
+            pub.send(fields)
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not got:
+                a.poll(0.001)
+                b.poll(0.001)
+            return got[0] if got else None
+
+        def f32(x):
+            return struct.unpack("<f", struct.pack("<f", x))[0]
+
+        for code, name in (("B", "a_u8"), ("H", "a_u16"), ("I", "a_u32"), ("Q", "a_u64"),
+                           ("b", "a_i8"), ("h", "a_i16"), ("i", "a_i32"), ("q", "a_i64")):
+            src = [0, 1, 100]
+            r = trip(**{name: array.array(code, src)})
+            check("array.array(%r) for %s" % (code, name), r is not None and list(r[name]) == src)
+        r = trip(a_f32=array.array("f", [1.5, -2.25]), a_f64=array.array("d", [0.1, -3.5e100]))
+        check("array.array f and d", r is not None and list(r["a_f32"]) == [1.5, -2.25]
+              and list(r["a_f64"]) == [0.1, -3.5e100])
+        r = trip(a_f32=array.array("d", [0.1, 2.5]))
+        check("array.array d for an f32 field converts",
+              r is not None and list(r["a_f32"]) == [f32(0.1), 2.5])
+        r = trip(a_f32=memoryview(array.array("d", [0.1, 2.5])))
+        check("a memoryview of doubles for an f32 field is not raw bytes",
+              r is not None and list(r["a_f32"]) == [f32(0.1), 2.5])
+        r = trip(a_f64=array.array("i", [-7, 9]))
+        check("array.array i for an f64 field converts",
+              r is not None and list(r["a_f64"]) == [-7.0, 9.0])
+        r = trip(a_i32=array.array("q", [-5, 1 << 20]))
+        check("array.array q for an i32 field converts",
+              r is not None and list(r["a_i32"]) == [-5, 1 << 20])
+        r = trip(a_u8=memoryview(b"\x01\x02\x03"), a_f32=memoryview(array.array("f", [4.5])).cast("B").cast("f"))
+        check("memoryview of bytes for u8, cast to f for f32",
+              r is not None and bytes(r["a_u8"]) == b"\x01\x02\x03" and list(r["a_f32"]) == [4.5])
+        r = trip(a_f32=struct.pack("<2f", 1.0, 2.0))
+        check("bytes for an f32 field stay raw", r is not None and list(r["a_f32"]) == [1.0, 2.0])
+        try:
+            trip(a_u8=array.array("b", [-1]))
+            check("a signed buffer for a u8 field raises on a negative", False)
+        except (struct.error, rant.Error):
+            check("a signed buffer for a u8 field raises on a negative", True)
+        r = trip(a_u8=array.array("b", [1, 2]))
+        check("a signed buffer for a u8 field converts in range",
+              r is not None and bytes(r["a_u8"]) == b"\x01\x02")
+
+        if np is None:
+            print("  numpy missing, numpy cases skipped")
+        else:
+            pic = np.arange(4 * 5 * 3, dtype=np.uint8).reshape(4, 5, 3)
+            r = trip(img=rant.types.Image(width=5, height=4, stride=15,
+                                          format=rant.types.ImageFormat.Rgb8, data=pic))
+            check("a 3 dimensional uint8 image packs flat",
+                  r is not None and bytes(r["img"]["data"]) == pic.tobytes())
+            r = trip(a_f32=np.array([1.5, 2.5], dtype=np.float32))
+            check("float32 array for f32", r is not None and list(r["a_f32"]) == [1.5, 2.5])
+            r = trip(a_f32=np.array([0.1, 2.5], dtype=np.float64))
+            check("float64 array for an f32 field converts",
+                  r is not None and list(r["a_f32"]) == [f32(0.1), 2.5])
+            r = trip(a_i16=np.arange(10, dtype=np.int16)[::2])
+            check("a non contiguous slice", r is not None and list(r["a_i16"]) == [0, 2, 4, 6, 8])
+            r = trip(a_f32=np.array([1.5, -2.5, 0.1], dtype=">f4"))
+            check("a big endian float32 array converts",
+                  r is not None and list(r["a_f32"]) == [1.5, -2.5, f32(0.1)])
+            r = trip(a_u32=np.array([1, 0x01020304], dtype=">u4"))
+            check("a big endian uint32 array converts",
+                  r is not None and list(r["a_u32"]) == [1, 0x01020304])
+            r = trip(a_bool=np.array([True, False, True]))
+            check("a numpy bool array for a bool field",
+                  r is not None and [bool(x) for x in r["a_bool"]] == [True, False, True])
+            r = trip(a_i64=np.array([-1, 5], dtype=np.int64), a_u16=np.array([7], dtype=np.uint16))
+            check("int64 and uint16 arrays match their fields",
+                  r is not None and list(r["a_i64"]) == [-1, 5] and list(r["a_u16"]) == [7])
+            r = trip(fx=np.array([1, 2, 3], dtype=np.float64))
+            check("a fixed f32 field converts a float64 array",
+                  r is not None and list(r["fx"]) == [1.0, 2.0, 3.0])
+    finally:
+        a.close()
+        b.close()
+    print("array buffers: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
 def log_status():
     """A line logged before the subscribe replays with its level and origin and one below the
     level never arrives. A status raised before anyone listens reaches a late binder whole, a
@@ -1681,6 +1798,7 @@ LEGS = [
     ("patterns", patterns),
     ("tasks", tasks),
     ("dispatch", dispatch_leg),
+    ("array_buffers", array_buffers),
     ("log_status", log_status),
     ("rebind", rebind),
     ("close_race", close_race),
