@@ -99,8 +99,43 @@ gap reached the provider, and its RUNNING, progress and answer went to a peer wi
 mostly silently, since the topic looked converged. A binding with work between the creates
 (C# measured it) hit that on a few percent of fresh calls. The same hold keeps a caller
 from matching a new definition's `@req` before its `@rsp` exists. The detail exchange then
-asks for all of a peer's channels in one request, so their verdicts land in one pass. The
+asks for all of a peer's channels in one request, but the answer can still split across
+pages, so the announce alone does not order the verdicts. The handle gate below does. The
 `one_announce` case of `e2e.patterns` pins one version step per create.
+
+## The handle gate
+
+A request channel takes a peer's requests only once each answer channel (`@rsp`, and
+`@prg` for a task) that the peer subscribes has a writer lane to that peer. Late lanes are
+not symmetric:
+
+- A late reader lane heals. The writer keeps the unacked request, and the new lane's first
+  ack (`F_UNPOS`) makes it resend from its acked edge.
+- A late writer lane loses. It starts at the head and the answer channels carry no
+  catch_up, so a reply written before it formed never reaches the caller.
+
+Without the gate, a caller whose detail answer split `@req` from `@rsp` had its request
+taken before the provider could answer, and the reply went nowhere, silently once the
+provider was past its match window. A big differing req schema splits the answer (from
+about 1330 bytes of schema wire, half or more of fresh calls lost), and so can many handles
+created at once.
+
+The gate holds only the opening of the request lane. Requests that arrive while it is
+shut are dropped and come back through the resend once it opens, one round trip later. It
+never closes a live lane, which could deliver a request twice. It reads only our own
+verdicts and lanes, so two nodes that both call and answer (`@rant/meta`) never wait on
+each other.
+
+"Subscribes" counts every live entry the peer advertises for the channel, pending, matched
+or refused. A refused `@rsp` keeps the gate shut, so the handler never runs for a reply
+that cannot arrive. A peer that sends on `@req` but reads no answers (the explorer's raw
+CANCEL) is not held. A dissolved entry, whose hash named another topic, claims nothing.
+
+The transport links a handle's channels into a ring (`i_rant_transport_topic_link`), and
+an unlinked request channel stays shut, which covers the moment between creating `@req`
+and linking it. A writer lane forming on a linked channel re runs its request channel,
+since the rematch loop visits topics in index order and `@req` is created first. The
+`handle_gate` case of `e2e.patterns` pins it: without the gate it loses 19 of 20 replies.
 
 ## One outcome per call
 

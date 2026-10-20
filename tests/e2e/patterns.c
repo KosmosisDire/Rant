@@ -1136,6 +1136,86 @@ static void one_announce_checks(void){
     rant_allocator_reset(&aa);
 }
 
+/* The handle gate: a differing caller req schema sized so its detail answer holds req alone
+ * and rsp follows a page later. No request may run before its reply lane exists. */
+#define HG_N 20
+static RantFunction *hg_defs[HG_N];
+static long long hg_handled, hg_no_lane, hg_unmatched, hg_ok, hg_bad;
+static void hg_event(const RantEvent *e){
+    if (e->kind == RANT_ERROR && e->error == RANT_E_UNMATCHED_SEND) test_atomic_add(&hg_unmatched, 1);
+}
+static void hg_handler(RantRequest *r, void *user){
+    test_atomic_add(&hg_handled, 1);
+    if (rant_function_match_count(hg_defs[(intptr_t)user]) == 0) test_atomic_add(&hg_no_lane, 1);
+    rant_request_reply(r, rant_bytes(NULL, 0));
+}
+static void hg_on_response(const RantResponse *r){
+    test_atomic_add(r->status == RANT_CALL_OK ? &hg_ok : &hg_bad, 1);
+}
+static RantSchema *hg_schema(RantAllocator *a, int nf, int pad){
+    static char txt[8192]; size_t o = 0; int i;
+    o += (size_t)sprintf(txt + o, "Req { a: u32");
+    for (i = 0; i < nf; i++) o += (size_t)sprintf(txt + o, ", extra_field_number_%03d_with_a_long_name: u32", i);
+    if (pad){ o += (size_t)sprintf(txt + o, ", p"); for (i = 0; i < pad; i++) txt[o++] = 'x'; o += (size_t)sprintf(txt + o, ": u32"); }
+    sprintf(txt + o, " }");
+    return test_compile(a, txt, NULL);
+}
+static void handle_gate_checks(void){
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0), ma = rant_allocator_heap(0);
+    RantNodeOpts ao, bo; RantNode *A, *B; RantAddr seed;
+    RantSchema *small, *big = NULL; uint8_t *payload = NULL; int i, nf, pad, issued = 0;
+    small = test_compile(&ma, "Req { a: u32 }", NULL);
+    /* 1325 to 1350 wire bytes: the req entry fills one 1390 byte page, rsp cannot follow */
+    for (nf = 0; nf < 64 && !big; nf++){
+        RantSchema *s = hg_schema(&ma, nf, 0);
+        size_t w = s ? rant_schema_wire(s).len : 0;
+        if (w > 1350) break;
+        for (pad = 0; pad < 64 && !big && w + 64 > 1325; pad++){
+            RantSchema *p = hg_schema(&ma, nf, pad);
+            size_t pw = p ? rant_schema_wire(p).len : 0;
+            if (pw >= 1325 && pw <= 1350) big = p;
+        }
+    }
+    CHECK(small && big, "handle_gate: a caller req schema of 1325 to 1350 wire bytes");
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=TEST_DOMAIN+27; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    bo = ao;
+    ao.match_wait_ms = -1;     /* a reply never waits out a forming lane, so a lost one shows */
+    A = big ? rant_node_open(&aa, "hg-a", NULL, hg_event, &ao) : NULL;
+    B = big ? rant_node_open(&ba, "hg-b", NULL, NULL, &bo) : NULL;
+    CHECK(!big || (A && B), "handle_gate: nodes open");
+    if (A && B) payload = (uint8_t*)calloc(1, rant_schema_size(big));
+    if (payload){
+        for (i = 0; i < HG_N; i++){
+            char name[32]; sprintf(name, "gate/f%02d", i);
+            hg_defs[i] = rant_node_create_function_definition(A, name, small, NULL, hg_handler,
+                                                              (void*)(intptr_t)i, NULL);
+            CHECK(hg_defs[i] != NULL, "handle_gate: definition %s", name);
+        }
+        for (i = 0; i < HG_N; i++){   /* each call right after its remote, before A knows its rsp */
+            char name[32]; RantFunction *rem;
+            sprintf(name, "gate/f%02d", i);
+            rem = rant_node_create_remote_function(B, name, big, NULL, NULL);
+            if (!rem || rant_function_call_async(rem, rant_bytes(payload, rant_schema_size(big)),
+                                                 hg_on_response, NULL, NULL) != RANT_OK) continue;
+            issued++;
+            PUMP_UNTIL(A, B, 3000, test_atomic_load(&hg_ok) + test_atomic_load(&hg_bad) >= issued);
+        }
+        CHECK(issued == HG_N && test_atomic_load(&hg_ok) == HG_N,
+                 "handle_gate: every call answered (%lld of %d, %d issued)", test_atomic_load(&hg_ok), HG_N, issued);
+        CHECK(test_atomic_load(&hg_no_lane) == 0,
+                 "handle_gate: no request ran before its reply lane (%lld of %lld)",
+                 test_atomic_load(&hg_no_lane), test_atomic_load(&hg_handled));
+        CHECK(test_atomic_load(&hg_unmatched) == 0,
+                 "handle_gate: no reply went to a missing lane (%lld)", test_atomic_load(&hg_unmatched));
+    }
+    free(payload);
+    if (A) rant_node_close(A,0);
+    if (B) rant_node_close(B,0);
+    rant_allocator_reset(&aa); rant_allocator_reset(&ba); rant_allocator_reset(&ma);
+}
+
 static const TestCase cases[] = {
     { "patterns", patterns_checks },
     { "variable_wait", varwait_checks },
@@ -1145,6 +1225,7 @@ static const TestCase cases[] = {
     { "loud", loud_checks },
     { "sync_capture", sync_capture_checks },
     { "one_announce", one_announce_checks },
+    { "handle_gate", handle_gate_checks },
 };
 
 TEST_MAIN(cases)

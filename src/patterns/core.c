@@ -705,6 +705,13 @@ static RantFunction *i_rant_function_open(RantNode *n, const char *name,
         return (RantFunction*)i_rant_pat_half_create_fail(fn->req);
     }
     i_rant_topic_set_dispatch(fn->rsp, i_rant_func_dispatch);
+    /* the request channel stays shut to a peer until rsp and prg reach it, see
+       spec/patterns.md */
+    if (i_rant_topic_link(fn->req, fn->rsp, fn->prg) != RANT_OK){
+        (void)rant_topic_set_role(fn->rsp, RANT_INACTIVE);
+        if (fn->prg) (void)rant_topic_set_role(fn->prg, RANT_INACTIVE);
+        return (RantFunction*)i_rant_pat_half_create_fail(fn->req);
+    }
 
     acquired = i_rant_node_sys_lock(n);         /* publish into the manager list */
     fn->next = pm->funcs; pm->funcs = fn; pm->auth_dirty = 1;

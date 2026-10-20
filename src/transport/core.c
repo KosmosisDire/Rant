@@ -68,6 +68,7 @@ static i_RantTransportState *i_rant_transport_build(i_RantBump *b, const i_RantT
       uint8_t  *peer_pub_bitmap = (uint8_t*) i_rant_bump_take(b, (size_t)max_peers*bitmap_len, 1);
       uint8_t  *peer_sub_bitmap = (uint8_t*) i_rant_bump_take(b, (size_t)max_peers*bitmap_len, 1);
       uint8_t  *peer_sub_reliable = (uint8_t*) i_rant_bump_take(b, (size_t)max_peers*bitmap_len, 1);
+      uint8_t  *peer_sub_claim = (uint8_t*) i_rant_bump_take(b, (size_t)max_peers*bitmap_len, 1);
       i_RantTopic *topic = (i_RantTopic*)i_rant_bump_take(b, n_topics*sizeof(i_RantTopic), 16);
       /* only the u16 ticket table lives in the arena, records are pool allocated per match */
       uint16_t   *lane_index = (uint16_t*)i_rant_bump_take(b, (size_t)nlanes*sizeof(uint16_t), 2);
@@ -89,7 +90,8 @@ static i_RantTransportState *i_rant_transport_build(i_RantBump *b, const i_RantT
           st->peer_rtt=peer_rtt; memset(peer_rtt, 0, max_peers*sizeof(i_RantPeerRtt));
           st->frag = i_rant_clamp_frag(cfg->frag_size);
           st->peer_pub_bitmap=peer_pub_bitmap; st->peer_sub_bitmap=peer_sub_bitmap;
-          st->peer_sub_reliable=peer_sub_reliable; st->bitmap_len=bitmap_len;
+          st->peer_sub_reliable=peer_sub_reliable; st->peer_sub_claim=peer_sub_claim;
+          st->bitmap_len=bitmap_len;
           st->topics=topic; st->reader_epoch_counter=1;
           st->next_deadline_us=RANT__NO_DEADLINE;
           st->lanes=NULL; st->lane_cap=0u; st->lane_free=RANT__NIL;
@@ -112,6 +114,7 @@ static i_RantTransportState *i_rant_transport_build(i_RantBump *b, const i_RantT
           memset(peer_seen_version, 0, (size_t)max_peers*sizeof(uint32_t));
           memset(peer_pub_bitmap,0,(size_t)max_peers*bitmap_len); memset(peer_sub_bitmap,0,(size_t)max_peers*bitmap_len);
           memset(peer_sub_reliable,0,(size_t)max_peers*bitmap_len);
+          memset(peer_sub_claim,0,(size_t)max_peers*bitmap_len);
           memset(lane_index,0xFF,(size_t)nlanes*sizeof(uint16_t));   /* all unmatched */
           memset(dest_queued,0,ndest);
           memset(dest_head,0xFF,(size_t)ndest*sizeof(uint32_t));   /* all RANT__NIL */
@@ -125,6 +128,7 @@ static i_RantTransportState *i_rant_transport_build(i_RantBump *b, const i_RantT
             memset(topic,0,sizeof(*topic));
             topic->role = RANT_INACTIVE;
             topic->lane_head = RANT__NIL;
+            topic->sib = 0xFFFFu;
             topic->name = name_pool + (size_t)c*(RANT_TOPIC_NAME_MAX + 1u);
             ((char*)topic->name)[0] = '\0';
         }
@@ -237,6 +241,8 @@ i_RantTransportState *i_rant_transport_migrate(i_RantTransportState *old, void *
                old->peer_sub_bitmap + (size_t)p*old->bitmap_len, old->bitmap_len);
         memcpy(nw->peer_sub_reliable + (size_t)p*nw->bitmap_len,
                old->peer_sub_reliable + (size_t)p*old->bitmap_len, old->bitmap_len);
+        memcpy(nw->peer_sub_claim + (size_t)p*nw->bitmap_len,
+               old->peer_sub_claim + (size_t)p*old->bitmap_len, old->bitmap_len);
         nw->peer_index[p]     = old->peer_index[p];
         nw->peer_index_len[p] = old->peer_index_len[p];
         nw->peer_astate[p]    = old->peer_astate[p];
@@ -426,6 +432,51 @@ static void i_rant_reader_unmatch(i_RantTransportState *st, uint16_t c, i_RantLa
 }
 
 
+static void i_rant_topic_rematch(i_RantTransportState *st, uint16_t c, uint16_t peer_slot);
+
+static int i_rant_kind_is_request(uint8_t kind){
+    return kind == RANT_KIND_FUNC_REQ || kind == RANT_KIND_TASK_REQ;
+}
+
+/* The handle gate: a request lane opens once each answer channel the peer subscribes has a
+ * writer lane to it, since a late writer lane never replays. See spec/patterns.md. */
+static int i_rant_topic_gate_open(i_RantTransportState *st, uint16_t c, uint16_t peer_slot){
+    const uint8_t *claim = &st->peer_sub_claim[(size_t)peer_slot*st->bitmap_len];
+    uint16_t s = st->topics[c].sib; uint32_t steps = 0;
+    if (!i_rant_kind_is_request(st->topics[c].kind)) return 1;
+    if (s == 0xFFFFu) return 0;                     /* unlinked: its answers have no channel yet */
+    for (; s != c; s = st->topics[s].sib){
+        const i_RantLane *l;
+        if (s >= st->cfg.n_topics || ++steps > st->cfg.n_topics) return 0;     /* a broken ring */
+        if (!i_rant_role_pubs(st->topics[s].role) || !i_rant_bit_get(claim, s)) continue;
+        l = i_rant_lane_at(st, s, peer_slot);
+        if (!l || !l->w.used) return 0;
+    }
+    return 1;
+}
+
+/* A writer lane formed on a linked channel, so its handle's request channel may open. The
+ * rematch loops run in index order and the request channel is created first. */
+static void i_rant_topic_gate_wake(i_RantTransportState *st, uint16_t c, uint16_t peer_slot){
+    uint16_t s = st->topics[c].sib; uint32_t steps = 0;
+    for (; s != c && s < st->cfg.n_topics && ++steps <= st->cfg.n_topics; s = st->topics[s].sib)
+        if (i_rant_kind_is_request(st->topics[s].kind)) i_rant_topic_rematch(st, s, peer_slot);
+}
+
+/* Takes a slot out of its handle's ring, so a later occupant starts unlinked. A lone
+ * survivor is unlinked too, which keeps a surviving request channel shut. */
+static void i_rant_topic_unlink(i_RantTransportState *st, uint16_t c){
+    uint16_t next = st->topics[c].sib, s = next; uint32_t steps = 0;
+    if (next == 0xFFFFu) return;
+    st->topics[c].sib = 0xFFFFu;
+    while (s < st->cfg.n_topics && st->topics[s].sib != c){
+        if (++steps > st->cfg.n_topics) return;     /* a broken ring: nothing points back */
+        s = st->topics[s].sib;
+    }
+    if (s >= st->cfg.n_topics) return;
+    st->topics[s].sib = next == s ? 0xFFFFu : next;
+}
+
 /* Recomputes one lane from our role and the peer's bits. Only a changed side is touched,
  * so reader positions survive a re apply. */
 static void i_rant_topic_rematch(i_RantTransportState *st, uint16_t c, uint16_t peer_slot){
@@ -434,12 +485,15 @@ static void i_rant_topic_rematch(i_RantTransportState *st, uint16_t c, uint16_t 
     const uint8_t *peer_sub_bitmap=&st->peer_sub_bitmap[(size_t)peer_slot*st->bitmap_len];
     int wuse = i_rant_role_pubs(topic->role) && i_rant_bit_get(peer_sub_bitmap,c);
     int ruse = i_rant_role_subs(topic->role) && i_rant_bit_get(peer_pub_bitmap,c);
+    int formed = 0;
     i_RantLane *l;
     /* the rebind hold: nothing goes to a peer until it proved it applied our announce at
        the slot's rebind version. Inbound needs no hold, our own verdicts were re pended. */
     if (wuse && topic->rebind_version && st->peer_seen_version[peer_slot] < topic->rebind_version)
         wuse = 0;
     l = i_rant_lane_at(st,c,peer_slot);
+    /* the handle gate holds only the opening: closing a live lane could deliver twice */
+    if (ruse && !(l && l->r.used) && !i_rant_topic_gate_open(st,c,peer_slot)) ruse = 0;
     int had = l && (l->w.used || l->r.used);
     if (!wuse && !ruse){
         if (!had) return;
@@ -452,7 +506,7 @@ static void i_rant_topic_rematch(i_RantTransportState *st, uint16_t c, uint16_t 
         l = i_rant_lane_ensure(st,c,peer_slot);     /* may relocate the pool */
         if (!l) return;                             /* OOM: refused, the next announce retries */
     }
-    if (wuse && !l->w.used) i_rant_writer_match(st,c,peer_slot,l);
+    if (wuse && !l->w.used){ i_rant_writer_match(st,c,peer_slot,l); formed = 1; }
     else if (!wuse && l->w.used) i_rant_writer_unmatch(st,c,l);
     if (ruse && !l->r.used) i_rant_reader_match(st,c,peer_slot,l);
     else if (!ruse && l->r.used) i_rant_reader_unmatch(st,c,l);
@@ -462,6 +516,8 @@ static void i_rant_topic_rematch(i_RantTransportState *st, uint16_t c, uint16_t 
     } else if (had && !(l->w.used || l->r.used)){
         i_rant_lane_release(st,c,peer_slot);
     }
+    /* last, since the wake's rematch may relocate the lane pool under l */
+    if (formed && topic->sib != 0xFFFFu) i_rant_topic_gate_wake(st,c,peer_slot);
 }
 
 
@@ -480,6 +536,7 @@ void i_rant_transport_peer_add(i_RantTransportState *st, uint32_t id, uint16_t p
     memset(&st->peer_pub_bitmap[(size_t)free*st->bitmap_len],0,st->bitmap_len);
     memset(&st->peer_sub_bitmap[(size_t)free*st->bitmap_len],0,st->bitmap_len);
     memset(&st->peer_sub_reliable[(size_t)free*st->bitmap_len],0,st->bitmap_len);
+    memset(&st->peer_sub_claim[(size_t)free*st->bitmap_len],0,st->bitmap_len);
     if (st->peer_index[free] && st->peer_index_len[free]){   /* slot reuse: no stale state */
         memset(st->peer_index[free],0xFF,(size_t)st->peer_index_len[free]*sizeof(uint16_t));
         if (st->peer_astate[free]) memset(st->peer_astate[free],0,st->peer_index_len[free]);
@@ -798,6 +855,40 @@ static i_RantInterestSections i_rant_interest_sections(const uint8_t *d, size_t 
 }
 
 
+/* Iterator over the live entries of an interest stream, shared by the candidate scans so
+ * they cannot drift. The stream must have passed i_rant_interest_walk_len first. */
+typedef struct {
+    const uint8_t *e;        /* next entry */
+    uint32_t a;              /* its position */
+    uint32_t n;              /* slots in the stream */
+    uint32_t pos;            /* yielded: the entry's position */
+    uint32_t hash;           /* yielded: its 32 bit nomination */
+    uint8_t  flags;          /* yielded: the raw flags */
+    uint8_t  their_pub, their_sub;   /* yielded: the advertised role by direction */
+} i_RantInterestScan;
+
+static void i_rant_interest_scan_init(i_RantInterestScan *s, const uint8_t *d, uint16_t n){
+    s->e = d + 2u; s->a = 0; s->n = n;
+    s->pos = 0; s->hash = 0; s->flags = 0; s->their_pub = s->their_sub = 0;
+}
+
+static int i_rant_interest_scan_next(i_RantInterestScan *s){
+    while (s->a < s->n){
+        const uint8_t *e = s->e;
+        uint32_t a = s->a, step = 1;
+        uint8_t flags = e[4], role = (uint8_t)(flags & RANT__INT_ROLE_MASK);
+        if (flags & RANT__INT_HOLE_RUN) step = i_rant_le_r32(e);
+        s->e = e + 5u; s->a = a + step;
+        if (flags & RANT__INT_HOLE_RUN) continue;     /* a run of undefined slots */
+        if (role == RANT_INACTIVE) continue;          /* declared but off */
+        s->pos = a; s->hash = i_rant_le_r32(e); s->flags = flags;
+        s->their_pub = (uint8_t)i_rant_role_pubs(role);
+        s->their_sub = (uint8_t)i_rant_role_subs(role);
+        return 1;
+    }
+    return 0;
+}
+
 /* Re derives the peer's bits from cached verdicts plus the entry's current flags, then
  * rematches every topic. Idempotent. The gates are in spec/interest.md. */
 void i_rant_transport_apply_peer_interest(i_RantTransportState *st, uint32_t peer_id, RantBytes blob){
@@ -902,6 +993,24 @@ void i_rant_transport_apply_peer_interest(i_RantTransportState *st, uint32_t pee
     }
     if (unmappable)   /* never silent: those topics can never deliver here */
         i_rant_transport_fire_event(st, RANT_E_INTEREST_OVERFLOW, 0, peer_id, 0, unmappable);
+    {   /* the handle gate's claims: every topic the peer subscribes, pending or decided, even
+           refused. A dissolved entry names another topic and claims nothing */
+        uint8_t *claim = &st->peer_sub_claim[(size_t)peer_slot*st->bitmap_len];
+        i_RantInterestScan scan;
+        memset(claim, 0, st->bitmap_len);
+        i_rant_interest_scan_init(&scan, d, n);
+        while (astate && i_rant_interest_scan_next(&scan)){
+            if (!scan.their_sub || scan.pos >= st->peer_index_len[peer_slot]) continue;
+            if (astate[scan.pos] & RANT__AST_DETAILED){
+                if ((astate[scan.pos] & RANT__AST_NAME_OK) && amap[scan.pos] < st->cfg.n_topics)
+                    i_rant_bit_set(claim, amap[scan.pos]);
+                continue;
+            }
+            for (c=0;c<st->cfg.n_topics;c++)     /* pending: every topic the hash nominates */
+                if (i_rant_topic_announced(&st->topics[c]) && (uint32_t)st->topics[c].identity == scan.hash)
+                    i_rant_bit_set(claim, c);
+        }
+    }
     for (c=0;c<st->cfg.n_topics;c++) i_rant_topic_rematch(st,c,(uint16_t)peer_slot);
 
     /* per lane values, applied after the rematch so the lanes exist and re derived on
@@ -1296,40 +1405,6 @@ int i_rant_detail_next(RantBytes resp, i_RantDetailIter *it, i_RantDetail *out){
     return 1;
 }
 
-/* Iterator over the live entries of an interest stream, shared by the candidate scans so
- * they cannot drift. The stream must have passed i_rant_interest_walk_len first. */
-typedef struct {
-    const uint8_t *e;        /* next entry */
-    uint32_t a;              /* its position */
-    uint32_t n;              /* slots in the stream */
-    uint32_t pos;            /* yielded: the entry's position */
-    uint32_t hash;           /* yielded: its 32 bit nomination */
-    uint8_t  flags;          /* yielded: the raw flags */
-    uint8_t  their_pub, their_sub;   /* yielded: the advertised role by direction */
-} i_RantInterestScan;
-
-static void i_rant_interest_scan_init(i_RantInterestScan *s, const uint8_t *d, uint16_t n){
-    s->e = d + 2u; s->a = 0; s->n = n;
-    s->pos = 0; s->hash = 0; s->flags = 0; s->their_pub = s->their_sub = 0;
-}
-
-static int i_rant_interest_scan_next(i_RantInterestScan *s){
-    while (s->a < s->n){
-        const uint8_t *e = s->e;
-        uint32_t a = s->a, step = 1;
-        uint8_t flags = e[4], role = (uint8_t)(flags & RANT__INT_ROLE_MASK);
-        if (flags & RANT__INT_HOLE_RUN) step = i_rant_le_r32(e);
-        s->e = e + 5u; s->a = a + step;
-        if (flags & RANT__INT_HOLE_RUN) continue;     /* a run of undefined slots */
-        if (role == RANT_INACTIVE) continue;          /* declared but off */
-        s->pos = a; s->hash = i_rant_le_r32(e); s->flags = flags;
-        s->their_pub = (uint8_t)i_rant_role_pubs(role);
-        s->their_sub = (uint8_t)i_rant_role_subs(role);
-        return 1;
-    }
-    return 0;
-}
-
 /* The pending candidates of a peer: a hash and role overlap with no cached verdict. */
 uint16_t i_rant_transport_detail_wants(i_RantTransportState *st, const i_RantMetaSchema *schemas,
                                      uint32_t peer_id, RantBytes interest,
@@ -1559,6 +1634,7 @@ int i_rant_transport_topic_retire(i_RantTransportState *st, uint16_t topic_index
     topic = i_rant_topic_at(st, topic_index, NULL);
     if (!topic || topic->name_len == 0 || topic->retired) return -1;
     topic->role = RANT_INACTIVE; topic->retired = 1;
+    i_rant_topic_unlink(st, topic_index);
     for (p=0;p<st->cfg.max_peers;p++)          /* both sides unmatch, every lane releases */
         if (st->peer_used[p]) i_rant_topic_rematch(st, topic_index, p);
     depth = topic->qos.keep_last;
@@ -1578,6 +1654,25 @@ int i_rant_transport_topic_retire(i_RantTransportState *st, uint16_t topic_index
     topic->history_head = 0; topic->have_first = 0; topic->first_seqno = 0;
     memset(&topic->repair_stats, 0, sizeof topic->repair_stats);
     /* the caller re advertises: the slot now rides the announce as a hole */
+    return 0;
+}
+
+
+/* The request channel was shut while unlinked, so it re runs against every peer. */
+int i_rant_transport_topic_link(i_RantTransportState *st, const uint16_t *topic_index, uint16_t n){
+    uint16_t k, j, p;
+    if (!st || !topic_index || n < 2) return -1;
+    for (k=0;k<n;k++){
+        const i_RantTopic *t = i_rant_topic_at(st, topic_index[k], NULL);
+        if (!t || !i_rant_topic_announced(t) || t->sib != 0xFFFFu) return -1;
+        for (j=0;j<k;j++) if (topic_index[j] == topic_index[k]) return -1;
+    }
+    for (k=0;k<n;k++) st->topics[topic_index[k]].sib = topic_index[(k + 1u) % n];
+    for (k=0;k<n;k++){
+        if (!i_rant_kind_is_request(st->topics[topic_index[k]].kind)) continue;
+        for (p=0;p<st->cfg.max_peers;p++)
+            if (st->peer_used[p]) i_rant_topic_rematch(st, topic_index[k], p);
+    }
     return 0;
 }
 
@@ -1663,6 +1758,7 @@ int i_rant_transport_topic_reuse(i_RantTransportState *st, uint16_t topic_index,
             i_rant_bit_clr(&st->peer_pub_bitmap[(size_t)p*st->bitmap_len], topic_index);
             i_rant_bit_clr(&st->peer_sub_bitmap[(size_t)p*st->bitmap_len], topic_index);
             i_rant_bit_clr(&st->peer_sub_reliable[(size_t)p*st->bitmap_len], topic_index);
+            i_rant_bit_clr(&st->peer_sub_claim[(size_t)p*st->bitmap_len], topic_index);
             /* dissolved verdicts re pend, as at define. Attrs stay. */
             if (st->peer_astate[p]){
                 uint8_t *as = st->peer_astate[p];

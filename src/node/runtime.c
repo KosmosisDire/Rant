@@ -2551,6 +2551,19 @@ void i_rant_topic_clear_sys(RantTopic *topic){
 void i_rant_topic_set_dispatch(RantTopic *topic, i_RantSysDispatchFn on_dispatch){
     if (topic) topic->sys_on_dispatch = on_dispatch;
 }
+
+int i_rant_topic_link(RantTopic *req, RantTopic *rsp, RantTopic *prg){
+    uint16_t idx[3], k = 0; int acquired, r;
+    if (!req || !rsp || rsp->n != req->n || (prg && prg->n != req->n)) return RANT_ERR_STATE;
+    idx[k++] = req->index;
+    if (prg) idx[k++] = prg->index;
+    idx[k++] = rsp->index;
+    acquired = i_rant_node_lock(req->n);
+    r = i_rant_transport_topic_link(req->n->transport, idx, k);
+    if (r != 0) i_rant_node_create_fail(req->n, RANT_E_STATE, i_rant_node_topic_name(req->n, req->index), 0, 1);
+    i_rant_node_unlock(req->n, acquired);
+    return r == 0 ? RANT_OK : RANT_ERR_STATE;
+}
 RantQueue *i_rant_topic_queue(RantTopic *topic){ return topic ? topic->queue : NULL; }
 int i_rant_topic_busy(RantTopic *topic){ return topic && topic->q && topic->q->busy; }
 

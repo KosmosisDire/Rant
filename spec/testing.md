@@ -74,7 +74,7 @@ program in this order.
 | `e2e.detail` | detail_live, interest_external |
 | `e2e.shm` | shm_node |
 | `e2e.queues` | queue, pull, callback_queue, callback_pattern |
-| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce |
+| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate |
 | `e2e.tasks` | task, task_matrix |
 | `e2e.entities` | reflect_dropped, churn, log_and_meta, status |
 | `e2e.matchwait` | matchwait |
@@ -262,6 +262,11 @@ What each phase pins, grouped by layer.
   ring is the only thing between a drained batch and lost replies, which are invisible at
   the provider. The caller needs the same depth in its req ring, and both lanes must be
   up before the first reply commits since rsp carries no catch_up.
+- Handle gate: 20 callers, each with a req schema whose wire (1325 to 1350 bytes) fills
+  the first detail page so rsp follows on a second, call right after creating the remote.
+  Every call is answered and no handler runs before its rsp lane. Without the gate 19 of
+  20 replies went to a missing lane. The provider's match wait is off, so the case needs
+  no sleep past the window.
 - Variables: a typed remote force and unforce pass the schema gate through the empty
   payload exemption, on_change dedups and replays, on_write fires on every write, a
   reentrant set inside on_write commits before the outer publish so the owner skips the

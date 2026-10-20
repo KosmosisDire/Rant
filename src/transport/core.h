@@ -304,6 +304,9 @@ int         i_rant_transport_topic_reuse_find(i_RantTransportState *st, const ch
  * until each peer names rebind_version in a request. 0 ok, -1 refused, -4 out of memory. */
 int         i_rant_transport_topic_reuse(i_RantTransportState *st, uint16_t topic_index,
                                 const i_RantTopicDef *def, int binding_changed, uint32_t rebind_version);
+/* Links a pattern handle's channels into one ring for the handle gate of spec/interest.md.
+ * The slots must be defined and unlinked. 0 ok, -1 refused. */
+int         i_rant_transport_topic_link(i_RantTransportState *st, const uint16_t *topic_index, uint16_t n);
 /* Records the highest version of our blob a peer named in a request. 1 when a held lane formed. */
 int         i_rant_transport_peer_seen_version(i_RantTransportState *st, uint32_t peer_id, uint32_t version);
 

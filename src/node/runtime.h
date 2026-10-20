@@ -363,6 +363,9 @@ void i_rant_topic_clear_sys(RantTopic *topic);
 #define I_RANT_REC_SYNTH 0x80u
 typedef void (*i_RantSysDispatchFn)(void *user, const RantMsg *msg, uint8_t kind);
 void       i_rant_topic_set_dispatch(RantTopic *topic, i_RantSysDispatchFn on_dispatch);
+/* Links a pattern handle's channels, so the request channel takes a peer's requests only
+ * once the answer channels reach that peer (spec/patterns.md). prg may be NULL. */
+int        i_rant_topic_link(RantTopic *req, RantTopic *rsp, RantTopic *prg);
 RantQueue *i_rant_topic_queue(RantTopic *topic);      /* NULL = inline */
 int        i_rant_topic_busy(RantTopic *topic);       /* 1 while a dispatched callback of it runs */
 /* Parks hdr then body as one record on the topic's ring. A pattern ring never parks the

@@ -192,6 +192,7 @@ typedef struct {
     uint8_t   gen;          /* rebind generation, bumped when a reused slot's binding changed */
     uint32_t  rebind_version; /* our blob version at the last rebind, 0 = never. Writer lanes
                                  hold until the peer has seen it */
+    uint16_t  sib;          /* the next channel of the same pattern handle, a ring, 0xFFFF none */
     /* writer */
     i_RantWriterSample *history;         /* [depth] ring */
     uint16_t  history_head;    /* next slot to overwrite */
@@ -219,6 +220,8 @@ struct i_RantTransportState {
     uint8_t     *peer_pub_bitmap; /* [max_peers][bitmap_len] the peer publishes topic c */
     uint8_t     *peer_sub_bitmap; /* [max_peers][bitmap_len] the peer subscribes topic c */
     uint8_t     *peer_sub_reliable; /* [max_peers][bitmap_len] and requested RELIABLE */
+    uint8_t     *peer_sub_claim; /* [max_peers][bitmap_len] the peer advertises subscribing topic
+                                    c, decided or pending, for the handle gate */
     uint16_t     bitmap_len;       /* ceil(n_topics / 8) */
     /* per peer wire index to our topic, sized to the peer's highest advertised index */
     uint16_t   **peer_index;      /* [max_peers] the index map, 0xFFFF = unmapped */

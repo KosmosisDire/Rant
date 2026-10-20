@@ -125,6 +125,11 @@ before the peer verifies us heals through reliable repair: the reader drops the
 unverified DATA, then NACKs it after its own verdict lands. Pinned by a fault injection
 that swallows detail responses to one port.
 
+The handle gate of spec/patterns.md is the one cross topic rule: a pattern request
+channel's reader lane opens only once its linked answer channels have writer lanes to the
+same peer. It reads `peer_sub_claim`, which the interest apply fills with every topic the
+peer subscribes, pending or decided, so a pending `@rsp` holds the request lane shut.
+
 ## Slot lifecycle: retire and reuse
 
 `rant_topic_retire` parks the slot (role INACTIVE plus a retired flag), releases every
