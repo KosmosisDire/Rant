@@ -17,7 +17,8 @@ reuses the same kind bytes.
 - `rant_schema_size` is the fixed size.
 - `rant_schema_msg_min` is fixed plus 4 bytes per variable field. `message_default`
   writes that.
-- `rant_schema_msg_len` is the live length to send. 0 means malformed.
+- `rant_schema_msg_len` is the live length to send. 0 means malformed, unless `msg_min` is 0:
+  that schema is empty and 0 is its length.
 
 Setters resize frames in place (they memmove the tail), refuse an over cap write and never
 truncate. Readers clamp a hostile live length to the cap. A short string write zero fills

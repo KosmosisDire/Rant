@@ -747,6 +747,9 @@ static void stdtypes_checks(void){
                  "stdtypes: Capsule and Cylinder share bytes but never cross wire");
         CHECK(e && rant_schema_size(e) == 0 && rant_schema_field_count(e) == 0,
                  "stdtypes: Empty is zero bytes and no fields");
+        CHECK(e && rant_schema_msg_min(e) == 0 && rant_schema_message_default(e, NULL, 0)
+                 && rant_schema_msg_len(e, NULL, 0) == 0 && rant_schema_validate(e, rant_bytes(NULL, 0)),
+                 "stdtypes: an Empty message needs no buffer and its length 0 is valid");
         box.pose.orientation = rant_quaternion_identity();
         box.size = rant_double3(1.0, 2.0, 3.0);
         memcpy(m, &box, sizeof box);

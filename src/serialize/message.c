@@ -292,10 +292,10 @@ int rant_get_value(RantBytes msg, const RantSchema *s, uint16_t field, RantValue
 /* writing a message */
 int rant_schema_message_default(const RantSchema *s, void *buf, size_t cap){
     size_t min;
-    if (!s || !buf) return 0;
+    if (!s) return 0;
     min = (size_t)s->size + 4u * s->n_var;
-    if (cap < min) return 0;
-    memset(buf, 0, min);            /* zeroed fixed fields plus one empty frame per variable */
+    if (cap < min || (!buf && min)) return 0;      /* an empty message needs no buffer */
+    if (min) memset(buf, 0, min);            /* zeroed fixed fields plus one empty frame per variable */
     return 1;
 }
 

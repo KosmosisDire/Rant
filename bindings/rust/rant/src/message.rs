@@ -673,7 +673,7 @@ impl Codec {
             v.__encode(&mut e)?;
             // SAFETY: as above
             let n = unsafe { ffi::rant_schema_msg_len(self.schema, e.buf.as_ptr().cast(), e.buf.len()) } as usize;
-            if n == 0 {
+            if n == 0 && self.msg_min > 0 {
                 return Err(format!("{}: the encoded message is malformed", self.name));
             }
             Ok(f(&e.buf[..n]))

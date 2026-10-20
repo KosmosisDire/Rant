@@ -266,6 +266,15 @@ static bool patterns_leg() {
     auto r3 = rf_chk.call(AddReq{ -1, 0 }, 3s);
     chk("patterns: fail() -> AppError", !r3.ok() && r3.status() == rant::CallStatus::AppError);
 
+    /* a request and reply of zero bytes */
+    auto def_reset = a.function_definition<rant::types::Empty, rant::types::Empty>("empty/reset",
+        [](const rant::types::Empty&) { return rant::types::Empty{}; });
+    auto rf_reset = b.remote_function<rant::types::Empty, rant::types::Empty>("empty/reset");
+    chk("patterns: an Empty function is discovered",
+        wait_for(4000, [&] { return rf_reset.match_count() > 0; }, &b) && b.settle(4s));
+    auto r_empty = rf_reset.call(rant::types::Empty{}, 3s);
+    chk("patterns: an Empty request is answered Ok", r_empty.ok());
+
     /* deferred completion from another thread while the caller blocks */
     std::thread completer([] {
         while (!g_deferred_ready)

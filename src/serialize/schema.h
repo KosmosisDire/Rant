@@ -71,7 +71,8 @@ RANT_API uint32_t      rant_schema_print(const RantSchema *s, char *buf, size_t 
 RANT_API uint32_t      rant_schema_size(const RantSchema *s);
 /* The smallest valid message: the fixed section plus one empty frame per variable field. */
 RANT_API uint32_t      rant_schema_msg_min(const RantSchema *s);
-/* The live length to send. 0 on a malformed or uninitialized buffer. */
+/* The live length to send. 0 on a malformed or uninitialized buffer, and also the true
+ * length of an empty message, so test 0 only when rant_schema_msg_min is above 0. */
 RANT_API uint32_t      rant_schema_msg_len(const RantSchema *s, const void *buf, size_t cap);
 /* The flat depth first table. A bare root is one field named "". */
 RANT_API uint16_t      rant_schema_field_count(const RantSchema *s);
