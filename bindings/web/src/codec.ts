@@ -385,9 +385,19 @@ function payload(t: Table, i: number, val: unknown): Uint8Array | null {
     }
 }
 
+/* The view type whose bytes already are the wire kind, so one copy suffices. */
+const WIRE_VIEW: Partial<Record<number, Function[]>> = {
+    [K.U8]: [Uint8Array, Uint8ClampedArray], [K.I8]: [Int8Array], [K.U16]: [Uint16Array], [K.I16]: [Int16Array],
+    [K.U32]: [Uint32Array], [K.I32]: [Int32Array], [K.U64]: [BigUint64Array], [K.I64]: [BigInt64Array],
+    [K.F32]: [Float32Array], [K.F64]: [Float64Array],
+};
+
 function packScalars(elem: number, val: unknown, name: string): Uint8Array {
-    if (ArrayBuffer.isView(val) && !(val instanceof DataView))
-        return new Uint8Array(val.buffer.slice(val.byteOffset, val.byteOffset + val.byteLength));
+    if (ArrayBuffer.isView(val) && !(val instanceof DataView)) {
+        if (WIRE_VIEW[elem]?.includes(val.constructor))
+            return new Uint8Array(val.buffer.slice(val.byteOffset, val.byteOffset + val.byteLength));
+        val = Array.from(val as unknown as ArrayLike<unknown>);   /* another element type converts */
+    }
     if (!Array.isArray(val)) throw new SchemaError(`'${name}' takes an array`);
     const size = SIZE[elem], out = new DataView(new ArrayBuffer(val.length * size));
     val.forEach((x, k) => writeScalar(out, k * size, elem, x, name));

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-    openNode, version, struct, f64, f32, bool, u64, i32, string, array, enumOf, map, types, CancelledError, AppError,
+    openNode, version, struct, f64, f32, bool, u8, u16, u64, i16, i32, i64, string, array, enumOf, map, types, CancelledError, AppError,
 } from "../dist/rant.js";
 
 const domain = 190 + (process.pid % 10);
@@ -225,6 +225,26 @@ await check("a handler may close its own handle", async () => {
     pub.send(2);
     await new Promise((r) => setTimeout(r, 100));
     assert.deepEqual(got, [1]);
+});
+
+await check("a scalar array of another element type converts", async () => {
+    const Conv = struct("Conv", {
+        w: array(f32), id: array(u8), n: array(i32), big: array(i64), d: array(f64), g: array(f32, 2), s: array(i16), h: array(u16),
+    });
+    const sc = a.schema(Conv);
+    const back = sc.decode(sc.encode({
+        w: new Float64Array([1.5, 2.5]), id: new Int32Array([1, 2, 250]), n: new Float32Array([1, -2]),
+        big: new Int32Array([-3, 4]), d: new BigInt64Array([5n, -6n]), g: new Float64Array([7, 8]),
+        s: new Uint16Array([9, 10]), h: new Int8Array([11, 12]),
+    }));
+    assert.deepEqual([...back.w], [1.5, 2.5]);
+    assert.deepEqual([...back.id], [1, 2, 250]);
+    assert.deepEqual([...back.n], [1, -2]);
+    assert.deepEqual([...back.big], [-3n, 4n]);
+    assert.deepEqual([...back.d], [5, -6]);
+    assert.deepEqual([...back.g], [7, 8]);
+    assert.deepEqual([...back.s], [9, 10]);
+    assert.deepEqual([...back.h], [11, 12]);
 });
 
 const errors = events.filter((e) => e.kind === "error");
