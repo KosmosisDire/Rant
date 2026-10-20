@@ -628,11 +628,217 @@ done:
     rant_allocator_reset(&ca); rant_allocator_reset(&ba); rant_allocator_reset(&aa);
 }
 
+static void rc_answer(RantRequest *r, void *u){ (void)u; rant_request_reply(r, rant_bytes(NULL, 0)); }
+
+/* n's own Rant conditions of one kind: their count, and their texts joined by '|' */
+static int rc_kind(RantNode *n, const char *kind, char *texts, size_t cap, uint64_t *level){
+    RantBytes m = i_rant_node_status_view(n);
+    const RantSchema *s = n->status_schema;
+    uint32_t i, count = m.len ? rant_get_array_count(m, s, "conditions") : 0;
+    size_t kl = strlen(kind), o = 0; int c = 0; char path[48];
+    if (texts && cap) texts[0] = '\0';
+    for (i = 0; i < count; i++){
+        RantString k, t;
+        snprintf(path, sizeof path, "conditions[%u].origin", (unsigned)i);
+        if (rant_get_uint(m, s, path) != RANT_ORIGIN_RANT) continue;
+        snprintf(path, sizeof path, "conditions[%u].key", (unsigned)i);
+        k = rant_get_string(m, s, path);
+        if (k.len < kl || memcmp(k.data, kind, kl) != 0 || (k.len > kl && k.data[kl] != '/')) continue;
+        c++;
+        snprintf(path, sizeof path, "conditions[%u].level", (unsigned)i);
+        if (level) *level = rant_get_uint(m, s, path);
+        snprintf(path, sizeof path, "conditions[%u].text", (unsigned)i);
+        t = rant_get_string(m, s, path);
+        if (texts && o + t.len + 2 < cap){ memcpy(texts + o, t.data, t.len); o += t.len; texts[o++] = '|'; texts[o] = '\0'; }
+    }
+    return c;
+}
+
+/* Rant's own conditions: one per problem naming its peer, each gone exactly when its cause
+ * is, a cap that keeps the app's room and counts the rest, and a refused peer that ages out. */
+static void rant_conditions_checks(void){
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0), ca = rant_allocator_heap(0);
+    RantAllocator ma = rant_allocator_heap(0);
+    RantNodeOpts ao, bo, co; RantNode *A=NULL, *B=NULL, *C=NULL; RantAddr seed;
+    RantTopicOpts rel, be;
+    const RantSchema *f32 = NULL, *f64 = NULL;
+    char tx[2048]; uint64_t lv = 0; int na, nb, k;
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=TEST_DOMAIN+44; ao.discovery.max_peers=8;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    bo=ao; co=ao;
+    memset(&rel,0,sizeof rel); rel.qos.reliability = RANT_RELIABLE;
+    memset(&be,0,sizeof be); be.qos.reliability = RANT_BEST_EFFORT;
+    f32 = test_compile(&ma, "RcPose { x: f32 }", NULL);
+    f64 = test_compile(&ma, "RcPose { x: f64 }", NULL);
+    A = rant_node_open(&aa, "rc-a", NULL, NULL, &ao);
+    B = rant_node_open(&ba, "rc-b", st_on_msg, NULL, &bo);
+    C = rant_node_open(&ca, "rc-c", NULL, NULL, &co);
+    CHECK(A && B && C && f32 && f64, "rantcond: nodes open, schemas compile");
+    if (!(A && B && C && f32 && f64)) goto done;
+
+    /* two readers whose schema does not fit: A holds one condition per peer, each named */
+    { RantTopic *ta = rant_node_create_topic(A, "rc/pose", RANT_PUB_ONLY, f32, &rel);
+      RantTopic *tb = rant_node_create_topic(B, "rc/pose", RANT_SUB_ONLY, f64, &rel);
+      RantTopic *tc = rant_node_create_topic(C, "rc/pose", RANT_SUB_ONLY, f64, &rel);
+      CHECK(ta && tb && tc, "rantcond: pose topics");
+      PUMP3_UNTIL(A, B, C, 6000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 2
+                                  && rc_kind(B, "schema_mismatch", NULL, 0, NULL) == 1);
+      na = rc_kind(A, "schema_mismatch", tx, sizeof tx, &lv);
+      CHECK(na == 2 && lv == RANT_LEVEL_ERROR && strstr(tx, "rc/pose to rc-b") && strstr(tx, "rc/pose to rc-c"),
+               "rantcond: a writer holds one schema_mismatch per reader, each naming it (n=%d: %s)", na, tx);
+      nb = rc_kind(B, "schema_mismatch", tx, sizeof tx, NULL);
+      CHECK(nb == 1 && strstr(tx, "rc/pose from rc-a"), "rantcond: the reader names the writer (n=%d: %s)", nb, tx);
+
+      /* the published set carries them as Rant's, never clearable */
+      st_count = 0;
+      (void)rant_topic_set_role(rant_node_status_topic(B), RANT_PUBSUB);
+      PUMP3_UNTIL(A, B, C, 6000, st_count >= 2);
+      CHECK(st_count >= 2 && st_origin[0] == RANT_ORIGIN_RANT && !st_clearable[0]
+               && !strncmp(st_key[0], "schema_mismatch/", 16),
+               "rantcond: A publishes them with origin Rant (n=%d key=%s)", st_count, st_key[0]);
+
+      /* C leaves: only its condition goes */
+      rant_node_close(C, 1); C = NULL;
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 1);
+      na = rc_kind(A, "schema_mismatch", tx, sizeof tx, NULL);
+      CHECK(na == 1 && strstr(tx, "rc-b") && !strstr(tx, "rc-c"),
+               "rantcond: a peer leaving takes only its condition (n=%d: %s)", na, tx);
+
+      /* B retires its reader: both sides clear */
+      CHECK(rant_topic_retire(tb) == RANT_OK, "rantcond: B retires the reader");
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0
+                              && rc_kind(B, "schema_mismatch", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0 && rc_kind(B, "schema_mismatch", NULL, 0, NULL) == 0,
+               "rantcond: a fixed cause clears both sides");
+      (void)rant_topic_retire(ta); }
+
+    /* QoS: a reliable reader meets a best effort writer */
+    { RantTopic *ta = rant_node_create_topic(A, "rc/q", RANT_PUB_ONLY, NULL, &be);
+      RantTopic *tb = rant_node_create_topic(B, "rc/q", RANT_SUB_ONLY, NULL, &rel);
+      PUMP_UNTIL(A, B, 6000, rc_kind(B, "qos_incompatible", NULL, 0, NULL) == 1);
+      nb = rc_kind(B, "qos_incompatible", tx, sizeof tx, NULL);
+      CHECK(ta && tb && nb == 1 && strstr(tx, "rc/q from rc-a"), "rantcond: qos_incompatible names the writer (n=%d: %s)", nb, tx);
+      (void)rant_topic_retire(tb);
+      PUMP_UNTIL(A, B, 6000, rc_kind(B, "qos_incompatible", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(B, "qos_incompatible", NULL, 0, NULL) == 0, "rantcond: qos_incompatible clears with its topic");
+      (void)rant_topic_retire(ta); }
+
+    /* kind: a plain reader of a name another node owns as a variable */
+    { RantTopic *ta = rant_node_create_topic(A, "rc/k", RANT_SUB_ONLY, NULL, &rel);
+      RantVariable *vb = rant_node_create_variable_definition(B, "rc/k", NULL, NULL);
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "kind_mismatch", NULL, 0, NULL) == 1);
+      na = rc_kind(A, "kind_mismatch", tx, sizeof tx, NULL);
+      CHECK(ta && vb && na == 1 && strstr(tx, "rc/k at rc-b"), "rantcond: kind_mismatch names the peer (n=%d: %s)", na, tx);
+      (void)rant_variable_retire(vb);
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "kind_mismatch", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(A, "kind_mismatch", NULL, 0, NULL) == 0, "rantcond: kind_mismatch clears when the variable goes");
+      (void)rant_topic_retire(ta); }
+
+    /* duplicate authority: two providers of one function, each warned about the other */
+    { RantFunction *fa = rant_node_create_function_definition(A, "rc/f", NULL, NULL, rc_answer, NULL, NULL);
+      RantFunction *fb = rant_node_create_function_definition(B, "rc/f", NULL, NULL, rc_answer, NULL, NULL);
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "duplicate_authority", NULL, 0, NULL) == 1
+                              && rc_kind(B, "duplicate_authority", NULL, 0, NULL) == 1);
+      na = rc_kind(A, "duplicate_authority", tx, sizeof tx, &lv);
+      CHECK(fa && fb && na == 1 && lv == RANT_LEVEL_WARN && strstr(tx, "rc/f is also provided by rc-b"),
+               "rantcond: duplicate_authority warns, naming the rival (n=%d: %s)", na, tx);
+      (void)rant_function_retire(fb);
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "duplicate_authority", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(A, "duplicate_authority", NULL, 0, NULL) == 0, "rantcond: the rival retiring clears it");
+      (void)rant_function_retire(fa); }
+
+    /* forced: the owner holds a Warn naming who forced its variable, until it is unforced */
+    { uint8_t one = 1, two = 2; RantBytes got;
+      RantVariable *va = rant_node_create_variable_definition(A, "rc/v", NULL,
+                             &(RantVariableOpts){ .allow_force = 1, .initial = rant_bytes(&one, 1) });
+      RantVariable *vb = rant_node_create_remote_variable(B, "rc/v", NULL, NULL);
+      PUMP_UNTIL(A, B, 6000, vb && rant_variable_get(vb, &got) == 1 && rant_variable_match_count(vb) > 0);
+      CHECK(va && vb && rant_variable_force(vb, rant_bytes(&two, 1)) == RANT_OK, "rantcond: B forces A's variable");
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "forced", NULL, 0, NULL) == 1);
+      na = rc_kind(A, "forced", tx, sizeof tx, &lv);
+      CHECK(na == 1 && lv == RANT_LEVEL_WARN && strstr(tx, "rc/v is forced by rc-b"),
+               "rantcond: forced names the variable and who forced it (n=%d: %s)", na, tx);
+      (void)rant_variable_unforce(vb);
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "forced", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(A, "forced", NULL, 0, NULL) == 0, "rantcond: unforce clears it");
+      (void)rant_variable_force(va, rant_bytes(&two, 1));
+      rant_node_poll(A, 0);
+      na = rc_kind(A, "forced", tx, sizeof tx, NULL);
+      CHECK(na == 1 && strstr(tx, "forced by this node"), "rantcond: a local force names this node (%s)", tx);
+      (void)rant_variable_retire(vb); (void)rant_variable_retire(va);
+      rant_node_poll(A, 0);
+      CHECK(rc_kind(A, "forced", NULL, 0, NULL) == 0, "rantcond: retiring the variable clears it"); }
+
+    /* the cap: Rant lists RANT_STATUS_RANT_MAX - 1 and counts the rest, the app keeps its room */
+    { RantTopic *ta[20], *tb[20]; char nm[32];
+      for (k = 0; k < 20; k++){
+          snprintf(nm, sizeof nm, "rc/m%02d", k);
+          ta[k] = rant_node_create_topic(A, nm, RANT_PUB_ONLY, f32, &rel);
+          tb[k] = rant_node_create_topic(B, nm, RANT_SUB_ONLY, f64, &rel);
+      }
+      PUMP_UNTIL(A, B, 8000, rc_kind(A, "more_problems", NULL, 0, NULL) == 1);
+      na = rc_kind(A, "schema_mismatch", NULL, 0, NULL);
+      k = rc_kind(A, "more_problems", tx, sizeof tx, NULL);
+      CHECK(na == RANT_STATUS_RANT_MAX - 1 && k == 1 && strstr(tx, "5 more problems"),
+               "rantcond: %d listed and the rest counted (%d: %s)", na, k, tx);
+      CHECK(rant_node_set_status(A, "app", RANT_LEVEL_INFO, "still room", NULL) == RANT_OK,
+               "rantcond: a full Rant list leaves the app its room");
+      (void)rant_node_clear_status(A, "app");
+      for (k = 0; k < 20; k++){ (void)rant_topic_retire(tb[k]); (void)rant_topic_retire(ta[k]); }
+      PUMP_UNTIL(A, B, 8000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0
+                              && rc_kind(A, "more_problems", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0 && rc_kind(A, "more_problems", NULL, 0, NULL) == 0,
+               "rantcond: the list and its count empty out"); }
+
+done:
+    if (C) rant_node_close(C,1);
+    if (B) rant_node_close(B,1);
+    if (A) rant_node_close(A,1);
+    rant_allocator_reset(&ca); rant_allocator_reset(&ba); rant_allocator_reset(&aa); rant_allocator_reset(&ma);
+}
+
+/* A static node with room for one peer turns the next away and holds a peer_refused
+ * condition naming its address, which ages out once that node goes quiet. */
+static void rc_refused_checks(void){
+    static uint8_t mem[1u << 20];
+    RantAllocator da = rant_allocator_static(mem, sizeof mem);
+    RantAllocator ea = rant_allocator_heap(0), fa = rant_allocator_heap(0);
+    RantNodeOpts o, d; RantNode *D=NULL, *E=NULL, *F=NULL; RantAddr seed;
+    char tx[512]; int nd;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+45; o.discovery.max_peers=8;
+    o.discovery.announce_interval_us=200000;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    d = o; d.discovery.max_peers = 1;
+    D = rant_node_open(&da, "rc-d", NULL, NULL, &d);
+    E = rant_node_open(&ea, "rc-e", NULL, NULL, &o);
+    F = rant_node_open(&fa, "rc-f", NULL, NULL, &o);
+    CHECK(D && E && F, "rantcond: refusal nodes open");
+    if (!(D && E && F)) goto done;
+    PUMP3_UNTIL(D, E, F, 6000, rc_kind(D, "peer_refused", NULL, 0, NULL) == 1);
+    nd = rc_kind(D, "peer_refused", tx, sizeof tx, NULL);
+    CHECK(nd == 1 && strstr(tx, "127.0.0.1:") && strstr(tx, "raise max_peers"),
+             "rantcond: a full table holds peer_refused naming the address (n=%d: %s)", nd, tx);
+    rant_node_close(E, 1); E = NULL;
+    rant_node_close(F, 1); F = NULL;
+    { int t; for (t = 0; t < 400 && rc_kind(D, "peer_refused", NULL, 0, NULL); t++) rant_node_poll(D, 5); }
+    CHECK(rc_kind(D, "peer_refused", NULL, 0, NULL) == 0, "rantcond: it ages out once the node goes quiet");
+done:
+    if (F) rant_node_close(F,1);
+    if (E) rant_node_close(E,1);
+    if (D) rant_node_close(D,1);
+    rant_allocator_reset(&fa); rant_allocator_reset(&ea);
+}
+
 static const TestCase cases[] = {
     { "reflect_dropped", reflect_dropped_checks },
     { "churn", churn_checks },
     { "log_and_meta", metalog_checks },
     { "status", status_checks },
+    { "rant_conditions", rant_conditions_checks },
+    { "rant_refused", rc_refused_checks },
 };
 
 TEST_MAIN(cases)

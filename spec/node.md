@@ -298,6 +298,43 @@ asker as `.peer` and the key as `.detail`. Anything else becomes a Debug note. T
 reply, since the next set is the answer, and the `since_us` match keeps two operators'
 clears from landing on a later raise of the same key.
 
+## Rant's own conditions
+
+Errors that are really states (a node that cannot be a peer, a refused match, a rival
+authority, a forced variable) also hold an origin Rant condition, one per problem, so a
+late subscriber sees what is wrong now rather than a log line that scrolled away. The
+`RANT_ERROR` event still fires once, as the moment. The kinds and their texts are in
+docs/node.md.
+
+Conditions are derived from state, never from events, since most causes end silently. A
+source reports its whole current set of one kind between `i_rant_node_problems_begin` and
+`_end`, and end removes that kind's conditions that went unreported. The runtime rebuilds
+its kinds at the poll pass when `problems_dirty` is set (any RANT_ERROR, a peer up, down or
+interest change, our own re advertise) or when an aging problem is due:
+
+- Match refusals (`schema_mismatch`, `qos_incompatible`, `kind_mismatch`): each interest
+  apply re derives `RANT__AST_REF_*` bits per (peer, entry) where it fires the events, and
+  `i_rant_transport_troubles` walks them, skipping our topics that parked or retired. The
+  schema text is the node core's stored reason, empty under `RANT_NO_DIAG`.
+- Sources that are not peers (`wire_version`, `peer_refused`, and `peer_too_big` for a
+  blob) live in discovery's trouble ring of `RANT_DISCOVERY_TROUBLE_MAX` (16), refreshed on
+  every datagram and reported until 3 announce intervals of silence. The ring is also the
+  once per source dedup of the wire version event. A dynamic node grows instead of
+  refusing, so it reports a refusal or a blob only past what it can reach.
+- `peer_too_big` also covers a peer whose index map failed to allocate, `bridge` reads the
+  tunnel's link state each look while down, since a reconnect says nothing, and
+  `announce_overflow` is the transport's `interest_truncated`.
+- The patterns layer rebuilds `duplicate_authority` and `forced` itself whenever its rival
+  lists or a force change. A rival that stops providing is dropped on the peer's next
+  interest apply, so its condition goes while the peer stays.
+
+A key is the kind alone or `kind/` plus 8 hex digits of FNV-1a over what names the problem
+(peer id, topic index and side, an address's bytes, an entity name), so it stays fixed
+while the problem lasts. Rant conditions count against `RANT_STATUS_RANT_MAX`, not the
+app's cap, and the last slot is kept for `more_problems`, which counts what did not fit.
+The scratch per kind holds ids only, under 100 bytes, since the poll pass may run on a
+small embedded stack.
+
 `rant_node_set_log_queue` and `rant_node_set_status_queue` give their handle a ring and the
 queue after creation, the one handle queue that changes. A binding sets it before widening
 the role, so the catch up replay parks rather than landing inline.

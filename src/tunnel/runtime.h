@@ -20,6 +20,8 @@ i_RantTunnel *i_rant_tunnel_open(const char *url, const char *passphrase, const 
 void          i_rant_tunnel_close(i_RantTunnel *t);
 /* 1 with one line in why when the link dropped or a socket op failed since the last call. */
 int           i_rant_tunnel_note(i_RantTunnel *t, char *why, size_t why_cap);
+/* 1 while the link to the bridge is open, else 0 with the bridge and its state in why. */
+int           i_rant_tunnel_link_up(i_RantTunnel *t, char *why, size_t why_cap);
 #endif /* RANT_TUNNEL */
 
 i_RantSock i_rant_net_udp_open(i_RantTunnel *t);

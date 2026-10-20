@@ -4,6 +4,7 @@
 #include "../common/bytes.h"
 #include <string.h>
 #include <stddef.h>            /* offsetof */
+#include <stdio.h>             /* snprintf for the duplicate authority condition text */
 
 /* the per node manager: fans the node wide event and tick out to every entity */
 
@@ -14,6 +15,7 @@ typedef struct {
     uint8_t     kind;          /* RantEntityKind */
     RantTopic    *primary;     /* the entity's primary channel */
     uint32_t  **ids; uint16_t *n_ids, *cap;   /* the entity's reported peers list */
+    uint8_t     hit;           /* the peer being checked still provides it */
 } i_RantPatAuth;
 
 typedef struct i_RantPatterns {
@@ -28,6 +30,7 @@ typedef struct i_RantPatterns {
 } i_RantPatterns;
 
 static void     i_rant_patterns_on_event(void *user, const RantEvent *ev);
+static void     i_rant_pat_problems(i_RantPatterns *pm);
 static uint64_t i_rant_patterns_tick(void *user, uint64_t now_us);
 static void     i_rant_patterns_on_close(void *user);
 /* the pending call reaper, retire cancels through it */
@@ -914,6 +917,7 @@ int rant_function_retire(RantFunction *fn){
     if (fn->sync_buf)  i_rant_node_sys_alloc(n, fn->sync_buf, 0);
     if (fn->dup_peers) i_rant_node_sys_alloc(n, fn->dup_peers, 0);
     i_rant_node_sys_alloc(n, fn, 0);
+    if (pm) i_rant_pat_problems(pm);           /* its rivals' conditions go with it */
     i_rant_node_sys_unlock(n, acquired);
     i_rant_node_advertise_hold(n);
     i_rant_pat_release_channels(req, rsp);
@@ -1277,6 +1281,7 @@ struct RantVariable {
     RantVariableUpdateFn on_write;    void *on_write_user;    /* fires on every applied write */
     const RantSchema *cur_schema;    /* what store decodes with */
     uint32_t        last_source;     /* the peer behind the current state, 0 = a local call */
+    uint32_t        forced_by;       /* owner: the peer that forced it last, 0 = a local call */
     uint64_t        last_write_us;   /* when the current state applied, node clock */
     uint64_t        last_written_us;   /* the writer's wall clock for that write, 0 = unstamped */
     uint32_t       *dup_peers;      /* owner: peers already reported for duplicate authority */
@@ -1410,8 +1415,9 @@ static void i_rant_var_owner_force(RantVariable *v, RantBytes val, uint32_t sour
     if (!v->forced)   /* entering force: save the current source into the shadow */
         i_rant_buf_put(v->n, &v->shadow, &v->shadow_len, &v->shadow_cap, rant_bytes(v->store, v->store_len));
     if (!i_rant_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, val)) return;
-    v->forced = 1; v->has_value = 1; v->write_seq++;
+    v->forced = 1; v->has_value = 1; v->write_seq++; v->forced_by = source;
     i_rant_var_publish_locked(v);
+    if (v->pm) i_rant_pat_problems(v->pm);    /* a forced value stays visible on the status */
     i_rant_var_notify(v, changed, source, when_us, written_us);
 }
 static void i_rant_var_owner_unforce(RantVariable *v, uint32_t source, uint64_t when_us,
@@ -1422,6 +1428,7 @@ static void i_rant_var_owner_unforce(RantVariable *v, uint32_t source, uint64_t 
     i_rant_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, rant_bytes(v->shadow, v->shadow_len));
     v->write_seq++;
     i_rant_var_publish_locked(v);
+    if (v->pm) i_rant_pat_problems(v->pm);
     i_rant_var_notify(v, 1, source, when_us, written_us);     /* a flag flip is always a change */
 }
 
@@ -1685,6 +1692,7 @@ int rant_variable_retire(RantVariable *var){
     if (var->shadow)    i_rant_node_sys_alloc(n, var->shadow, 0);
     if (var->dup_peers) i_rant_node_sys_alloc(n, var->dup_peers, 0);
     i_rant_node_sys_alloc(n, var, 0);
+    if (pm) i_rant_pat_problems(pm);           /* its rivals' conditions go with it */
     i_rant_node_sys_unlock(n, acquired);
     i_rant_node_advertise_hold(n);
     i_rant_pat_release_channels(value, set);
@@ -1875,12 +1883,12 @@ static uint16_t i_rant_pat_auth_lower(const i_RantPatterns *pm, RantEntityKind k
 /* Every authority against one peer whose interest was just applied: one walk of the
  * peer's entities with a binary search each. On OOM the index is skipped this time. */
 static void i_rant_pat_dup_check_peer(i_RantPatterns *pm, uint32_t peer){
-    RantIter it; RantEntityInfo ei;
+    RantIter it; RantEntityInfo ei; uint16_t k; int changed = 0;
     if (pm->auth_dirty && !i_rant_pat_auth_rebuild(pm)) return;
     if (!pm->auth_n) return;
+    for (k = 0; k < pm->auth_n; k++) pm->auth[k].hit = 0;
     memset(&it, 0, sizeof it);
     while (rant_node_entities_next(pm->n, peer, &it, &ei)){
-        uint16_t k;
         if (!ei.provides || ei.kind == RANT_ENTITY_TOPIC) continue;
         for (k = i_rant_pat_auth_lower(pm, ei.kind, ei.hash);
              k < pm->auth_n && pm->auth[k].kind == (uint8_t)ei.kind && pm->auth[k].hash == ei.hash; k++){
@@ -1890,11 +1898,20 @@ static void i_rant_pat_dup_check_peer(i_RantPatterns *pm, uint32_t peer){
                 if (len >= 5 && nm.data[len - 4] == '@') len -= 4;   /* the entity's base name */
                 if (ei.name.len != len || memcmp(ei.name.data, nm.data, len) != 0) continue;
             }
+            a->hit = 1;
             if (i_rant_pat_dup_reported(*a->ids, *a->n_ids, peer)) continue;
             i_rant_pat_dup_remember(pm->n, a->ids, a->n_ids, a->cap, peer);
             i_rant_node_sys_error(pm->n, RANT_E_DUPLICATE_AUTHORITY, a->primary, peer);
+            changed = 1;
         }
     }
+    for (k = 0; k < pm->auth_n; k++){   /* a rival that stopped claiming it is no rival */
+        i_RantPatAuth *a = &pm->auth[k];
+        if (a->hit || !i_rant_pat_dup_reported(*a->ids, *a->n_ids, peer)) continue;
+        i_rant_pat_dup_drop(*a->ids, a->n_ids, peer);
+        changed = 1;
+    }
+    if (changed) i_rant_pat_problems(pm);
 }
 
 /* a just created authority against every active peer */
@@ -1905,12 +1922,54 @@ static void i_rant_pat_dup_sweep(RantNode *n, RantTopic *primary, RantEntityKind
     while (rant_node_peers_next(n, &it, &p))
         if (p.liveness == RANT_PEER_ACTIVE)
             i_rant_pat_dup_check(n, p.id, primary, kind, ids, n_ids, cap);
+    if (*n_ids){
+        i_RantPatterns *pm = (i_RantPatterns*)*i_rant_node_sys_slot(n);
+        if (pm) i_rant_pat_problems(pm);
+    }
 }
 
 static void i_rant_pat_dup_forget_peer(i_RantPatterns *pm, uint32_t peer){
     RantFunction *fn; RantVariable *v;
     for (fn = pm->funcs; fn; fn = fn->next) i_rant_pat_dup_drop(fn->dup_peers, &fn->dup_n, peer);
     for (v = pm->vars; v; v = v->next)      i_rant_pat_dup_drop(v->dup_peers, &v->dup_n, peer);
+    i_rant_pat_problems(pm);
+}
+
+/* one duplicate_authority condition per rival, naming the entity and the peer */
+static void i_rant_pat_problem(i_RantPatterns *pm, i_RantProblems *ps, RantTopic *primary,
+                               uint32_t peer, const char *role){
+    char text[RANT_STATUS_TEXT_MAX + 1];
+    RantString nm = i_rant_topic_name(primary), pn = i_rant_node_sys_peer_name(pm->n, peer);
+    size_t len = nm.len;
+    uint32_t idb[2];
+    if (len >= 5 && nm.data[len - 4] == '@') len -= 4;   /* the entity's base name */
+    snprintf(text, sizeof text, "%.*s is also %s by %.*s", (int)len, nm.data, role, (int)pn.len, pn.data);
+    idb[0] = i_rant_node_problem_id(nm.data, len); idb[1] = peer;
+    i_rant_node_problem(ps, i_rant_node_problem_id(idb, sizeof idb), RANT_LEVEL_WARN, text);
+}
+
+/* Rebuilds this layer's Rant conditions: duplicate_authority from the reported rivals, and
+ * forced for each owned variable left forced, since forcing is for debugging only. Lock held. */
+static void i_rant_pat_problems(i_RantPatterns *pm){
+    i_RantProblems ps; RantFunction *fn; RantVariable *v; uint16_t i;
+    i_rant_node_problems_begin(pm->n, &ps, I_RANT_PROB_DUPLICATE_AUTHORITY);
+    for (fn = pm->funcs; fn; fn = fn->next)
+        for (i = 0; i < fn->dup_n; i++) i_rant_pat_problem(pm, &ps, fn->req, fn->dup_peers[i], "provided");
+    for (v = pm->vars; v; v = v->next)
+        for (i = 0; i < v->dup_n; i++) i_rant_pat_problem(pm, &ps, v->value, v->dup_peers[i], "owned");
+    i_rant_node_problems_end(&ps);
+    i_rant_node_problems_begin(pm->n, &ps, I_RANT_PROB_FORCED);
+    for (v = pm->vars; v; v = v->next){
+        char text[RANT_STATUS_TEXT_MAX + 1];
+        RantString nm, by;
+        if (!v->is_owner || !v->forced) continue;
+        nm = i_rant_topic_name(v->value);
+        by = v->forced_by ? i_rant_node_sys_peer_name(pm->n, v->forced_by) : rant_cstr("this node");
+        snprintf(text, sizeof text, "%.*s is forced by %.*s, forcing is for debugging only",
+                 (int)nm.len, nm.data, (int)by.len, by.data);
+        i_rant_node_problem(&ps, i_rant_node_problem_id(nm.data, nm.len), RANT_LEVEL_WARN, text);
+    }
+    i_rant_node_problems_end(&ps);
 }
 
 /* the manager hooks: call timeouts on the tick, provider loss on the event */

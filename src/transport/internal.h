@@ -31,6 +31,12 @@
 #define RANT__AST_NAME_OK    0x02u  /* identity and name verified: peer_index[a] is our topic */
 #define RANT__AST_READ_OK    0x04u  /* schema gate passed on the read side, their pub to our sub */
 #define RANT__AST_WRITE_OK 0x08u    /* schema gate passed on the write side, their sub to our pub */
+/* what the last interest apply refused for the entry, re derived on every apply */
+#define RANT__AST_REF_KIND  0x10u   /* the name is another entity kind there */
+#define RANT__AST_REF_QOS   0x20u   /* their best effort publisher, our reliable subscriber */
+#define RANT__AST_REF_READ  0x40u   /* the schema gate refused our read side */
+#define RANT__AST_REF_WRITE 0x80u   /* the schema gate refused our write side */
+#define RANT__AST_REF_MASK  0xF0u
 
 /* per entry interest flags, the announce's hash list */
 #define RANT__INT_ROLE_MASK 0x03u /* bits 0 and 1: the advertiser's RantRole */
@@ -231,6 +237,7 @@ struct i_RantTransportState {
     uint8_t    **peer_agen;       /* [max_peers] the last applied rebind generation per entry */
     uint8_t    **peer_attrs;      /* [max_peers] the peer's advertised attrs per entry */
     uint32_t    *peer_seen_version; /* [max_peers] the highest version of our blob the peer named */
+    uint16_t    *peer_unmappable; /* [max_peers] entries the last apply had no verdict storage for */
     i_RantTopic    *topics;     /* [n_topics] */
     /* the lane record pool: one hook allocation grown by doubling, records per real match */
     i_RantLane    *lanes;       /* [lane_cap] */
@@ -247,6 +254,7 @@ struct i_RantTransportState {
     uint64_t     sweep_time_us;     /* the clock position the sweep has paid for */
     uint64_t     next_deadline_us; /* the earliest armed timer, caps the poll wait */
     uint32_t     reader_epoch_counter;      /* starts at 1, 0 = none */
+    uint8_t      interest_truncated;        /* our last inline interest did not fit the announce */
 };
 
 typedef enum { RANT_ORDER_OLD, RANT_ORDER_GAP, RANT_ORDER_ADOPTED, RANT_ORDER_INORDER } i_RantReaderOrder;

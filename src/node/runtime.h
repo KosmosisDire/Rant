@@ -297,7 +297,10 @@ RANT_API RantTopic       *rant_node_log_topic(RantNode *n);
 #define RANT_STATUS_KEY_MAX  48     /* key bytes, a longer key is refused */
 #define RANT_STATUS_TEXT_MAX 160    /* text bytes, longer is truncated */
 #ifndef RANT_STATUS_MAX
-#define RANT_STATUS_MAX      32     /* conditions per node */
+#define RANT_STATUS_MAX      32     /* app conditions per node */
+#endif
+#ifndef RANT_STATUS_RANT_MAX
+#define RANT_STATUS_RANT_MAX 16     /* Rant's own conditions per node, the last a count of any more */
 #endif
 typedef struct {
     uint8_t clearable;   /* 1 = another node may clear it with rant_node_clear_peer_status */
@@ -414,6 +417,29 @@ typedef int (*i_RantSysWaitFn)(RantNode *n, void *ctx, uint64_t now_us, uint64_t
 int      i_rant_node_sys_wait    (RantNode *n, i_RantSysWaitFn done, void *ctx);
 /* Fires a topic scoped RANT_ERROR through the node's normal event path. Under the node lock. */
 void     i_rant_node_sys_error (RantNode *n, RantErrorKind error, RantTopic *topic, uint32_t peer);
+/* A peer's node name, "unknown-peer" when it has none. */
+RantString i_rant_node_sys_peer_name(RantNode *n, uint32_t peer);
+/* Rant's own conditions, one kind per problem source (spec/node.md). A source reports its
+ * whole current set of one kind between begin and end, and end clears what went unreported.
+ * id names one problem within its kind, 0 when the kind has one. Lock held. */
+typedef enum {
+    I_RANT_PROB_WIRE_VERSION, I_RANT_PROB_PEER_REFUSED, I_RANT_PROB_PEER_TOO_BIG,
+    I_RANT_PROB_SCHEMA_MISMATCH, I_RANT_PROB_QOS_INCOMPATIBLE, I_RANT_PROB_KIND_MISMATCH,
+    I_RANT_PROB_BRIDGE, I_RANT_PROB_ANNOUNCE_OVERFLOW, I_RANT_PROB_DUPLICATE_AUTHORITY,
+    I_RANT_PROB_FORCED, I_RANT_PROB_KINDS
+} i_RantProblemKind;
+typedef struct {
+    RantNode *n;
+    uint8_t   kind;
+    uint16_t  n_ids;
+    uint32_t  over;          /* problems past RANT_STATUS_RANT_MAX */
+    uint32_t  ids[RANT_STATUS_RANT_MAX];
+} i_RantProblems;
+void     i_rant_node_problems_begin(RantNode *n, i_RantProblems *ps, i_RantProblemKind kind);
+void     i_rant_node_problem       (i_RantProblems *ps, uint32_t id, RantLevel level, const char *text);
+void     i_rant_node_problems_end  (i_RantProblems *ps);
+/* An id for a problem from the bytes that name it, never 0. */
+uint32_t i_rant_node_problem_id(const void *bytes, size_t len);
 /* Matched subscribers excluding dormant peers, the provider liveness query. */
 int      i_rant_topic_live_match_count(RantTopic *topic);
 /* Is peer a matched subscriber of this PUB topic. The directed call severed lane backstop. */

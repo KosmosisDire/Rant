@@ -304,6 +304,12 @@ int         i_rant_transport_topic_reuse_find(i_RantTransportState *st, const ch
  * until each peer names rebind_version in a request. 0 ok, -1 refused, -4 out of memory. */
 int         i_rant_transport_topic_reuse(i_RantTransportState *st, uint16_t topic_index,
                                 const i_RantTopicDef *def, int binding_changed, uint32_t rebind_version);
+/* What the last applies refused, for the node's Rant conditions. what is KIND_MISMATCH,
+ * QOS_INCOMPATIBLE or SCHEMA_MISMATCH per (peer, topic, side), read set for our read side,
+ * INTEREST_OVERFLOW per peer with count entries, or META_TRUNCATED_INTEREST for our announce. */
+typedef void (*i_RantTroubleFn)(void *user, RantErrorKind what, uint32_t peer,
+                                uint16_t topic_index, int read, uint32_t count);
+void        i_rant_transport_troubles(i_RantTransportState *st, i_RantTroubleFn fn, void *user);
 /* Links a pattern handle's channels into one ring for the handle gate of spec/interest.md.
  * The slots must be defined and unlinked. 0 ok, -1 refused. */
 int         i_rant_transport_topic_link(i_RantTransportState *st, const uint16_t *topic_index, uint16_t n);

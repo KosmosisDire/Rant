@@ -563,6 +563,16 @@ int i_rant_tunnel_note(i_RantTunnel *t, char *why, size_t why_cap){
     return had;
 }
 
+int i_rant_tunnel_link_up(i_RantTunnel *t, char *why, size_t why_cap){
+    int up;
+    i_rant_tunnel_lock(t);
+    up = t->state == I_RANT_LINK_OPEN;
+    if (!up) snprintf(why, why_cap, "%s:%u, %s", t->url.host, (unsigned)t->url.port,
+                      t->state == I_RANT_LINK_REFUSED ? "refused" : "reconnecting");
+    i_rant_tunnel_unlock(t);
+    return up;
+}
+
 /* ---- the sockets ---- */
 
 static i_RantTunnelSock *i_rant_tunnel_sock(i_RantTunnel *t, i_RantSock s){

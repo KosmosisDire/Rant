@@ -54,8 +54,8 @@ struct i_RantDiscoveryState {
     uint16_t        targeted_cursor;  /* round robin over peers for poll_targeted */
     i_RantDiscoverySubnet local_nets[RANT_DISCOVERY_MAX_SUBNETS];
     uint8_t       n_local_nets;
-    RantAddr      wire_told[8];   /* sources already reported on another wire version */
-    uint8_t       n_wire_told, next_wire_told;
+    i_RantDiscoveryTrouble trouble[RANT_DISCOVERY_TROUBLE_MAX];  /* a ring, the oldest goes */
+    uint8_t       n_trouble, next_trouble;
     uint64_t      now_us;         /* the latest time fed in, which ages the paths */
     i_RantDiscoveryPeer    *peers;
 };
@@ -367,18 +367,42 @@ static int i_rant_discovery_on_path(const i_RantDiscoveryState *st, const i_Rant
     return 0;
 }
 
+/* Records a troubled source heard now, so the node can hold a condition while it lasts.
+   1 when it was not already known. */
+static int i_rant_discovery_trouble_note(i_RantDiscoveryState *st, RantErrorKind kind,
+                                         const RantAddr *a, uint32_t value, uint32_t peer){
+    i_RantDiscoveryTrouble *t; int i;
+    for (i = 0; i < st->n_trouble; i++){
+        t = &st->trouble[i];
+        if (t->kind == kind && i_rant_discovery_addr_is(&t->addr, a->ip, a->ip_len, a->port)){
+            t->heard_us = st->now_us; t->value = value; t->peer = peer;
+            return 0;
+        }
+    }
+    t = &st->trouble[st->next_trouble];
+    t->addr = *a; t->heard_us = st->now_us; t->value = value; t->peer = peer; t->kind = kind;
+    st->next_trouble = (uint8_t)((st->next_trouble + 1) % RANT_DISCOVERY_TROUBLE_MAX);
+    if (st->n_trouble < RANT_DISCOVERY_TROUBLE_MAX) st->n_trouble++;
+    return 1;
+}
+
+int i_rant_discovery_troubles(const i_RantDiscoveryState *st, i_RantDiscoveryTrouble *out, int max){
+    int i, n = 0;
+    uint64_t live = (uint64_t)st->cfg.announce_interval_us * 3u;
+    for (i = 0; i < st->n_trouble && n < max; i++)
+        if (st->now_us - st->trouble[i].heard_us <= live) out[n++] = st->trouble[i];
+    return n;
+}
+
 /* A datagram of this domain on another wire version. Its sender announces every interval, so
-   each source is reported once, the last 8 remembered. */
-static void i_rant_discovery_wire_mismatch(i_RantDiscoveryState *st, const RantAddr *src){
-    RantAddr a; int i;
+   each source is reported once while the trouble table remembers it. */
+static void i_rant_discovery_wire_mismatch(i_RantDiscoveryState *st, const RantAddr *src,
+                                           uint8_t version){
+    RantAddr a;
     memset(&a, 0, sizeof a);
     if (src && (src->ip_len==4 || src->ip_len==16)){ memcpy(a.ip, src->ip, src->ip_len); a.ip_len = src->ip_len; a.port = src->port; }
-    for (i = 0; i < st->n_wire_told; i++)
-        if (i_rant_discovery_addr_is(&st->wire_told[i], a.ip, a.ip_len, a.port)) return;
-    st->wire_told[st->next_wire_told] = a;
-    st->next_wire_told = (uint8_t)((st->next_wire_told + 1) % 8);
-    if (st->n_wire_told < 8) st->n_wire_told++;
-    i_rant_discovery_fire_error(st, RANT_E_WIRE_VERSION, 0, &a, 0);
+    if (i_rant_discovery_trouble_note(st, RANT_E_WIRE_VERSION, &a, version, 0))
+        i_rant_discovery_fire_error(st, RANT_E_WIRE_VERSION, 0, &a, 0);
 }
 
 void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
@@ -400,7 +424,7 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     if (len < 8) return;
     if (p[0]!='u'||p[1]!='D'||p[2]!='S'||p[3]!='C') return;
     if (i_rant_le_r16(p+6) != st->cfg.domain_id) return;
-    if (p[4]!=(uint8_t)RANT_WIRE_VERSION){ i_rant_discovery_wire_mismatch(st, src); return; }
+    if (p[4]!=(uint8_t)RANT_WIRE_VERSION){ i_rant_discovery_wire_mismatch(st, src, p[4]); return; }
     if (len < (size_t)RANT_DISCOVERY_META_OFF) return;
     uuid = p+8;
     if (memcmp(uuid, st->cfg.uuid, 16)==0) return;  /* ignore self */
@@ -412,6 +436,8 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
         RantAddr a; int at = i_rant_discovery_find(st, uuid);
         memset(&a, 0, sizeof a);
         if (src_ip && (src_ip_len==4 || src_ip_len==16)){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
+        (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_META_TOO_BIG, &a, meta_len,
+                                            at >= 0 ? st->peers[at].local_id : 0);
         i_rant_discovery_fire_error(st, RANT_E_PEER_META_TOO_BIG,
                                     at >= 0 ? st->peers[at].local_id : 0, &a, meta_len);
         return;
@@ -432,6 +458,8 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
             memset(&a, 0, sizeof a);
             if (src_ip){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
             a.port = disc_port;
+            (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_META_TOO_BIG, &a, (uint32_t)overlay.len,
+                                                at >= 0 ? st->peers[at].local_id : 0);
             i_rant_discovery_fire_error(st, RANT_E_PEER_META_TOO_BIG,
                                         at >= 0 ? st->peers[at].local_id : 0, &a, overlay.len);
             return;
@@ -466,6 +494,7 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
         i_rant_discovery_evict_endpoint(st, &addr);
         idx = i_rant_discovery_alloc(st);
         if (idx < 0){       /* table full of active peers: refuse, never evict a live one */
+            (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_REFUSED, &addr, st->cap_peers, 0);
             i_rant_discovery_fire_error(st, RANT_E_PEER_REFUSED, 0, &addr, 0);
             return;
         }

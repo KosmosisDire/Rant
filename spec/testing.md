@@ -76,7 +76,7 @@ program in this order.
 | `e2e.queues` | queue, pull, callback_queue, callback_pattern |
 | `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate |
 | `e2e.tasks` | task, task_matrix |
-| `e2e.entities` | reflect_dropped, churn, log_and_meta, status |
+| `e2e.entities` | reflect_dropped, churn, log_and_meta, status, rant_conditions, rant_refused |
 | `e2e.matchwait` | matchwait |
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
@@ -262,6 +262,12 @@ What each phase pins, grouped by layer.
   ring is the only thing between a drained batch and lost replies, which are invisible at
   the provider. The caller needs the same depth in its req ring, and both lanes must be
   up before the first reply commits since rsp carries no catch_up.
+- Rant conditions: a writer with two ill fitting readers holds one schema_mismatch per
+  reader naming it, published with origin Rant, and loses exactly one when that reader
+  leaves. QoS, kind, duplicate authority and a forced variable each raise and clear with
+  their cause. 20 refusals list 15 and count 5 in more_problems while the app keeps its
+  room. A static node with room for one peer holds peer_refused naming the address and
+  drops it once the turned away node goes quiet.
 - Handle gate: 20 callers, each with a req schema whose wire (1325 to 1350 bytes) fills
   the first detail page so rsp follows on a second, call right after creating the remote.
   Every call is answered and no handler runs before its rsp lane. Without the gate 19 of

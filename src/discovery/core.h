@@ -120,6 +120,19 @@ void           i_rant_discovery_set_local_subnets(i_RantDiscoveryState *st,
  * fills *to, the peer's locator, or 0. */
 size_t         i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, void *out, size_t cap,
                                       RantAddr *to);
+/* A source this node heard but cannot take as a peer: another wire version (value is its
+ * version), a full table (RANT_E_PEER_REFUSED) or a blob too big (value is its bytes). */
+#define RANT_DISCOVERY_TROUBLE_MAX 16
+typedef struct {
+    RantAddr      addr;
+    uint64_t      heard_us;
+    uint32_t      value;
+    uint32_t      peer;         /* the peer's local id when it is in the table, else 0 */
+    RantErrorKind kind;
+} i_RantDiscoveryTrouble;
+/* The troubles heard within three announce intervals, up to max into out. Returns the count. */
+int            i_rant_discovery_troubles(const i_RantDiscoveryState *st,
+                                      i_RantDiscoveryTrouble *out, int max);
 /* Live peers, DROPPED entries excluded. */
 uint16_t       i_rant_discovery_peer_count(const i_RantDiscoveryState *st);
 /* Table capacity, the slot range for peer_addr and peer_at. */

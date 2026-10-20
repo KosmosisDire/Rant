@@ -231,6 +231,28 @@ rant_node_set_status(n, "drive2", RANT_LEVEL_ERROR, "drive 2 tripped on overcurr
 if (ev->kind == RANT_STATUS_CLEARED && !strcmp(ev->detail, "drive2")) reset_drive(2);
 ```
 
+Rant raises its own conditions, origin `RANT_ORIGIN_RANT`, never clearable, one per
+problem. Each holds while its cause does and clears itself. The key is the kind, then `/`
+and an id for the problem, and the text names the peer, topic or address.
+
+| Key | Level | Holds while |
+|---|---|---|
+| `wire_version/…` | Error | a node at that address speaks another wire version |
+| `peer_refused/…` | Error | the peer table is full and a node keeps being turned away |
+| `peer_too_big/…` | Error | a peer's announce or topic map is too big for this node |
+| `schema_mismatch/…` | Error | a match is refused because the schemas do not fit |
+| `qos_incompatible/…` | Error | a reliable subscriber here meets a best effort publisher |
+| `kind_mismatch/…` | Error | the name is another kind of entity at a peer |
+| `bridge` | Error | the link to `net.bridge` is down |
+| `announce_overflow` | Error | this node's topic list does not fit its announce |
+| `duplicate_authority/…` | Warn | another node also provides or owns this entity |
+| `forced/…` | Warn | a variable this node owns is forced |
+| `more_problems` | Error | more problems than the `RANT_STATUS_RANT_MAX` (16) slots hold |
+
+A source that is not a peer (`wire_version`, `peer_refused`) clears 3 announce intervals
+after it goes quiet. Rant's conditions have their own cap, so they never take the app's
+`RANT_STATUS_MAX`. Each problem also fires its `RANT_ERROR` event once, as before.
+
 ### Meta
 
 Every node also hosts the `@rant/meta` function, which answers a snapshot of its peers,

@@ -83,6 +83,7 @@ static i_RantTransportState *i_rant_transport_build(i_RantBump *b, const i_RantT
       uint8_t **peer_agen      = (uint8_t**) i_rant_bump_take(b, (size_t)max_peers*sizeof(uint8_t*), 8);
       uint8_t **peer_attrs     = (uint8_t**) i_rant_bump_take(b, (size_t)max_peers*sizeof(uint8_t*), 8);
       uint32_t *peer_seen_version = (uint32_t*)i_rant_bump_take(b, (size_t)max_peers*sizeof(uint32_t), 8);
+      uint16_t *peer_unmappable = (uint16_t*)i_rant_bump_take(b, (size_t)max_peers*sizeof(uint16_t), 2);
       name_pool = (char*)i_rant_bump_take(b, name_bytes ? name_bytes : 1u, 1);
       if (st && b->base){
           st->cfg=*cfg; st->peer_ids=peer_ids; st->peer_used=peer_used;
@@ -100,7 +101,7 @@ static i_RantTransportState *i_rant_transport_build(i_RantBump *b, const i_RantT
           st->peer_index=peer_index; st->peer_index_len=peer_index_len;
           st->peer_astate=peer_astate;
           st->peer_agen=peer_agen; st->peer_attrs=peer_attrs;
-          st->peer_seen_version=peer_seen_version;
+          st->peer_seen_version=peer_seen_version; st->peer_unmappable=peer_unmappable;
           memset(peer_used,0,max_peers); memset(peer_dormant,0,max_peers);
           { uint32_t k; for (k=0;k<max_peers;k++) peer_frag[k]=RANT_FRAG_SIZE; }
 #ifdef RANT_SHM
@@ -112,6 +113,7 @@ static i_RantTransportState *i_rant_transport_build(i_RantBump *b, const i_RantT
           memset(peer_agen, 0, (size_t)max_peers*sizeof(uint8_t*));
           memset(peer_attrs, 0, (size_t)max_peers*sizeof(uint8_t*));
           memset(peer_seen_version, 0, (size_t)max_peers*sizeof(uint32_t));
+          memset(peer_unmappable, 0, (size_t)max_peers*sizeof(uint16_t));
           memset(peer_pub_bitmap,0,(size_t)max_peers*bitmap_len); memset(peer_sub_bitmap,0,(size_t)max_peers*bitmap_len);
           memset(peer_sub_reliable,0,(size_t)max_peers*bitmap_len);
           memset(peer_sub_claim,0,(size_t)max_peers*bitmap_len);
@@ -206,6 +208,7 @@ i_RantTransportState *i_rant_transport_migrate(i_RantTransportState *old, void *
 
     nw->reader_epoch_counter = old->reader_epoch_counter;
     nw->frag = old->frag;
+    nw->interest_truncated = old->interest_truncated;
     memcpy(nw->peer_ids,     old->peer_ids,     (size_t)omp*sizeof(uint32_t));
     memcpy(nw->peer_used,    old->peer_used,    omp);
     memcpy(nw->peer_dormant, old->peer_dormant, omp);
@@ -249,6 +252,7 @@ i_RantTransportState *i_rant_transport_migrate(i_RantTransportState *old, void *
         nw->peer_agen[p]      = old->peer_agen[p];
         nw->peer_attrs[p]     = old->peer_attrs[p];
         nw->peer_seen_version[p] = old->peer_seen_version[p];
+        nw->peer_unmappable[p] = old->peer_unmappable[p];
     }
     /* re enqueue every used lane and force a full sweep next poll, so timers re arm */
     for (c=0;c<onc;c++)
@@ -544,6 +548,7 @@ void i_rant_transport_peer_add(i_RantTransportState *st, uint32_t id, uint16_t p
         if (st->peer_attrs[free])  memset(st->peer_attrs[free],0,st->peer_index_len[free]);
     }
     st->peer_seen_version[free]=0;   /* seen versions are per incarnation */
+    st->peer_unmappable[free]=0;
     /* nothing matches until apply_peer_interest feeds the peer's interest */
 }
 
@@ -567,7 +572,7 @@ void i_rant_transport_peer_remove(i_RantTransportState *st, uint32_t id){
         st->peer_index[s]=NULL; st->peer_astate[s]=NULL; st->peer_agen[s]=NULL;
         st->peer_attrs[s]=NULL; st->peer_index_len[s]=0;
     }
-    st->peer_seen_version[s]=0;
+    st->peer_seen_version[s]=0; st->peer_unmappable[s]=0;
     st->peer_used[s]=0; st->peer_dormant[s]=0;
     memset(&st->peer_rtt[s], 0, sizeof(i_RantPeerRtt));
 #ifdef RANT_SHM
@@ -909,6 +914,8 @@ void i_rant_transport_apply_peer_interest(i_RantTransportState *st, uint32_t pee
     memset(peer_sub_reliable,0,st->bitmap_len);
     amap   = n ? i_rant_peer_index_ensure(st, peer_slot, n) : NULL;
     astate = amap ? st->peer_astate[peer_slot] : NULL;
+    if (astate)   /* the refusals are this apply's, re derived from the entries below */
+        for (a=0;a<st->peer_index_len[peer_slot];a++) astate[a] = (uint8_t)(astate[a] & ~RANT__AST_REF_MASK);
     /* the generation data is consumed by the entry loop with a merge cursor, the rate
        values are applied after the rematch once lanes exist */
     sec = i_rant_interest_sections(d, blob.len, entries_len);
@@ -965,6 +972,7 @@ void i_rant_transport_apply_peer_interest(i_RantTransportState *st, uint32_t pee
         {   /* the kind gate: the same name under another kind is refused, never cross wired */
             uint8_t their_kind = (uint8_t)((flags & RANT__INT_KIND_MASK) >> RANT__INT_KIND_SHIFT);
             if (their_kind != topic->kind){
+                astate[a] |= RANT__AST_REF_KIND;
                 i_rant_transport_fire_event(st, RANT_E_KIND_MISMATCH, cidx, peer_id, 0, 0);
                 continue;
             }
@@ -975,8 +983,10 @@ void i_rant_transport_apply_peer_interest(i_RantTransportState *st, uint32_t pee
         if (their_pub){   /* their offered qos against our subscription */
             int ours_sub = i_rant_role_subs(topic->role);
             if (ours_sub && topic->qos.reliability==RANT_RELIABLE && !rel){
+                astate[a] |= RANT__AST_REF_QOS;
                 i_rant_transport_fire_event(st, RANT_E_QOS_INCOMPATIBLE, cidx, peer_id, 0, 0);
             } else if (!(astate[a] & RANT__AST_READ_OK)){
+                astate[a] |= RANT__AST_REF_READ;
                 i_rant_transport_fire_event(st, RANT_E_SCHEMA_MISMATCH, cidx, peer_id, 1, 0);
             } else {
                 i_rant_bit_set(peer_pub_bitmap,(uint32_t)cidx);
@@ -984,6 +994,7 @@ void i_rant_transport_apply_peer_interest(i_RantTransportState *st, uint32_t pee
         }
         if (their_sub){                                /* their requested qos, for our writer */
             if (!(astate[a] & RANT__AST_WRITE_OK)){
+                astate[a] |= RANT__AST_REF_WRITE;
                 i_rant_transport_fire_event(st, RANT_E_SCHEMA_MISMATCH, cidx, peer_id, 0, 0);
             } else {
                 i_rant_bit_set(peer_sub_bitmap,(uint32_t)cidx);
@@ -991,6 +1002,7 @@ void i_rant_transport_apply_peer_interest(i_RantTransportState *st, uint32_t pee
             }
         }
     }
+    st->peer_unmappable[peer_slot] = (uint16_t)(unmappable > 0xFFFFu ? 0xFFFFu : unmappable);
     if (unmappable)   /* never silent: those topics can never deliver here */
         i_rant_transport_fire_event(st, RANT_E_INTEREST_OVERFLOW, 0, peer_id, 0, unmappable);
     {   /* the handle gate's claims: every topic the peer subscribes, pending or decided, even
@@ -1138,11 +1150,14 @@ uint16_t i_rant_transport_meta_build(i_RantTransportState *st, uint8_t *out, uin
     (void)shm_capable; (void)host;
 #endif
     out[off-1] = interest_external ? RANT__META_IFLAG_EXTERNAL : 0u;
+    st->interest_truncated = 0;
     if (interest_external) return off;     /* the bootstrap: locator sized, always one datagram */
     interest_len = i_rant_transport_build_interest(st, out + off, cap - off);
     len = (size_t)off + interest_len;
-    if (interest_len == 0)    /* did not fit: never silent */
+    if (interest_len == 0){   /* did not fit: never silent */
+        st->interest_truncated = 1;
         i_rant_transport_fire_event(st, RANT_E_META_TRUNCATED_INTEREST, 0, 0, 0, 0);
+    }
     return (uint16_t)len;
 }
 
@@ -1655,6 +1670,33 @@ int i_rant_transport_topic_retire(i_RantTransportState *st, uint16_t topic_index
     memset(&topic->repair_stats, 0, sizeof topic->repair_stats);
     /* the caller re advertises: the slot now rides the announce as a hole */
     return 0;
+}
+
+
+void i_rant_transport_troubles(i_RantTransportState *st, i_RantTroubleFn fn, void *user){
+    uint16_t p; uint32_t a;
+    if (!st || !fn) return;
+    if (st->interest_truncated) fn(user, RANT_E_META_TRUNCATED_INTEREST, 0, 0, 0, 0);
+    for (p=0;p<st->cfg.max_peers;p++){
+        const uint8_t *as = st->peer_astate[p];
+        uint32_t id = st->peer_ids[p];
+        if (!st->peer_used[p]) continue;
+        if (st->peer_unmappable[p]) fn(user, RANT_E_INTEREST_OVERFLOW, id, 0, 0, st->peer_unmappable[p]);
+        if (!as) continue;
+        for (a=0;a<st->peer_index_len[p];a++){
+            uint8_t r = (uint8_t)(as[a] & RANT__AST_REF_MASK);
+            uint16_t c;
+            if (!r) continue;
+            c = st->peer_index[p][a];
+            if (c >= st->cfg.n_topics) continue;
+            /* a topic of ours that parked or retired since refuses nothing */
+            if (!i_rant_topic_announced(&st->topics[c]) || st->topics[c].role == RANT_INACTIVE) continue;
+            if (r & RANT__AST_REF_KIND)  fn(user, RANT_E_KIND_MISMATCH, id, c, 0, 0);
+            if (r & RANT__AST_REF_QOS)   fn(user, RANT_E_QOS_INCOMPATIBLE, id, c, 1, 0);
+            if (r & RANT__AST_REF_READ)  fn(user, RANT_E_SCHEMA_MISMATCH, id, c, 1, 0);
+            if (r & RANT__AST_REF_WRITE) fn(user, RANT_E_SCHEMA_MISMATCH, id, c, 0, 0);
+        }
+    }
 }
 
 

@@ -129,6 +129,16 @@ static void disc_core_checks(void){
     CHECK(dc_wire_n==2 && dc_up_n==0 && i_rant_discovery_peer_count(st)==0,
              "disc-core: another wire version is reported once per source, never a peer (reports=%u ups=%u)",
              dc_wire_n, dc_up_n);
+    {   /* each such source is held as a trouble for the node's condition, until it goes quiet */
+        i_RantDiscoveryTrouble tr[RANT_DISCOVERY_TROUBLE_MAX]; int nt;
+        nt = i_rant_discovery_troubles(st, tr, RANT_DISCOVERY_TROUBLE_MAX);
+        CHECK(nt==2 && tr[0].kind==RANT_E_WIRE_VERSION && tr[1].kind==RANT_E_WIRE_VERSION
+                 && tr[0].value==(uint32_t)(RANT_WIRE_VERSION+1) && tr[0].heard_us==5000,
+                 "disc-core: each source on another wire is a trouble, refreshed when heard (n=%d)", nt);
+        i_rant_discovery_update(st, 6000 + 3u*c.announce_interval_us + 1u, out, sizeof out);
+        nt = i_rant_discovery_troubles(st, tr, RANT_DISCOVERY_TROUBLE_MAX);
+        CHECK(nt==0, "disc-core: a trouble quiet for three announce intervals ages out (n=%d)", nt);
+    }
 
     /* A peer heard on two paths is known from either, as a multihomed host sends from
        whichever its route picks. A path two peers share is neither's, and a path quiet for
