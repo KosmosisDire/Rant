@@ -625,6 +625,8 @@ def handles():
     try:
         p = a.publisher("shared", Velocity, reliable=True)
         s = a.subscriber("shared", Velocity, lambda t: None, reliable=True)
+        vel = a.schema(Velocity).hash
+        check("both handles report their schema", p.schema.hash == vel and s.schema.hash == vel)
         try:
             a.publisher("shared", Reading)
             check("a different schema on a live name is refused", False)
@@ -638,6 +640,7 @@ def handles():
         check("publisher matched the peer's subscriber", p.match_count == 1)
         check("the sibling subscriber closes", s.close())
         check("close is idempotent", s.close())
+        check("a closed handle reports no schema", s.schema is None)
         check("the publisher still sends", p.send(Velocity(dx=3.0)) == rant.SendStatus.OK)
         deadline = time.time() + 5.0
         while time.time() < deadline and not got:

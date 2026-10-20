@@ -1893,10 +1893,10 @@ class Entity:
                    progress_schema_hash=e.progress_schema_hash, generation=e.generation)
 
 
-def _current_schema(node, st, read, local):
-    # the schema a handle uses now, read under a pass: its own, keeping its class, or the one
-    # it adopted. None once closed
-    with st.use(node._gate) as h:
+def _current_schema(node, use, read, local):
+    # the schema a handle uses now, read under the handle's own pass: its own, keeping its
+    # class, or the one it adopted. None once closed
+    with use as h:
         ptr = read(h) if h else None
     if not ptr:
         return None
@@ -2033,8 +2033,8 @@ class _Topic:
             return h is not None and self._node._lib.rant_topic_refresh(h) == 1
 
     def schema(self):
-        return _current_schema(self._node, self._h if self._open else None,
-                               self._node._lib.rant_topic_schema, self._schema)
+        return _current_schema(self._node, self._use(), self._node._lib.rant_topic_schema,
+                               self._schema)
 
     def match_count(self):
         with self._use() as h:
@@ -3199,13 +3199,13 @@ class _Function:
     def request_schema(self):
         """The request schema in use now, None when untyped. A reflect_from_mesh handle
                 reports what it adopted."""
-        return _current_schema(self._node, self._st, self._node._lib.rant_function_request_schema,
+        return _current_schema(self._node, self._use(), self._node._lib.rant_function_request_schema,
                                self._req_schema)
 
     @property
     def response_schema(self):
         """The response schema in use now, as request_schema."""
-        return _current_schema(self._node, self._st, self._node._lib.rant_function_response_schema,
+        return _current_schema(self._node, self._use(), self._node._lib.rant_function_response_schema,
                                self._rsp_schema)
 
     def refresh(self):
@@ -3354,7 +3354,7 @@ class TaskDefinition(_Function):
     @property
     def progress_schema(self):
         """The progress schema in use now, as request_schema."""
-        return _current_schema(self._node, self._st, self._node._lib.rant_function_progress_schema,
+        return _current_schema(self._node, self._use(), self._node._lib.rant_function_progress_schema,
                                self._prg_schema)
 
     def __init__(self, node, name, handler, req_schema=None, prg_schema=None,
@@ -3398,7 +3398,7 @@ class RemoteTask(_Function):
     @property
     def progress_schema(self):
         """The progress schema in use now, as request_schema."""
-        return _current_schema(self._node, self._st, self._node._lib.rant_function_progress_schema,
+        return _current_schema(self._node, self._use(), self._node._lib.rant_function_progress_schema,
                                self._prg_schema)
 
     def __init__(self, node, name, req_schema=None, prg_schema=None, rsp_schema=None,
@@ -3526,7 +3526,7 @@ class Variable:
     def schema(self):
         """The schema in use now, None when untyped. A reflect_from_mesh variable reports
                 what it adopted."""
-        return _current_schema(self._node, self._st, self._node._lib.rant_variable_schema,
+        return _current_schema(self._node, self._use(), self._node._lib.rant_variable_schema,
                                self._schema)
 
     def _use(self):
