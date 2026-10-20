@@ -317,10 +317,17 @@ interest change, our own re advertise) or when an aging problem is due:
   `i_rant_transport_troubles` walks them, skipping our topics that parked or retired. The
   schema text is the node core's stored reason, empty under `RANT_NO_DIAG`.
 - Sources that are not peers (`wire_version`, `peer_refused`, and `peer_too_big` for a
-  blob) live in discovery's trouble ring of `RANT_DISCOVERY_TROUBLE_MAX` (16), refreshed on
-  every datagram and reported until 3 announce intervals of silence. The ring is also the
-  once per source dedup of the wire version event. A dynamic node grows instead of
-  refusing, so it reports a refusal or a blob only past what it can reach.
+  blob) live in discovery's trouble table of `RANT_DISCOVERY_TROUBLE_MAX` (16), refreshed
+  on every datagram and reported until 3 announce intervals of silence. A newcomer takes
+  only a stale entry's place, never a live one's, else it marks the kind as having more,
+  so on a mesh of 500 old nodes the tracked set and the status stay still instead of
+  cycling every announce. The table is also the once per source dedup of the events: the
+  wire version event fires per tracked source and once when the first one past it is
+  heard, and the node drops repeats of a refused or too big source the same way
+  (`i_rant_discovery_trouble_new`), since discovery still fires those every announce as
+  the growth signal of a dynamic node. A dynamic node grows instead of refusing, so it
+  reports a refusal or a blob only past what it can reach. A source taken as a peer leaves
+  the refused entries at once.
 - `peer_too_big` also covers a peer whose index map failed to allocate, `bridge` reads the
   tunnel's link state each look while down, since a reconnect says nothing, and
   `announce_overflow` is the transport's `interest_truncated`.
@@ -330,10 +337,15 @@ interest change, our own re advertise) or when an aging problem is due:
 
 A key is the kind alone or `kind/` plus 8 hex digits of FNV-1a over what names the problem
 (peer id, topic index and side, an address's bytes, an entity name), so it stays fixed
-while the problem lasts. Rant conditions count against `RANT_STATUS_RANT_MAX`, not the
-app's cap, and the last slot is kept for `more_problems`, which counts what did not fit.
-The scratch per kind holds ids only, under 100 bytes, since the poll pass may run on a
-small embedded stack.
+while the problem lasts. The form is a contract readers rely on, and grouping never parses
+it: each source reports into one kind's set. Past `RANT_STATUS_KIND_MAX` (3) problems a
+kind folds at its end into one condition under the kind alone, with the count, " or more"
+when the source tracks fewer than it heard, and the first problem's text. The fold sweeps
+the kind's listed conditions before it puts its own, so it always has their room. Rant
+conditions count against `RANT_STATUS_RANT_MAX`, not the app's cap, and the last slot is
+kept for `more_problems`, which counts what did not fit. The scratch per kind holds the
+ids and the first text, under 150 bytes, since the poll pass may run on a small embedded
+stack.
 
 `rant_node_set_log_queue` and `rant_node_set_status_queue` give their handle a ring and the
 queue after creation, the one handle queue that changes. A binding sets it before widening

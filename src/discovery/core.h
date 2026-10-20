@@ -122,7 +122,9 @@ size_t         i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, void *ou
                                       RantAddr *to);
 /* A source this node heard but cannot take as a peer: another wire version (value is its
  * version), a full table (RANT_E_PEER_REFUSED) or a blob too big (value is its bytes). */
-#define RANT_DISCOVERY_TROUBLE_MAX 16
+#ifndef RANT_DISCOVERY_TROUBLE_MAX
+#define RANT_DISCOVERY_TROUBLE_MAX 16   /* sources tracked, the rest only counted as more */
+#endif
 typedef struct {
     RantAddr      addr;
     uint64_t      heard_us;
@@ -133,6 +135,11 @@ typedef struct {
 /* The troubles heard within three announce intervals, up to max into out. Returns the count. */
 int            i_rant_discovery_troubles(const i_RantDiscoveryState *st,
                                       i_RantDiscoveryTrouble *out, int max);
+/* 1 while sources of kind past the table's size were heard within three announce intervals. */
+int            i_rant_discovery_trouble_more(const i_RantDiscoveryState *st, RantErrorKind kind);
+/* 1 when the trouble the last datagram noted was news: a source not tracked before, or the
+ * first heard past the table's size. The node reports repeats of a trouble only once. */
+int            i_rant_discovery_trouble_new(const i_RantDiscoveryState *st);
 /* Live peers, DROPPED entries excluded. */
 uint16_t       i_rant_discovery_peer_count(const i_RantDiscoveryState *st);
 /* Table capacity, the slot range for peer_addr and peer_at. */

@@ -795,6 +795,9 @@ static void i_rant_node_on_event(const RantEvent *ev){
             return;
         }
     }
+    /* a refused or too big source repeats every announce, so the app hears each one once */
+    if (ev->kind == RANT_ERROR && (ev->error == RANT_E_PEER_REFUSED || ev->error == RANT_E_PEER_META_TOO_BIG)
+        && !i_rant_discovery_trouble_new(i_rant_discovery_state(n->discovery))) return;
     { RantEvent e = *ev; i_rant_node_emit(n, &e); }
 }
 
@@ -1882,6 +1885,15 @@ static const char *const i_rant_problem_names[I_RANT_PROB_KINDS] = {
 };
 #define I_RANT_PROB_MORE "more_problems"   /* the reserved last slot: a count of the unlisted */
 
+/* a kind folded into one condition: its count, " or more" when the source tracks fewer */
+static const char *const i_rant_problem_folds[I_RANT_PROB_KINDS] = {
+    "%u%s nodes speak another wire version", "%u%s nodes turned away, the peer table is full",
+    "%u%s peers are too big for this node", "%u%s matches refused for their schemas",
+    "%u%s matches refused for their reliability", "%u%s names are another kind of entity at a peer",
+    "%u%s bridge problems", "%u%s announce problems", "%u%s rivals provide or own this node's entities",
+    "%u%s variables are forced, forcing is for debugging only"
+};
+
 uint32_t i_rant_node_problem_id(const void *bytes, size_t len){
     const uint8_t *p = (const uint8_t*)bytes; uint32_t h = 2166136261u; size_t i;
     for (i = 0; i < len; i++){ h ^= p[i]; h *= 16777619u; }   /* FNV-1a */
@@ -1905,40 +1917,28 @@ static int64_t i_rant_problem_key_id(RantString key, const char *name){
 }
 
 void i_rant_node_problems_begin(RantNode *n, i_RantProblems *ps, i_RantProblemKind kind){
-    ps->n = n; ps->kind = (uint8_t)kind; ps->n_ids = 0; ps->over = 0;
+    ps->n = n; ps->kind = (uint8_t)kind; ps->more = 0; ps->worst = 0;
+    ps->n_ids = 0; ps->count = 0; ps->over = 0; ps->first[0] = '\0';
 }
 
-void i_rant_node_problem(i_RantProblems *ps, uint32_t id, RantLevel level, const char *text){
+/* Puts one of ps's conditions when the status has room, the last slot kept for the count of
+ * the unlisted. 1 when it holds the condition. */
+static int i_rant_node_problem_put(i_RantProblems *ps, const char *key, RantLevel level, const char *text){
     RantNode *n = ps->n;
-    char key[RANT_STATUS_KEY_MAX + 1];
-    uint32_t listed;
-    uint16_t i;
-    if (!n || !n->status_topic) return;
-    for (i = 0; i < ps->n_ids; i++) if (ps->ids[i] == id) return;     /* one condition per id */
-    if (id) snprintf(key, sizeof key, "%s/%08x", i_rant_problem_names[ps->kind], (unsigned)id);
-    else    snprintf(key, sizeof key, "%s", i_rant_problem_names[ps->kind]);
-    /* a new key leaves the last slot to the count of the unlisted */
-    listed = i_rant_node_status_count(n, RANT_ORIGIN_RANT)
-           - (i_rant_node_status_find(n, RANT_ORIGIN_RANT, rant_cstr(I_RANT_PROB_MORE)) >= 0 ? 1u : 0u);
-    if (ps->n_ids >= RANT_STATUS_RANT_MAX - 1
-        || (i_rant_node_status_find(n, RANT_ORIGIN_RANT, rant_cstr(key)) < 0
-            && listed >= (uint32_t)RANT_STATUS_RANT_MAX - 1u)
-        || i_rant_node_status_put(n, RANT_ORIGIN_RANT, rant_cstr(key), level, rant_cstr(text), 0) != RANT_OK){
-        ps->over++;
-        return;
-    }
-    ps->ids[ps->n_ids++] = id;
+    uint32_t listed = i_rant_node_status_count(n, RANT_ORIGIN_RANT)
+                    - (i_rant_node_status_find(n, RANT_ORIGIN_RANT, rant_cstr(I_RANT_PROB_MORE)) >= 0 ? 1u : 0u);
+    if (i_rant_node_status_find(n, RANT_ORIGIN_RANT, rant_cstr(key)) < 0
+        && listed >= (uint32_t)RANT_STATUS_RANT_MAX - 1u) return 0;
+    return i_rant_node_status_put(n, RANT_ORIGIN_RANT, rant_cstr(key), level, rant_cstr(text), 0) == RANT_OK;
 }
 
-void i_rant_node_problems_end(i_RantProblems *ps){
+/* Drops ps's kind's conditions whose id went unreported. */
+static void i_rant_node_problems_sweep(i_RantProblems *ps){
     RantNode *n = ps->n;
-    const RantSchema *s;
-    uint32_t i = 0, total = 0;
-    int k;
+    const RantSchema *s = n->status_schema;
+    uint32_t i = 0;
     char path[48];
-    if (!n || !n->status_topic) return;
-    s = n->status_schema;
-    for (;;){      /* clear this kind's conditions that went unreported */
+    for (;;){
         RantBytes m = i_rant_node_status_view(n);
         uint32_t count = m.len ? rant_get_array_count(m, s, "conditions") : 0;
         int64_t id; uint16_t j; int keep = 0;
@@ -1950,6 +1950,43 @@ void i_rant_node_problems_end(i_RantProblems *ps){
         if (id < 0){ i++; continue; }
         for (j = 0; j < ps->n_ids && !keep; j++) keep = ps->ids[j] == (uint32_t)id;
         if (keep) i++; else i_rant_node_status_remove(n, (int)i);
+    }
+}
+
+void i_rant_node_problem(i_RantProblems *ps, uint32_t id, RantLevel level, const char *text){
+    RantNode *n = ps->n;
+    char key[RANT_STATUS_KEY_MAX + 1];
+    uint16_t i;
+    if (!n || !n->status_topic) return;
+    for (i = 0; i < ps->n_ids; i++) if (ps->ids[i] == id) return;     /* one condition per id */
+    if (++ps->count == 1) snprintf(ps->first, sizeof ps->first, "%s", text);
+    if ((uint8_t)level > ps->worst) ps->worst = (uint8_t)level;
+    if (ps->count > RANT_STATUS_KIND_MAX) return;      /* the kind folds at its end */
+    if (id) snprintf(key, sizeof key, "%s/%08x", i_rant_problem_names[ps->kind], (unsigned)id);
+    else    snprintf(key, sizeof key, "%s", i_rant_problem_names[ps->kind]);
+    if (i_rant_node_problem_put(ps, key, level, text)) ps->ids[ps->n_ids++] = id;
+    else ps->over++;
+}
+
+void i_rant_node_problems_end(i_RantProblems *ps){
+    RantNode *n = ps->n;
+    uint32_t total = 0;
+    int k;
+    if (!n || !n->status_topic) return;
+    if (ps->count > RANT_STATUS_KIND_MAX || ps->more){
+        /* many of a kind are one condition under the kind alone: the count and the first */
+        char text[RANT_STATUS_TEXT_MAX + 1];
+        int len = snprintf(text, sizeof text, i_rant_problem_folds[ps->kind], (unsigned)ps->count,
+                           ps->more ? " or more" : "");
+        if (len >= 0 && (size_t)len < sizeof text)
+            snprintf(text + len, sizeof text - (size_t)len, ". First: %s", ps->first);
+        ps->n_ids = 0; ps->over = 0;
+        i_rant_node_problems_sweep(ps);     /* its listed ones go first, so the fold has room */
+        if (i_rant_node_problem_put(ps, i_rant_problem_names[ps->kind], (RantLevel)ps->worst, text))
+            ps->ids[ps->n_ids++] = 0;
+        else ps->over = 1;
+    } else {
+        i_rant_node_problems_sweep(ps);
     }
     n->problem_over[ps->kind] = ps->over;
     for (k = 0; k < I_RANT_PROB_KINDS; k++) total += n->problem_over[k];
@@ -2058,6 +2095,7 @@ static void i_rant_node_problems_rebuild(RantNode *n){
         i_rant_node_problem(&one, i_rant_problem_addr_id(&tr[i].addr), RANT_LEVEL_ERROR, text);
         aging = 1;
     }
+    one.more = (uint8_t)i_rant_discovery_trouble_more(i_rant_discovery_state(n->discovery), RANT_E_WIRE_VERSION);
     i_rant_node_problems_end(&one);
     i_rant_node_problems_begin(n, &one, I_RANT_PROB_PEER_REFUSED);
     for (i = 0; i < nt && !n->alloc_dynamic; i++){   /* a dynamic table grows instead */
@@ -2068,6 +2106,8 @@ static void i_rant_node_problems_rebuild(RantNode *n){
         i_rant_node_problem(&one, i_rant_problem_addr_id(&tr[i].addr), RANT_LEVEL_ERROR, text);
         aging = 1;
     }
+    if (!n->alloc_dynamic)
+        one.more = (uint8_t)i_rant_discovery_trouble_more(i_rant_discovery_state(n->discovery), RANT_E_PEER_REFUSED);
     i_rant_node_problems_end(&one);
     i_rant_node_problems_begin(n, &big, I_RANT_PROB_PEER_TOO_BIG);
     for (i = 0; i < nt; i++){

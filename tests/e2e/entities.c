@@ -654,6 +654,26 @@ static int rc_kind(RantNode *n, const char *kind, char *texts, size_t cap, uint6
     return c;
 }
 
+/* n's Rant condition under exactly key, its text into text. 1 when it holds one */
+static int rc_exact(RantNode *n, const char *key, char *text, size_t cap){
+    RantBytes m = i_rant_node_status_view(n);
+    const RantSchema *s = n->status_schema;
+    uint32_t i, count = m.len ? rant_get_array_count(m, s, "conditions") : 0;
+    char path[48];
+    for (i = 0; i < count; i++){
+        RantString k;
+        snprintf(path, sizeof path, "conditions[%u].origin", (unsigned)i);
+        if (rant_get_uint(m, s, path) != RANT_ORIGIN_RANT) continue;
+        snprintf(path, sizeof path, "conditions[%u].key", (unsigned)i);
+        k = rant_get_string(m, s, path);
+        if (k.len != strlen(key) || memcmp(k.data, key, k.len) != 0) continue;
+        snprintf(path, sizeof path, "conditions[%u].text", (unsigned)i);
+        if (text && cap) st_copy(text, cap, rant_get_string(m, s, path));
+        return 1;
+    }
+    return 0;
+}
+
 /* Rant's own conditions: one per problem naming its peer, each gone exactly when its cause
  * is, a cap that keeps the app's room and counts the rest, and a refused peer that ages out. */
 static void rant_conditions_checks(void){
@@ -771,32 +791,74 @@ static void rant_conditions_checks(void){
       rant_node_poll(A, 0);
       CHECK(rc_kind(A, "forced", NULL, 0, NULL) == 0, "rantcond: retiring the variable clears it"); }
 
-    /* the cap: Rant lists RANT_STATUS_RANT_MAX - 1 and counts the rest, the app keeps its room */
+    /* many of a kind: past RANT_STATUS_KIND_MAX they fold into one condition under the kind
+       alone, counting them and quoting the first, and unfold when few are left */
     { RantTopic *ta[20], *tb[20]; char nm[32];
       for (k = 0; k < 20; k++){
           snprintf(nm, sizeof nm, "rc/m%02d", k);
           ta[k] = rant_node_create_topic(A, nm, RANT_PUB_ONLY, f32, &rel);
           tb[k] = rant_node_create_topic(B, nm, RANT_SUB_ONLY, f64, &rel);
       }
-      PUMP_UNTIL(A, B, 8000, rc_kind(A, "more_problems", NULL, 0, NULL) == 1);
+      PUMP_UNTIL(A, B, 8000, rc_exact(A, "schema_mismatch", tx, sizeof tx) && strstr(tx, "20 matches"));
       na = rc_kind(A, "schema_mismatch", NULL, 0, NULL);
-      k = rc_kind(A, "more_problems", tx, sizeof tx, NULL);
-      CHECK(na == RANT_STATUS_RANT_MAX - 1 && k == 1 && strstr(tx, "5 more problems"),
-               "rantcond: %d listed and the rest counted (%d: %s)", na, k, tx);
+      CHECK(na == 1 && rc_exact(A, "schema_mismatch", tx, sizeof tx)
+               && strstr(tx, "20 matches refused for their schemas. First: rc/m") && !rc_exact(A, "more_problems", NULL, 0),
+               "rantcond: 20 refusals are one condition (n=%d: %s)", na, tx);
       CHECK(rant_node_set_status(A, "app", RANT_LEVEL_INFO, "still room", NULL) == RANT_OK,
-               "rantcond: a full Rant list leaves the app its room");
+               "rantcond: the app keeps its room");
       (void)rant_node_clear_status(A, "app");
-      for (k = 0; k < 20; k++){ (void)rant_topic_retire(tb[k]); (void)rant_topic_retire(ta[k]); }
-      PUMP_UNTIL(A, B, 8000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0
-                              && rc_kind(A, "more_problems", NULL, 0, NULL) == 0);
-      CHECK(rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0 && rc_kind(A, "more_problems", NULL, 0, NULL) == 0,
-               "rantcond: the list and its count empty out"); }
+      for (k = 3; k < 20; k++){ (void)rant_topic_retire(tb[k]); (void)rant_topic_retire(ta[k]); }
+      PUMP_UNTIL(A, B, 8000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 3
+                              && !rc_exact(A, "schema_mismatch", NULL, 0));
+      na = rc_kind(A, "schema_mismatch", tx, sizeof tx, NULL);
+      CHECK(na == 3 && !rc_exact(A, "schema_mismatch", NULL, 0) && strstr(tx, "rc/m00 to rc-b"),
+               "rantcond: three left are listed one by one again (n=%d: %s)", na, tx);
+      for (k = 0; k < 3; k++){ (void)rant_topic_retire(tb[k]); (void)rant_topic_retire(ta[k]); }
+      PUMP_UNTIL(A, B, 8000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0, "rantcond: and none once fixed"); }
 
 done:
     if (C) rant_node_close(C,1);
     if (B) rant_node_close(B,1);
     if (A) rant_node_close(A,1);
     rant_allocator_reset(&ca); rant_allocator_reset(&ba); rant_allocator_reset(&aa); rant_allocator_reset(&ma);
+}
+
+/* The overall cap: six kinds of three problems list RANT_STATUS_RANT_MAX - 1 and count the
+ * rest in more_problems, and a kind of four folds into one. Driven through the sources' API. */
+static void rc_cap_checks(void){
+    static const i_RantProblemKind kinds[6] = {
+        I_RANT_PROB_WIRE_VERSION, I_RANT_PROB_PEER_REFUSED, I_RANT_PROB_PEER_TOO_BIG,
+        I_RANT_PROB_SCHEMA_MISMATCH, I_RANT_PROB_QOS_INCOMPATIBLE, I_RANT_PROB_KIND_MISMATCH };
+    RantAllocator a = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *N; i_RantProblems ps; char text[64], tx[256]; int k, j, listed;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+46; o.net.multicast_interface="127.0.0.1";
+    N = rant_node_open(&a, "rc-cap", NULL, NULL, &o);
+    CHECK(N != NULL, "rantcap: node opens");
+    if (!N) return;
+    for (k = 0; k < 6; k++){
+        i_rant_node_problems_begin(N, &ps, kinds[k]);
+        for (j = 0; j < RANT_STATUS_KIND_MAX; j++){
+            snprintf(text, sizeof text, "problem %d.%d", k, j);
+            i_rant_node_problem(&ps, (uint32_t)(k * 10 + j + 1), RANT_LEVEL_ERROR, text);
+        }
+        i_rant_node_problems_end(&ps);
+    }
+    listed = i_rant_node_status_count(N, RANT_ORIGIN_RANT);
+    CHECK(listed == RANT_STATUS_RANT_MAX && rc_exact(N, "more_problems", tx, sizeof tx)
+             && strstr(tx, "3 more problems"),
+             "rantcap: %d Rant conditions, the last counting the rest (%s)", listed, tx);
+    i_rant_node_problems_begin(N, &ps, kinds[0]);
+    for (j = 0; j < RANT_STATUS_KIND_MAX + 1; j++){
+        snprintf(text, sizeof text, "10.0.0.%d speaks wire version 6", j + 1);
+        i_rant_node_problem(&ps, (uint32_t)(j + 1), RANT_LEVEL_ERROR, text);
+    }
+    i_rant_node_problems_end(&ps);
+    CHECK(rc_kind(N, "wire_version", NULL, 0, NULL) == 1 && rc_exact(N, "wire_version", tx, sizeof tx)
+             && strstr(tx, "4 nodes speak another wire version. First: 10.0.0.1"),
+             "rantcap: a fourth of a kind folds it into one (%s)", tx);
+    rant_node_close(N, 0);
+    rant_allocator_reset(&a);
 }
 
 /* A static node with room for one peer turns the next away and holds a peer_refused
@@ -839,6 +901,7 @@ static const TestCase cases[] = {
     { "status", status_checks },
     { "rant_conditions", rant_conditions_checks },
     { "rant_refused", rc_refused_checks },
+    { "rant_cap", rc_cap_checks },
 };
 
 TEST_MAIN(cases)

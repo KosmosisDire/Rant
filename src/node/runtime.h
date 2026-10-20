@@ -302,6 +302,9 @@ RANT_API RantTopic       *rant_node_log_topic(RantNode *n);
 #ifndef RANT_STATUS_RANT_MAX
 #define RANT_STATUS_RANT_MAX 16     /* Rant's own conditions per node, the last a count of any more */
 #endif
+#ifndef RANT_STATUS_KIND_MAX
+#define RANT_STATUS_KIND_MAX 3      /* Rant's problems of one kind listed apart, more fold into one */
+#endif
 typedef struct {
     uint8_t clearable;   /* 1 = another node may clear it with rant_node_clear_peer_status */
 } RantStatusOpts;
@@ -420,8 +423,9 @@ void     i_rant_node_sys_error (RantNode *n, RantErrorKind error, RantTopic *top
 /* A peer's node name, "unknown-peer" when it has none. */
 RantString i_rant_node_sys_peer_name(RantNode *n, uint32_t peer);
 /* Rant's own conditions, one kind per problem source (spec/node.md). A source reports its
- * whole current set of one kind between begin and end, and end clears what went unreported.
- * id names one problem within its kind, 0 when the kind has one. Lock held. */
+ * whole current set of one kind between begin and end, and end clears what went unreported
+ * and folds a kind past RANT_STATUS_KIND_MAX into one. id names one problem, 0 when the kind
+ * has one. Lock held. */
 typedef enum {
     I_RANT_PROB_WIRE_VERSION, I_RANT_PROB_PEER_REFUSED, I_RANT_PROB_PEER_TOO_BIG,
     I_RANT_PROB_SCHEMA_MISMATCH, I_RANT_PROB_QOS_INCOMPATIBLE, I_RANT_PROB_KIND_MISMATCH,
@@ -431,9 +435,12 @@ typedef enum {
 typedef struct {
     RantNode *n;
     uint8_t   kind;
+    uint8_t   more;          /* set by the source: it saw more than it tracks, so count is a floor */
+    uint8_t   worst;         /* the most serious level reported */
     uint16_t  n_ids;
-    uint32_t  over;          /* problems past RANT_STATUS_RANT_MAX */
-    uint32_t  ids[RANT_STATUS_RANT_MAX];
+    uint32_t  count, over;   /* problems reported, and listed ones past RANT_STATUS_RANT_MAX */
+    uint32_t  ids[RANT_STATUS_KIND_MAX];
+    char      first[96];     /* the first problem's text, which a folded condition quotes */
 } i_RantProblems;
 void     i_rant_node_problems_begin(RantNode *n, i_RantProblems *ps, i_RantProblemKind kind);
 void     i_rant_node_problem       (i_RantProblems *ps, uint32_t id, RantLevel level, const char *text);

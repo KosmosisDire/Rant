@@ -140,6 +140,32 @@ static void disc_core_checks(void){
         CHECK(nt==0, "disc-core: a trouble quiet for three announce intervals ages out (n=%d)", nt);
     }
 
+    /* Twenty such sources: the table keeps the first it can hold while they are heard, never
+       evicting a live one, and counts the rest as more. Each tracked source is reported once
+       and the rest once, so a big mesh on another wire is no event flood. */
+    {   i_RantDiscoveryTrouble tr[RANT_DISCOVERY_TROUBLE_MAX]; int nt, k, round;
+        uint8_t ip[4] = {10,0,1,0};
+        st = i_rant_discovery_init(mem,sizeof mem,&c);
+        i_rant_discovery_update(st, 1000, out, sizeof out);
+        dc_wire_n = 0;
+        for (round = 0; round < 3; round++)
+            for (k = 0; k < RANT_DISCOVERY_TROUBLE_MAX + 4; k++){
+                ip[3] = (uint8_t)(k + 1);
+                n = dc_mk(buf,(uint8_t)(20 + k),0,99,6002,1); buf[4]=(uint8_t)(RANT_WIRE_VERSION+1);
+                dc_feed(st,ip,6730,buf,n,(uint64_t)2000 + (uint64_t)round*500000u + (uint64_t)k);
+            }
+        nt = i_rant_discovery_troubles(st, tr, RANT_DISCOVERY_TROUBLE_MAX);
+        CHECK(nt==RANT_DISCOVERY_TROUBLE_MAX && tr[0].addr.ip[3]==1
+                 && i_rant_discovery_trouble_more(st, RANT_E_WIRE_VERSION)
+                 && dc_wire_n==RANT_DISCOVERY_TROUBLE_MAX + 1u,
+                 "disc-core: a full table keeps its live sources and counts the rest once (n=%d reports=%u)",
+                 nt, dc_wire_n);
+        i_rant_discovery_update(st, 2000 + 2u*500000u + 100u + 3u*c.announce_interval_us, out, sizeof out);
+        CHECK(i_rant_discovery_troubles(st, tr, RANT_DISCOVERY_TROUBLE_MAX)==0
+                 && !i_rant_discovery_trouble_more(st, RANT_E_WIRE_VERSION),
+                 "disc-core: the table and its count of more age out together");
+    }
+
     /* A peer heard on two paths is known from either, as a multihomed host sends from
        whichever its route picks. A path two peers share is neither's, and a path quiet for
        three announce intervals stops counting. */

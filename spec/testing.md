@@ -76,7 +76,7 @@ program in this order.
 | `e2e.queues` | queue, pull, callback_queue, callback_pattern |
 | `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate |
 | `e2e.tasks` | task, task_matrix |
-| `e2e.entities` | reflect_dropped, churn, log_and_meta, status, rant_conditions, rant_refused |
+| `e2e.entities` | reflect_dropped, churn, log_and_meta, status, rant_conditions, rant_refused, rant_cap |
 | `e2e.matchwait` | matchwait |
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
@@ -265,9 +265,12 @@ What each phase pins, grouped by layer.
 - Rant conditions: a writer with two ill fitting readers holds one schema_mismatch per
   reader naming it, published with origin Rant, and loses exactly one when that reader
   leaves. QoS, kind, duplicate authority and a forced variable each raise and clear with
-  their cause. 20 refusals list 15 and count 5 in more_problems while the app keeps its
-  room. A static node with room for one peer holds peer_refused naming the address and
-  drops it once the turned away node goes quiet.
+  their cause. 20 refusals fold into one condition under the kind alone, and three left
+  are listed one by one again, while the app keeps its room. Six kinds of three list 15
+  and count 3 in more_problems. A static node with room for one peer holds peer_refused
+  naming the address and drops it once the turned away node goes quiet. In the discovery
+  core 20 sources on another wire keep the first 16 tracked, report 17 times in all, and
+  age out together.
 - Handle gate: 20 callers, each with a req schema whose wire (1325 to 1350 bytes) fills
   the first detail page so rsp follows on a second, call right after creating the remote.
   Every call is answered and no handler runs before its rsp lane. Without the gate 19 of

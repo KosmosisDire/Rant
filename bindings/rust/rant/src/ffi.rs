@@ -51,6 +51,7 @@ pub const RANT_STATUS_KEY_MAX: u32 = 48;
 pub const RANT_STATUS_TEXT_MAX: u32 = 160;
 pub const RANT_STATUS_MAX: u32 = 32;
 pub const RANT_STATUS_RANT_MAX: u32 = 16;
+pub const RANT_STATUS_KIND_MAX: u32 = 3;
 pub const RANT_META_NODE: u32 = 1;
 pub const RANT_META_PROC: u32 = 2;
 pub const RANT_META_TOPICS: u32 = 4;

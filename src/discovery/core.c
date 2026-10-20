@@ -54,8 +54,11 @@ struct i_RantDiscoveryState {
     uint16_t        targeted_cursor;  /* round robin over peers for poll_targeted */
     i_RantDiscoverySubnet local_nets[RANT_DISCOVERY_MAX_SUBNETS];
     uint8_t       n_local_nets;
-    i_RantDiscoveryTrouble trouble[RANT_DISCOVERY_TROUBLE_MAX];  /* a ring, the oldest goes */
-    uint8_t       n_trouble, next_trouble;
+    /* troubled sources, a live one never evicted, so the set stays stable on a big mesh */
+    i_RantDiscoveryTrouble trouble[RANT_DISCOVERY_TROUBLE_MAX];
+    uint8_t       n_trouble;
+    uint8_t       trouble_new;      /* the last note was news, see i_rant_discovery_trouble_new */
+    uint64_t      trouble_more_us[3];   /* when a source past the table was last heard, by kind */
     uint64_t      now_us;         /* the latest time fed in, which ages the paths */
     i_RantDiscoveryPeer    *peers;
 };
@@ -367,35 +370,67 @@ static int i_rant_discovery_on_path(const i_RantDiscoveryState *st, const i_Rant
     return 0;
 }
 
-/* Records a troubled source heard now, so the node can hold a condition while it lasts.
-   1 when it was not already known. */
+/* a trouble or a past the table mark is live while heard within three announce intervals */
+static int i_rant_discovery_trouble_live(const i_RantDiscoveryState *st, uint64_t heard_us){
+    return heard_us && st->now_us - heard_us <= (uint64_t)st->cfg.announce_interval_us * 3u;
+}
+
+static int i_rant_discovery_trouble_kind(RantErrorKind kind){
+    return kind == RANT_E_WIRE_VERSION ? 0 : kind == RANT_E_PEER_REFUSED ? 1 : 2;
+}
+
+/* Records a troubled source heard now, so the node can hold a condition while it lasts. A
+   full table takes a newcomer only in a stale entry's place, else it is counted as more.
+   1 when it was news, see i_rant_discovery_trouble_new. */
 static int i_rant_discovery_trouble_note(i_RantDiscoveryState *st, RantErrorKind kind,
                                          const RantAddr *a, uint32_t value, uint32_t peer){
-    i_RantDiscoveryTrouble *t; int i;
+    i_RantDiscoveryTrouble *t = NULL; int i;
+    uint64_t *more = &st->trouble_more_us[i_rant_discovery_trouble_kind(kind)];
     for (i = 0; i < st->n_trouble; i++){
         t = &st->trouble[i];
         if (t->kind == kind && i_rant_discovery_addr_is(&t->addr, a->ip, a->ip_len, a->port)){
             t->heard_us = st->now_us; t->value = value; t->peer = peer;
-            return 0;
+            return st->trouble_new = 0;
         }
     }
-    t = &st->trouble[st->next_trouble];
+    t = NULL;
+    if (st->n_trouble < RANT_DISCOVERY_TROUBLE_MAX) t = &st->trouble[st->n_trouble++];
+    else for (i = 0; i < st->n_trouble && !t; i++)
+        if (!i_rant_discovery_trouble_live(st, st->trouble[i].heard_us)) t = &st->trouble[i];
+    if (!t){
+        st->trouble_new = (uint8_t)!i_rant_discovery_trouble_live(st, *more);
+        *more = st->now_us;
+        return st->trouble_new;
+    }
     t->addr = *a; t->heard_us = st->now_us; t->value = value; t->peer = peer; t->kind = kind;
-    st->next_trouble = (uint8_t)((st->next_trouble + 1) % RANT_DISCOVERY_TROUBLE_MAX);
-    if (st->n_trouble < RANT_DISCOVERY_TROUBLE_MAX) st->n_trouble++;
-    return 1;
+    return st->trouble_new = 1;
+}
+
+/* A source taken as a peer is no longer turned away. */
+static void i_rant_discovery_trouble_drop(i_RantDiscoveryState *st, RantErrorKind kind, const RantAddr *a){
+    int i;
+    for (i = 0; i < st->n_trouble; i++)
+        if (st->trouble[i].kind == kind && i_rant_discovery_addr_is(&st->trouble[i].addr, a->ip, a->ip_len, a->port))
+            st->trouble[i].heard_us = 0;
 }
 
 int i_rant_discovery_troubles(const i_RantDiscoveryState *st, i_RantDiscoveryTrouble *out, int max){
     int i, n = 0;
-    uint64_t live = (uint64_t)st->cfg.announce_interval_us * 3u;
     for (i = 0; i < st->n_trouble && n < max; i++)
-        if (st->now_us - st->trouble[i].heard_us <= live) out[n++] = st->trouble[i];
+        if (i_rant_discovery_trouble_live(st, st->trouble[i].heard_us)) out[n++] = st->trouble[i];
     return n;
 }
 
+int i_rant_discovery_trouble_more(const i_RantDiscoveryState *st, RantErrorKind kind){
+    return i_rant_discovery_trouble_live(st, st->trouble_more_us[i_rant_discovery_trouble_kind(kind)]);
+}
+
+int i_rant_discovery_trouble_new(const i_RantDiscoveryState *st){
+    return st->trouble_new;
+}
+
 /* A datagram of this domain on another wire version. Its sender announces every interval, so
-   each source is reported once while the trouble table remembers it. */
+   each source is reported once while the trouble table remembers it, and once for the rest. */
 static void i_rant_discovery_wire_mismatch(i_RantDiscoveryState *st, const RantAddr *src,
                                            uint8_t version){
     RantAddr a;
@@ -498,6 +533,7 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
             i_rant_discovery_fire_error(st, RANT_E_PEER_REFUSED, 0, &addr, 0);
             return;
         }
+        i_rant_discovery_trouble_drop(st, RANT_E_PEER_REFUSED, &addr);
         keep_meta = st->peers[idx].meta;            /* the blob buffer survives the reset */
         keep_cap  = st->peers[idx].meta_cap;
         keep_user = st->peers[idx].user;

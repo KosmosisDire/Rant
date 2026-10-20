@@ -231,27 +231,36 @@ rant_node_set_status(n, "drive2", RANT_LEVEL_ERROR, "drive 2 tripped on overcurr
 if (ev->kind == RANT_STATUS_CLEARED && !strcmp(ev->detail, "drive2")) reset_drive(2);
 ```
 
-Rant raises its own conditions, origin `RANT_ORIGIN_RANT`, never clearable, one per
-problem. Each holds while its cause does and clears itself. The key is the kind, then `/`
-and an id for the problem, and the text names the peer, topic or address.
+Rant raises its own conditions, origin `RANT_ORIGIN_RANT`, never clearable. Each holds
+while its cause does and clears itself, and its text names the peer, topic or address.
 
-| Key | Level | Holds while |
+- A key is `kind/` and 8 hex digits for one problem, or the kind alone for the kind as a
+  whole. The kinds are the table's. Split a Rant key at its first `/` to get its kind. App
+  keys have no such form.
+- Up to `RANT_STATUS_KIND_MAX` (3) problems of a kind are listed one by one. More fold into
+  one condition under the kind alone, which counts them and quotes the first, such as
+  `wire_version`: "500 nodes speak another wire version. First: 10.0.0.5:6733 ...".
+
+| Kind | Level | Holds while |
 |---|---|---|
-| `wire_version/…` | Error | a node at that address speaks another wire version |
-| `peer_refused/…` | Error | the peer table is full and a node keeps being turned away |
-| `peer_too_big/…` | Error | a peer's announce or topic map is too big for this node |
-| `schema_mismatch/…` | Error | a match is refused because the schemas do not fit |
-| `qos_incompatible/…` | Error | a reliable subscriber here meets a best effort publisher |
-| `kind_mismatch/…` | Error | the name is another kind of entity at a peer |
+| `wire_version` | Error | a node at that address speaks another wire version |
+| `peer_refused` | Error | the peer table is full and a node keeps being turned away |
+| `peer_too_big` | Error | a peer's announce or topic map is too big for this node |
+| `schema_mismatch` | Error | a match is refused because the schemas do not fit |
+| `qos_incompatible` | Error | a reliable subscriber here meets a best effort publisher |
+| `kind_mismatch` | Error | the name is another kind of entity at a peer |
 | `bridge` | Error | the link to `net.bridge` is down |
 | `announce_overflow` | Error | this node's topic list does not fit its announce |
-| `duplicate_authority/…` | Warn | another node also provides or owns this entity |
-| `forced/…` | Warn | a variable this node owns is forced |
-| `more_problems` | Error | more problems than the `RANT_STATUS_RANT_MAX` (16) slots hold |
+| `duplicate_authority` | Warn | another node also provides or owns this entity |
+| `forced` | Warn | a variable this node owns is forced |
+| `more_problems` | Error | more than the `RANT_STATUS_RANT_MAX` (16) slots hold |
 
 A source that is not a peer (`wire_version`, `peer_refused`) clears 3 announce intervals
-after it goes quiet. Rant's conditions have their own cap, so they never take the app's
-`RANT_STATUS_MAX`. Each problem also fires its `RANT_ERROR` event once, as before.
+after it goes quiet. Rant tracks `RANT_DISCOVERY_TROUBLE_MAX` (16) such sources and counts
+any more as "16 or more", so a big mesh costs no memory past them. Each tracked source
+fires its `RANT_ERROR` event once, and the rest once together. Rant's conditions have their
+own cap, so they never take the app's `RANT_STATUS_MAX`. All three caps are build options:
+a small target such as an ESP32 can define them lower.
 
 ### Meta
 
