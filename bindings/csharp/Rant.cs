@@ -6470,15 +6470,15 @@ namespace Rant
         {
             int esz = ScalarSize[elem];
             if ((elem == U8 || elem == I8) && val is byte[] u8) return u8;   // raw-blob fast path
-            // fast path: a primitive array whose element width already matches the wire
-            if (val is Array a && a.GetType().GetElementType() is Type et && et.IsPrimitive
-                && et != typeof(bool) && System.Runtime.InteropServices.Marshal.SizeOf(et) == esz)
+            // fast path: a primitive array whose element type is exactly the wire kind's type
+            if (val is Array a && a.GetType().GetElementType() is Type et && et != typeof(bool)
+                && ScalarKind.TryGetValue(et, out byte ek) && ek == elem)
             {
                 byte[] outb = new byte[a.Length * esz];
                 Buffer.BlockCopy(a, 0, outb, 0, outb.Length);
                 return outb;
             }
-            // general: any enumerable of numbers (dict-source lists, mismatched widths),
+            // general: any enumerable of numbers (dict-source lists, other element types),
             // each converted to the wire element kind, little-endian
             var items = new List<object>();
             if (val is System.Collections.IEnumerable en) foreach (var x in en) items.Add(x);

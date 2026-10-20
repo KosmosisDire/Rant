@@ -877,6 +877,31 @@ static class Program
         return ok;
     }
 
+    // A scalar array of another element type converts to the field's kind, never reinterprets.
+    static bool ArrayConvert()
+    {
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+
+        using var node = new RantNode("ac", Local(12, Threading.Manual));
+        var s = node.Schema("Conv { f: f32[], i: i32[], u: u8[], w: u32[], d: f64[], g: f32[2], h: i16[] }");
+        var back = (Dictionary<string, object>)s.Decode(s.Encode(new Dictionary<string, object>
+        {
+            { "f", new int[] { 1, -2, 3 } }, { "i", new float[] { 1f, -2f, 3f } },
+            { "u", new int[] { 1, 2, 250 } }, { "w", new int[] { 1, 2, 3 } },
+            { "d", new float[] { 0.5f, 1.5f } }, { "g", new int[] { 7, 8 } },
+            { "h", new ushort[] { 1, 2 } },
+        }));
+        Check("int[] for f32[]", back["f"] is float[] f && f.Length == 3 && f[0] == 1f && f[1] == -2f && f[2] == 3f);
+        Check("float[] for i32[]", back["i"] is int[] i && i.Length == 3 && i[0] == 1 && i[1] == -2 && i[2] == 3);
+        Check("int[] for u8[]", back["u"] is byte[] u && u.Length == 3 && u[2] == 250);
+        Check("int[] for u32[]", back["w"] is uint[] w && w.Length == 3 && w[1] == 2);
+        Check("float[] for f64[]", back["d"] is double[] d && d.Length == 2 && d[0] == 0.5 && d[1] == 1.5);
+        Check("int[] for f32[2]", back["g"] is float[] g && g.Length == 2 && g[0] == 7f && g[1] == 8f);
+        Check("ushort[] for i16[]", back["h"] is short[] h && h.Length == 2 && h[1] == 2);
+        return ok;
+    }
+
     // Bare types as whole schemas: no struct wrapper, plain values through Send and the handler.
     static bool ValueRoots()
     {
@@ -1803,6 +1828,7 @@ static class Program
         ("layout", LayoutLeg),
         ("round_trip", RoundTrip),
         ("value_roots", ValueRoots),
+        ("array_convert", ArrayConvert),
         ("std_types", StdTypes),
         ("pose", PoseLeg),
         ("value_roots_live", ValueRootsLive),

@@ -119,7 +119,8 @@ ends of a C# pair derive the same name, and another language must spell it.
 
 A `Dictionary<string, object>` encodes against any compiled schema by field name, the keys
 in any spelling, nested structs as nested dictionaries and a struct array as a list of
-them. Without a C# type a message decodes the same way, the keys in wire spelling.
+them. A numeric array of another element type converts to the field's, as an `int[]` for an
+`f32[]` field. Without a C# type a message decodes the same way, the keys in wire spelling.
 
 Every typed handle also takes its schema as an optional argument: `schema:` on a topic or
 variable, `requestSchema:`, `responseSchema:` and `progressSchema:` on a function or task.
