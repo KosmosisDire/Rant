@@ -196,8 +196,10 @@ done:
     rant_allocator_reset(&aa); rant_allocator_reset(&ba);
 }
 
+#ifndef RANT_NO_SHM
 /* A pull reader still holding the view of a big message keeps the next one, below the
- * default cap and above it, since a view pins the ring against the grow the next needs */
+ * default cap and above it, since a view pins the ring against the grow the next needs.
+ * Shared memory only: over UDP a burst this big outgrows the receive buffer Linux allows. */
 static uint8_t pv_payload[1536u * 1024u];
 static void pull_view_checks(void){
     const uint32_t sizes[2] = { 600u * 1024u, 1536u * 1024u };
@@ -208,7 +210,6 @@ static void pull_view_checks(void){
     memset(&o, 0, sizeof o); memset(&m, 0, sizeof m);
     o.domain = TEST_DOMAIN+54; o.discovery.max_peers = 4; o.max_topics = 4;
     o.net.multicast_interface = "127.0.0.1";
-    o.net.recv_buffer_bytes = 8u << 20;   /* without shm a 1.5 MB burst must fit the socket */
     a = rant_node_open(&aa, "pv-a", NULL, NULL, &o);
     b = rant_node_open(&ba, "pv-b", NULL, NULL, &o);
     memset(&co, 0, sizeof co);
@@ -239,6 +240,7 @@ done:
     if (b) rant_node_close(b, 1);
     rant_allocator_reset(&aa); rant_allocator_reset(&ba);
 }
+#endif
 
 /* The callback queue phases (spec/testing.md): a pub only A and a sub only B whose topics
  * cq/x and cq/y share one queue while cq/in stays inline. */
@@ -686,7 +688,9 @@ static void queued_retire_checks(void){
 static const TestCase cases[] = {
     { "queue", queue_checks },
     { "pull", pull_checks },
+#ifndef RANT_NO_SHM
     { "pull_view", pull_view_checks },
+#endif
     { "callback_queue", callback_queue_checks },
     { "callback_pattern", callback_pattern_checks },
     { "queued_retire", queued_retire_checks },

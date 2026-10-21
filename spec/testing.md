@@ -245,7 +245,8 @@ What each phase pins, grouped by layer.
   take_latest returns the newest and drops the rest, a timed take drives the loop, and
   take on a topic created without pull and pull with a queue are refused. A reader still
   holding the view of a 600 KB or 1.5 MB message keeps the next one, below the default cap
-  and above it.
+  and above it. Only with shared memory: over UDP a burst that big outgrows the receive
+  buffer Linux allows by default, so the `.noshm` twin leaves it out.
 
 ### Patterns
 
