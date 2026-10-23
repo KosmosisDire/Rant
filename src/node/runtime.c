@@ -2652,8 +2652,8 @@ static int i_rant_node_topic_unsettled(RantNode *n, RantTopic *h, uint64_t now){
     return 0;
 }
 
-/* The match wait's predicate: done once matching converged, so the send reaches every
- * candidate that matches and not only the first. The match count is re read every call. */
+/* The match wait's predicate: done at the first match or once matching converged, so a
+ * send never waits on a match beyond the first. The match count is re read every call. */
 typedef struct {
     RantTopic *h;
     uint16_t   index;
@@ -2665,6 +2665,7 @@ static int i_rant_node_match_wait_done(RantNode *n, void *ctx, uint64_t now, uin
     i_RantMatchWait *c = (i_RantMatchWait*)ctx;
     *deadline = c->deadline;
     c->matched = i_rant_transport_publisher_match_count(n->transport, c->index);
+    if (c->matched) return 1;
     /* past the window the topic reads as converged, so a wait that ran out would never
        time out: there only a convergence memoized before counts */
     if (now >= c->deadline) return c->h->resolve_epoch == n->match_epoch;
@@ -2750,17 +2751,18 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
     size_t len = ts_bytes + cap_bytes + hdr.len + data.len;
     int guarded = 0;   /* the unsent eviction check runs after the wait */
 
-    /* a send while matching still forms waits for it to converge, so it reaches every peer
-       that wants it, not only those that matched first. A topic that retains history is
-       exempt, since its history replays. See spec/interest.md */
-    if (topic_index < n->max_topics && !(q && q->reliability == RANT_RELIABLE && q->catch_up > 0)){
+    /* a send to zero subscribers while a match forms waits for the first, never once one
+       matched: latency once matched comes first. A topic that retains history is exempt,
+       since its history replays. See spec/interest.md */
+    if (!matched && topic_index < n->max_topics
+        && !(q && q->reliability == RANT_RELIABLE && q->catch_up > 0)){
         RantTopic *h = n->handles[topic_index];
         if (h && i_rant_role_pubs(h->role)
               && i_rant_node_topic_unsettled(n, h, i_rant_plat_now_us())){
             if (may_wait && n->match_wait_us){
                 matched = i_rant_node_match_wait(n, topic_index, h, 1);
                 q = i_rant_transport_topic_qos(n->transport, topic_index);     /* the arena may move */
-            } else if (!matched){
+            } else {
                 RantEvent e; memset(&e, 0, sizeof e);
                 e.kind = RANT_ERROR; e.error = RANT_E_UNMATCHED_SEND;
                 e.topic = topic_index; e.topic_name = i_rant_node_topic_name(n, topic_index);

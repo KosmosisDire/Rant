@@ -261,8 +261,8 @@ RANT_API int        rant_topic_drain(RantTopic *topic, int timeout_ms);
 /* Subscribers matched now. */
 RANT_API int        rant_topic_match_count(RantTopic *topic);
 
-/* The send path match wait: a send while a match is still resolving blocks up to
- * opts.match_wait_ms, so it reaches every peer that wants it. See docs/topics.md. */
+/* The send path match wait: a send that would reach nobody while a match is still
+ * resolving blocks up to opts.match_wait_ms. See docs/topics.md and spec/interest.md. */
 /* Unresolved candidate matches right now. 0 = converged for everyone known. */
 RANT_API int        rant_topic_pending_count(RantTopic *topic);
 /* 1 when a send would not wait: matched, or converged with nobody to wait for. The async

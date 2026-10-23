@@ -431,9 +431,9 @@ What each phase pins, grouped by layer.
   heals through reliable repair once its verdict lands, so delivery is writer
   authoritative. A first send waits for an already present subscriber. A disabled wait
   drops at once but loudly with RANT_E_UNMATCHED_SEND. With one subscriber matched at once
-  and another that answers the fetch 300 ms later, the first send waits and reaches both,
-  and with the other never answering it waits out the window, reaches the one, and fires no
-  RANT_E_UNMATCHED_SEND. The ports the wire tap drops by are the ones the nodes bound.
+  and another that answers the fetch 300 ms later, a send never waits: it reaches the one
+  matched, fires no RANT_E_UNMATCHED_SEND, and the later one misses it. The ports the wire
+  tap drops by are the ones the nodes bound.
 
 ### End to end
 
@@ -475,8 +475,8 @@ What each phase pins, grouped by layer.
   hold 30 unrelated publishers matches a subscriber that opens last, turning nobody away.
   A static node with a static bulk opens smaller than the same node without one, a crowd
   leaves its main flat, a late subscriber still matches, and its meta answer reports the
-  bulk. A runtime topic nobody wants
-  sends at once, and one three peers want reaches all three.
+  bulk. A runtime topic nobody wants sends at once, and one three peers want reaches the
+  first match with its first send and all three once they matched.
 
 ### Benches
 

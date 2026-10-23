@@ -189,20 +189,22 @@ static void matchwait_checks(void){
 
 #ifdef RANT_THREADS
     /* (e) A PARTIAL MATCH: one subscriber matches at once, another answers the publisher's
-       fetch only 300 ms later. The first send waits for it, so it reaches both. */
+       fetch only 300 ms later. A send with one matched never waits for the other: it commits
+       at once, reaches the first, is no unmatched send, and the later one misses it. */
     { RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0), ca = rant_allocator_heap(0);
       RantNodeOpts o; RantNode *A, *B, *C; RantTopic *at = NULL, *bt = NULL, *ct = NULL;
       i_RantThread later; int started = 0;
+      uint64_t t0 = 0, took = 0;
       memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+27; o.disable_shm=1; o.discovery.max_peers=4;
       o.discovery.announce_interval_us=200000;
       o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
-      mw_part_got[0] = mw_part_got[1] = 0;
+      mw_part_got[0] = mw_part_got[1] = 0; mw_unmatched = 0;
       o.user_data = &mw_part_got[0];
       B = rant_node_open(&ba, "mw-part-b", mw_part_message, NULL, &o);
       o.user_data = &mw_part_got[1];
       C = rant_node_open(&ca, "mw-part-c", mw_part_message, NULL, &o);
       o.user_data = NULL;
-      A = rant_node_open(&aa, "mw-part-a", NULL, NULL, &o);
+      A = rant_node_open(&aa, "mw-part-a", NULL, mw_on_event, &o);
       if (B) bt = rant_node_create_topic(B, "mw-part", RANT_SUB_ONLY, NULL, &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
       if (C) ct = rant_node_create_topic(C, "mw-part", RANT_SUB_ONLY, NULL, &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
       CHECK(A && B && C && bt && ct, "matchwait: partial trio up");
@@ -217,51 +219,19 @@ static void matchwait_checks(void){
           WAIT_UNTIL(3000, at && rant_topic_match_count(at) >= 1);
           CHECK(at && rant_topic_match_count(at) == 1 && test_atomic_load(&mw_part_got[1]) == 0,
                 "matchwait: one subscriber matched, the other still answering (%d)", at ? rant_topic_match_count(at) : -1);
+          t0 = i_rant_plat_now_us();
           if (at) rant_topic_send(at, rant_bytes("partial", 7), NULL);
-          WAIT_UNTIL(3000, test_atomic_load(&mw_part_got[0]) && test_atomic_load(&mw_part_got[1]));
-          CHECK(test_atomic_load(&mw_part_got[0]) == 1 && test_atomic_load(&mw_part_got[1]) == 1,
-                "matchwait: the first send waits for the one still answering and reaches both (%lld, %lld)",
+          took = i_rant_plat_now_us() - t0;
+          WAIT_UNTIL(3000, at && rant_topic_match_count(at) == 2);
+          test_sleep_ms(300);       /* time for a late copy of the send, which must not come */
+          CHECK(took < 50000u && test_atomic_load(&mw_unmatched) == 0,
+                "matchwait: a send with one subscriber matched never waits (%.1f ms, unmatched %lld)",
+                took / 1000.0, test_atomic_load(&mw_unmatched));
+          CHECK(test_atomic_load(&mw_part_got[0]) == 1 && test_atomic_load(&mw_part_got[1]) == 0,
+                "matchwait: it reaches the matched one, the later one misses it (%lld, %lld)",
                 test_atomic_load(&mw_part_got[0]), test_atomic_load(&mw_part_got[1]));
       }
       if (started) i_rant_plat_thread_join(&later);
-      if (A) rant_node_close(A,1);
-      if (B) rant_node_close(B,1);
-      if (C) rant_node_close(C,1);
-    }
-
-    /* (f) the one still answering never does: the send waits out the window and reaches the
-       other, which is no unmatched send */
-    { RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0), ca = rant_allocator_heap(0);
-      RantNodeOpts o; RantNode *A, *B, *C; RantTopic *at = NULL, *bt = NULL, *ct = NULL;
-      uint64_t t0 = 0, took = 0;
-      memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+28; o.disable_shm=1; o.discovery.max_peers=4;
-      o.discovery.announce_interval_us=200000;
-      o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
-      mw_part_got[0] = mw_part_got[1] = 0; mw_unmatched = 0;
-      o.user_data = &mw_part_got[0];
-      B = rant_node_open(&ba, "mw-mute-b", mw_part_message, NULL, &o);
-      o.user_data = &mw_part_got[1];
-      C = rant_node_open(&ca, "mw-mute-c", mw_part_message, NULL, &o);
-      o.user_data = NULL; o.match_wait_ms = 300;    /* ends while the silent one's asks still run */
-      A = rant_node_open(&aa, "mw-mute-a", NULL, mw_on_event, &o);
-      if (B) bt = rant_node_create_topic(B, "mw-mute", RANT_SUB_ONLY, NULL, &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
-      if (C) ct = rant_node_create_topic(C, "mw-mute", RANT_SUB_ONLY, NULL, &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
-      CHECK(A && B && C && bt && ct, "matchwait: mute trio up");
-      if (A && B && C && bt && ct){
-          rant_node_start(A); rant_node_start(B);
-          for (t = 0; t < 150 && i_rant_discovery_peer_count(i_rant_discovery_state(A->discovery)) < 2; t++)
-              rant_node_poll(C, 10);
-          for (t = 0; t < 100; t++) rant_node_poll(C, 10);
-          at = rant_node_create_topic(A, "mw-mute", RANT_PUB_ONLY, NULL, &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
-          WAIT_UNTIL(3000, at && rant_topic_match_count(at) >= 1);
-          t0 = i_rant_plat_now_us();
-          if (at) rant_topic_send(at, rant_bytes("mute", 4), NULL);
-          took = i_rant_plat_now_us() - t0;
-          WAIT_UNTIL(2000, test_atomic_load(&mw_part_got[0]));
-          CHECK(test_atomic_load(&mw_part_got[0]) == 1 && test_atomic_load(&mw_unmatched) == 0 && took < 1500000u,
-                "matchwait: one that never answers bounds the wait, and reaching the other is no unmatched send (%lld, %lld, %.0f ms)",
-                test_atomic_load(&mw_part_got[0]), test_atomic_load(&mw_unmatched), took / 1000.0);
-      }
       if (A) rant_node_close(A,1);
       if (B) rant_node_close(B,1);
       if (C) rant_node_close(C,1);

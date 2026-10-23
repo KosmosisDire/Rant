@@ -226,10 +226,13 @@ and one that meets it asks us.
 Matching a fresh topic to a present peer costs an announce and detail round trip after
 create. A send in that window would commit to zero subscribers. The node closes the
 window: discovery sends our blob at open and peers answer with theirs, create's replay re fires peer up so detail requests
-queue and the kick sends them, and a send WHILE a candidate is resolving blocks until
-matching converges, so it reaches every candidate that matches and not only the first,
-bounded by `opts.match_wait_ms`. That holds with some subscribers matched already: a send
-to the first matches alone would be lost to a later one, which joins after it. Resolving means a
+queue and the kick sends them, and a send that would reach zero subscribers WHILE a
+candidate is resolving blocks until the first match forms or matching converges, bounded by
+`opts.match_wait_ms`. A send never waits once a subscriber matched, since latency once
+matched comes first: a subscriber that matches after the first misses the sends before it,
+unless the topic keeps history. Waiting for every candidate held each publisher's first
+sends at least the gather's quiet window, and the backlog that built up then overflowed
+peers at high rates. Resolving means a
 held announce nominates this topic but its verdicts are in flight, a record without a slot
 is being fetched, or the post open gather has not settled. The gather settles on matches
 alone, never peers coming and going, and ends one match window after open at the latest,
