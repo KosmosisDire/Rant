@@ -74,7 +74,7 @@ These scale with real traffic and real matches, never with worst case tables.
 | reader reassembly and bitmap, two slots | per matched lane, on receive | grows to the largest message received |
 | per peer index and verdict maps | peer's first matched topic | that peer's advertised entry count |
 | announce blob | first build | actual overlay size |
-| discovery records | open, doubling as peers arrive | records x sizeof(i_RantDiscoveryRecord) |
+| discovery records | open, doubling as peers arrive up to `max_records` | records x sizeof(i_RantDiscoveryRecord) |
 | per peer interest and detail buffers | on fetch | actual length, freed on GONE |
 
 A grown buffer never shrinks. Freeing returns the block to the reuse pool. The sparse

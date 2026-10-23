@@ -17,7 +17,7 @@ opening datagram, the first announce after a change (`RANT_DISCOVERY_BLOB_RESEND
 every targeted send. Every announce carries the blob's version. A steady state announce
 without the blob but with a newer version makes the peer fetch the blob. So a connection forms from the announces the nodes already send, with no per
 topic handshake and no steady state metadata heartbeat. `on_peer_up` fires only on a
-change (first contact, address, blob, revive), never per announce.
+change (admission, address, blob, revive), never per announce.
 
 Every datagram stays under one MTU. Nothing ever relies on IP reassembly, because lwIP
 class stacks often cannot reassemble and a dropped fragmented announce would leave the
@@ -94,27 +94,73 @@ need it, and the uuid self filter drops the echoes.
 
 Every peer heard has a record: its uuid and local id, its locator, name and last heard time,
 the version of its blob judged and the highest it advertised, and the work owed to it. Two
-hash indexes find a record by uuid and by id. What only a connected peer needs sits in a
+hash indexes find a record by uuid and by id. What only a matched peer needs sits in a
 slot: the blob, the node's per peer scratch, the source paths and the locator's freshness.
-`max_peers` counts slots. Every record takes a slot, so a peer is refused exactly when every
-slot holds a live one.
+`max_peers` counts slots and `max_records` bounds the records, never fewer than the slots.
+The slot hooks (`on_peer_up`, `on_peer_down`) hear only of slotted peers, so the transport
+and node core see only them, and a source maps back to a slotted peer only. `on_peer_seen`
+hears of every record: up at first contact and on a return, down at the drop or when it goes
+while ACTIVE, each time before the slot hooks.
 
 Records are referenced by index, never by pointer, because a store on the hook moves when it
-doubles. Without a hook the store sits in the arena at `max_peers` records and never grows.
-With one, `max_peers` records are taken at init and the store doubles as it fills. A grow
-moves the slots into the new arena and leaves the records where they are, so only a core with
-the hook migrates, and never to fewer slots.
+doubles. Without a hook the store sits in the arena at `max_records` and never grows. With
+one, `max_peers` records are taken at init and the store doubles as it fills, up to
+`max_records`. The node leaves the bound open on a pool that grows and keeps one record per
+slot on a fixed pool. A grow moves the slots into the new arena and leaves the records where
+they are, so only a core with the hook migrates, and never to fewer slots.
+
+## Judging on arrival
+
+The admit hook says of a blob whether its peer takes a slot: NO (nothing of ours to meet),
+YES (a match) or LOAN (a blob that cannot be judged alone, as an external interest whose
+pages come through a slot). A blob is judged as it arrives: always for a record without a
+slot, at a newer version for one with. Without a hook every peer is a match and takes a slot
+when first heard, blob or not.
+
+| verdict | without a slot | with one |
+|---|---|---|
+| NO | the record is kept, judged at that version | given back: the slot hooks see GONE, the app nothing |
+| YES | a free slot, else the oldest DROPPED peer's, else a live loan's. None: refused | kept |
+| LOAN | a free or DROPPED slot only. None: it waits, unreported | kept as a loan |
+
+A refused match is noted under its id for the node's condition and refused again each time
+it is heard. When a slot opens (given back, a slotted peer gone or dropped, a migrate), as
+many records that wanted one as there are spare slots are fetched, and their answers take
+the slots. `rejudge` judges one slotted peer again by the blob it holds, `replay_peers` every
+live one: a slot that meets nothing is given back, a loan that now meets us is told.
+
+A match the peer may not know of is told by an ask (Owed work and copies), repeated until any
+datagram marked ONE comes from it: a new match, or a held one whose version skipped one, since
+the peer may have given us back on the version we missed. Consecutive versions need no
+answer: the pairings are symmetric, so a pair's verdicts agree at each step. Nor does a match
+from a datagram marked ONE (its sender holds our blob or asks for it) or ALL (an observer
+never assumes).
+
+A first contact heard without a blob is judged by assumption when its change age exceeds the
+time since our own last change by 250 ms, the margin alone before our opening: it judged our
+current blob since, and asks if it meets us. Else it is fetched. Our last change, not our
+open, orders a pair, so of two nodes meeting the one that changed earlier fetches and they
+never both assume. It is a comparison, so an age past our uptime never wraps. An observer
+assumes nothing, since it admits peers that would not admit it, nor does a core without a
+hook, nor one that refused a peer without a record or forgot one for room: that peer may hold
+us and would be a first contact again.
+
+A blob past our bound, cut by the OS or bigger than `meta_cap`, leaves the header, which
+counts and makes the record. Its fetch stops until a newer version, or a migrate that grew
+the bound, which fetches that peer alone.
 
 ## Owed work and copies
 
-A record can be owed two targeted sends, each carrying our blob and ONE:
+A record can be owed three targeted sends, each carrying our blob and ONE. A fetch and a
+match are asks, sent with REQ at once, then every 250 ms, four sends:
 
 | owed | sent as | when |
 |---|---|---|
-| reply | BLOB\|ONE | A solicit marked UNI, ONE or ALL: at once. A group solicit: within one ms per live peer, placed by a hash of both uuids, so a crowd's answers spread. A record's first blob judged, from a datagram not marked ONE: at once, the match answer, since its sender may lack ours. Every record keeps its slot, so a later change needs none |
-| fetch | REQ\|ONE\|BLOB | While the peer advertises a version past the one judged: at once, then every 250 ms, four sends. A datagram after the last starts over, with one send when the last fetch went unanswered, as from a peer that refused us. The blob at the advertised version ends it, and so does one too big to hold, since a retry brings the same bytes |
+| reply | BLOB\|ONE | A solicit marked UNI, ONE or ALL: at once. A group solicit: within one ms per live peer, placed by a hash of both uuids, so a crowd's answers spread |
+| fetch | REQ\|ONE\|BLOB | While the peer advertises a version past the one judged, unless that one is too big to hold, and while a slot opened for it or the bound grew. A datagram after the last send starts over, with one send when the last ask went unanswered, as from a peer that refused us. The blob judged ends it, and so does one too big to hold, since a retry brings the same bytes |
+| match | REQ\|ONE\|BLOB | A match the peer may not know of (Judging on arrival). Any datagram marked ONE from the peer ends it: it holds our blob, or asks and our reply follows |
 
-A fetch carries our blob, so it settles a reply owed too. The records owed work sit on one
+An ask carries our blob, so it settles a reply owed too. The records owed work sit on one
 due queue in the record store, oldest first, so a poll walks only them. Each send settles
 its record or moves it to the tail with a later due time, and a peer that drops is owed
 nothing. Nothing goes out before the opening.
@@ -130,14 +176,14 @@ peers end with their slots. A targeted send starts none either.
 | state | meaning |
 |---|---|
 | ACTIVE | heard within `peer_timeout_us` (12 s). Flow controlled, never evicted |
-| DROPPED | silent past the timeout. The slot and `local_id` are kept, `on_peer_down` fires with reason `RANT_DISCOVERY_DROP`, and the node marks it dormant: out of flow control, proxies and delivery position kept, inbound still processed |
+| DROPPED | silent past the timeout. The record, any slot and `local_id` are kept, `on_peer_seen` fires down and, for a slotted peer, `on_peer_down` with reason `RANT_DISCOVERY_DROP`. The node marks it dormant: out of flow control, proxies and delivery position kept, inbound still processed |
 | GONE | freed. A DROPPED peer silent past `gone_timeout_us` (2 min, 0 = never) is promoted on its own. A `BYE` is GONE at once |
 
 The same uuid returning resumes under the same `local_id`: `on_peer_up` fires again and
 the subscriber kept its `deliver_upto`, so the writer fills only the gap and replayed
 history is deduped (spec/transport.md, peer resume). A new uuid is a fresh peer and gets
-`catch_up`. When a new peer needs a slot the oldest DROPPED peer is evicted (reason
-`RANT_DISCOVERY_GONE`). A table full of ACTIVE peers refuses the newcomer
+`catch_up`. When a match needs a slot, or a newcomer a record, the oldest DROPPED peer is
+forgotten (reason `RANT_DISCOVERY_GONE`). A table full of live peers refuses the newcomer
 (a `RANT_E_PEER_REFUSED` event) rather than evicting a live one.
 `timeout_us` is the single tolerance knob. A separate grace timer was rejected as part of
 the timeout. One helper fires PEER_DOWN then frees the slot for BYE, both eviction sweeps,

@@ -86,6 +86,16 @@ typedef struct {
     void             *user;          /* the peer's user scratch, or NULL */
 } i_RantDiscoveryPeerView;
 
+#define I_RANT_DISCOVERY_RECORDS_ANY 0xFFFFu   /* max_records bound only by the index range */
+
+/* What the admit hook says of a peer's blob. A loan is for a blob that cannot be judged
+ * alone: it takes only a free slot, never a match's, and rejudge settles it. */
+typedef enum {
+    I_RANT_ADMIT_NO = 0,    /* nothing of ours to meet: the record keeps no slot */
+    I_RANT_ADMIT_YES,       /* meets us: a slot, a loan's if none is free */
+    I_RANT_ADMIT_LOAN
+} i_RantDiscoveryAdmit;
+
 typedef struct {
     uint8_t  uuid[16];      /* unique per process instance */
     uint16_t domain_id;
@@ -93,16 +103,25 @@ typedef struct {
     uint32_t announce_interval_us;
     uint32_t peer_timeout_us;    /* drop a peer after this much silence */
     uint32_t gone_timeout_us;    /* DROPPED to GONE this long after the drop, 0 = never */
-    uint16_t max_peers;
+    uint16_t max_peers;     /* slots */
+    uint16_t max_records;   /* records held at most, at least max_peers. A hook store starts at max_peers */
     uint8_t  observer;      /* 1 = our solicits carry ALL, so every peer answers at once */
     RantString name;        /* advertised name, copied at init, cut to RANT_NODE_NAME_MAX */
     RantBytes meta;         /* the initial overlay. Must stay valid, .len <= meta_cap */
     uint16_t meta_cap;      /* per peer overlay capacity, 0 = RANT_DISCOVERY_META_MAX */
     uint16_t peer_user_bytes;    /* scratch reserved per peer, 0 = none */
-    /* The peer lifecycle hooks, both optional. up: first contact, an address or blob
-     * change, or a resume, with the locator and the overlay we hold. */
+    /* The slot hooks, both optional, for peers holding a slot. up: admission, an address or
+     * blob change, or a resume, with the locator and the overlay we hold. down GONE also
+     * when a slot is given back while the record stays. */
     void (*on_peer_up)(void *user, uint32_t peer, const RantAddr *addr, RantBytes meta);
     void (*on_peer_down)(void *user, uint32_t peer, i_RantDiscoveryDownReason reason);
+    /* Optional. Whether a peer takes a slot, judged from its blob at version: on arrival
+     * without a slot, on a newer version with one, and from rejudge and replay_peers. NULL
+     * admits every peer at first contact, blob or not. */
+    i_RantDiscoveryAdmit (*admit)(void *user, uint32_t peer, RantBytes meta, uint32_t version);
+    /* Optional. Every record, slotted or not: up at first contact and on a return, down at
+     * the drop or when it goes while ACTIVE. Fires before the slot hooks. */
+    void (*on_peer_seen)(void *user, uint32_t peer, const RantAddr *addr, int up);
     /* Optional, errors only: PEER_REFUSED (.ip, .port) and PEER_META_TOO_BIG (.peer, 0 for
      * an unknown one, .ip, .port, .too_big_bytes = the wanted size). .user is user below. */
     RantEventFn on_event;
@@ -143,9 +162,13 @@ size_t         i_rant_discovery_leave(i_RantDiscoveryState *st, void *out, size_
 /* Queues a one shot group solicit. The next update asks peers to answer with their blob,
  * spread over a few ms, or at once for an observer. */
 void           i_rant_discovery_solicit(i_RantDiscoveryState *st);
-/* Re fires peer up for every live peer with the blob we hold, so a caller that changed
- * its own advertised data re applies every peer's interest. */
+/* Judges every live slotted peer again by the blob we hold: one that no longer meets us
+ * gives its slot back, the rest re fire peer up. A caller that changed its own advertised
+ * data so re applies every peer's interest. */
 void           i_rant_discovery_replay_peers(i_RantDiscoveryState *st);
+/* Judges one slotted peer again by the blob we hold, as when what admit judges by came in
+ * after the blob. 1 when it gave its slot back. */
+int            i_rant_discovery_rejudge(i_RantDiscoveryState *st, uint32_t id);
 /* Replaces the overlay and bumps its version so peers re fetch it. meta must stay valid.
  * now_us dates the change, which every announce reports as its age. */
 void           i_rant_discovery_set_meta(i_RantDiscoveryState *st, RantBytes meta, uint64_t now_us);
@@ -160,7 +183,7 @@ void           i_rant_discovery_set_local_subnets(i_RantDiscoveryState *st,
  * Nothing goes out before the first update. */
 size_t         i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, uint64_t now_us,
                                       void *out, size_t cap, RantAddr *to);
-/* How many records the store holds room for, the index range of copy_addr. */
+/* How many records the store holds room for, the index range of copy_addr and known_at. */
 uint16_t       i_rant_discovery_record_cap(const i_RantDiscoveryState *st);
 /* 1 when record i takes a unicast copy of each announce, with its locator in *out. *uni is 1
  * when the copy must carry UNI: the record heard us by unicast lately, so it may hear no group. */
@@ -188,12 +211,24 @@ int            i_rant_discovery_trouble_more(const i_RantDiscoveryState *st, Ran
 /* 1 when the trouble the last datagram noted was news: a source not tracked before, or the
  * first heard past the table's size. The node reports repeats of a trouble only once. */
 int            i_rant_discovery_trouble_new(const i_RantDiscoveryState *st);
-/* Live peers, DROPPED entries excluded. */
+/* Live records, slotted or not, DROPPED ones excluded. */
 uint16_t       i_rant_discovery_peer_count(const i_RantDiscoveryState *st);
+/* Slots holding a record, DROPPED holders included. */
+uint16_t       i_rant_discovery_slots_used(const i_RantDiscoveryState *st);
+/* Live records without a slot whose blob is still owed to us, so nothing yet says whether
+ * they meet us. The match wait counts each as resolving. */
+uint16_t       i_rant_discovery_pending(const i_RantDiscoveryState *st);
+/* 1 when every live record was heard at or after since_us, 0 when one was not, -1 when
+ * none is live. */
+int            i_rant_discovery_heard_since(const i_RantDiscoveryState *st, uint64_t since_us);
 /* Table capacity, the slot range for peer_at. */
 uint16_t       i_rant_discovery_max_peers(const i_RantDiscoveryState *st);
 /* Read only view of the peer in a slot, ACTIVE or DROPPED. 1 if it holds one. */
 int            i_rant_discovery_peer_at(const i_RantDiscoveryState *st, uint16_t slot,
+                                      i_RantDiscoveryPeerView *out);
+/* The same for record i below record_cap, slotted or not. One without a slot has no blob
+ * or user scratch. */
+int            i_rant_discovery_known_at(const i_RantDiscoveryState *st, uint16_t i,
                                       i_RantDiscoveryPeerView *out);
 
 /* By id lookups, DROPPED peers included. The node keys its state on the id and uses
@@ -207,7 +242,7 @@ int            i_rant_discovery_addr_of_id(const i_RantDiscoveryState *st, uint3
                                       RantAddr *out);
 /* {NULL,0} for an unknown peer. */
 RantString       i_rant_discovery_peer_name(const i_RantDiscoveryState *st, uint32_t id);
-/* Maps a source back to a peer id: its locator, else its data port on a recent path. */
+/* Maps a source back to a slotted peer's id: its locator, else its data port on a recent path. */
 int            i_rant_discovery_id_for_addr(const i_RantDiscoveryState *st, const uint8_t *ip,
                                       uint8_t ip_len, uint16_t port, uint32_t *id);
 /* Deterministic RFC 9562 v8 uuid from a stable input plus a boot seed. Not cryptographic. */

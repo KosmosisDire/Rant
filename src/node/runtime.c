@@ -1133,6 +1133,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     dc.announce_interval_us = o.discovery.announce_interval_us;
     dc.peer_timeout_us = o.discovery.peer_timeout_us;
     dc.max_peers   = max_peers;
+    dc.max_records = alloc->page_realloc ? I_RANT_DISCOVERY_RECORDS_ANY : 0;   /* a fixed pool: one per slot */
     dc.observer    = o.fetch_details;
     dc.meta_cap = i_rant_meta_cap(max_topics);
     dc.peer_user_bytes = i_rant_node_core_peer_user_bytes();     /* the core's scratch */

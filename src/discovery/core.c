@@ -6,15 +6,17 @@
 #include <string.h>
 
 #define RANT_DISCOVERY_BLOB_RESEND 1u          /* announces that carry the full blob after a change */
-#define RANT_DISCOVERY_FETCH_TRIES 4u          /* sends of one fetch, a later datagram starts over */
-#define RANT_DISCOVERY_FETCH_RETRY_US 250000u  /* an unanswered fetch goes again this soon */
+#define RANT_DISCOVERY_ASK_TRIES 4u            /* sends of one ask, a later datagram starts a fetch over */
+#define RANT_DISCOVERY_ASK_RETRY_US 250000u    /* an unanswered ask goes again this soon */
 #define RANT_DISCOVERY_SWEEPS 4u               /* timeout sweeps per announce interval */
+#define RANT_DISCOVERY_JUDGE_MARGIN_US 250000u /* a peer's change this close to ours is not assumed judged */
 
 /* What only a peer holding a slot needs. max_peers counts slots. */
 typedef struct {
     uint16_t rec;            /* the record here, I_RANT_REC_NONE when free */
     uint16_t meta_cap;
     uint16_t meta_len;
+    uint8_t  loan;           /* held on a LOAN verdict, which a match may take */
     uint8_t *meta;           /* the overlay: a pool slot or a grown hook block, kept across occupants */
     uint8_t *user;           /* consumer scratch, stride st->user_stride */
     uint64_t addr_heard_us;  /* last datagram that arrived from the locator. A fresh incumbent stays put */
@@ -29,6 +31,8 @@ struct i_RantDiscoveryState {
     uint64_t      next_sweep_us;
     uint8_t       started;
     uint8_t       want_solicit;   /* a group solicit is queued for the next update */
+    uint8_t       distrust;       /* a peer was refused or forgotten for room: no first contact is assumed judged */
+    uint8_t       slots_opened;   /* a slot came open: offer the open slots before returning */
     uint16_t      cap_peers;      /* slots */
     uint16_t      meta_cap;       /* per peer meta buffer capacity */
     uint8_t      *meta_pool;      /* cap_peers x meta_cap. NULL in hook mode */
@@ -60,6 +64,13 @@ static i_RantDiscoverySlot *i_rant_discovery_slot_of(const i_RantDiscoveryState 
     return rec->slot != I_RANT_REC_NONE ? &st->slots[rec->slot] : NULL;
 }
 
+static void i_rant_discovery_addr_of(const i_RantDiscoveryRecord *rec, RantAddr *out){
+    memset(out, 0, sizeof *out);
+    memcpy(out->ip, rec->ip, 16);
+    out->ip_len = rec->ip_len;
+    out->port   = rec->port;
+}
+
 /* The hook and event builders. peer_up carries the overlay we hold. */
 static void i_rant_discovery_fire_up(i_RantDiscoveryState *st, const i_RantDiscoveryRecord *rec,
                                const RantAddr *addr){
@@ -70,6 +81,12 @@ static void i_rant_discovery_fire_up(i_RantDiscoveryState *st, const i_RantDisco
 }
 static void i_rant_discovery_fire_down(i_RantDiscoveryState *st, uint32_t id, i_RantDiscoveryDownReason reason){
     if (st->cfg.on_peer_down) st->cfg.on_peer_down(st->cfg.user, id, reason);
+}
+static void i_rant_discovery_fire_seen(i_RantDiscoveryState *st, const i_RantDiscoveryRecord *rec, int up){
+    RantAddr addr;
+    if (!st->cfg.on_peer_seen) return;
+    i_rant_discovery_addr_of(rec, &addr);
+    st->cfg.on_peer_seen(st->cfg.user, rec->local_id, &addr, up);
 }
 static void i_rant_discovery_fire_error(i_RantDiscoveryState *st, RantErrorKind error, uint32_t id,
                                   const RantAddr *addr, uint64_t too_big){
@@ -103,6 +120,15 @@ const uint8_t *i_rant_discovery_uuid(const i_RantDiscoveryState *st){
 
 static uint16_t i_rant_discovery_meta_cap(const i_RantDiscoveryCoreConfig *cfg){
     return cfg->meta_cap ? cfg->meta_cap : RANT_DISCOVERY_META_MAX;
+}
+
+/* The records a store may hold. Every slot holds a record, so never fewer than slots. */
+static uint16_t i_rant_discovery_record_bound(const i_RantDiscoveryCoreConfig *cfg){
+    return cfg->max_records > cfg->max_peers ? cfg->max_records : cfg->max_peers;
+}
+/* An arena store sits at its bound, a hook store starts at the slots and grows to it. */
+static uint16_t i_rant_discovery_record_reserve(const i_RantDiscoveryCoreConfig *cfg){
+    return cfg->alloc ? cfg->max_peers : i_rant_discovery_record_bound(cfg);
 }
 
 /* Rounded up to 8 so a consumer may store a pointer in its slot. */
@@ -184,7 +210,7 @@ static void i_rant_discovery_layout(i_RantBump *b, const i_RantDiscoveryCoreConf
     o->meta_pool = cfg->alloc ? NULL
                  : (uint8_t*)i_rant_bump_take(b, (size_t)cfg->max_peers * meta_cap, 1);
     o->user_pool = user_stride ? (uint8_t*)i_rant_bump_take(b, (size_t)cfg->max_peers * user_stride, 8) : NULL;
-    i_rant_records_layout(b, cfg->max_peers, cfg->alloc != NULL, &o->records);
+    i_rant_records_layout(b, i_rant_discovery_record_reserve(cfg), cfg->alloc != NULL, &o->records);
 }
 
 size_t i_rant_discovery_required_memory(const i_RantDiscoveryCoreConfig *cfg){
@@ -234,8 +260,8 @@ i_RantDiscoveryState *i_rant_discovery_init(void *mem, size_t cap, const i_RantD
     st->user_pool     = blk.user_pool;
     st->started       = 0;
     i_rant_discovery_slots_reset(st, 0);
-    /* every peer heard takes a slot, so as many records as slots are reserved */
-    if (!i_rant_records_init(&st->records, &blk.records, cfg->max_peers, cfg->alloc, cfg->alloc_user))
+    if (!i_rant_records_init(&st->records, &blk.records, i_rant_discovery_record_reserve(cfg),
+                             i_rant_discovery_record_bound(cfg), cfg->alloc, cfg->alloc_user))
         return NULL;
     st->self_meta         = cfg->meta;
     st->self_meta_version = 1;
@@ -246,6 +272,8 @@ i_RantDiscoveryState *i_rant_discovery_init(void *mem, size_t cap, const i_RantD
     return st;
 }
 
+
+static void i_rant_discovery_regrown(i_RantDiscoveryState *st, uint16_t old_slots, uint16_t old_meta_cap);
 
 /* Not a re init: the uuid, blob version, records and slots survive, or peers would treat
  * us as a new node. The records and blobs are hook memory and carry over as they are. */
@@ -266,6 +294,7 @@ i_RantDiscoveryState *i_rant_discovery_core_migrate(i_RantDiscoveryState *old, v
     st->cfg.meta_cap      = new_meta_cap;
     st->cfg.user          = peer_cb_user;  /* peer callbacks fire on the relocated node core */
     st->cap_peers         = new_max_peers;
+    if (st->records.max < new_max_peers) st->records.max = new_max_peers;   /* a record per slot */
     st->meta_cap          = i_rant_discovery_meta_cap(&dc);
     st->slots             = (i_RantDiscoverySlot*)blk.slots;
     st->user_pool         = blk.user_pool;
@@ -276,6 +305,7 @@ i_RantDiscoveryState *i_rant_discovery_core_migrate(i_RantDiscoveryState *old, v
         if (st->slots[i].user) memcpy(st->slots[i].user, old->slots[i].user, st->user_stride);
     }
     i_rant_discovery_slots_reset(st, old->cap_peers);
+    i_rant_discovery_regrown(st, old->cap_peers, old->meta_cap);
     return st;
 }
 
@@ -291,52 +321,87 @@ void i_rant_discovery_destroy(i_RantDiscoveryState *st){
     i_rant_records_destroy(&st->records);
 }
 
-/* Fires GONE while the slot still exists, so the handler can read its scratch, then frees
- * the slot and the record. */
+/* Fires the hooks while the record and its slot still exist, so a handler can read them,
+ * then frees both. A slot it held is open after. */
 static void i_rant_discovery_peer_gone(i_RantDiscoveryState *st, uint16_t ri){
     i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
     if (!rec) return;
-    i_rant_discovery_fire_down(st, rec->local_id, RANT_DISCOVERY_GONE);
-    if (rec->slot != I_RANT_REC_NONE) st->slots[rec->slot].rec = I_RANT_REC_NONE;
+    if (rec->state == I_RANT_REC_ACTIVE) i_rant_discovery_fire_seen(st, rec, 0);
+    if (rec->slot != I_RANT_REC_NONE){
+        i_rant_discovery_fire_down(st, rec->local_id, RANT_DISCOVERY_GONE);
+        st->slots[rec->slot].rec = I_RANT_REC_NONE;
+        st->slots_opened = 1;
+    }
     i_rant_records_remove(&st->records, ri);
 }
 
-/* A free slot, else the oldest DROPPED peer's, evicted as GONE. Active peers are never
- * evicted, so NONE when every slot holds one. */
-static uint16_t i_rant_discovery_slot_take(i_RantDiscoveryState *st){
-    uint16_t s, victim = I_RANT_REC_NONE; uint64_t oldest = (uint64_t)-1;
+/* A slotted record leaves its slot and keeps its record: the slot hooks see it GONE, the
+ * app nothing. */
+static void i_rant_discovery_give_back(i_RantDiscoveryState *st, uint16_t ri){
+    i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
+    if (!rec || rec->slot == I_RANT_REC_NONE) return;
+    i_rant_discovery_fire_down(st, rec->local_id, RANT_DISCOVERY_GONE);
+    st->slots[rec->slot].rec = I_RANT_REC_NONE;
+    rec->slot = I_RANT_REC_NONE;
+}
+
+/* A slot for a record judged verdict: a free one, else the oldest DROPPED peer's, forgotten
+ * as GONE, else for a match a live loan's, given back. A live match is never evicted. */
+static uint16_t i_rant_discovery_slot_take(i_RantDiscoveryState *st, i_RantDiscoveryAdmit verdict){
+    uint16_t s, victim = I_RANT_REC_NONE, loan = I_RANT_REC_NONE; uint64_t oldest = (uint64_t)-1;
     for (s = 0; s < st->cap_peers; s++){
         const i_RantDiscoveryRecord *rec;
         if (st->slots[s].rec == I_RANT_REC_NONE) return s;
         rec = i_rant_discovery_rec(st, st->slots[s].rec);
-        if (rec->state == I_RANT_REC_DROPPED && rec->last_heard_us <= oldest){
-            oldest = rec->last_heard_us; victim = st->slots[s].rec;
-        }
+        if (rec->state == I_RANT_REC_DROPPED){
+            if (rec->last_heard_us <= oldest){ oldest = rec->last_heard_us; victim = st->slots[s].rec; }
+        } else if (st->slots[s].loan && loan == I_RANT_REC_NONE) loan = s;
     }
-    if (victim == I_RANT_REC_NONE) return I_RANT_REC_NONE;
-    s = i_rant_discovery_rec(st, victim)->slot;
-    i_rant_discovery_peer_gone(st, victim);
-    return s;
+    if (victim != I_RANT_REC_NONE){
+        s = i_rant_discovery_rec(st, victim)->slot;
+        i_rant_discovery_peer_gone(st, victim);
+        st->distrust = 1;                    /* a peer forgotten for room may still hold us */
+        return s;
+    }
+    if (verdict != I_RANT_ADMIT_YES || loan == I_RANT_REC_NONE) return I_RANT_REC_NONE;
+    victim = st->slots[loan].rec;
+    i_rant_discovery_give_back(st, victim);
+    i_rant_discovery_rec(st, victim)->want = I_RANT_ADMIT_LOAN;     /* waits for a free slot */
+    return loan;
 }
 
-/* Gives record ri the free slot s: fresh scratch, the blob buffer reused. */
+/* Gives record ri the free slot s: fresh scratch, the blob buffer reused. A slotted record
+ * wants nothing more, and holds no blob until one is stored, so its version is fetched. */
 static void i_rant_discovery_slot_bind(i_RantDiscoveryState *st, uint16_t s, uint16_t ri){
     i_RantDiscoverySlot *slot = &st->slots[s];
+    i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
     uint8_t *meta = slot->meta, *user = slot->user; uint16_t meta_cap = slot->meta_cap;
     memset(slot, 0, sizeof *slot);
     slot->meta = meta; slot->meta_cap = meta_cap; slot->user = user;
     if (user) memset(user, 0, st->user_stride);
     slot->rec = ri;
-    i_rant_discovery_rec(st, ri)->slot = s;
+    rec->slot = s;
+    rec->meta_version = 0;
+    rec->want = I_RANT_ADMIT_NO;
+    rec->flags = (uint8_t)(rec->flags & ~I_RANT_REC_REFETCH);
 }
 
-/* A record and a slot for a new uuid. NONE when refused. */
-static uint16_t i_rant_discovery_admit(i_RantDiscoveryState *st, const uint8_t uuid[16]){
-    uint16_t s = i_rant_discovery_slot_take(st), ri;
-    if (s == I_RANT_REC_NONE) return I_RANT_REC_NONE;
-    ri = i_rant_records_add(&st->records, uuid);
-    if (ri != I_RANT_REC_NONE) i_rant_discovery_slot_bind(st, s, ri);
-    return ri;
+/* A record for a new uuid: a fresh one, else the place of the oldest DROPPED record,
+ * forgotten as GONE. NONE when every record is live or memory ran out. */
+static uint16_t i_rant_discovery_record_take(i_RantDiscoveryState *st, const uint8_t uuid[16]){
+    uint16_t ri = i_rant_records_add(&st->records, uuid), i, victim = I_RANT_REC_NONE;
+    uint64_t oldest = (uint64_t)-1;
+    if (ri != I_RANT_REC_NONE) return ri;
+    for (i = 0; i < st->records.cap; i++){
+        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+        if (rec && rec->state == I_RANT_REC_DROPPED && rec->last_heard_us <= oldest){
+            oldest = rec->last_heard_us; victim = i;
+        }
+    }
+    if (victim == I_RANT_REC_NONE) return I_RANT_REC_NONE;
+    i_rant_discovery_peer_gone(st, victim);
+    st->distrust = 1;
+    return i_rant_records_add(&st->records, uuid);
 }
 
 /* A new uuid from an (ip, port) we hold means that process restarted, so the old record is
@@ -392,13 +457,6 @@ static int i_rant_discovery_addr_rank(const i_RantDiscoveryState *st, const uint
         if (same) return 2;
     }
     return 1;
-}
-
-static void i_rant_discovery_addr_of(const i_RantDiscoveryRecord *rec, RantAddr *out){
-    memset(out, 0, sizeof *out);
-    memcpy(out->ip, rec->ip, 16);
-    out->ip_len = rec->ip_len;
-    out->port   = rec->port;
 }
 
 /* A path to the peer: the entry already holding ip, else the stalest, empty ones first. */
@@ -495,21 +553,25 @@ static void i_rant_discovery_wire_mismatch(i_RantDiscoveryState *st, const RantA
         i_rant_discovery_fire_error(st, RANT_E_WIRE_VERSION, 0, &a, 0);
 }
 
+/* REFETCH ends: a blob came, or the record went silent or too big. The slot promised to a
+ * record that wanted one is spare again. */
+static void i_rant_discovery_refetch_done(i_RantDiscoveryState *st, i_RantDiscoveryRecord *rec){
+    if (!(rec->flags & I_RANT_REC_REFETCH)) return;
+    rec->flags = (uint8_t)(rec->flags & ~I_RANT_REC_REFETCH);
+    if (rec->want != I_RANT_ADMIT_NO && rec->slot == I_RANT_REC_NONE) st->slots_opened = 1;
+}
+
 /* A blob bigger than we hold: the OS cut it to our buffer, or it is past the accept bound.
- * The node grows the bound and re solicits on the event. wanted is the stated size. A
- * fetch owed is settled, since a retry brings the same bytes. */
-static void i_rant_discovery_too_big(i_RantDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
-                                     const i_RantDiscoveryWire *w, uint32_t wanted){
-    RantAddr a;
-    uint16_t ri = i_rant_records_find(&st->records, w->uuid);
-    const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
-    uint32_t id = rec ? rec->local_id : 0;
+ * Its fetch stops until a newer version or a grown bound, since a retry brings the same
+ * bytes. The node grows the bound on the event. wanted is the stated size. */
+static void i_rant_discovery_too_big(i_RantDiscoveryState *st, uint16_t ri, const RantAddr *addr,
+                                     uint32_t wanted){
+    i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
+    rec->flags |= I_RANT_REC_TOO_BIG;
+    i_rant_discovery_refetch_done(st, rec);
     i_rant_records_settle(&st->records, ri, I_RANT_OWE_FETCH);
-    memset(&a, 0, sizeof a);
-    if (src_ip){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
-    a.port = w->data_port;
-    (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_META_TOO_BIG, &a, wanted, id);
-    i_rant_discovery_fire_error(st, RANT_E_PEER_META_TOO_BIG, id, &a, wanted);
+    (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_META_TOO_BIG, addr, wanted, rec->local_id);
+    i_rant_discovery_fire_error(st, RANT_E_PEER_META_TOO_BIG, rec->local_id, addr, wanted);
 }
 
 /* Takes the name every datagram carries. A uuid keeps its name for life, so this only fills it. */
@@ -541,19 +603,184 @@ static uint64_t i_rant_discovery_reply_at(const i_RantDiscoveryState *st, const 
     return now + (uint64_t)i_rant_hash_below(i_rant_fnv1a64(pair, 32), st->records.live) * 1000u;
 }
 
-/* A fetch is owed while the peer advertises a version past the one judged. One already owed
- * keeps its tries, so a datagram starts it over only once they ran out. After a fetch that
- * went unanswered, likely a peer that refused us, the next sends once. */
+/* Owes record ri an ask: our blob with REQ|ONE, sent again until settled. One already owed
+ * keeps its tries. After an ask that went unanswered, likely to a peer that refused us, the
+ * next sends once. Nothing is owed to a silent peer. */
+static void i_rant_discovery_ask(i_RantDiscoveryState *st, uint16_t ri, uint8_t bits, uint64_t now){
+    i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
+    if (!rec || rec->state != I_RANT_REC_ACTIVE) return;
+    if (!(rec->owed & I_RANT_OWE_ASK))
+        rec->ask_tries = (rec->flags & I_RANT_REC_ASK_MISSED) ? 1u : RANT_DISCOVERY_ASK_TRIES;
+    i_rant_records_owe(&st->records, ri, bits, now);
+}
+
+/* Its blob is owed to us while it advertises a version past the one judged, unless that one
+ * is past our bound, and while REFETCH says so. */
+static int i_rant_discovery_wants_blob(const i_RantDiscoveryRecord *rec){
+    return (rec->meta_version < rec->adv_version && !(rec->flags & I_RANT_REC_TOO_BIG))
+        || (rec->flags & I_RANT_REC_REFETCH) != 0;
+}
+
+/* Starts a fetch while its blob is owed to us, ends one when not. One already owed keeps
+ * its tries, so a datagram starts it over only once they ran out. */
 static void i_rant_discovery_fetch_check(i_RantDiscoveryState *st, uint16_t ri, uint64_t now){
     i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
-    if (rec->meta_version >= rec->adv_version){
-        rec->fetch_missed = 0;
-        i_rant_records_settle(&st->records, ri, I_RANT_OWE_FETCH);
+    if (!i_rant_discovery_wants_blob(rec)) i_rant_records_settle(&st->records, ri, I_RANT_OWE_FETCH);
+    else if (!(rec->owed & I_RANT_OWE_FETCH)) i_rant_discovery_ask(st, ri, I_RANT_OWE_FETCH, now);
+}
+
+/* A live record without a slot that wanted one. */
+static int i_rant_discovery_waiting(const i_RantDiscoveryRecord *rec){
+    return rec && rec->state == I_RANT_REC_ACTIVE && rec->slot == I_RANT_REC_NONE
+        && rec->want != I_RANT_ADMIT_NO;
+}
+
+/* Open slots go to the records that wanted one: as many as are spare, open and not promised
+ * to a record already fetched, are fetched, and their answers take them. */
+static void i_rant_discovery_offer_slots(i_RantDiscoveryState *st, uint64_t now){
+    uint16_t i, spare = 0;
+    st->slots_opened = 0;
+    for (i = 0; i < st->cap_peers; i++){
+        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, st->slots[i].rec);
+        if (!rec || rec->state == I_RANT_REC_DROPPED) spare++;
+    }
+    for (i = 0; i < st->records.cap && spare; i++){
+        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+        if (i_rant_discovery_waiting(rec) && (rec->flags & I_RANT_REC_REFETCH)) spare--;
+    }
+    for (i = 0; i < st->records.cap && spare; i++){
+        i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+        if (!i_rant_discovery_waiting(rec) || (rec->flags & I_RANT_REC_REFETCH)) continue;
+        rec->flags |= I_RANT_REC_REFETCH;
+        i_rant_discovery_fetch_check(st, i, now);
+        spare--;
+    }
+}
+
+/* After a migrate: grown slots go to the records that wanted one, and a grown bound fetches
+ * each blob that was past it, from that peer alone. */
+static void i_rant_discovery_regrown(i_RantDiscoveryState *st, uint16_t old_slots, uint16_t old_meta_cap){
+    uint16_t i;
+    if (st->meta_cap > old_meta_cap)
+        for (i = 0; i < st->records.cap; i++){
+            i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+            if (!rec || !(rec->flags & I_RANT_REC_TOO_BIG)) continue;
+            rec->flags = (uint8_t)((rec->flags & ~I_RANT_REC_TOO_BIG) | I_RANT_REC_REFETCH);
+            i_rant_discovery_fetch_check(st, i, st->now_us);
+        }
+    if (st->cap_peers > old_slots || st->slots_opened) i_rant_discovery_offer_slots(st, st->now_us);
+}
+
+/* A record that meets us found no slot. Noted for the node's condition each time it is
+ * heard, and fetched once a slot opens. */
+static void i_rant_discovery_refuse(i_RantDiscoveryState *st, i_RantDiscoveryRecord *rec){
+    RantAddr addr;
+    rec->want = I_RANT_ADMIT_YES;
+    i_rant_discovery_addr_of(rec, &addr);
+    (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_REFUSED, &addr, st->cap_peers, rec->local_id);
+    i_rant_discovery_fire_error(st, RANT_E_PEER_REFUSED, rec->local_id, &addr, 0);
+}
+
+/* A slot for record ri judged verdict. 0 when none can be had. */
+static int i_rant_discovery_seat(i_RantDiscoveryState *st, uint16_t ri, i_RantDiscoveryAdmit verdict){
+    uint16_t s = i_rant_discovery_slot_take(st, verdict);
+    RantAddr addr;
+    if (s == I_RANT_REC_NONE) return 0;
+    i_rant_discovery_slot_bind(st, s, ri);
+    st->slots[s].loan = (uint8_t)(verdict == I_RANT_ADMIT_LOAN);
+    i_rant_discovery_addr_of(i_rant_discovery_rec(st, ri), &addr);
+    i_rant_discovery_trouble_drop(st, RANT_E_PEER_REFUSED, &addr);
+    return 1;
+}
+
+/* Copies a blob into a slot, growing a hook block to fit. 0 when hook memory ran out. A pool
+ * slot holds meta_cap, which on_datagram checked. */
+static int i_rant_discovery_slot_store(i_RantDiscoveryState *st, i_RantDiscoverySlot *slot, RantBytes blob){
+    if (blob.len > slot->meta_cap){
+        uint8_t *nb = st->cfg.alloc ? (uint8_t*)st->cfg.alloc(st->cfg.alloc_user, slot->meta, blob.len) : NULL;
+        if (!nb) return 0;
+        slot->meta = nb; slot->meta_cap = (uint16_t)blob.len;
+    }
+    if (blob.len) memcpy(slot->meta, blob.data, blob.len);
+    slot->meta_len = (uint16_t)blob.len;
+    return 1;
+}
+
+/* The admit hook's word on a blob at version. Without a hook every peer meets us. */
+static i_RantDiscoveryAdmit i_rant_discovery_verdict(i_RantDiscoveryState *st, const i_RantDiscoveryRecord *rec,
+                                                     RantBytes blob, uint32_t version){
+    return st->cfg.admit ? st->cfg.admit(st->cfg.user, rec->local_id, blob, version) : I_RANT_ADMIT_YES;
+}
+
+/* Judges a blob of record ri that arrived at version, with the datagram's flags: a match
+ * takes or keeps a slot, no match gives one back, a match without room is refused. A match
+ * the peer may not know of is told by an ask. Sets *up when the slot hooks owe a peer up. */
+static void i_rant_discovery_judge(i_RantDiscoveryState *st, uint16_t ri, RantBytes blob, uint32_t version,
+                                   uint8_t flags, int *up){
+    i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
+    i_RantDiscoverySlot *slot = i_rant_discovery_slot_of(st, rec);
+    /* a held blob was a match, and the peer may have given us back on a version we missed */
+    int was_match = slot && !slot->loan && rec->meta_version, skipped = version > rec->meta_version + 1u;
+    i_RantDiscoveryAdmit verdict;
+    if (slot && version <= rec->meta_version) return;     /* a held blob is judged once per version */
+    i_rant_discovery_refetch_done(st, rec);
+    rec->flags = (uint8_t)(rec->flags & ~I_RANT_REC_TOO_BIG);
+    verdict = i_rant_discovery_verdict(st, rec, blob, version);
+    if (verdict == I_RANT_ADMIT_NO){
+        rec->meta_version = version; rec->want = I_RANT_ADMIT_NO;
+        if (slot){ i_rant_discovery_give_back(st, ri); st->slots_opened = 1; }
         return;
     }
-    if (rec->owed & I_RANT_OWE_FETCH) return;
-    rec->fetch_tries = rec->fetch_missed ? 1u : RANT_DISCOVERY_FETCH_TRIES;
-    i_rant_records_owe(&st->records, ri, I_RANT_OWE_FETCH, now);
+    if (!slot){
+        if (!i_rant_discovery_seat(st, ri, verdict)){
+            rec->meta_version = version;
+            if (verdict == I_RANT_ADMIT_YES) i_rant_discovery_refuse(st, rec);
+            else rec->want = I_RANT_ADMIT_LOAN;
+            return;
+        }
+        slot = i_rant_discovery_slot_of(st, rec);
+        if (!i_rant_discovery_slot_store(st, slot, blob)){
+            slot->rec = I_RANT_REC_NONE; rec->slot = I_RANT_REC_NONE;   /* no memory: the version gap fetches it again */
+            st->slots_opened = 1;
+            return;
+        }
+    } else if (!i_rant_discovery_slot_store(st, slot, blob)) return;    /* the stale blob stays, the fetch retries */
+    rec->meta_version = version;
+    slot->loan = (uint8_t)(verdict == I_RANT_ADMIT_LOAN);
+    *up = 1;
+    /* ONE: the sender holds our blob or asks for it. ALL: an observer never assumes */
+    if (verdict == I_RANT_ADMIT_YES && (!was_match || skipped)
+        && !(flags & (RANT_DISCOVERY_FLAG_ONE | RANT_DISCOVERY_FLAG_ALL)))
+        i_rant_discovery_ask(st, ri, I_RANT_OWE_MATCH, st->now_us);
+}
+
+/* Judges a slotted record again by the blob it holds. No match gives the slot back, a loan
+ * that now meets us tells the peer. 1 when it gave the slot back. */
+static int i_rant_discovery_rejudge_at(i_RantDiscoveryState *st, uint16_t ri){
+    i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
+    i_RantDiscoverySlot *slot = rec ? i_rant_discovery_slot_of(st, rec) : NULL;
+    i_RantDiscoveryAdmit verdict;
+    if (!slot) return 0;
+    verdict = i_rant_discovery_verdict(st, rec, rant_bytes(slot->meta_len ? slot->meta : NULL, slot->meta_len),
+                                       rec->meta_version);
+    if (verdict == I_RANT_ADMIT_NO){
+        i_rant_discovery_give_back(st, ri);
+        st->slots_opened = 1;
+        return 1;
+    }
+    if (verdict == I_RANT_ADMIT_YES && slot->loan) i_rant_discovery_ask(st, ri, I_RANT_OWE_MATCH, st->now_us);
+    slot->loan = (uint8_t)(verdict == I_RANT_ADMIT_LOAN);
+    return 0;
+}
+
+/* A first contact heard without a blob is judged by assumption when its blob last changed
+ * before ours did, by the margin: it judged our current blob since and asks us if it meets
+ * us. Before our opening, ours is about to change. Only between symmetric judges, so never
+ * without a hook, as an observer, or while distrusting. A comparison, so it never wraps. */
+static int i_rant_discovery_assume_judged(const i_RantDiscoveryState *st, uint32_t changed_ago_ms, uint64_t now){
+    uint64_t ours = st->started && now > st->changed_us ? now - st->changed_us : 0u;
+    if (!st->cfg.admit || st->cfg.observer || st->distrust) return 0;
+    return (uint64_t)changed_ago_ms * 1000u > ours + RANT_DISCOVERY_JUDGE_MARGIN_US;
 }
 
 void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
@@ -561,7 +788,8 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     const uint8_t *src_ip = (src && (src->ip_len==4 || src->ip_len==16)) ? src->ip : NULL;
     uint8_t  src_ip_len = src_ip ? src->ip_len : 0;
     i_RantDiscoveryWire w; i_RantDiscoveryDecode dr;
-    RantAddr addr; int addr_changed, first_contact=0, blob_changed=0, first_blob=0, revived=0, have_blob;
+    RantAddr addr; int addr_changed, first_contact=0, revived=0, have_blob, up=0;
+    uint32_t too_big = 0;
     uint16_t ri;
     i_RantDiscoveryRecord *rec;
     i_RantDiscoverySlot *slot;
@@ -571,18 +799,18 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     if (dr == I_RANT_DISC_FOREIGN || w.domain != st->cfg.domain_id) return;
     if (dr == I_RANT_DISC_WIRE){ i_rant_discovery_wire_mismatch(st, src, w.wire); return; }
     if (dr == I_RANT_DISC_MALFORMED || memcmp(w.uuid, st->cfg.uuid, 16) == 0) return;   /* or self */
-    if (dr == I_RANT_DISC_CUT){ i_rant_discovery_too_big(st, src_ip, src_ip_len, &w, w.overlay_len); return; }
-    have_blob = (w.flags & RANT_DISCOVERY_FLAG_BLOB) != 0;
-    if (have_blob && w.overlay.len > st->meta_cap){     /* this side can never hold it, so say so */
-        i_rant_discovery_too_big(st, src_ip, src_ip_len, &w, (uint32_t)w.overlay.len);
-        return;
-    }
+    /* a blob we cannot hold leaves the header, which still counts */
+    have_blob = dr == I_RANT_DISC_OK && (w.flags & RANT_DISCOVERY_FLAG_BLOB);
+    if (dr == I_RANT_DISC_CUT) too_big = w.overlay_len;
+    else if (have_blob && w.overlay.len > st->meta_cap) too_big = (uint32_t)w.overlay.len;
+    if (too_big) have_blob = 0;
 
     ri  = i_rant_records_find(&st->records, w.uuid);
     rec = i_rant_discovery_rec(st, ri);
 
     if (w.flags & RANT_DISCOVERY_FLAG_BYE){
         if (rec) i_rant_discovery_peer_gone(st, ri);     /* a BYE is GONE */
+        if (st->slots_opened) i_rant_discovery_offer_slots(st, now);
         return;
     }
 
@@ -597,14 +825,15 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     if (!rec){
         /* a new uuid from a held endpoint means a restart: evict the dead predecessor */
         i_rant_discovery_evict_endpoint(st, &addr);
-        ri = i_rant_discovery_admit(st, w.uuid);
-        if (ri == I_RANT_REC_NONE){       /* every slot holds a live peer: refuse, never evict one */
+        ri  = i_rant_discovery_record_take(st, w.uuid);
+        rec = i_rant_discovery_rec(st, ri);
+        if (!rec){       /* every record is live: refuse, never forget one */
+            st->distrust = 1;          /* it may hold us, and would be a first contact again */
             (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_REFUSED, &addr, st->cap_peers, 0);
             i_rant_discovery_fire_error(st, RANT_E_PEER_REFUSED, 0, &addr, 0);
+            if (st->slots_opened) i_rant_discovery_offer_slots(st, now);
             return;
         }
-        i_rant_discovery_trouble_drop(st, RANT_E_PEER_REFUSED, &addr);
-        rec = i_rant_discovery_rec(st, ri);
         first_contact = 1;
     }
     slot = i_rant_discovery_slot_of(st, rec);
@@ -615,16 +844,20 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     }
     rec->last_heard_us = now;
     if (w.flags & RANT_DISCOVERY_FLAG_UNI) rec->uni_us = now;
-    if (src_ip) i_rant_discovery_note_path(slot, src_ip, src_ip_len, now);
+    if (w.flags & RANT_DISCOVERY_FLAG_ONE){    /* it holds our blob, or asks and our reply follows */
+        i_rant_records_settle(&st->records, ri, I_RANT_OWE_MATCH);
+        rec->flags = (uint8_t)(rec->flags & ~I_RANT_REC_ASK_MISSED);
+    }
 
-    /* Rank the candidate against the incumbent so a multi path locator never flaps. See
-       spec/discovery.md. */
+    /* Rank the candidate against the incumbent so a multi path locator never flaps. Only a
+       slot keeps the freshness, as only its locator carries data. See spec/discovery.md. */
     if (rec->ip_len == 4 && addr.ip_len == 4 && memcmp(rec->ip, addr.ip, 4) != 0){
         int rank_new = i_rant_discovery_addr_rank(st, addr.ip, 4);
         int rank_old = i_rant_discovery_addr_rank(st, rec->ip, 4);
+        uint64_t fresh = slot ? slot->addr_heard_us : 0u;
         if (rank_new < rank_old ||
-            (rank_new == rank_old &&
-             now - slot->addr_heard_us < (uint64_t)st->cfg.announce_interval_us * 2u))
+            (rank_new == rank_old && fresh &&
+             now - fresh < (uint64_t)st->cfg.announce_interval_us * 2u))
             memcpy(addr.ip, rec->ip, 4);          /* keep the incumbent */
     }
 
@@ -635,40 +868,42 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
         rec->ip_len = addr.ip_len; rec->port = addr.port;
         memcpy(rec->ip, addr.ip, 16);
     }
-    /* only a datagram that really arrived from the held locator counts as freshness */
-    if (rec->ip_len == 4 && src_ip && src_ip_len == 4 && memcmp(rec->ip, src_ip, 4) == 0)
-        slot->addr_heard_us = now;
+    if (first_contact || revived) i_rant_discovery_fire_seen(st, rec, 1);
 
-    /* A newer version with the blob updates our copy. A newer version without it means we
-       fell behind, so it is fetched. */
-    if (w.version > rec->adv_version) rec->adv_version = w.version;
-    if (have_blob && w.version > rec->meta_version){
-        int fits = 1;
-        if (w.overlay.len > slot->meta_cap){   /* hook mode resizes, pool slots are pre sized */
-            uint8_t *nb = st->cfg.alloc ? (uint8_t*)st->cfg.alloc(st->cfg.alloc_user, slot->meta, w.overlay.len)
-                                        : NULL;
-            if (nb){ slot->meta = nb; slot->meta_cap = (uint16_t)w.overlay.len; }
-            else fits = 0;                   /* OOM: keep the stale blob, the fetch retries */
+    /* A blob is judged on arrival. Without one, a peer that meets us takes a slot when heard
+       if there is no hook to judge by, a first contact may be judged by assumption, and a
+       record that wanted a slot asks for one again. */
+    if (w.version > rec->adv_version){
+        rec->adv_version = w.version;
+        rec->flags = (uint8_t)(rec->flags & ~I_RANT_REC_TOO_BIG);   /* a newer blob may fit */
+    }
+    if (too_big) i_rant_discovery_too_big(st, ri, &addr, too_big);
+    if (have_blob) i_rant_discovery_judge(st, ri, w.overlay, w.version, w.flags, &up);
+    else if (!st->cfg.admit){
+        if (!slot){
+            if (i_rant_discovery_seat(st, ri, I_RANT_ADMIT_YES)) up = 1;
+            else i_rant_discovery_refuse(st, rec);
         }
-        if (fits){
-            if (w.overlay.len) memcpy(slot->meta, w.overlay.data, w.overlay.len);
-            first_blob = rec->meta_version == 0;
-            slot->meta_len = (uint16_t)w.overlay.len; rec->meta_version = w.version;
-            blob_changed = 1;
-        }
+    } else if (first_contact && !too_big && w.version && i_rant_discovery_assume_judged(st, w.changed_ago_ms, now))
+        rec->meta_version = w.version;
+    else if (i_rant_discovery_waiting(rec) && !(rec->flags & I_RANT_REC_REFETCH)){
+        i_rant_discovery_offer_slots(st, now);
+        if (!(rec->flags & I_RANT_REC_REFETCH) && rec->want == I_RANT_ADMIT_YES) i_rant_discovery_refuse(st, rec);
     }
     i_rant_discovery_fetch_check(st, ri, now);
-
-    /* The match answer: the first blob judged of a peer, from a datagram not aimed at us,
-       whose sender may lack ours. Every record keeps its slot, so a later change needs none. */
-    if (first_blob && !(w.flags & RANT_DISCOVERY_FLAG_ONE))
-        i_rant_records_owe(&st->records, ri, I_RANT_OWE_REPLY, now);
     if (w.flags & RANT_DISCOVERY_FLAG_REQ)
         i_rant_records_owe(&st->records, ri, I_RANT_OWE_REPLY,
                            i_rant_discovery_reply_at(st, rec, w.flags, now));
 
-    if (first_contact || addr_changed || blob_changed || revived)
-        i_rant_discovery_fire_up(st, rec, &addr);
+    slot = i_rant_discovery_slot_of(st, rec);
+    if (slot){
+        if (src_ip) i_rant_discovery_note_path(slot, src_ip, src_ip_len, now);
+        /* only a datagram that really arrived from the held locator counts as freshness */
+        if (rec->ip_len == 4 && src_ip && src_ip_len == 4 && memcmp(rec->ip, src_ip, 4) == 0)
+            slot->addr_heard_us = now;
+        if (up || addr_changed || revived) i_rant_discovery_fire_up(st, rec, &addr);
+    }
+    if (st->slots_opened) i_rant_discovery_offer_slots(st, now);
 }
 
 /* Demotes the records silent past the timeout and frees the DROPPED ones silent past the
@@ -686,10 +921,15 @@ static void i_rant_discovery_sweep(i_RantDiscoveryState *st, uint64_t now){
         }
         if (i_rant_discovery_silent_past(now, rec->last_heard_us, st->cfg.peer_timeout_us)){
             /* the record, slot and id stay so a same uuid return resumes. Nothing owed goes
-               to a silent peer */
+               to a silent peer, and a slot it holds is open to a newcomer */
             i_rant_records_set_state(&st->records, i, I_RANT_REC_DROPPED);
             i_rant_records_settle(&st->records, i, 0xFFu);
-            i_rant_discovery_fire_down(st, rec->local_id, RANT_DISCOVERY_DROP);
+            i_rant_discovery_refetch_done(st, rec);
+            i_rant_discovery_fire_seen(st, rec, 0);
+            if (rec->slot != I_RANT_REC_NONE){
+                i_rant_discovery_fire_down(st, rec->local_id, RANT_DISCOVERY_DROP);
+                st->slots_opened = 1;
+            }
         }
     }
 }
@@ -713,6 +953,7 @@ size_t i_rant_discovery_update(i_RantDiscoveryState *st, uint64_t now, void *out
         st->next_sweep_us = now + sweep_us;
         i_rant_discovery_sweep(st, now);
     }
+    if (st->slots_opened) i_rant_discovery_offer_slots(st, now);
     if (st->want_solicit){   /* the group solicit: our blob, and peers answer with theirs */
         st->want_solicit = 0;
         return i_rant_discovery_build(st, i_rant_discovery_req_flags(st), 1, (uint8_t *)out, cap);
@@ -770,21 +1011,21 @@ size_t i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, uint64_t now, vo
     if (!st->started) return 0;
     for (i = st->records.due_head; i != I_RANT_REC_NONE; i = st->records.recs[i].due_next){
         i_RantDiscoveryRecord *rec = &st->records.recs[i];
-        int fetch = (rec->owed & I_RANT_OWE_FETCH) != 0;
+        int ask = (rec->owed & I_RANT_OWE_ASK) != 0;
         if (rec->due_us > now) continue;
         i_rant_discovery_addr_of(rec, to);
-        i_rant_records_settle(&st->records, i, I_RANT_OWE_REPLY);   /* a fetch carries our blob too */
-        if (fetch){
-            if (rec->fetch_tries > 1u){
-                rec->fetch_tries--;
-                i_rant_records_requeue(&st->records, i, now + RANT_DISCOVERY_FETCH_RETRY_US);
+        i_rant_records_settle(&st->records, i, I_RANT_OWE_REPLY);   /* an ask carries our blob too */
+        if (ask){
+            if (rec->ask_tries > 1u){
+                rec->ask_tries--;
+                i_rant_records_requeue(&st->records, i, now + RANT_DISCOVERY_ASK_RETRY_US);
             } else {
-                rec->fetch_missed = 1;          /* an answer to this last send clears it */
-                i_rant_records_settle(&st->records, i, I_RANT_OWE_FETCH);
+                rec->flags |= I_RANT_REC_ASK_MISSED;     /* an answer to this last send clears it */
+                i_rant_records_settle(&st->records, i, I_RANT_OWE_ASK);
             }
         }
-        return i_rant_discovery_build(st, fetch ? RANT_DISCOVERY_FLAG_REQ | RANT_DISCOVERY_FLAG_ONE
-                                                : RANT_DISCOVERY_FLAG_ONE, 1, (uint8_t *)out, cap);
+        return i_rant_discovery_build(st, ask ? RANT_DISCOVERY_FLAG_REQ | RANT_DISCOVERY_FLAG_ONE
+                                              : RANT_DISCOVERY_FLAG_ONE, 1, (uint8_t *)out, cap);
     }
     return 0;
 }
@@ -810,30 +1051,65 @@ void i_rant_discovery_mark_copy(uint8_t *datagram, size_t len, int uni){
 
 void i_rant_discovery_solicit(i_RantDiscoveryState *st){ if (st) st->want_solicit = 1; }
 
-/* No version changes. The local side may now have a topic a held blob's interest matches. */
+/* No version changes. The local side may now have a topic a held blob's interest matches,
+ * or none it did. */
 void i_rant_discovery_replay_peers(i_RantDiscoveryState *st){
     uint16_t s;
-    if (!st || !st->cfg.on_peer_up) return;
+    if (!st) return;
     for (s=0;s<st->cap_peers;s++){
-        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, st->slots[s].rec);
+        uint16_t ri = st->slots[s].rec;
+        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
         RantAddr addr;
-        if (!rec || rec->state != I_RANT_REC_ACTIVE) continue;
+        if (!rec || rec->state != I_RANT_REC_ACTIVE || i_rant_discovery_rejudge_at(st, ri)) continue;
         i_rant_discovery_addr_of(rec, &addr);
         i_rant_discovery_fire_up(st, rec, &addr);
     }
+    if (st->slots_opened) i_rant_discovery_offer_slots(st, st->now_us);
+}
+
+int i_rant_discovery_rejudge(i_RantDiscoveryState *st, uint32_t id){
+    int gave;
+    if (!st) return 0;
+    gave = i_rant_discovery_rejudge_at(st, i_rant_records_by_id(&st->records, id));
+    if (st->slots_opened) i_rant_discovery_offer_slots(st, st->now_us);
+    return gave;
 }
 
 /* DROPPED records linger for resume and are not members. */
 uint16_t i_rant_discovery_peer_count(const i_RantDiscoveryState *st){ return st->records.live; }
 
+uint16_t i_rant_discovery_slots_used(const i_RantDiscoveryState *st){
+    uint16_t s, n = 0;
+    for (s = 0; s < st->cap_peers; s++) if (st->slots[s].rec != I_RANT_REC_NONE) n++;
+    return n;
+}
+
+uint16_t i_rant_discovery_pending(const i_RantDiscoveryState *st){
+    uint16_t i, n = 0;
+    for (i = 0; i < st->records.cap; i++){
+        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+        if (rec && rec->state == I_RANT_REC_ACTIVE && rec->slot == I_RANT_REC_NONE
+            && i_rant_discovery_wants_blob(rec)) n++;
+    }
+    return n;
+}
+
+int i_rant_discovery_heard_since(const i_RantDiscoveryState *st, uint64_t since_us){
+    uint16_t i; int live = 0;
+    for (i = 0; i < st->records.cap; i++){
+        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+        if (!rec || rec->state != I_RANT_REC_ACTIVE) continue;
+        if (rec->last_heard_us < since_us) return 0;
+        live = 1;
+    }
+    return live ? 1 : -1;
+}
+
 uint16_t i_rant_discovery_max_peers(const i_RantDiscoveryState *st){ return st->cap_peers; }
 
-int i_rant_discovery_peer_at(const i_RantDiscoveryState *st, uint16_t s, i_RantDiscoveryPeerView *out){
-    const i_RantDiscoveryRecord *rec; const i_RantDiscoverySlot *slot;
-    if (s >= st->cap_peers) return 0;
-    slot = &st->slots[s];
-    rec  = i_rant_discovery_rec(st, slot->rec);
-    if (!rec) return 0;                      /* a DROPPED record still holds its slot */
+static void i_rant_discovery_view(const i_RantDiscoveryState *st, const i_RantDiscoveryRecord *rec,
+                                  i_RantDiscoveryPeerView *out){
+    const i_RantDiscoverySlot *slot = i_rant_discovery_slot_of(st, rec);
     memset(out, 0, sizeof *out);
     out->id = rec->local_id;
     memcpy(out->uuid, rec->uuid, 16);
@@ -841,10 +1117,26 @@ int i_rant_discovery_peer_at(const i_RantDiscoveryState *st, uint16_t s, i_RantD
     out->liveness      = rec->state == I_RANT_REC_DROPPED ? RANT_PEER_DROPPED : RANT_PEER_ACTIVE;
     out->last_heard_us = rec->last_heard_us;
     out->name          = rant_string(rec->name_len ? rec->name : NULL, rec->name_len);
+    out->adv_meta_version = rec->adv_version;
+    if (!slot) return;
     out->meta          = rant_bytes(slot->meta_len ? slot->meta : NULL, slot->meta_len);
     out->meta_version  = rec->meta_version;
-    out->adv_meta_version = rec->adv_version;
     out->user          = st->user_stride ? slot->user : NULL;
+}
+
+int i_rant_discovery_peer_at(const i_RantDiscoveryState *st, uint16_t s, i_RantDiscoveryPeerView *out){
+    const i_RantDiscoveryRecord *rec;
+    if (s >= st->cap_peers) return 0;
+    rec = i_rant_discovery_rec(st, st->slots[s].rec);
+    if (!rec) return 0;                      /* a DROPPED record still holds its slot */
+    i_rant_discovery_view(st, rec, out);
+    return 1;
+}
+
+int i_rant_discovery_known_at(const i_RantDiscoveryState *st, uint16_t i, i_RantDiscoveryPeerView *out){
+    const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+    if (!rec) return 0;
+    i_rant_discovery_view(st, rec, out);
     return 1;
 }
 
@@ -888,15 +1180,15 @@ int i_rant_discovery_id_for_addr(const i_RantDiscoveryState *st, const uint8_t *
     uint16_t i;
     const i_RantDiscoveryRecord *found = NULL;
     if (!ip || (ip_len != 4 && ip_len != 16)) return 0;
-    for (i=0;i<st->records.cap;i++){
-        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+    for (i=0;i<st->cap_peers;i++){
+        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, st->slots[i].rec);
         if (rec && rec->ip_len == ip_len && rec->port == port && memcmp(rec->ip, ip, ip_len) == 0){
             if (id) *id = rec->local_id;
             return 1;
         }
     }
-    /* Else the data port on any recent path of a slotted peer. One peer or none: an address
-       two peers share attributes to neither. */
+    /* Else the data port on any recent path. One peer or none: an address two peers share
+       attributes to neither. */
     for (i=0;i<st->cap_peers;i++){
         const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, st->slots[i].rec);
         if (!rec || rec->state != I_RANT_REC_ACTIVE || rec->port != port) continue;

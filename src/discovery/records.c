@@ -57,11 +57,13 @@ void i_rant_records_layout(i_RantBump *b, uint16_t reserve, int hooked, i_RantDi
 }
 
 int i_rant_records_init(i_RantDiscoveryRecords *r, const i_RantDiscoveryRecordsBlocks *blk,
-                        uint16_t reserve, RantAllocFn alloc, void *alloc_user){
+                        uint16_t reserve, uint16_t max, RantAllocFn alloc, void *alloc_user){
     uint32_t nb = i_rant_records_buckets(reserve);
     memset(r, 0, sizeof *r);
     if (reserve > I_RANT_REC_MAX) return 0;
     r->alloc = alloc; r->alloc_user = alloc_user;
+    r->max = reserve;           /* an arena store stays at its reserve */
+    if (alloc && max > reserve) r->max = max > I_RANT_REC_MAX ? (uint16_t)I_RANT_REC_MAX : max;
     if (alloc){
         r->recs  = (i_RantDiscoveryRecord*)alloc(alloc_user, NULL, (size_t)reserve * sizeof(i_RantDiscoveryRecord));
         r->heads = (uint16_t*)alloc(alloc_user, NULL, 2u * nb * sizeof(uint16_t));
@@ -95,7 +97,7 @@ static int i_rant_records_grow(i_RantDiscoveryRecords *r){
     uint16_t old = r->cap;
     i_RantDiscoveryRecord *nr;
     if (!r->alloc) return 0;
-    if (ncap > I_RANT_REC_MAX) ncap = I_RANT_REC_MAX;
+    if (ncap > r->max) ncap = r->max;
     if (ncap <= r->cap) return 0;
     nr = (i_RantDiscoveryRecord*)r->alloc(r->alloc_user, r->recs, ncap * sizeof(i_RantDiscoveryRecord));
     if (!nr) return 0;

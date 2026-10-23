@@ -63,7 +63,7 @@ program in this order.
 | Program | Cases |
 |---|---|
 | `unit.transport` | basics, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
-| `unit.discovery` | records, migrate, owed, wire, change_age, discovery_core, node_core |
+| `unit.discovery` | records, migrate, owed, judge, first_contact, too_big, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
@@ -127,21 +127,39 @@ What each phase pins, grouped by layer.
 ### Discovery core
 
 - Records: a store is found by uuid and by id through doubling and reuse, every add mints a
-  new id that skips 0, an arena store stays at its reserve, and a refused growth leaves
-  every record in place. The due queue holds exactly the records owed work, oldest first,
-  keeps the earliest due time and loses a removed record, and the live count follows every
-  change of state.
-- Migrate: a grow keeps each peer's id, scratch, locator and name and takes the peer it
-  refused. A pool core does not migrate, nor does any to fewer slots.
+  new id that skips 0, an arena store stays at its reserve, a hook store grows to its bound
+  and no further, and a refused growth leaves every record in place. The due queue holds
+  exactly the records owed work, oldest first, keeps the earliest due time and loses a
+  removed record, and the live count follows every change of state.
+- Migrate: a grow keeps each peer's id, scratch, locator and name, fetches the peer it
+  refused at once and its answer takes a slot. A pool core does not migrate, nor does any to
+  fewer slots.
 - Owed work: the opening carries the blob with no REQ, an observer's asks REQ|ALL, nothing
   goes out before it. A targeted, unicast or observer solicit is answered at once, a group
-  one within one ms per live peer and spread. A first blob from the group is answered, one
-  from a targeted send or a change is not. A version ahead is fetched at once, four sends
+  one within one ms per live peer and spread. A new match from the group is told with an
+  ask, one from a targeted send or a change is not. A version ahead is fetched at once, four sends
   250 ms apart, a later announce starts over with one send after a fetch that went
   unanswered, the blob at that version or one too big ends it, and a fetch settles an
   answer owed too. Copies go marked UNI to a record heard by unicast
   within the peer timeout and plain to a slotted one, none to a dropped one. A silent peer
   drops within a quarter interval of its timeout, and a change rides one announce.
+- Judge: a peer that meets nothing is known and seen but holds no slot and gets no answer
+  or copies, and its blob is judged each time it comes. A match takes a slot and asks back
+  every 250 ms until any targeted datagram from the peer, a held blob is judged once per
+  version, and only a skipped version asks again. A match from a targeted datagram or an
+  observer's solicit is not asked back. A match without room is refused under its id and
+  again when heard, a slot given back fetches it at once and its answer takes the slot. A
+  loan waits unrefused for a free slot, a match takes a live loan's, rejudge tells a loan
+  that now matches and gives back a slot that meets nothing, as replay does for all. A drop
+  is seen for every record and reaches the slot hooks for slotted ones.
+- First contact: without a blob it is judged by assumption when its blob changed before our
+  last change by the margin, the margin alone before our opening, else fetched, and an age
+  past our uptime never wraps. An observer, a core without a hook and one that refused a peer
+  without a record assume nothing. A refused peer that takes a slot without its blob is still
+  fetched.
+- Too big: the header keeps the record under its id with no fetch, a newer version is
+  fetched once and a too big answer ends it, a grown bound fetches that peer alone and its
+  answer takes a slot, and a blob the OS cut short counts the same.
 - Wire: every field round trips and every short, long or cut datagram is refused as such.
 - Change age: it counts from the start, restarts at each change and saturates.
 - Lifecycle: two announces are two ups, silence past the timeout drops both but keeps

@@ -15,15 +15,23 @@ typedef enum {
     I_RANT_REC_DROPPED              /* silent past peer_timeout_us, kept for a same uuid return */
 } i_RantRecState;
 
-/* The work a record is owed, the bits of its owed field. */
-#define I_RANT_OWE_REPLY 0x01u      /* our announce and blob */
-#define I_RANT_OWE_FETCH 0x02u      /* a request for its blob, which also carries ours */
+/* The work a record is owed, the bits of its owed field. A fetch and a match are both an
+ * ask: our blob with REQ|ONE, sent again until settled. */
+#define I_RANT_OWE_REPLY 0x01u      /* our announce and blob, once */
+#define I_RANT_OWE_FETCH 0x02u      /* its blob, until it comes */
+#define I_RANT_OWE_MATCH 0x04u      /* our blob to a peer that may not know it meets us, until it answers */
+#define I_RANT_OWE_ASK   (I_RANT_OWE_FETCH | I_RANT_OWE_MATCH)
+
+/* The bits of a record's flags field. */
+#define I_RANT_REC_TOO_BIG    0x01u /* its blob is past our bound: not fetched until a newer version or the bound grows */
+#define I_RANT_REC_REFETCH    0x02u /* fetched until its blob is judged: a slot opened for it, or the bound grew */
+#define I_RANT_REC_ASK_MISSED 0x04u /* the last ask went unanswered */
 
 /* What a peer is, whether or not it holds a slot. */
 typedef struct {
     uint8_t  uuid[16];
     uint32_t local_id;               /* stable across a drop and return */
-    uint32_t meta_version;           /* the version of its blob judged, 0 = none yet */
+    uint32_t meta_version;           /* the version of its blob judged and, with a slot, held. 0 = none yet */
     uint64_t last_heard_us;
     uint64_t uni_us;                 /* last heard by a unicast copy, 0 = never */
     uint64_t due_us;                 /* when its owed work goes out, while queued */
@@ -37,8 +45,9 @@ typedef struct {
     uint16_t id_next;                /* the id chain */
     uint16_t due_prev, due_next;     /* the due queue, which holds exactly the records owed work */
     uint8_t  owed;                   /* I_RANT_OWE_* */
-    uint8_t  fetch_tries;            /* sends left of the fetch owed */
-    uint8_t  fetch_missed;           /* the last fetch went unanswered */
+    uint8_t  ask_tries;              /* sends left of the ask owed */
+    uint8_t  want;                   /* without a slot, the verdict that wanted one: I_RANT_ADMIT_* */
+    uint8_t  flags;                  /* I_RANT_REC_* */
     uint8_t  name_len;
     char     name[RANT_NODE_NAME_MAX + 1];
 } i_RantDiscoveryRecord;
@@ -48,6 +57,7 @@ typedef struct {
     i_RantDiscoveryRecord *recs;     /* [cap] */
     uint16_t   *heads;               /* uuid chains [mask + 1], then id chains [mask + 1] */
     uint16_t    cap, count, free_head, mask;
+    uint16_t    max;                 /* the cap a hook store grows to at most */
     uint16_t    live;                /* ACTIVE records */
     uint16_t    due_head, due_tail;  /* the due queue, oldest owed first */
     uint32_t    next_id;
@@ -60,9 +70,10 @@ typedef struct { uint8_t *recs, *heads; } i_RantDiscoveryRecordsBlocks;
 /* The arena part of a store of reserve records: all of it without a hook, none with one. */
 void     i_rant_records_layout(i_RantBump *b, uint16_t reserve, int hooked,
                                i_RantDiscoveryRecordsBlocks *o);
-/* With a hook, reserve records come from it now and more as the store fills. 0 on OOM. */
+/* With a hook, reserve records come from it now and more as the store fills, up to max. 0
+ * on OOM. */
 int      i_rant_records_init(i_RantDiscoveryRecords *r, const i_RantDiscoveryRecordsBlocks *blk,
-                             uint16_t reserve, RantAllocFn alloc, void *alloc_user);
+                             uint16_t reserve, uint16_t max, RantAllocFn alloc, void *alloc_user);
 void     i_rant_records_destroy(i_RantDiscoveryRecords *r);
 /* A zeroed ACTIVE record with a fresh local id and no slot. NONE when full or out of memory. */
 uint16_t i_rant_records_add(i_RantDiscoveryRecords *r, const uint8_t uuid[16]);
