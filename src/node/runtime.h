@@ -42,6 +42,9 @@ typedef struct {
                                                 called, 0 = 64 KB. Overflow drops the oldest event */
     const char           *prefix;        /* goes with '/' in front of every name this node creates,
                                             inside RANT_PREFIX. NULL = none. docs/node.md */
+    RantAllocator        *bulk;          /* a second pool for the big buffers touched rarely, such as
+                                            PSRAM. Copied at open and reset at close like alloc.
+                                            NULL = alloc. spec/allocation.md, Two pools */
 } RantNodeOpts;
 
 typedef struct RantQueue RantQueue;       /* a callback queue, owned by the node, freed at close */
@@ -229,8 +232,8 @@ RANT_API uint32_t rant_node_mesh_epoch(RantNode *n);
 /* Microseconds waited on slow subscribers and how many sends waited, since open. */
 RANT_API void       rant_node_backpressure_stats(RantNode *n, uint64_t *waited_us, uint32_t *waited_sends);
 
-/* Live bytes, the high water mark and the count of heap allocations. A flat count over a
- * window proves the hot path is allocation free. */
+/* The main pool's live bytes, high water mark and count of allocations. A flat count over a
+ * window proves the hot path is allocation free. The meta snapshot reports a bulk pool. */
 RANT_API void       rant_node_mem_stats(RantNode *n, size_t *in_use, size_t *peak, uint64_t *alloc_calls);
 /* The topic's cumulative repair counters. Zeroed for a NULL topic. */
 RANT_API void       rant_topic_repair_stats(RantTopic *topic, RantRepairStats *out);
@@ -397,6 +400,8 @@ void i_rant_node_set_sys_hooks(RantNode *n, i_RantSysEventFn on_event, i_RantSys
 /* Node pool allocation (size 0 frees), the layer's per node handle slot, the monotonic
  * clock and the wall clock the transport stamps written_us from. Under the node lock. */
 void    *i_rant_node_sys_alloc(RantNode *n, void *ptr, size_t size);
+/* The same from the bulk pool, for message sized buffers. */
+void    *i_rant_node_sys_bulk(RantNode *n, void *ptr, size_t size);
 void   **i_rant_node_sys_slot (RantNode *n);
 uint64_t i_rant_node_now_us     (RantNode *n);
 uint64_t i_rant_node_wall_us    (RantNode *n);

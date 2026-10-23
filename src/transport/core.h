@@ -77,7 +77,8 @@ typedef int (*i_RantShmMsgFn)(void *user, uint16_t topic_index, uint32_t from_pe
 #endif
 
 /* i_RantTransportConfig.allocator is required. Every growable buffer sizes through it, so memory
- * scales with traffic and matches. Static mode passes rant_allocator_alloc over a static one. */
+ * scales with traffic and matches. Static mode passes rant_allocator_alloc over a static one.
+ * bulk, when set, takes the message sized buffers instead. spec/allocation.md, Two pools */
 
 /* topics set: defined at init. topics NULL: n_topics reserved slots, all INACTIVE, filled
  * later by i_rant_transport_topic_define. */
@@ -92,6 +93,7 @@ typedef struct {
 #endif
     RantEventFn             on_event;   /* optional, .user is i_RantTransportConfig.user */
     RantAllocFn             allocator;  /* required, init fails without it */
+    RantAllocFn             bulk;       /* the history samples and the reassembly, NULL = allocator */
     /* Optional schema gate at detail intake, once per direction. peer_is_pub 1 gates the
      * read side. Return 1 to allow. Verdicts are cached per (peer, index). */
     int                 (*schema_check)(void *user, uint32_t peer, uint16_t topic_index,

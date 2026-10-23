@@ -136,6 +136,7 @@ int main(int argc, char **argv){
     FIELD(RantNodeOpts, discovery)
     FIELD(RantNodeOpts, event_queue_bytes)
     FIELD(RantNodeOpts, prefix)
+    FIELD(RantNodeOpts, bulk)
     SIZE(RantPeerInfo)
     FIELD(RantPeerInfo, id)
     FIELD(RantPeerInfo, uuid)

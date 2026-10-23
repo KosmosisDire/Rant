@@ -82,7 +82,8 @@ typedef struct {
     RantEventFn           on_event;      /* optional */
     void                 *user;
     RantAllocFn             alloc;         /* required, backs the schema state and the blob */
-    void                 *alloc_user;
+    RantAllocFn             bulk;          /* the interest and detail buffers, NULL = alloc */
+    void                 *alloc_user;   /* both hooks' user */
     int                   oob_capable;   /* 1 = we can deliver shared memory payloads */
     uint8_t               oob_host[16];  /* our host id, a peer is reachable iff it matches */
     uint8_t               fetch_details; /* observer mode: fetch and cache every advertised index */

@@ -705,8 +705,81 @@ static void want_filter_checks(void){
     i_rant_transport_destroy(st);
 }
 
+/* Two pools behind one transport user, so a check sees which hook each buffer came from. */
+typedef struct { RantAllocator main, bulk; } bk_Pools;
+static void *bk_main(void *u, void *ptr, size_t size){ return rant_allocator_alloc(&((bk_Pools*)u)->main, ptr, size); }
+static void *bk_bulk(void *u, void *ptr, size_t size){ return rant_allocator_alloc(&((bk_Pools*)u)->bulk, ptr, size); }
+static int bk_recv; static size_t bk_len;
+static int bk_on_msg(void *u, uint16_t ch, uint32_t from, RantBytes d){
+    (void)u; (void)ch; (void)from; bk_recv++; bk_len = d.len; return 0;
+}
+static i_RantTransportState *bk_side(i_RantTopicDef *def, i_RantTransportConfig *cfg, bk_Pools *pl,
+                                     void **mem, RantRole role, RantQos q){
+    size_t need;
+    memset(def, 0, sizeof *def); def->name = "bk/big"; def->qos = q; def->role = role;
+    memset(cfg, 0, sizeof *cfg);
+    cfg->topics = def; cfg->n_topics = 1; cfg->max_peers = 2; cfg->on_message = bk_on_msg;
+    cfg->allocator = bk_main; cfg->bulk = bk_bulk; cfg->user = pl;
+    pl->main = rant_allocator_heap(0); pl->bulk = rant_allocator_heap(0);
+    need = i_rant_transport_required_memory(cfg);
+    *mem = malloc(need);
+    return *mem ? i_rant_transport_init(*mem, need, cfg) : NULL;
+}
+
+/* The bulk hook takes the history samples and the reassembly, the main one the lanes and
+   the peer maps, and each frees into the pool it came from. */
+static void bulk_checks(void){
+    static uint8_t msg[20000];
+    i_RantTopicDef wd, rd; i_RantTransportConfig wc, rc; bk_Pools wp, rp; void *wm = NULL, *rm = NULL;
+    i_RantTransportState *w, *r; RantQos q; uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t ol;
+    size_t wmain, rmain, wbulk, rbulk; uint64_t clk = 1000000u; int i;
+    memset(&q, 0, sizeof q); q.reliability = RANT_RELIABLE; q.keep_last = 1;
+    w = bk_side(&wd, &wc, &wp, &wm, RANT_PUB_ONLY, q);
+    r = bk_side(&rd, &rc, &rp, &rm, RANT_SUB_ONLY, q);
+    CHECK(w && r, "bulk: two transports open");
+    if (!w || !r) goto done;
+    i_rant_transport_peer_add(w, 2u, RANT_FRAG_SIZE);
+    i_rant_transport_peer_add(r, 1u, RANT_FRAG_SIZE);
+    test_apply_verified(r, 1u, w);
+    test_apply_verified(w, 2u, r);
+    CHECK(i_rant_transport_publisher_match_count(w, 0) == 1 && wp.bulk.in_use == 0 && rp.bulk.in_use == 0
+          && wp.main.in_use > 0 && rp.main.in_use > 0,
+          "bulk: a match puts its lanes and maps in the main and nothing in the bulk (main %u %u)",
+          (unsigned)wp.main.in_use, (unsigned)rp.main.in_use);
+    wmain = wp.main.in_use; rmain = rp.main.in_use;
+    bk_recv = 0;
+    CHECK(i_rant_transport_send(w, 0, rant_bytes(msg, sizeof msg), clk) == RANT_OK, "bulk: a 20 kB send commits");
+    for (i = 0; i < 50 && !bk_recv; i++){
+        while (i_rant_transport_poll_send(w, &to, buf, sizeof buf, &ol, clk))
+            i_rant_transport_on_datagram(r, 1u, rant_bytes(buf, ol), clk);
+        while (i_rant_transport_poll_send(r, &to, buf, sizeof buf, &ol, clk))
+            i_rant_transport_on_datagram(w, 2u, rant_bytes(buf, ol), clk);
+        clk += 1000u;
+    }
+    wbulk = wp.bulk.in_use; rbulk = rp.bulk.in_use;
+    CHECK(bk_recv == 1 && bk_len >= sizeof msg && wbulk >= sizeof msg && rbulk >= sizeof msg
+          && wp.main.in_use == wmain && rp.main.in_use == rmain,
+          "bulk: the history sample and the reassembly are in the bulk, the mains unmoved (recv %d of %u, bulk %u %u, main %+d %+d)",
+          bk_recv, (unsigned)bk_len, (unsigned)wbulk, (unsigned)rbulk, (int)(wp.main.in_use - wmain), (int)(rp.main.in_use - rmain));
+    i_rant_transport_peer_remove(r, 1u);
+    i_rant_transport_topic_retire(w, 0);
+    CHECK(rp.bulk.in_use == 0 && wp.bulk.in_use == 0 && rp.main.in_use < rmain,
+          "bulk: a peer removed and a topic retired give the bulk blocks back to the bulk (bulk %u %u)",
+          (unsigned)wp.bulk.in_use, (unsigned)rp.bulk.in_use);
+    i_rant_transport_destroy(w); i_rant_transport_destroy(r); w = r = NULL;
+    CHECK(wp.main.in_use == 0 && rp.main.in_use == 0 && wp.bulk.in_use == 0 && rp.bulk.in_use == 0,
+          "bulk: destroy leaves each pool empty (main %u %u)", (unsigned)wp.main.in_use, (unsigned)rp.main.in_use);
+done:
+    if (w) i_rant_transport_destroy(w);
+    if (r) i_rant_transport_destroy(r);
+    free(wm); free(rm);
+    rant_allocator_reset(&wp.main); rant_allocator_reset(&wp.bulk);
+    rant_allocator_reset(&rp.main); rant_allocator_reset(&rp.bulk);
+}
+
 static const TestCase cases[] = {
     { "basics", basics_checks },
+    { "bulk", bulk_checks },
     { "want_set", want_set_checks },
     { "want_filter", want_filter_checks },
     { "rate", rate_checks },

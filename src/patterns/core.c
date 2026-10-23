@@ -400,7 +400,7 @@ static void i_rant_func_mark_running(i_RantPending *p){
 
 /* frees an unlinked pending entry and any queued request bytes */
 static void i_rant_func_free_pending(RantFunction *fn, i_RantPending *p){
-    if (p->queued_req) i_rant_node_sys_alloc(fn->n, p->queued_req, 0);
+    if (p->queued_req) i_rant_node_sys_bulk(fn->n, p->queued_req, 0);
     i_rant_node_sys_alloc(fn->n, p, 0);
 }
 
@@ -425,7 +425,7 @@ static void i_rant_func_flush_queued(RantFunction *fn){
         else
             (void)i_rant_topic_send_hdr(fn->req, rant_bytes(hdr, RANT__FN_PREFIX),
                                         rant_bytes(pick->queued_req, pick->queued_len));
-        i_rant_node_sys_alloc(fn->n, pick->queued_req, 0);
+        i_rant_node_sys_bulk(fn->n, pick->queued_req, 0);
         pick->queued_req = NULL; pick->queued_len = 0;
     }
 }
@@ -839,7 +839,7 @@ static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponse
     if (dest ? !i_rant_topic_peer_matched(fn->req, dest) : rant_topic_match_count(fn->req) == 0){
         /* its provider not matched yet: the transport would drop an unmatched send, so queue
            the request and flush the instant the match forms. See spec/patterns.md */
-        p->queued_req = (uint8_t*)i_rant_node_sys_alloc(fn->n, NULL, req.len ? req.len : 1u);
+        p->queued_req = (uint8_t*)i_rant_node_sys_bulk(fn->n, NULL, req.len ? req.len : 1u);
         if (!p->queued_req){
             fn->pending = p->next;
             i_rant_node_sys_alloc(fn->n, p, 0);
@@ -920,7 +920,7 @@ int rant_function_retire(RantFunction *fn){
     i_rant_func_drop_parked(fn);
     if (pm){ i_rant_pat_unlink((void**)&pm->funcs, fn, offsetof(RantFunction, next)); pm->auth_dirty = 1; }
     req = fn->req; rsp = fn->rsp; prg = fn->prg;   /* outlive fn, see phase 3 */
-    if (fn->sync_buf)  i_rant_node_sys_alloc(n, fn->sync_buf, 0);
+    if (fn->sync_buf)  i_rant_node_sys_bulk(n, fn->sync_buf, 0);
     if (fn->dup_peers) i_rant_node_sys_alloc(n, fn->dup_peers, 0);
     i_rant_node_sys_alloc(n, fn, 0);
     if (pm) i_rant_pat_problems(pm);           /* its rivals' conditions go with it */
@@ -990,7 +990,7 @@ static void i_rant_func_sync_response(const RantResponse *r){
     }
     if (r->data.len){
         if (fn->sync_cap < r->data.len){
-            uint8_t *nb = (uint8_t*)i_rant_node_sys_alloc(fn->n, fn->sync_buf, r->data.len);
+            uint8_t *nb = (uint8_t*)i_rant_node_sys_bulk(fn->n, fn->sync_buf, r->data.len);
             if (nb){ fn->sync_buf = nb; fn->sync_cap = (uint32_t)r->data.len; }
             else c->len = 0;
         }
@@ -1220,7 +1220,7 @@ static void i_rant_meta_on_request(RantRequest *request, void *user){
     if (!body.data){ rant_request_fail(request, "snapshot failed", rant_bytes(NULL, 0)); return; }
     need = rant_schema_msg_min(pm->meta_rsp_schema) + (uint32_t)body.len;
     if (pm->meta_msg_cap < need){
-        uint8_t *nb = (uint8_t*)i_rant_node_sys_alloc(n, pm->meta_msg, need);
+        uint8_t *nb = (uint8_t*)i_rant_node_sys_bulk(n, pm->meta_msg, need);
         if (!nb){ rant_request_fail(request, "out of memory", rant_bytes(NULL, 0)); return; }
         pm->meta_msg = nb; pm->meta_msg_cap = need;
     }
@@ -1317,7 +1317,7 @@ struct RantVariable {
 /* copies v into a grown buffer, 0 on OOM with the buffer unchanged */
 static int i_rant_buf_put(RantNode *n, uint8_t **buf, uint32_t *len, uint32_t *cap, RantBytes v){
     if (*cap < v.len){
-        uint8_t *nb = (uint8_t*)i_rant_node_sys_alloc(n, *buf, v.len ? v.len : 1u);
+        uint8_t *nb = (uint8_t*)i_rant_node_sys_bulk(n, *buf, v.len ? v.len : 1u);
         if (!nb) return 0;
         *buf = nb; *cap = (uint32_t)(v.len ? v.len : 1u);
     }
@@ -1712,8 +1712,8 @@ int rant_variable_retire(RantVariable *var){
     i_rant_pat_clear_channels(var->value, var->set);
     if (pm){ i_rant_pat_unlink((void**)&pm->vars, var, offsetof(RantVariable, next)); pm->auth_dirty = 1; }
     value = var->value; set = var->set;   /* outlive var, see phase 3 */
-    if (var->store)     i_rant_node_sys_alloc(n, var->store, 0);
-    if (var->shadow)    i_rant_node_sys_alloc(n, var->shadow, 0);
+    if (var->store)     i_rant_node_sys_bulk(n, var->store, 0);
+    if (var->shadow)    i_rant_node_sys_bulk(n, var->shadow, 0);
     if (var->dup_peers) i_rant_node_sys_alloc(n, var->dup_peers, 0);
     i_rant_node_sys_alloc(n, var, 0);
     if (pm) i_rant_pat_problems(pm);           /* its rivals' conditions go with it */

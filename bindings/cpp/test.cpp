@@ -2091,8 +2091,33 @@ static bool version_leg() {
     return true;
 }
 
+/* a bulk buffer takes a message the main buffer could never hold */
+static bool bulk_leg() {
+    int before = g_failures;
+    std::vector<uint8_t> main_block(256u << 10), bulk_block(2u << 20), big(300u << 10, 7);
+    rant::NodeOptions opts;
+    opts.domain = test_domain(16);
+    opts.multicast_interface = "127.0.0.1";
+    rant::NodeOptions small = opts;
+    small.memory = main_block.data(); small.memory_size = main_block.size();
+    small.bulk = bulk_block.data(); small.bulk_size = bulk_block.size();
+    small.disable_shm = true;
+    rant::Node a("bulk_a", small), b("bulk_b", opts);
+    if (!a.valid() || !b.valid()) { chk("bulk: node construction", false); return false; }
+    std::atomic<size_t> got{ 0 };
+    auto sub = a.subscriber<rant::Bytes>("big", [&](const rant::MessageView& m) { got = m.data().size(); },
+                                         { rant::Reliability::Reliable });
+    auto pub = b.publisher<rant::Bytes>("big", { rant::Reliability::Reliable });
+    chk("bulk: the topics match", wait_for(4000, [&] { return pub.match_count() > 0; }));
+    chk("bulk: a 300 kB send commits", pub.send(rant::Bytes(big.data(), big.size())) == rant::SendStatus::Ok);
+    chk("bulk: it arrives whole", wait_for(5000, [&] { return got.load() == big.size(); }));
+    chk("bulk: the main buffer never held it", a.stats().memory_peak <= main_block.size());
+    return g_failures == before;
+}
+
 struct Leg { const char* name; bool (*run)(); };
 static const Leg LEGS[] = {
+    { "bulk",       bulk_leg },
     { "dynamic",    dynamic_leg },
     { "patterns",   patterns_leg },
     { "value_root", value_root_leg },

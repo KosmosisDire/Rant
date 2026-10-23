@@ -495,6 +495,10 @@ struct NodeOptions {
      * growth, shared memory off, and the open fails when the buffer is too small. */
     void*                    memory      = nullptr;
     size_t                   memory_size = 0;
+    /* A second buffer, such as one in PSRAM, for the big buffers touched rarely: message
+     * history and reassembly, peer records, queue rings. Null keeps them with the rest. */
+    void*                    bulk        = nullptr;
+    size_t                   bulk_size   = 0;
 };
 
 #ifndef RANT_NO_PATTERNS
@@ -3003,6 +3007,8 @@ public:
         detail::RantAllocator mem = (o.memory && o.memory_size)
             ? detail::rant_allocator_static(o.memory, o.memory_size)
             : detail::rant_allocator_heap(0);
+        detail::RantAllocator bulk = detail::rant_allocator_static(o.bulk, o.bulk_size);
+        co.bulk = (o.bulk && o.bulk_size) ? &bulk : nullptr;    /* copied at open */
         detail::RantNode* n = detail::rant_node_open(
             &mem, nm.empty() ? nullptr : nm.c_str(),
             &Node::on_msg_tramp, &Node::on_evt_tramp, &co);

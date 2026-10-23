@@ -181,6 +181,31 @@ int test_builtin(const RantEntityInfo *e){
     return 0;
 }
 
+long long test_page_live[TEST_PAGE_SOURCES], test_page_foreign;
+typedef struct { uint32_t tag, pad; size_t size; } TestPageHead;
+static void *test_page(int k, void *ptr, size_t size){
+    TestPageHead *h;
+    if (ptr){
+        h = (TestPageHead*)((uint8_t*)ptr - 16);
+        if (h->tag != 0xB0B0u + (uint32_t)k || size){ test_page_foreign++; return NULL; }
+        test_page_live[k] -= (long long)h->size; h->tag = 0; free(h);
+        return NULL;
+    }
+    h = (TestPageHead*)malloc(size + 16);
+    if (!h) return NULL;
+    h->tag = 0xB0B0u + (uint32_t)k; h->size = size; test_page_live[k] += (long long)size;
+    return (uint8_t*)h + 16;
+}
+static void *test_page0(void *p, size_t n){ return test_page(0, p, n); }
+static void *test_page1(void *p, size_t n){ return test_page(1, p, n); }
+static void *test_page2(void *p, size_t n){ return test_page(2, p, n); }
+static void *test_page3(void *p, size_t n){ return test_page(3, p, n); }
+RantPageFn test_page_source(int k){
+    static const RantPageFn fns[TEST_PAGE_SOURCES] = { test_page0, test_page1, test_page2, test_page3 };
+    return fns[k];
+}
+void test_page_clear(void){ memset(test_page_live, 0, sizeof test_page_live); test_page_foreign = 0; }
+
 uint16_t test_free_port(uint16_t port){
     uint16_t k;
     for (k = 0; k < 100; k++){

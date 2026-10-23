@@ -67,6 +67,18 @@ To run one handle's callbacks on a thread of your own, pass it a queue from
 - A callback that throws never breaks the node. The error goes to stderr and
   `on_event`. A function or task handler that throws answers the caller `AppError`.
 
+### Memory
+
+`memory` and `memory_size` run the node in one buffer, with no heap and no growth. `bulk`
+and `bulk_size` add a second buffer for the big buffers touched rarely: message history and
+reassembly, peer records, queue rings. On an ESP32-S3 give the node SRAM and the bulk PSRAM:
+
+```cpp
+static uint8_t sram[96 << 10];
+rant::Node node("arm", { .memory = sram, .memory_size = sizeof sram,
+                         .bulk = heap_caps_malloc(2 << 20, MALLOC_CAP_SPIRAM), .bulk_size = 2 << 20 });
+```
+
 ## Types
 
 ```cpp

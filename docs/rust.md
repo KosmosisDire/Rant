@@ -225,3 +225,6 @@ for peer in node.reflection().peers() {
 
 `NodeOptions::new().memory(4 << 20)` runs the node in one block of that many bytes, with no
 growth and no shared memory. The open fails with `Oom` when the block is too small.
+`.bulk(2 << 20)` adds a second block for the big buffers touched rarely: message history and
+reassembly, peer records, queue rings. On ESP-IDF a block past the internal malloc threshold
+lands in PSRAM.

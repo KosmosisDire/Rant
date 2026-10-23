@@ -191,6 +191,7 @@ i_RantTransportState *i_rant_transport_init(void *mem, size_t cap, const i_RantT
     st = i_rant_transport_build(&b, cfg);
     if (!st || b.oom) return NULL;
     st->cfg.topics = NULL;   /* only read during init */
+    if (!st->cfg.bulk) st->cfg.bulk = st->cfg.allocator;
     return st;
 }
 
@@ -372,8 +373,8 @@ static i_RantLane *i_rant_lane_ensure(i_RantTransportState *st, uint16_t c, uint
 
 /* free one assembly slot's grown buffers */
 static void i_rant_asm_free(i_RantTransportState *st, i_RantAssembly *a){
-    if (a->buf){ st->cfg.allocator(st->cfg.user, a->buf, 0); a->buf=NULL; a->cap=0; }
-    if (a->bitmap){ st->cfg.allocator(st->cfg.user, a->bitmap, 0); a->bitmap=NULL; a->bitmap_cap=0; }
+    if (a->buf){ st->cfg.bulk(st->cfg.user, a->buf, 0); a->buf=NULL; a->cap=0; }
+    if (a->bitmap){ st->cfg.bulk(st->cfg.user, a->bitmap, 0); a->bitmap=NULL; a->bitmap_cap=0; }
     a->active=0;
 }
 
@@ -671,7 +672,7 @@ void i_rant_transport_destroy(i_RantTransportState *st){
         if (!topic->history) continue;         /* a retired slot freed its ring */
         depth = topic->qos.keep_last;
         for (d=0; d<depth; d++)
-            if (topic->history[d].buf){ st->cfg.allocator(st->cfg.user, topic->history[d].buf, 0);
+            if (topic->history[d].buf){ st->cfg.bulk(st->cfg.user, topic->history[d].buf, 0);
                                   topic->history[d].buf=NULL; topic->history[d].cap=0; }
         if (topic->history_owned && topic->history){   /* the ring came from topic_define */
             st->cfg.allocator(st->cfg.user, topic->history, 0);
@@ -1815,7 +1816,7 @@ int i_rant_transport_topic_retire(i_RantTransportState *st, uint16_t topic_index
     if (topic->history){
         for (d=0; d<depth; d++)
             if (topic->history[d].buf){
-                st->cfg.allocator(st->cfg.user, topic->history[d].buf, 0);
+                st->cfg.bulk(st->cfg.user, topic->history[d].buf, 0);
                 topic->history[d].buf = NULL; topic->history[d].cap = 0;
             }
         if (topic->history_owned){

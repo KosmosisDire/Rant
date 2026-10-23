@@ -358,6 +358,7 @@ namespace Rant
         public RantNodeDiscovery discovery;
         public uint event_queue_bytes;
         public IntPtr prefix;                  // copied at open
+        public IntPtr bulk;                    // always null: this binding has one pool
     }
 
     [StructLayout(LayoutKind.Sequential)]

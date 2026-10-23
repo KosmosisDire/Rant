@@ -434,6 +434,59 @@ static void crowd_late_match_checks(void){
     ms_crowd_close();
 }
 
+/* A static node with a static bulk keeps its records and peer blobs out of the main buffer:
+   it opens smaller than the same node without one, a crowd leaves the main flat, a late
+   subscriber still matches, and the meta answer reports the bulk. */
+static void static_bulk_checks(void){
+    static uint8_t abuf[1u << 20], bbuf[1u << 20], cbuf[1u << 20];
+    RantAllocator a = rant_allocator_static(abuf, sizeof abuf), b = rant_allocator_static(bbuf, sizeof bbuf);
+    RantAllocator c = rant_allocator_static(cbuf, sizeof cbuf);
+    uint16_t dom = (uint16_t)(TEST_DOMAIN + 13);
+    RantNodeOpts ot = ms_opts(dom, 2, 4, 500000), ol = ms_opts(dom, 0, 2, 500000);
+    MsEvents et; RantNode *T, *U, *L = NULL; RantTopic *pub; RantResponse out;
+    size_t whole = 0, open = 0, m10 = 0, m30 = 0; int known, r = 0; uint32_t id = 0;
+    uint8_t mask[4] = { 1, 0, 0, 0 };     /* RANT_META_NODE */
+    U = rant_node_open(&c, "ms-bulk-ref", NULL, NULL, &ot);
+    if (U){ rant_node_mem_stats(U, &whole, NULL, NULL); rant_node_close(U, 0); }
+    memset(&et, 0, sizeof et);
+    ot.user_data = &et; ot.bulk = &b;
+    T = rant_node_open(&a, "ms-bulk", NULL, ms_on_event, &ot);
+    if (T) rant_node_mem_stats(T, &open, NULL, NULL);
+    CHECK(T && U && open + 1024u <= whole, "static bulk: opens %ld bytes smaller than without a bulk",
+          (long)whole - (long)open);
+    if (!T) return;
+    pub = rant_node_create_topic(T, "ms/bulk", RANT_PUB_ONLY, NULL, NULL);
+    rant_node_start(T);
+    ms_crowd_open(dom, 10, 20, 500000);
+    MS_WAIT_UNTIL(8000, ms_crowd_all_see("ms-bulk"));
+    ms_wait(1000);
+    rant_node_mem_stats(T, &m10, NULL, NULL);
+    ms_crowd_open(dom, 20, 20, 500000);
+    MS_WAIT_UNTIL(8000, ms_crowd_all_see("ms-bulk"));
+    ms_wait(1000);
+    rant_node_mem_stats(T, &m30, NULL, NULL);
+    known = ms_active(T);
+    CHECK(m30 <= m10 + 2048u && known == 8, "static bulk: 20 more peers cost the main %ld bytes (known %d)",
+          (long)m30 - (long)m10, known);
+    L = ms_heap("ms-bulk-sub", &ol);
+    if (L){ rant_node_create_topic(L, "ms/bulk", RANT_SUB_ONLY, NULL, NULL); (void)rant_node_meta_function(L); rant_node_start(L); }
+    MS_WAIT_UNTIL(6000, pub && rant_topic_match_count(pub) == 1 && L && (id = ms_peer_id(L, "ms-bulk")) != 0);
+    CHECK(pub && rant_topic_match_count(pub) == 1 && et.refused == 0,
+          "static bulk: the late subscriber matched, nobody turned away (refused %lld)", et.refused);
+    if (id) r = rant_function_call(rant_node_meta_function(L), rant_bytes(mask, 4), &out, 3000,
+                                   &(RantCallOpts){ .provider = id });
+    if (r == 1 && out.status == RANT_CALL_OK && out.schema){
+        RantBytes info = rant_get_map(out.data, out.schema, "info");
+        RantValue node, bulk;
+        int ok = rant_map_get(info, "node", &node) && rant_map_get(node.bytes, "bulk_in_use", &bulk);
+        CHECK(ok && bulk.v.u > 0 && bulk.v.u <= sizeof bbuf, "static bulk: the meta answer reports the bulk (%llu bytes)",
+              ok ? (unsigned long long)bulk.v.u : 0ull);
+    } else CHECK(0, "static bulk: the meta call is answered (ret %d)", r);
+    if (L) rant_node_close(L, 1);
+    rant_node_close(T, 1);
+    ms_crowd_close();
+}
+
 /* A topic made at runtime among peers that hold no blob here: one nobody wants sends at once,
    and one three peers want reaches all three with its first message. */
 static void ms_rt_msg(const RantMsg *m){ if (m->user) *(volatile int*)m->user = 1; }
@@ -519,6 +572,7 @@ static const TestCase cases[] = {
     { "big_peer",            big_peer_checks },
     { "slot_back",           slot_back_checks },
     { "crowd_late_match",    crowd_late_match_checks },
+    { "static_bulk",         static_bulk_checks },
     { "runtime_topic",       runtime_topic_checks },
 };
 

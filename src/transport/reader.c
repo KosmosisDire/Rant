@@ -44,12 +44,12 @@ static void i_rant_reader_ack_now(i_RantTransportState *st, i_RantTopic *topic, 
 static int i_rant_asm_fit(i_RantTransportState *st, i_RantAssembly *a, uint32_t len, uint16_t count){
     uint32_t bitmap_need = ((uint32_t)count + 7u) / 8u;
     if (a->cap < len){
-        uint8_t *nb = (uint8_t*)st->cfg.allocator(st->cfg.user, a->buf, len?len:1u);
+        uint8_t *nb = (uint8_t*)st->cfg.bulk(st->cfg.user, a->buf, len?len:1u);
         if (!nb) return 0;
         a->buf = nb; a->cap = len?len:1u;
     }
     if (a->bitmap_cap < bitmap_need){
-        uint8_t *nb = (uint8_t*)st->cfg.allocator(st->cfg.user, a->bitmap, bitmap_need?bitmap_need:1u);
+        uint8_t *nb = (uint8_t*)st->cfg.bulk(st->cfg.user, a->bitmap, bitmap_need?bitmap_need:1u);
         if (!nb) return 0;
         a->bitmap = nb; a->bitmap_cap = bitmap_need?bitmap_need:1u;
     }

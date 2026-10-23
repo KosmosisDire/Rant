@@ -49,30 +49,28 @@ static void i_rant_records_free_from(i_RantDiscoveryRecords *r, uint16_t first){
     }
 }
 
-void i_rant_records_layout(i_RantBump *b, uint16_t reserve, int hooked, i_RantDiscoveryRecordsBlocks *o){
+void i_rant_records_layout(i_RantBump *b, uint16_t reserve, RantAllocFn alloc, RantAllocFn bulk,
+                           i_RantDiscoveryRecordsBlocks *o){
     o->recs = o->heads = NULL;
-    if (hooked) return;
-    o->recs  = (uint8_t*)i_rant_bump_take(b, (size_t)reserve * sizeof(i_RantDiscoveryRecord), 8);
+    if (alloc) return;
+    if (!bulk) o->recs = (uint8_t*)i_rant_bump_take(b, (size_t)reserve * sizeof(i_RantDiscoveryRecord), 8);
     o->heads = (uint8_t*)i_rant_bump_take(b, 2u * i_rant_records_buckets(reserve) * sizeof(uint16_t), 2);
 }
 
 int i_rant_records_init(i_RantDiscoveryRecords *r, const i_RantDiscoveryRecordsBlocks *blk,
-                        uint16_t reserve, uint16_t max, RantAllocFn alloc, void *alloc_user){
+                        uint16_t reserve, uint16_t max, RantAllocFn alloc, RantAllocFn bulk,
+                        void *alloc_user){
     uint32_t nb = i_rant_records_buckets(reserve);
     memset(r, 0, sizeof *r);
     if (reserve > I_RANT_REC_MAX) return 0;
     r->alloc = alloc; r->alloc_user = alloc_user;
-    r->max = reserve;           /* an arena store stays at its reserve */
+    r->bulk = bulk ? bulk : alloc;
+    r->max = reserve;           /* a store without alloc stays at its reserve */
     if (alloc && max > reserve) r->max = max > I_RANT_REC_MAX ? (uint16_t)I_RANT_REC_MAX : max;
-    if (alloc){
-        r->recs  = (i_RantDiscoveryRecord*)alloc(alloc_user, NULL, (size_t)reserve * sizeof(i_RantDiscoveryRecord));
-        r->heads = (uint16_t*)alloc(alloc_user, NULL, 2u * nb * sizeof(uint16_t));
-        if (!r->recs || !r->heads){ i_rant_records_destroy(r); return 0; }
-    } else {
-        r->recs  = (i_RantDiscoveryRecord*)blk->recs;
-        r->heads = (uint16_t*)blk->heads;
-        if (!r->recs || !r->heads) return 0;
-    }
+    r->recs  = r->bulk ? (i_RantDiscoveryRecord*)r->bulk(alloc_user, NULL, (size_t)reserve * sizeof(i_RantDiscoveryRecord))
+                       : (i_RantDiscoveryRecord*)blk->recs;
+    r->heads = alloc ? (uint16_t*)alloc(alloc_user, NULL, 2u * nb * sizeof(uint16_t)) : (uint16_t*)blk->heads;
+    if (!r->recs || !r->heads){ i_rant_records_destroy(r); return 0; }
     r->cap = reserve; r->mask = (uint16_t)(nb - 1u);
     r->free_head = I_RANT_REC_NONE;
     r->due_head = r->due_tail = I_RANT_REC_NONE;
@@ -84,9 +82,8 @@ int i_rant_records_init(i_RantDiscoveryRecords *r, const i_RantDiscoveryRecordsB
 }
 
 void i_rant_records_destroy(i_RantDiscoveryRecords *r){
-    if (!r->alloc) return;      /* arena memory stays the caller's */
-    if (r->recs) r->alloc(r->alloc_user, r->recs, 0);
-    if (r->heads) r->alloc(r->alloc_user, r->heads, 0);
+    if (r->bulk && r->recs) r->bulk(r->alloc_user, r->recs, 0);     /* arena memory stays the caller's */
+    if (r->alloc && r->heads) r->alloc(r->alloc_user, r->heads, 0);
     r->recs = NULL; r->heads = NULL; r->cap = 0; r->count = 0; r->live = 0;
     r->free_head = r->due_head = r->due_tail = I_RANT_REC_NONE;
 }
@@ -99,7 +96,7 @@ static int i_rant_records_grow(i_RantDiscoveryRecords *r){
     if (!r->alloc) return 0;
     if (ncap > r->max) ncap = r->max;
     if (ncap <= r->cap) return 0;
-    nr = (i_RantDiscoveryRecord*)r->alloc(r->alloc_user, r->recs, ncap * sizeof(i_RantDiscoveryRecord));
+    nr = (i_RantDiscoveryRecord*)r->bulk(r->alloc_user, r->recs, ncap * sizeof(i_RantDiscoveryRecord));
     if (!nr) return 0;
     r->recs = nr;
     memset(nr + old, 0, (size_t)(ncap - old) * sizeof(i_RantDiscoveryRecord));

@@ -62,26 +62,26 @@ program in this order.
 
 | Program | Cases |
 |---|---|
-| `unit.transport` | basics, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
-| `unit.discovery` | records, migrate, owed, judge, unmatched, filter, forgotten, first_contact, too_big, wire, change_age, discovery_core, node_core |
+| `unit.transport` | basics, bulk, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
+| `unit.discovery` | records, migrate, owed, judge, unmatched, filter, forgotten, first_contact, too_big, bulk, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
 | `unit.tunnel` | hash, handshake, frame, json, batch |
 | `e2e.stream` | stream, scale, named, collision |
-| `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups |
+| `e2e.node` | open_fail, bulk_pools, bulk_shm, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups |
 | `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema |
-| `e2e.detail` | detail_live, interest_external, filter_fetch |
+| `e2e.detail` | detail_live, interest_external, interest_bulk, filter_fetch |
 | `e2e.shm` | shm_node |
 | `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
 | `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate |
 | `e2e.tasks` | task, task_matrix |
 | `e2e.entities` | reflect_dropped, churn, republish, log_and_meta, status, rant_conditions, rant_refused, rant_partial, rant_cap |
 | `e2e.matchwait` | matchwait |
-| `e2e.mesh` | builtins_quiet, seeded_segments, meta_from_callbacks, directed_first_call, static_bounded, static_meta_peers, observer_fast, grow_at_once, big_peer, slot_back, crowd_late_match, runtime_topic |
+| `e2e.mesh` | builtins_quiet, seeded_segments, meta_from_callbacks, directed_first_call, static_bounded, static_meta_peers, observer_fast, grow_at_once, big_peer, slot_back, crowd_late_match, static_bulk, runtime_topic |
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
-| `bench.memscale` | `rant_bench memscale`, a steady state send never allocates |
+| `bench.memscale` | `rant_bench memscale`, a steady state send never allocates, with a bulk pool too |
 | `bindings.cpp`, `.python`, `.csharp` | the binding suites, below |
 | `fuzz.receive`, `.schema`, `.message` | the target's seeds and saved crashes, below |
 | `interop.<pub>_to_<sub>` | one language publishing to another, below |
@@ -119,6 +119,10 @@ What each phase pins, grouped by layer.
 - Send result codes: the size check precedes the role check, so an oversize send on a pub
   topic is TOO_BIG even with no subscriber and a valid send on a sub only topic is ROLE.
   An init with no allocator refuses.
+- Bulk: with two pools behind one user, a match puts its lanes and maps in the main and
+  nothing in the bulk, a 20 kB message's history sample and reassembly land in the bulk
+  with both mains unmoved, a removed peer and a retired topic give the bulk blocks back to
+  the bulk, and destroy leaves each pool empty.
 - Want set: our publish meets a subscriber of any kind and never a publisher, another name
   or an inactive entry, a variable we own meets a rival owner of its kind only, a function we
   serve a rival provider unless MULTI. A new topic or one back from parked grows the set, a
@@ -136,7 +140,9 @@ What each phase pins, grouped by layer.
 
 - Records: a store is found by uuid and by id through doubling and reuse, every add mints a
   new id that skips 0, an arena store stays at its reserve, a hook store grows to its bound
-  and no further, and a refused growth leaves every record in place. The due queue holds
+  and no further, and a refused growth leaves every record in place. With a bulk hook the
+  records grow there and the main holds only their chains, and a store without a main hook
+  takes its fixed reserve from the bulk, keeping only its chains in the arena. The due queue holds
   exactly the records owed work, oldest first, keeps the earliest due time and loses a
   removed record, and the live count follows every change of state.
 - Migrate: a grow keeps each peer's id, scratch, locator and name, fetches the peer it
@@ -185,6 +191,10 @@ What each phase pins, grouped by layer.
 - Too big: the header keeps the record under its id with no fetch, a newer version is
   fetched once and a too big answer ends it, a grown bound fetches that peer alone and its
   answer takes a slot, and a blob the OS cut short counts the same.
+- Bulk: a hooked core opens with its records in the bulk and its chains in the main, and
+  matched blobs and grown records go to the bulk with the main holding only the chains. A
+  fixed core takes its record array and blob pool from the bulk at init, needs that much
+  less arena, never grows them, and destroy frees each pool.
 - Wire: every field round trips and every short, long or cut datagram is refused as such.
 - Change age: it counts from the start, restarts at each change and saturates.
 - Lifecycle: two announces are two ups, silence past the timeout drops both but keeps
@@ -211,6 +221,11 @@ What each phase pins, grouped by layer.
 - User data forwarding: a shared memory capable node rewraps the transport callbacks, and a
   transport fired event must still reach `on_event` with the app's user data. A crafted
   name collision is the deterministic transport event that proves it.
+- Bulk pools: two nodes on a main and a bulk pool each, from page sources that tag their
+  pages. Two 200 kB streams, a queued copy, a 150 kB variable value and the first meta call
+  grow the bulks by megabytes and the mains by under 1 kB, the meta answer reports both
+  pools, and every page goes back to its own source at close. The main allocator passed as
+  the bulk is one pool. Over shared memory the copy out of the segment lands in the bulk.
 - Dynamic growth: creating topics past the reserve relocates the node into a bigger arena.
   A stream on the original handle loses, duplicates and reorders nothing across it.
 
@@ -263,7 +278,8 @@ What each phase pins, grouped by layer.
   steady state announces trigger no re fetch. Reflection reads the assembled interest and
   the interest epoch is the observer cache key. A node sharing nothing with the publisher
   lends its next blob a slot for the paging and gives the slot back once the pages show it
-  meets nothing.
+  meets nothing. On two pools each, the answer pages and the assembled interest grow the
+  bulks by at least the blob, and every page goes back to its own source.
 - Filter fetch: a node that opened among twelve unrelated publishers, all judged by
   assumption, fetches all twelve at its first topic after the gather (a variable named like
   one publisher's topic, whose rival key that filter holds). Then a name none takes fetches
@@ -428,7 +444,9 @@ What each phase pins, grouped by layer.
   the starting table. A peer too big for one announce never takes the slot a subscriber
   needs, and a peer that stops sharing gives its slot back. A static node whose 8 records
   hold 30 unrelated publishers matches a subscriber that opens last, turning nobody away.
-  A runtime topic nobody wants
+  A static node with a static bulk opens smaller than the same node without one, a crowd
+  leaves its main flat, a late subscriber still matches, and its meta answer reports the
+  bulk. A runtime topic nobody wants
   sends at once, and one three peers want reaches all three.
 
 ### Benches
@@ -439,7 +457,9 @@ What each phase pins, grouped by layer.
   survive a control peer flap, entries are tagged with domain and run nonce, workers
   HELLO at startup, and both machines must share a subnet.
 - memscale: steady state must be alloc free and warm sends pay no allocation. The command
-  exits 1 when a steady state send allocated.
+  exits 1 when a steady state send allocated. A last grid gives every node a bulk pool
+  from a counted page source, whose heap takes count as allocations, and shows the main
+  peaks flat at every payload size.
 - threadbench: keep_last 64 so the drain guard rather than ack flow control engages, and
   backpressure only ever engages flat out.
 - queuebench: inline callbacks against a 4 MB callback queue ring. The ring must cover the
@@ -468,7 +488,8 @@ in its callback and a node close inside its own callback, rebind a rebase decode
 reader's retired slot goes to another name, close_race sends, writes and creates on other
 threads while the node closes (a sanitizer build sees every miss), factory the node
 factories and their refusals, `reflect_from_mesh`, and the reflection walks and meta
-calls. `rant_cpp_test bench` runs the cost of each codec path
+calls, and bulk a static node whose 256 kB main buffer could never hold a 300 kB message
+taking one through its bulk buffer. `rant_cpp_test bench` runs the cost of each codec path
 (memcpy, loop, tails, dynamic) alone and end to end on loopback, next to a C node pair on
 the same footing, so a wrapper change is measured against the C floor.
 

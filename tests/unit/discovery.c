@@ -455,6 +455,11 @@ static void *rs_alloc(void *u, void *ptr, size_t size){
     return rant_allocator_alloc(u, ptr, size);
 }
 
+/* Two pools behind one user, so a test sees which hook each buffer came from. */
+typedef struct { RantAllocator main, bulk; } rs_Pools;
+static void *rs_main(void *u, void *ptr, size_t size){ return rant_allocator_alloc(&((rs_Pools*)u)->main, ptr, size); }
+static void *rs_bulk(void *u, void *ptr, size_t size){ return rant_allocator_alloc(&((rs_Pools*)u)->bulk, ptr, size); }
+
 static int rs_find_all(const i_RantDiscoveryRecords *r, const uint16_t *at, const uint32_t *ids, int n){
     int k;
     for (k = 0; k < n; k++){
@@ -489,8 +494,8 @@ static void records_checks(void){
     int k, ok;
 
     memset(&b, 0, sizeof b); b.base = mem; b.cap = sizeof mem;
-    i_rant_records_layout(&b, 3, 0, &blk);
-    CHECK(i_rant_records_init(&r, &blk, 3, 8, NULL, NULL), "records: an arena store opens");
+    i_rant_records_layout(&b, 3, NULL, NULL, &blk);
+    CHECK(i_rant_records_init(&r, &blk, 3, 8, NULL, NULL, NULL), "records: an arena store opens");
     for (k = 0; k < 3; k++){
         memset(uuid, 0, 16); uuid[0] = (uint8_t)k;
         at[k] = i_rant_records_add(&r, uuid); ids[k] = i_rant_records_at(&r, at[k])->local_id;
@@ -506,7 +511,7 @@ static void records_checks(void){
     CHECK(ids[1] == 4 && rs_find_all(&r, at, ids, 3),
           "records: the place is reused under a fresh id (id %u)", (unsigned)ids[1]);
 
-    CHECK(i_rant_records_init(&r, &blk, 2, I_RANT_REC_MAX, rs_alloc, &ma), "records: a hook store opens");
+    CHECK(i_rant_records_init(&r, &blk, 2, I_RANT_REC_MAX, rs_alloc, NULL, &ma), "records: a hook store opens");
     for (k = 0; k < 300; k++){
         memset(uuid, 0, 16); uuid[0] = (uint8_t)k; uuid[1] = (uint8_t)(k >> 8);
         at[k] = i_rant_records_add(&r, uuid);
@@ -549,7 +554,7 @@ static void records_checks(void){
     CHECK(ma.in_use == 0, "records: destroy frees the hook memory (%u in use)",
           (unsigned)ma.in_use);
     {   uint16_t got = 0;
-        CHECK(i_rant_records_init(&r, &blk, 2, 5, rs_alloc, &ma), "records: a bounded hook store opens");
+        CHECK(i_rant_records_init(&r, &blk, 2, 5, rs_alloc, NULL, &ma), "records: a bounded hook store opens");
         for (k = 0; k < 6; k++){
             memset(uuid, 0, 16); uuid[0] = (uint8_t)k;
             if (i_rant_records_add(&r, uuid) != I_RANT_REC_NONE) got++;
@@ -560,12 +565,48 @@ static void records_checks(void){
     }
     rant_allocator_reset(&ma);
 
+    /* A bulk hook holds the records and the main one only the chains, as the store grows
+       and when a store without a main hook takes its fixed reserve from the bulk */
+    {   rs_Pools pl; size_t heads, arena;
+        pl.main = rant_allocator_heap(0); pl.bulk = rant_allocator_heap(0);
+        CHECK(i_rant_records_init(&r, &blk, 2, I_RANT_REC_MAX, rs_main, rs_bulk, &pl), "records: a split hook store opens");
+        for (k = 0; k < 300; k++){
+            memset(uuid, 0, 16); uuid[0] = (uint8_t)k; uuid[1] = (uint8_t)(k >> 8);
+            at[k] = i_rant_records_add(&r, uuid);
+            ids[k] = at[k] != I_RANT_REC_NONE ? i_rant_records_at(&r, at[k])->local_id : 0;
+        }
+        heads = i_rant_allocator_class(2u * ((size_t)r.mask + 1u) * sizeof(uint16_t));
+        CHECK(rs_find_all(&r, at, ids, 300) && pl.main.in_use == heads
+              && pl.bulk.in_use == i_rant_allocator_class((size_t)r.cap * sizeof(i_RantDiscoveryRecord)),
+              "records: grown, the records are in the bulk and only the chains in the main (main %u bulk %u)",
+              (unsigned)pl.main.in_use, (unsigned)pl.bulk.in_use);
+        i_rant_records_destroy(&r);
+        CHECK(pl.main.in_use == 0 && pl.bulk.in_use == 0, "records: destroy frees each pool (main %u bulk %u)",
+              (unsigned)pl.main.in_use, (unsigned)pl.bulk.in_use);
+        rant_allocator_reset(&pl.main); rant_allocator_reset(&pl.bulk);   /* no pooled block to reuse */
+
+        memset(&b, 0, sizeof b); b.base = mem; b.cap = sizeof mem;
+        i_rant_records_layout(&b, 3, NULL, rs_bulk, &blk);
+        arena = b.offset;
+        CHECK(!blk.recs && blk.heads && arena < sizeof(i_RantDiscoveryRecord)
+              && i_rant_records_init(&r, &blk, 3, 8, NULL, rs_bulk, &pl)
+              && pl.bulk.in_use == i_rant_allocator_class(3u * sizeof(i_RantDiscoveryRecord)) && pl.main.in_use == 0,
+              "records: a fixed store with a bulk hook keeps only its chains in the arena (%u bytes, bulk %u)",
+              (unsigned)arena, (unsigned)pl.bulk.in_use);
+        for (k = 0; k < 4; k++){ memset(uuid, 0, 16); uuid[0] = (uint8_t)k; at[k] = i_rant_records_add(&r, uuid); }
+        CHECK(at[2] != I_RANT_REC_NONE && at[3] == I_RANT_REC_NONE && r.cap == 3,
+              "records: a fixed store with a bulk hook stays at its reserve (cap %u)", (unsigned)r.cap);
+        i_rant_records_destroy(&r);
+        CHECK(pl.bulk.in_use == 0, "records: destroy frees a fixed store's bulk block (%u)", (unsigned)pl.bulk.in_use);
+        rant_allocator_reset(&pl.main); rant_allocator_reset(&pl.bulk);
+    }
+
     /* The due queue holds exactly the records owed work, oldest first, and live counts the
        ACTIVE records through every change of state */
     {   uint16_t d[4], q[4];
         memset(&b, 0, sizeof b); b.base = mem; b.cap = sizeof mem;
-        i_rant_records_layout(&b, 4, 0, &blk);
-        CHECK(i_rant_records_init(&r, &blk, 4, 4, NULL, NULL), "records: a store for the queue opens");
+        i_rant_records_layout(&b, 4, NULL, NULL, &blk);
+        CHECK(i_rant_records_init(&r, &blk, 4, 4, NULL, NULL, NULL), "records: a store for the queue opens");
         for (k = 0; k < 4; k++){ memset(uuid, 0, 16); uuid[0] = (uint8_t)(k + 1); d[k] = i_rant_records_add(&r, uuid); }
         i_rant_records_owe(&r, d[0], I_RANT_OWE_REPLY, 500);
         i_rant_records_owe(&r, d[1], I_RANT_OWE_FETCH, 300);
@@ -1310,6 +1351,82 @@ static void too_big_checks(void){
     rant_allocator_reset(&ma);
 }
 
+/* The main pool's bytes when it holds only the record chains of a store of cap records. */
+static size_t bk_heads(const i_RantDiscoveryState *st){
+    size_t nb = 4u;
+    while (nb < i_rant_discovery_record_cap(st)) nb <<= 1;
+    return i_rant_allocator_class(2u * nb * sizeof(uint16_t));
+}
+
+/* A bulk hook takes the record array and the peer blobs: grown through it beside a main
+   hook, or taken whole at init by a fixed core, whose arena then keeps neither. */
+static void bulk_checks(void){
+    static uint8_t mem[16384];
+    uint8_t buf[256], out[RANT_DISCOVERY_WIRE_MAX], ip[4] = {10,0,0,0};
+    i_RantDiscoveryCoreConfig c; i_RantDiscoveryState *st; rs_Pools pl;
+    uint64_t t = 1000000u; size_t n, b0, fixed, split; int k;
+    jg_config(&c, 2);
+    c.meta_cap = 64; c.alloc = rs_main; c.bulk = rs_bulk; c.alloc_user = &pl;
+    pl.main = rant_allocator_heap(0); pl.bulk = rant_allocator_heap(0);
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    CHECK(st && pl.main.in_use == bk_heads(st)
+          && pl.bulk.in_use == i_rant_allocator_class(2u * sizeof(i_RantDiscoveryRecord)),
+          "bulk: a hooked core opens with its records in the bulk and its chains in the main (main %u bulk %u)",
+          (unsigned)pl.main.in_use, (unsigned)pl.bulk.in_use);
+    if (!st) return;
+    i_rant_discovery_update(st, t, out, sizeof out);
+    b0 = pl.bulk.in_use;
+    for (k = 1; k <= 2; k++){
+        ip[3] = (uint8_t)k;
+        n = dc_full(buf, sizeof buf, (uint8_t)k, RANT_DISCOVERY_FLAG_BLOB, (uint16_t)(5000 + k), 1, 0, I_RANT_ADMIT_YES, 40);
+        dc_feed(st, ip, 6730, buf, n, t);
+    }
+    CHECK(i_rant_discovery_slots_used(st) == 2 && pl.main.in_use == bk_heads(st)
+          && pl.bulk.in_use == b0 + 2u * i_rant_allocator_class(40),
+          "bulk: two matched blobs are held in the bulk, the main unmoved (main %u bulk %u)",
+          (unsigned)pl.main.in_use, (unsigned)pl.bulk.in_use);
+    for (k = 3; k <= 8; k++){
+        ip[3] = (uint8_t)k;
+        n = dc_full(buf, sizeof buf, (uint8_t)k, RANT_DISCOVERY_FLAG_BLOB, (uint16_t)(5000 + k), 1, 0, I_RANT_ADMIT_NO, 40);
+        dc_feed(st, ip, 6730, buf, n, t);
+    }
+    CHECK(i_rant_discovery_peer_count(st) == 8 && pl.main.in_use == bk_heads(st)
+          && pl.bulk.in_use == i_rant_allocator_class((size_t)i_rant_discovery_record_cap(st) * sizeof(i_RantDiscoveryRecord))
+                               + 2u * i_rant_allocator_class(40),
+          "bulk: the records grow in the bulk and the main holds only their chains (main %u bulk %u)",
+          (unsigned)pl.main.in_use, (unsigned)pl.bulk.in_use);
+    i_rant_discovery_destroy(st);
+    CHECK(pl.main.in_use == 0 && pl.bulk.in_use == 0, "bulk: destroy frees each pool (main %u bulk %u)",
+          (unsigned)pl.main.in_use, (unsigned)pl.bulk.in_use);
+    rant_allocator_reset(&pl.main); rant_allocator_reset(&pl.bulk);
+
+    c.alloc = NULL; c.bulk = NULL;
+    fixed = i_rant_discovery_required_memory(&c);
+    c.bulk = rs_bulk;
+    split = i_rant_discovery_required_memory(&c);
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    CHECK(st && fixed - split >= 8u * sizeof(i_RantDiscoveryRecord) + 2u * 64u
+          && pl.bulk.in_use == i_rant_allocator_class(8u * sizeof(i_RantDiscoveryRecord)) + i_rant_allocator_class(2u * 64u)
+          && pl.main.in_use == 0,
+          "bulk: a fixed core takes its records and blob pool from the bulk, %u arena bytes fewer (bulk %u)",
+          (unsigned)(fixed - split), (unsigned)pl.bulk.in_use);
+    if (!st) return;
+    i_rant_discovery_update(st, t, out, sizeof out);
+    b0 = pl.bulk.in_use;
+    for (k = 1; k <= 9; k++){
+        ip[3] = (uint8_t)k;
+        n = dc_full(buf, sizeof buf, (uint8_t)k, RANT_DISCOVERY_FLAG_BLOB, (uint16_t)(5000 + k), 1, 0,
+                    k <= 2 ? I_RANT_ADMIT_YES : I_RANT_ADMIT_NO, 40);
+        dc_feed(st, ip, 6730, buf, n, t);
+    }
+    CHECK(i_rant_discovery_slots_used(st) == 2 && i_rant_discovery_peer_count(st) == 8
+          && i_rant_discovery_record_cap(st) == 8 && pl.bulk.in_use == b0,
+          "bulk: a fixed core's blocks never grow, its slots hold blobs and its records stop at the bound");
+    i_rant_discovery_destroy(st);
+    CHECK(pl.bulk.in_use == 0, "bulk: destroy frees a fixed core's bulk blocks (%u)", (unsigned)pl.bulk.in_use);
+    rant_allocator_reset(&pl.main); rant_allocator_reset(&pl.bulk);
+}
+
 static const TestCase cases[] = {
     { "records",        records_checks },
     { "migrate",        migrate_checks },
@@ -1320,6 +1437,7 @@ static const TestCase cases[] = {
     { "forgotten",      forgotten_checks },
     { "first_contact",  first_contact_checks },
     { "too_big",        too_big_checks },
+    { "bulk",           bulk_checks },
     { "wire",           wire_checks },
     { "change_age",     change_age_checks },
     { "discovery_core", disc_core_checks },

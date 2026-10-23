@@ -67,6 +67,12 @@ void test_on_event(const RantEvent *ev);
 int test_builtin(const RantEntityInfo *e);
 /* The first UDP port from port up that binds now. Another program may hold the derived one */
 uint16_t test_free_port(uint16_t port);
+/* Heap page sources that tag their pages, for nodes on two pools each. A page another source
+   is asked to free is counted in test_page_foreign and kept, so a block crossing pools shows */
+#define TEST_PAGE_SOURCES 4
+extern long long test_page_live[TEST_PAGE_SOURCES], test_page_foreign;
+RantPageFn test_page_source(int k);
+void       test_page_clear(void);
 /* Sets an environment variable, an empty value removes it */
 void test_setenv(const char *name, const char *value);
 /* Two raw transport cores on one topic for the sans IO cases. The writer knows the reader as

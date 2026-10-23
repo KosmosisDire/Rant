@@ -85,6 +85,19 @@ heap at all, for embedded use. Buffers, index maps and lane records size to real
 inside whatever bound the allocator enforces. Running out surfaces as a `RANT_E_OOM` error
 event, never a silent truncation. spec/allocation.md lists what is allocated when.
 
+`opts.bulk` adds a second allocator for the big buffers touched rarely: message history and
+reassembly, peer records and blobs, queue rings. On an ESP32-S3 give the node SRAM and the
+bulk PSRAM:
+
+```c
+static uint8_t sram[96 << 10];
+RantAllocator mem = rant_allocator_static(sram, sizeof sram);
+RantAllocator psram = rant_allocator_static(heap_caps_malloc(2 << 20, MALLOC_CAP_SPIRAM), 2 << 20);
+RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){ .bulk = &psram });
+```
+
+`rant_node_mem_stats` counts the main pool. The meta snapshot reports both.
+
 ## Node options
 
 | option | meaning |
@@ -100,6 +113,7 @@ event, never a silent truncation. spec/allocation.md lists what is allocated whe
 | `net` | ports, group, interface, seed peers, bridge (docs/discovery.md) |
 | `discovery` | announce interval, peer timeout, max peers (docs/discovery.md) |
 | `user_data` | surfaced as `RantMsg.user` and `RantEvent.user` |
+| `bulk` | a second allocator for the big buffers touched rarely, such as PSRAM (see Memory) |
 
 ## Build flags
 

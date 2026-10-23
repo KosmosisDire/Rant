@@ -317,6 +317,61 @@ static void interest_external_checks(void){
     rant_node_close(P,1); rant_node_close(S,1);
 }
 
+/* The paged fetch between nodes on two pools each: the answer pages and the assembled
+   interest live in the bulk, and every page goes back to the source that gave it. */
+static void interest_bulk_checks(void){
+    RantAllocator pm, pb, sm, sb;
+    RantNodeOpts po, so; RantNode *P, *S; RantTopic *pub = NULL, *sub = NULL;
+    RantTopicOpts co; RantAddr seed; char name[16]; uint8_t payload[8];
+    int i; uint16_t cnt = 1; long long b1 = 0, b3 = 0, d1 = 0, d3 = 0;
+    test_page_clear();
+    pm = rant_allocator_dynamic(test_page_source(0), 0); pb = rant_allocator_dynamic(test_page_source(1), 0);
+    sm = rant_allocator_dynamic(test_page_source(2), 0); sb = rant_allocator_dynamic(test_page_source(3), 0);
+    memset(&co,0,sizeof co); co.qos.reliability=RANT_RELIABLE; co.qos.keep_last=4;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=TEST_DOMAIN+31; po.max_topics=IX_TOPICS+2; po.disable_shm=1;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    so=po; so.max_topics=2;
+    po.bulk=&pb; so.bulk=&sb;
+    wire_tap_write(&wire_tap.tx_interest_req, 0);
+    P = rant_node_open(&pm, "ixb-pub", NULL, NULL, &po);
+    S = rant_node_open(&sm, "ixb-sub", ix_on_message, NULL, &so);
+    CHECK(P && S, "interest bulk: nodes open on two pools each");
+    if (!(P && S)) goto done;
+    for (i=0;i<IX_TOPICS;i++){
+        snprintf(name,sizeof name,"ix/%03d",i);
+        if (!rant_node_create_topic(P, name, RANT_PUB_ONLY, NULL, &co)) break;
+    }
+    pub = rant_node_topic(P, 250);
+    sub = rant_node_create_topic(S, "ix/250", RANT_SUB_ONLY, NULL, &co);
+    ix_recv = 0;
+    b1 = test_page_live[1]; b3 = test_page_live[3];
+    PUMP_UNTIL(P, S, 16000, pub && rant_topic_match_count(pub)!=0);
+    d1 = test_page_live[1] - b1; d3 = test_page_live[3] - b3;
+    memset(payload,0x77,sizeof payload);
+    if (pub) rant_topic_send(pub, rant_bytes(payload,sizeof payload), NULL);
+    PUMP_UNTIL(P, S, 4800, ix_recv!=0);
+    CHECK(i==IX_TOPICS && sub && ix_recv>=1 && wire_tap_read(&wire_tap.tx_interest_req)>=1,
+          "interest bulk: the match forms through the paged fetch and delivers (%d)", ix_recv);
+    {   size_t total = i_rant_transport_interest_size(P->transport);
+        CHECK(d1 >= (long long)total && d3 >= (long long)total,
+              "interest bulk: the answer pages and the assembled interest grow the bulks (%u bytes, by %lld and %lld)",
+              (unsigned)total, d1, d3); }
+    rant_node_close(P,1); P = NULL;
+    {   uint64_t end = i_rant_plat_now_us() + 3000000u;     /* S hears the bye and frees what it held */
+        while (cnt && i_rant_plat_now_us() < end){
+            rant_node_poll(S, 5);
+            (void)test_peers(S, &cnt);
+        }
+    }
+    CHECK(cnt == 0, "interest bulk: the subscriber lets the publisher go (%u left)", (unsigned)cnt);
+done:
+    if (P) rant_node_close(P,1);
+    if (S) rant_node_close(S,1);
+    CHECK(test_page_live[0] + test_page_live[1] + test_page_live[2] + test_page_live[3] == 0 && test_page_foreign == 0,
+          "interest bulk: every page goes back to its own source (foreign %lld)", test_page_foreign);
+}
+
 /* A topic made after the open gather fetches only the peers whose filter it may meet. Among
    unrelated publishers judged by assumption, none has a filter yet, so the first fetches all.
    Their answers give them filters: then a name none takes fetches none, even right after a
@@ -367,6 +422,7 @@ static void filter_fetch_checks(void){
 static const TestCase cases[] = {
     { "detail_live", detail_live_checks },
     { "interest_external", interest_external_checks },
+    { "interest_bulk", interest_bulk_checks },
     { "filter_fetch", filter_fetch_checks },
 };
 

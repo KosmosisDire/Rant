@@ -279,6 +279,7 @@ struct i_RantNodeCore {
     const RantSchema      **chan_compiled; /* per topic parsed schema, the gate's local side */
     uint16_t                n_topics;
     RantAllocFn             alloc;         /* required */
+    RantAllocFn             bulk;          /* the interest and detail buffers, alloc when none */
     void                 *alloc_user;
     uint8_t              *detail_buf;    /* detail response scratch, grown on demand */
     uint32_t              detail_cap;
@@ -349,6 +350,7 @@ i_RantNodeCore *i_rant_node_core_init(void *mem, size_t cap, const i_RantNodeCor
     c->discovery     = cfg->discovery;     /* may be NULL now, bound later */
     c->on_event      = cfg->on_event;      c->user = cfg->user;
     c->alloc         = cfg->alloc;         c->alloc_user = cfg->alloc_user;
+    c->bulk          = cfg->bulk ? cfg->bulk : cfg->alloc;
     c->oob_capable   = cfg->oob_capable;
     c->fetch_details = cfg->fetch_details;
     memcpy(c->oob_host, cfg->oob_host, 16);
@@ -1423,7 +1425,7 @@ RantBytes i_rant_node_core_detail_respond(i_RantNodeCore *c, uint16_t domain, Ra
     need = i_rant_transport_detail_resp_size(c->transport, c->chan_schemas, req);
     if (!need) return rant_bytes(NULL, 0);
     if (need > c->detail_cap){
-        uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->detail_buf, need);
+        uint8_t *nb = (uint8_t*)c->bulk(c->alloc_user, c->detail_buf, need);
         if (!nb) return rant_bytes(NULL, 0);
         c->detail_buf = nb; c->detail_cap = (uint32_t)need;
     }
@@ -1747,7 +1749,7 @@ RantBytes i_rant_node_core_interest_respond(i_RantNodeCore *c, uint16_t domain, 
     total = i_rant_transport_interest_size(c->transport);
     need  = (size_t)RANT_INTEREST_RESP_HEAD + total;
     if (need > c->detail_cap){
-        uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->detail_buf, need);
+        uint8_t *nb = (uint8_t*)c->bulk(c->alloc_user, c->detail_buf, need);
         if (!nb) return rant_bytes(NULL, 0);
         c->detail_buf = nb; c->detail_cap = (uint32_t)need;
     }
@@ -1788,7 +1790,7 @@ void i_rant_node_core_apply_interest_page(i_RantNodeCore *c, uint16_t domain, ui
         return;
     }
     if (ex->interest_cap < total){
-        uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, ex->interest_buf, total ? total : 1u);
+        uint8_t *nb = (uint8_t*)c->bulk(c->alloc_user, ex->interest_buf, total ? total : 1u);
         if (!nb){ i_rant_node_core_fire_error(c, RANT_E_OOM, peer, NULL, total); return; }
         ex->interest_buf = nb; ex->interest_cap = total ? total : 1u;
     }
@@ -1827,7 +1829,7 @@ static void i_rant_node_core_peer_down(void *user, uint32_t id, i_RantDiscoveryD
     i_rant_node_core_schema_why_clear(c, id);
     i_rant_node_core_mesh_bump(c);
     if (ex && ex->interest_buf){                    /* the retained external interest */
-        c->alloc(c->alloc_user, ex->interest_buf, 0);
+        c->bulk(c->alloc_user, ex->interest_buf, 0);
         ex->interest_buf = NULL; ex->interest_cap = 0;
         ex->interest_version = 0; ex->fetch_version = 0;
         ex->fetch_cursor = 0; ex->fetch_len = 0; ex->interest_due = 0;

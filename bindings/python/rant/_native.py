@@ -143,6 +143,7 @@ class RantNodeOpts(Structure):
         ("discovery", RantNodeDiscovery),
         ("event_queue_bytes", c_uint32),
         ("prefix", c_char_p),
+        ("bulk", c_void_p),        # always NULL: this binding has one pool
     ]
 
 

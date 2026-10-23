@@ -209,8 +209,10 @@ struct RantNode {
     char          prefix[RANT_TOPIC_NAME_MAX + 1];  /* RANT_PREFIX then opts.prefix, '/' joined */
     uint8_t       prefix_len;
     void          *arena;      /* the control structs block, relocated on grow */
-    /* the node's pool, copied from the caller's allocator at open and reset on close */
+    /* the node's pools, copied from the caller's allocators at open and reset on close */
     RantAllocator pool;
+    RantAllocator bulk;            /* the message sized and cold buffers, when has_bulk */
+    uint8_t        has_bulk;
     uint8_t        alloc_dynamic;
     uint32_t       seat_misses;    /* discovery's count when the table last grew for them */
     uint16_t       max_peers;      /* the current peer table capacity, doubles on a dynamic grow */
@@ -255,6 +257,17 @@ struct RantNode {
  * allocation per call, so reset reclaims all. u is the node. */
 static void *i_rant_node_alloc(void *u, void *ptr, size_t size){
     return rant_allocator_alloc(&((RantNode*)u)->pool, ptr, size);
+}
+/* The hook for the message sized and cold buffers. spec/allocation.md, Two pools */
+static void *i_rant_node_bulk_alloc(void *u, void *ptr, size_t size){
+    RantNode *n = (RantNode*)u;
+    return rant_allocator_alloc(n->has_bulk ? &n->bulk : &n->pool, ptr, size);
+}
+/* Frees all the node holds. The main pool is copied out first, since its reset frees n. */
+static void i_rant_node_pools_reset(RantNode *n){
+    RantAllocator p = n->pool;
+    if (n->has_bulk) rant_allocator_reset(&n->bulk);
+    rant_allocator_reset(&p);
 }
 
 #ifdef RANT_THREADS
@@ -527,7 +540,7 @@ static int i_rant_q_grow(RantNode *n, i_RantMsgQueue *q, uint32_t need_total, ui
     /* two always fit, since a pinned record blocks the grow its successor would need */
     if (target / 2u < RANT__QALIGN(need_one)) target = 2u * RANT__QALIGN(need_one);
     if (target <= q->cap) return 0;
-    nb = (uint8_t*)i_rant_node_alloc(n, NULL, target);
+    nb = (uint8_t*)i_rant_node_bulk_alloc(n, NULL, target);
     if (!nb) return 0;
     {   uint32_t off = 0, i, src = q->tail;                        /* compact, oldest first */
         for (i = 0; i < q->count; i++){
@@ -540,7 +553,7 @@ static int i_rant_q_grow(RantNode *n, i_RantMsgQueue *q, uint32_t need_total, ui
         }
         q->tail = 0; q->head = off;
     }
-    if (q->buf) i_rant_node_alloc(n, q->buf, 0);
+    if (q->buf) i_rant_node_bulk_alloc(n, q->buf, 0);
     q->buf = nb; q->cap = target;
     return 1;
 }
@@ -666,7 +679,7 @@ static i_RantMsgQueue *i_rant_node_queue_ensure(RantNode *n, RantTopic *h, const
     q = (i_RantMsgQueue*)i_rant_node_alloc(n, NULL, sizeof *q);
     if (!q) return NULL;
     memset(q, 0, sizeof *q);
-    q->buf = (uint8_t*)i_rant_node_alloc(n, NULL, initial);
+    q->buf = (uint8_t*)i_rant_node_bulk_alloc(n, NULL, initial);
     if (!q->buf){ i_rant_node_alloc(n, q, 0); return NULL; }
     q->cap = initial; q->cap_limit = limit;
     q->reliable = (qos && qos->reliability == RANT_RELIABLE) ? 1u : 0u;
@@ -677,7 +690,7 @@ static i_RantMsgQueue *i_rant_node_queue_ensure(RantNode *n, RantTopic *h, const
 /* Frees a topic's ring, if any. Lock held. */
 static void i_rant_node_queue_drop(RantNode *n, RantTopic *h){
     if (!h->q) return;
-    if (h->q->buf) i_rant_node_alloc(n, h->q->buf, 0);
+    if (h->q->buf) i_rant_node_bulk_alloc(n, h->q->buf, 0);
     i_rant_node_alloc(n, h->q, 0);
     h->q = NULL;
 }
@@ -976,7 +989,7 @@ static int i_rant_node_on_shm(void *u, uint16_t topic_index, uint32_t from, cons
     if (!p) return 0;                                      /* recycled: NACK, then repair or skip */
     /* one copy out of shared memory so the user owns the bytes */
     if (len > n->shm_scratch_cap){
-        void *new_buf = i_rant_node_alloc(n, n->shm_scratch, len?len:1u);
+        void *new_buf = i_rant_node_bulk_alloc(n, n->shm_scratch, len?len:1u);
         if (!new_buf) return 0;
         n->shm_scratch = new_buf; n->shm_scratch_cap = len;
     }
@@ -1144,6 +1157,8 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     /* A growing pool takes records and per peer blobs as they come. A fixed one has them all
        in the arena from open, so a crowd costs it nothing later. Set before sizing so measure
        and place agree. alloc_user is set below */
+    if (o.bulk == alloc) o.bulk = NULL;     /* the same allocator is one pool */
+    if (o.bulk) dc.bulk = i_rant_node_bulk_alloc;
     if (alloc->page_realloc){
         dc.max_records = I_RANT_DISCOVERY_RECORDS_ANY;
         dc.alloc = i_rant_node_alloc;
@@ -1156,6 +1171,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     tc.max_peers   = max_peers;
     tc.frag_size= o.net.fragment_size;
     tc.allocator   = i_rant_node_alloc;     /* required by i_rant_transport_init */
+    tc.bulk        = i_rant_node_bulk_alloc;
 
     {   i_RantBump b; memset(&b,0,sizeof b);
         i_rant_node_layout(&b, max_topics, &tc, &dc, &blocks);
@@ -1168,9 +1184,10 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     if (!n) return i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, sizeof *n);
     memset(n, 0, sizeof *n);
     n->pool = pool;                                  /* the node owns the pool now */
+    if (o.bulk){ n->bulk = *o.bulk; n->has_bulk = 1; }
     n->alloc_dynamic = (alloc->page_realloc != NULL);
     arena = rant_allocator_alloc(&n->pool, NULL, need);
-    if (!arena){ RantAllocator p = n->pool; rant_allocator_reset(&p);
+    if (!arena){ i_rant_node_pools_reset(n);
                  return i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, need); }
     base = (uint8_t*)(((uintptr_t)arena+15u)&~(uintptr_t)15u);
     {   i_RantBump b; memset(&b,0,sizeof b);
@@ -1178,7 +1195,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
         i_rant_node_layout(&b, max_topics, &tc, &dc, &blocks); }
 
     if (!i_rant_plat_startup()){
-        RantAllocator p = n->pool; rant_allocator_reset(&p);
+        i_rant_node_pools_reset(n);
         return i_rant_node_open_fail(on_event, o.user_data, RANT_E_PLATFORM, 0, 0, 0);
     }
 
@@ -1266,6 +1283,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
         cc.n_topics = max_topics; cc.frag_size = i_rant_clamp_frag(o.net.fragment_size);
         cc.on_event = i_rant_node_on_event; cc.user = n;
         cc.alloc = i_rant_node_alloc; cc.alloc_user = n;     /* backs the peer schema state */
+        cc.bulk = i_rant_node_bulk_alloc;
         cc.fetch_details = o.fetch_details;
 #ifdef RANT_SHM
         cc.oob_capable = n->shm_capable; memcpy(cc.oob_host, n->shm_host, 16);
@@ -1356,7 +1374,7 @@ fail_threads:
     i_rant_plat_mutex_destroy(&n->mu);
 #endif
     i_rant_plat_cleanup();
-    { RantAllocator p = n->pool; rant_allocator_reset(&p); }       /* frees the node struct and arena */
+    i_rant_node_pools_reset(n);       /* frees the node struct and arena */
     return NULL;
 }
 
@@ -2940,6 +2958,7 @@ int i_rant_topic_send_to(RantTopic *topic, uint32_t to_peer, RantBytes hdr, Rant
 
 /* The patterns layer's seams. Not lock guarded, the layer calls them under the node lock. */
 void  *i_rant_node_sys_alloc(RantNode *n, void *ptr, size_t size){ return i_rant_node_alloc(n, ptr, size); }
+void  *i_rant_node_sys_bulk(RantNode *n, void *ptr, size_t size){ return i_rant_node_bulk_alloc(n, ptr, size); }
 void **i_rant_node_sys_slot (RantNode *n){ return &n->patterns; }
 uint64_t i_rant_node_now_us (RantNode *n){ (void)n; return i_rant_plat_now_us(); }
 uint64_t i_rant_node_wall_us(RantNode *n){ (void)n; return i_rant_plat_wall_us(); }
@@ -3399,6 +3418,12 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
         rant_map_put_uint(w, "mem_in_use", (uint64_t)in_use);
         rant_map_put_uint(w, "mem_peak", (uint64_t)peak);
         rant_map_put_uint(w, "alloc_calls", allocs);
+        if (n->has_bulk){
+            rant_allocator_stats(&n->bulk, &in_use, &peak, &allocs);
+            rant_map_put_uint(w, "bulk_in_use", (uint64_t)in_use);
+            rant_map_put_uint(w, "bulk_peak", (uint64_t)peak);
+            rant_map_put_uint(w, "bulk_alloc_calls", allocs);
+        }
         rant_map_put_uint(w, "evicted_unsent", n->evicted_unsent);
         rant_map_put_uint(w, "bp_waited_us", n->backpressure_total_us);
         rant_map_put_uint(w, "bp_waits", n->backpressure_wait_count);
@@ -3544,7 +3569,7 @@ RantBytes i_rant_node_snapshot(RantNode *n, uint32_t sections){
         RantMapWriter w;
         if (!n->snap_buf){
             /* a small node's snapshot is 1 to 2 KB: start there, the doubling finds the size */
-            n->snap_buf = (uint8_t*)i_rant_node_alloc(n, NULL, 1024u);
+            n->snap_buf = (uint8_t*)i_rant_node_bulk_alloc(n, NULL, 1024u);
             if (!n->snap_buf) return rant_bytes(NULL, 0);
             n->snap_cap = 1024u;
         }
@@ -3555,7 +3580,7 @@ RantBytes i_rant_node_snapshot(RantNode *n, uint32_t sections){
         {   /* did not fit (the writer latches on any failure): double and rebuild */
             uint32_t ncap = n->snap_cap * 2u; uint8_t *nb;
             if (ncap > (1u << 22)) return rant_bytes(NULL, 0);     /* 4 MB: not a size problem */
-            nb = (uint8_t*)i_rant_node_alloc(n, n->snap_buf, ncap);
+            nb = (uint8_t*)i_rant_node_bulk_alloc(n, n->snap_buf, ncap);
             if (!nb) return rant_bytes(NULL, 0);
             n->snap_buf = nb; n->snap_cap = ncap;
         }
@@ -3832,7 +3857,7 @@ int rant_node_set_event_queue(RantNode *n, RantQueue *q){
     }
     if (!q){                                   /* inline again: the parked events go */
         if (n->event_q){
-            if (n->event_q->buf) i_rant_node_alloc(n, n->event_q->buf, 0);
+            if (n->event_q->buf) i_rant_node_bulk_alloc(n, n->event_q->buf, 0);
             i_rant_node_alloc(n, n->event_q, 0);
             n->event_q = NULL;
         }
@@ -3844,7 +3869,7 @@ int rant_node_set_event_queue(RantNode *n, RantQueue *q){
         uint32_t limit = RANT__QALIGN(n->event_queue_bytes), initial = limit < 4096u ? limit : 4096u;
         if (!r){ i_rant_node_unlock(n, acquired); return RANT_ERR_OOM; }
         memset(r, 0, sizeof *r);
-        r->buf = (uint8_t*)i_rant_node_alloc(n, NULL, initial);
+        r->buf = (uint8_t*)i_rant_node_bulk_alloc(n, NULL, initial);
         if (!r->buf){ i_rant_node_alloc(n, r, 0); i_rant_node_unlock(n, acquired); return RANT_ERR_OOM; }
         r->cap = initial; r->cap_limit = limit; r->silent = 1;   /* best effort, evicts quietly */
         n->event_q = r;
@@ -4047,7 +4072,6 @@ void rant_node_unlock(RantNode *n){
 }
 
 int rant_node_close(RantNode *n, int send_bye){
-    RantAllocator pool;
     if (!n) return RANT_OK;
     /* a dispatch in progress, on this thread or another, still views a ring: refuse loudly */
     if (n->dispatching) return RANT_ERR_STATE;
@@ -4085,7 +4109,6 @@ int rant_node_close(RantNode *n, int send_bye){
     i_rant_plat_mutex_destroy(&n->mu);
 #endif
     i_rant_plat_cleanup();
-    pool = n->pool;                  /* copied out last, the reset frees n itself */
-    rant_allocator_reset(&pool);     /* frees the node struct, arena, buffers, schemas and handles */
+    i_rant_node_pools_reset(n);      /* last: frees the node struct, arena, buffers, schemas and handles */
     return RANT_OK;
 }

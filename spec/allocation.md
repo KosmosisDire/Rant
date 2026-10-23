@@ -26,6 +26,39 @@ the buffer cannot grow. A pooled block is reused only when it is within twice th
 a big block is not spent on a small one. The runaway guard counts pooled memory as held.
 The page allocator halves its request on failure for fragmented heaps.
 
+## Two pools
+
+`RantNodeOpts.bulk` gives a node a second allocator for the big buffers touched rarely. On an
+ESP32-S3 about 130 kB of SRAM is left once WiFi runs, while PSRAM holds megabytes and is
+slower only on a cache miss, so the main pool takes SRAM and the bulk PSRAM. The split goes
+by use, never by size: the arena is one big block and the hottest memory Rant has.
+
+- Main, touched per datagram: the node struct and the arena, topic handles, the record
+  chains, the lane pool, the per peer index and verdict maps, the want set, the schema state,
+  the announce blob, the socket and datagram buffers.
+- Bulk, big or cold: the record array and the peer blobs, writer history samples, reader
+  reassembly buffers and bitmaps, callback queue rings, the node core's interest and detail
+  buffers, the meta snapshot and its answer, the SHM receive scratch, and in the patterns
+  layer a variable's value and shadow, a call's reply and a queued request.
+
+NULL is the main pool, and the main allocator passed again is one pool. Any mode works:
+static over a PSRAM buffer, or dynamic over `heap_caps_realloc` with `MALLOC_CAP_SPIRAM`. The
+main mode sets the node's shape. A static main keeps fixed tables, and takes its record
+array and blob pool from the bulk at open, so the arena keeps only the record chains. A
+dynamic main grows the records and blobs in the bulk. Each pool fails on its own with
+`RANT_E_OOM`, and a failed record growth takes the forgotten tier.
+
+Each core takes the second hook beside its first, with the same user:
+`i_RantTransportConfig.bulk`, `i_RantDiscoveryCoreConfig.bulk` and
+`i_RantNodeCoreConfig.bulk`, NULL meaning the first. The runtime's hook is
+`i_rant_node_bulk_alloc`, and the patterns layer's `i_rant_node_sys_bulk`. A block is grown
+and freed through the hook that took it, since a block freed into the other pool corrupts
+both, so every alloc and its free name the same hook.
+
+`rant_node_mem_stats` reports the main pool, since SRAM is what runs out. The meta
+snapshot's node section adds `bulk_in_use`, `bulk_peak` and `bulk_alloc_calls` when a bulk
+is set.
+
 ## The copied pool rule
 
 `rant_node_open` copies the caller's allocator by value into its own struct, so the
@@ -34,7 +67,8 @@ value out, then reset the copy, because the reset frees the very page holding th
 that holds the pool field. Copy it out LAST, after every hook free has
 run, or the stale copy double frees (this was a heap corruption crash). One allocator per
 node: a shared long lived allocator would have its pages freed under anything that
-outlives the node. Callers never reset it themselves.
+outlives the node. Callers never reset it themselves. A bulk is copied the same way and
+reset just before the main pool, after every hook free.
 
 ## Growth
 
@@ -67,16 +101,17 @@ message size and of how many peers or matches exist. Nothing in it is freed unti
 
 These scale with real traffic and real matches, never with worst case tables.
 
-| buffer | when | size |
-|---|---|---|
-| writer history slot | first send that needs it | grows to the largest message sent |
-| lane record pool | first match (doubles from 8) | live matches x sizeof(i_RantLane) |
-| reader reassembly and bitmap, two slots | per matched lane, on receive | grows to the largest message received |
-| per peer index and verdict maps | peer's first matched topic | that peer's advertised entry count |
-| announce blob | first build | actual overlay size |
-| discovery records | open, doubling as peers arrive up to `max_records`. A static node's are in the arena | records x sizeof(i_RantDiscoveryRecord), 136 bytes with the default filter |
-| want set, and the keys it gained | the first judge after a topic change, the gained keys doubling from 8 | announced pairings x sizeof(i_RantWant), kept for reuse |
-| per peer interest and detail buffers | on fetch | actual length, freed on GONE |
+| buffer | pool | when | size |
+|---|---|---|---|
+| writer history slot | bulk | first send that needs it | grows to the largest message sent |
+| lane record pool | main | first match (doubles from 8) | live matches x sizeof(i_RantLane) |
+| reader reassembly and bitmap, two slots | bulk | per matched lane, on receive | grows to the largest message received |
+| per peer index and verdict maps | main | peer's first matched topic | that peer's advertised entry count |
+| announce blob | main | first build | actual overlay size |
+| discovery records | bulk, the chains main | open, doubling as peers arrive up to `max_records`. A static node's are in the arena, or taken from the bulk at open | records x sizeof(i_RantDiscoveryRecord), 152 bytes with the default filter |
+| want set, and the keys it gained | main | the first judge after a topic change, the gained keys doubling from 8 | announced pairings x sizeof(i_RantWant), kept for reuse |
+| per peer interest and detail buffers | bulk | on fetch | actual length, freed on GONE |
+| callback queue rings | bulk | the first parked callback | doubles toward `qos.queue_bytes` or `RANT_QUEUE_CAP` |
 
 A grown buffer never shrinks. Freeing returns the block to the reuse pool. The sparse
 matched lane record (`i_RantLane`, both proxies inline plus back references) is allocated
@@ -128,6 +163,9 @@ idle full node opens at about 20 kB, an ESP32 shaped example sits at 27 kB befor
 and about 87 kB warmed. The first matched peer adds about 2 kB (the lane pool). Idle poll
 is about 4 us. Code size at -Os on x86-64 is 118 kB full, 94 kB with no SHM, diag and
 patterns.
+
+With a bulk pool on every node, the memscale rows keep each main pool near 24 kB from a 64
+byte payload to a 1 MB one with keep_last 8, which holds 9 MB in the bulk instead.
 
 Where the RAM goes, in order: writer history (`keep_last` times message size, never
 shrinks), the builtin topics (about 5 kB), the fixed node buffers sized by the compile

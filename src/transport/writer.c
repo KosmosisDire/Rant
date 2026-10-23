@@ -93,7 +93,7 @@ static int i_rant_writer_store(i_RantTransportState *st, i_RantTopic *topic,
     {   i_RantWriterSample *slot = &topic->history[topic->history_head];
         size_t need = len ? len : 1u;
         if ((size_t)slot->cap < need){                    /* grow the slot to fit */
-            uint8_t *new_buf = (uint8_t*)st->cfg.allocator(st->cfg.user, slot->buf, need);
+            uint8_t *new_buf = (uint8_t*)st->cfg.bulk(st->cfg.user, slot->buf, need);
             if (!new_buf) return RANT_ERR_OOM;
             slot->buf = new_buf; slot->cap = (uint32_t)need;
         }

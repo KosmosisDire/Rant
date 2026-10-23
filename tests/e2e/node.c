@@ -372,8 +372,169 @@ static void domaingroup_checks(void){
     rant_allocator_reset(&aa); rant_allocator_reset(&ab); rant_allocator_reset(&ba);
 }
 
+static uint32_t bk_peer_id(RantNode *n, const char *name){
+    RantIter it; RantPeerInfo p; size_t l = strlen(name);
+    memset(&it, 0, sizeof it);
+    while (rant_node_peers_next(n, &it, &p))
+        if (p.name.len == l && !memcmp(p.name.data, name, l)) return p.id;
+    return 0;
+}
+
+static volatile int bk_got_up, bk_got_down, bk_got_one;
+static void bk_on_msg(const RantMsg *m){
+    if (m->data.len == 200000u) (*(volatile int*)m->user)++;
+}
+static void bk_on_one(const RantMsg *m){ if (m->data.len == 64u) bk_got_one++; }
+
+/* A bulk pool holds the message sized buffers: both ends of two 200 kB streams, a queued
+   copy, a big variable's value and the meta answer, while each main pool stays flat. Every
+   page returns to the pool that took it, and the main allocator passed as bulk is one pool. */
+static void bulk_pools_checks(void){
+    static uint8_t big[200000], value[150000], one[1u << 20], ref[1u << 20];
+    uint16_t dom = (uint16_t)(TEST_DOMAIN + 50);
+    RantAllocator pm, pb, sm, sb, oa = rant_allocator_static(one, sizeof one);
+    RantNodeOpts o; RantNode *P, *S = NULL, *O, *H; RantQueue *q = NULL;
+    RantTopic *down_pub = NULL, *down_sub = NULL, *up_pub = NULL, *up_sub = NULL;
+    RantVariable *def = NULL, *rem = NULL; RantBytes got;
+    size_t p0 = 0, s0 = 0, p1 = 0, s1 = 0; long long bulk0; uint8_t mask[4] = { 5, 0, 0, 0 };   /* NODE and TOPICS */
+    RantResponse out; int r = 0, k;
+    test_page_clear(); bk_got_up = bk_got_down = bk_got_one = 0;
+    pm = rant_allocator_dynamic(test_page_source(0), 0); pb = rant_allocator_dynamic(test_page_source(1), 0);
+    sm = rant_allocator_dynamic(test_page_source(2), 0); sb = rant_allocator_dynamic(test_page_source(3), 0);
+    memset(big, 0x5A, sizeof big); memset(value, 0xA5, sizeof value);
+    memset(&o, 0, sizeof o);
+    o.domain = dom; o.disable_shm = 1; o.net.multicast_interface = "127.0.0.1";
+    {   static uint8_t tiny[256]; RantAllocator ta = rant_allocator_static(tiny, sizeof tiny), ma = rant_allocator_static(ref, sizeof ref);
+        o.bulk = &ta;
+        O = rant_node_open(&ma, "bk-tiny", NULL, NULL, &o);
+        CHECK(!O && rant_last_error(NULL).error == RANT_E_OOM,
+              "bulk pools: a static node whose bulk cannot hold its records refuses the open with OOM (error %d)",
+              (int)rant_last_error(NULL).error);
+        if (O) rant_node_close(O, 0);
+        o.bulk = NULL;
+    }
+    {   RantTopic *one_pub = NULL; RantAllocator ha = rant_allocator_heap(0), ra = rant_allocator_static(ref, sizeof ref);
+        uint8_t m64[64]; size_t ref_use = 0, one_use = 0;
+        O = rant_node_open(&ra, "bk-one", bk_on_one, NULL, &o);
+        if (O){ rant_node_mem_stats(O, &ref_use, NULL, NULL); rant_node_close(O, 0); }
+        o.bulk = &oa;
+        O = rant_node_open(&oa, "bk-one", bk_on_one, NULL, &o);
+        if (O) rant_node_mem_stats(O, &one_use, NULL, NULL);
+        o.bulk = NULL;
+        H = rant_node_open(&ha, "bk-one-pub", NULL, NULL, &o);
+        if (O && H){
+            rant_node_create_topic(O, "bk/one", RANT_SUB_ONLY, NULL, &(RantTopicOpts){ .qos = { .reliability = RANT_RELIABLE } });
+            one_pub = rant_node_create_topic(H, "bk/one", RANT_PUB_ONLY, NULL, &(RantTopicOpts){ .qos = { .reliability = RANT_RELIABLE } });
+            rant_node_start(O); rant_node_start(H);
+            WAIT_UNTIL(5000, one_pub && rant_topic_match_count(one_pub) == 1);
+            memset(m64, 1, sizeof m64);
+            for (k = 0; k < 3 && one_pub; k++) rant_topic_send(one_pub, rant_bytes(m64, sizeof m64), NULL);
+            WAIT_UNTIL(3000, bk_got_one == 3);
+        }
+        CHECK(O && H && bk_got_one == 3 && ref_use && one_use == ref_use,
+              "bulk pools: the main allocator passed as bulk is one pool, counted whole, which matches and receives (%u and %u bytes, %d of 3)",
+              (unsigned)one_use, (unsigned)ref_use, bk_got_one);
+        if (H) rant_node_close(H, 1);
+        if (O) rant_node_close(O, 1);
+    }
+    o.user_data = (void*)&bk_got_up; o.bulk = &pb;
+    P = rant_node_open(&pm, "bk-p", bk_on_msg, NULL, &o);
+    o.user_data = (void*)&bk_got_down; o.bulk = &sb;
+    S = rant_node_open(&sm, "bk-s", bk_on_msg, NULL, &o);
+    CHECK(P && S, "bulk pools: both nodes open on a main and a bulk pool");
+    if (!P || !S) goto done;
+    q = rant_node_create_queue(S);
+    down_pub = rant_node_create_topic(P, "bk/down", RANT_PUB_ONLY, NULL, &(RantTopicOpts){ .qos = { .reliability = RANT_RELIABLE } });
+    down_sub = rant_node_create_topic(S, "bk/down", RANT_SUB_ONLY, NULL,
+                                      &(RantTopicOpts){ .qos = { .reliability = RANT_RELIABLE }, .queue = q });
+    up_pub = rant_node_create_topic(S, "bk/up", RANT_PUB_ONLY, NULL, &(RantTopicOpts){ .qos = { .reliability = RANT_RELIABLE } });
+    up_sub = rant_node_create_topic(P, "bk/up", RANT_SUB_ONLY, NULL, &(RantTopicOpts){ .qos = { .reliability = RANT_RELIABLE } });
+    def = rant_node_create_variable_definition(P, "bk/var", NULL, &(RantVariableOpts){ .initial = rant_bytes(value, 1000) });
+    rem = rant_node_create_remote_variable(S, "bk/var", NULL, NULL);
+    (void)rant_node_meta_function(S);
+    rant_node_start(P); rant_node_start(S);
+    WAIT_UNTIL(5000, down_pub && up_pub && rant_topic_match_count(down_pub) == 1 && rant_topic_match_count(up_pub) == 1
+                     && rem && rant_variable_match_count(rem) == 1);
+    CHECK(q && down_sub && up_sub && def && rem && rant_variable_wait(rem, 3000) == 1
+          && rant_variable_get(rem, &got) == 1 && got.len == 1000,
+          "bulk pools: the streams match and the variable's first value arrives (%u bytes)", (unsigned)got.len);
+    test_sleep_ms(300);
+    rant_node_mem_stats(P, &p0, NULL, NULL); rant_node_mem_stats(S, &s0, NULL, NULL);
+    bulk0 = test_page_live[1] + test_page_live[3];
+    rant_topic_send(down_pub, rant_bytes(big, sizeof big), NULL);
+    rant_topic_send(up_pub, rant_bytes(big, sizeof big), NULL);
+    rant_variable_set(def, rant_bytes(value, sizeof value));
+    for (k = 0; k < 500 && !(bk_got_down && bk_got_up && rant_variable_get(rem, &got) == 1 && got.len == sizeof value); k++)
+        rant_queue_dispatch(q, 0, 10);
+    r = rant_function_call(rant_node_meta_function(S), rant_bytes(mask, 4), &out, 3000,
+                           &(RantCallOpts){ .provider = bk_peer_id(S, "bk-p") });
+    rant_node_mem_stats(P, &p1, NULL, NULL); rant_node_mem_stats(S, &s1, NULL, NULL);
+    CHECK(bk_got_down == 1 && bk_got_up == 1 && got.len == sizeof value && p1 <= p0 + 512u && s1 <= s0 + 1024u
+          && test_page_live[1] + test_page_live[3] - bulk0 >= 5ll * 200000 + 4ll * 150000,
+          "bulk pools: two 200 kB streams, a queued copy, a 150 kB value and a meta answer grow the bulk by %lld kB and the mains by %ld and %ld bytes",
+          (test_page_live[1] + test_page_live[3] - bulk0) / 1024, (long)p1 - (long)p0, (long)s1 - (long)s0);
+    if (r == 1 && out.status == RANT_CALL_OK && out.schema){
+        RantBytes info = rant_get_map(out.data, out.schema, "info");
+        RantValue node, mem, bulk;
+        int ok = rant_map_get(info, "node", &node) && rant_map_get(node.bytes, "mem_in_use", &mem)
+              && rant_map_get(node.bytes, "bulk_in_use", &bulk);
+        CHECK(ok && bulk.v.u >= 600000u && mem.v.u > 0 && mem.v.u < bulk.v.u,
+              "bulk pools: the meta answer reports each pool (main %llu, bulk %llu)",
+              ok ? (unsigned long long)mem.v.u : 0ull, ok ? (unsigned long long)bulk.v.u : 0ull);
+    } else CHECK(0, "bulk pools: the meta call is answered (ret %d)", r);
+    rant_topic_retire(down_pub); rant_topic_retire(up_sub); rant_variable_retire(def);
+    rant_node_close(S, 1); S = NULL;
+    CHECK(test_page_live[2] == 0 && test_page_live[3] == 0 && test_page_foreign == 0,
+          "bulk pools: a closed node gives every page back to its own source (main %lld, bulk %lld, foreign %lld)",
+          test_page_live[2], test_page_live[3], test_page_foreign);
+    test_sleep_ms(200);
+done:
+    if (S) rant_node_close(S, 1);
+    if (P) rant_node_close(P, 1);
+    CHECK(test_page_live[0] == 0 && test_page_live[1] == 0 && test_page_foreign == 0,
+          "bulk pools: so does the other after its peer left (main %lld, bulk %lld, foreign %lld)",
+          test_page_live[0], test_page_live[1], test_page_foreign);
+}
+
+/* On the same host the one copy out of shared memory lands in the bulk, the main flat. */
+static void bulk_shm_checks(void){
+    static uint8_t big[200000];
+    RantAllocator pm, pb, sm, sb; RantNodeOpts o; RantNode *P, *S; RantTopic *pub = NULL, *sub = NULL;
+    size_t s0 = 0, s1 = 0; long long b0;
+    test_page_clear(); bk_got_down = 0;
+    pm = rant_allocator_dynamic(test_page_source(0), 0); pb = rant_allocator_dynamic(test_page_source(1), 0);
+    sm = rant_allocator_dynamic(test_page_source(2), 0); sb = rant_allocator_dynamic(test_page_source(3), 0);
+    memset(&o, 0, sizeof o);
+    o.domain = (uint16_t)(TEST_DOMAIN + 51); o.net.multicast_interface = "127.0.0.1";
+    o.bulk = &pb;
+    P = rant_node_open(&pm, "bk-shm-p", NULL, NULL, &o);
+    o.user_data = (void*)&bk_got_down; o.bulk = &sb;
+    S = rant_node_open(&sm, "bk-shm-s", bk_on_msg, NULL, &o);
+    CHECK(P && S, "bulk shm: both nodes open");
+    if (!P || !S) goto done;
+    pub = rant_node_create_topic(P, "bk/shm", RANT_PUB_ONLY, NULL, &(RantTopicOpts){ .qos = { .reliability = RANT_RELIABLE } });
+    sub = rant_node_create_topic(S, "bk/shm", RANT_SUB_ONLY, NULL, &(RantTopicOpts){ .qos = { .reliability = RANT_RELIABLE } });
+    rant_node_start(P); rant_node_start(S);
+    WAIT_UNTIL(5000, pub && sub && rant_topic_match_count(pub) == 1);
+    test_sleep_ms(300);
+    rant_node_mem_stats(S, &s0, NULL, NULL); b0 = test_page_live[3];
+    rant_topic_send(pub, rant_bytes(big, sizeof big), NULL);
+    WAIT_UNTIL(3000, bk_got_down == 1);
+    rant_node_mem_stats(S, &s1, NULL, NULL);
+    CHECK(bk_got_down == 1 && s1 <= s0 + 4096u && test_page_live[3] - b0 >= 200000,
+          "bulk shm: the copy out of shared memory grows the bulk by %lld kB and the main by %ld bytes",
+          (test_page_live[3] - b0) / 1024, (long)s1 - (long)s0);
+done:
+    if (S) rant_node_close(S, 1);
+    if (P) rant_node_close(P, 1);
+    CHECK(test_page_live[0] + test_page_live[1] + test_page_live[2] + test_page_live[3] == 0 && test_page_foreign == 0,
+          "bulk shm: every page goes back to its own source (foreign %lld)", test_page_foreign);
+}
+
 static const TestCase cases[] = {
     { "open_fail", open_fail_checks },
+    { "bulk_pools", bulk_pools_checks },
+    { "bulk_shm", bulk_shm_checks },
     { "event_user", event_user_checks },
     { "dynamic_grow", dynamic_grow_checks },
     { "launch_name", launchname_checks },

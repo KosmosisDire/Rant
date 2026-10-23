@@ -850,6 +850,7 @@ pub struct RantNodeOpts {
     pub discovery: RantNodeDiscovery,
     pub event_queue_bytes: u32,
     pub prefix: *const ::std::os::raw::c_char,
+    pub bulk: *mut RantAllocator,
 }
 impl Default for RantNodeOpts {
     fn default() -> Self {

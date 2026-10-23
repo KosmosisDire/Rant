@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::{block_on, domain, node, options, wait_for};
 use rant::{
-    CallOptions, EntityKind, ErrorKind, EventKind, FunctionOptions, Level, MetaSections, Node, NodeOptions, Origin, Qos, Request,
+    Bytes, CallOptions, EntityKind, ErrorKind, EventKind, FunctionOptions, Level, MetaSections, Node, NodeOptions, Origin, Qos, Request,
     SendError, StatusOptions, TaskOptions, TaskRequest, Threading, VariableOptions,
 };
 
@@ -203,4 +203,16 @@ fn static_memory_runs_in_one_block() {
     // both sides, so the answer finds the caller matched too
     assert!(wait_for(4000, None, || inc.match_count() > 0 && _add.match_count() > 0));
     assert_eq!(inc.call(&Ping { seq: 9 }, CallOptions::new()).unwrap().into_result().unwrap(), 10);
+
+    // a bulk block takes a message the main block could never hold
+    let c = Node::new("static_c", opts(43).memory(256 << 10).bulk(2 << 20).disable_shm(true)).unwrap();
+    let len = Arc::new(Mutex::new(0usize));
+    let l = Arc::clone(&len);
+    let _big = c.subscriber::<Bytes>("big", Qos::new().reliable(true), move |m| *l.lock().unwrap() = m.data().len()).unwrap();
+    let bp = b.publisher::<Bytes>("big", Qos::new().reliable(true)).unwrap();
+    assert!(wait_for(4000, None, || bp.match_count() > 0 && bp.ready()));
+    bp.send(&vec![7u8; 300 << 10]).unwrap();
+    assert!(wait_for(5000, None, || *len.lock().unwrap() == 300 << 10), "got {}", *len.lock().unwrap());
+    let stats = c.stats();
+    assert!(stats.memory_peak <= 256 << 10, "{stats:?}");
 }

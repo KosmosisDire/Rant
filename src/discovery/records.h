@@ -63,19 +63,23 @@ typedef struct {
     uint16_t    live;                /* ACTIVE records */
     uint16_t    due_head, due_tail;  /* the due queue, oldest owed first */
     uint32_t    next_id;
-    RantAllocFn alloc;               /* NULL: placed in the arena, fixed at its reserve */
-    void       *alloc_user;
+    RantAllocFn alloc;               /* the chains, and growth. NULL: chains in the arena, fixed at the reserve */
+    RantAllocFn bulk;                /* the records. NULL: in the arena */
+    void       *alloc_user;          /* both hooks' user */
 } i_RantDiscoveryRecords;
 
 typedef struct { uint8_t *recs, *heads; } i_RantDiscoveryRecordsBlocks;
 
-/* The arena part of a store of reserve records: all of it without a hook, none with one. */
-void     i_rant_records_layout(i_RantBump *b, uint16_t reserve, int hooked,
+/* The arena part of a store of reserve records: the chains without alloc, the records
+ * without alloc or bulk. */
+void     i_rant_records_layout(i_RantBump *b, uint16_t reserve, RantAllocFn alloc, RantAllocFn bulk,
                                i_RantDiscoveryRecordsBlocks *o);
-/* With a hook, reserve records come from it now and more as the store fills, up to max. 0
- * on OOM. */
+/* With alloc, reserve records come from it now and more as the store fills, up to max.
+ * bulk, when set, holds the records and alloc only the chains, and without alloc the
+ * reserve comes from bulk now and never grows. 0 on OOM. */
 int      i_rant_records_init(i_RantDiscoveryRecords *r, const i_RantDiscoveryRecordsBlocks *blk,
-                             uint16_t reserve, uint16_t max, RantAllocFn alloc, void *alloc_user);
+                             uint16_t reserve, uint16_t max, RantAllocFn alloc, RantAllocFn bulk,
+                             void *alloc_user);
 void     i_rant_records_destroy(i_RantDiscoveryRecords *r);
 /* A zeroed ACTIVE record with a fresh local id and no slot. NONE when full or out of memory. */
 uint16_t i_rant_records_add(i_RantDiscoveryRecords *r, const uint8_t uuid[16]);

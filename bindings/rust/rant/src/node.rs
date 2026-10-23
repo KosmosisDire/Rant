@@ -76,6 +76,10 @@ options! {
         /// with no growth and no shared memory, and the open fails when it is too small.
         /// 0 = the heap.
         memory: usize = 0,
+        /// A second block of this many bytes for the big buffers touched rarely: message
+        /// history and reassembly, peer records, queue rings. On ESP-IDF a block past the
+        /// internal malloc threshold lands in PSRAM. 0 = with the rest.
+        bulk: usize = 0,
     }
     hand {
         prefix: Option<String> = None,
@@ -416,6 +420,8 @@ pub(crate) struct NodeInner {
     pub(crate) status_peers: Mutex<HashSet<u32>>,
     /// static mode's one block, which the C allocates from until the state is freed
     memory: Option<*mut [u8]>,
+    /// the bulk pool's block, freed the same way
+    bulk: Option<*mut [u8]>,
 }
 
 // SAFETY: the C node is thread safe under its own lock, and the gate orders close after every call
@@ -574,7 +580,7 @@ impl Drop for NodeInner {
     fn drop(&mut self) {
         // reached only with a node already closed, or never opened, since Node closes first
         debug_assert!(self.raw.load(SeqCst).is_null(), "rant: node state freed while the C node is open");
-        if let Some(block) = self.memory {
+        for block in [self.memory, self.bulk].into_iter().flatten() {
             // SAFETY: the block came from Box::into_raw at open, and the C node is gone
             drop(unsafe { Box::from_raw(block) });
         }
@@ -644,9 +650,10 @@ impl Node {
             status_bound: AtomicBool::new(false),
             status_peers: Mutex::new(HashSet::new()),
             memory: (o.memory > 0).then(|| Box::into_raw(vec![0u8; o.memory].into_boxed_slice())),
+            bulk: (o.bulk > 0).then(|| Box::into_raw(vec![0u8; o.bulk].into_boxed_slice())),
         });
 
-        let co = ffi::RantNodeOpts {
+        let mut co = ffi::RantNodeOpts {
             domain: o.domain,
             max_topics: o.max_topics,
             user_data: Arc::as_ptr(&inner) as *mut c_void,
@@ -684,13 +691,17 @@ impl Node {
             ..Default::default()
         };
 
-        // SAFETY: open copies the allocator and the options, and keeps only the net strings,
-        // which live in inner for the node's life, and the static block, freed with inner
+        // SAFETY: open copies the allocators and the options, and keeps only the net strings,
+        // which live in inner for the node's life, and the static blocks, freed with inner
         let raw = unsafe {
             let mut alloc = match inner.memory {
                 Some(block) => static_allocator(block),
                 None => ffi::rant_allocator_heap(0),
             };
+            let mut bulk = inner.bulk.map(|block| static_allocator(block));
+            if let Some(b) = bulk.as_mut() {
+                co.bulk = b;
+            }
             ffi::rant_node_open(&mut alloc, cname.as_ref().map_or(null(), |c| c.as_ptr()), Some(on_message), Some(on_event), &co)
         };
         if raw.is_null() {

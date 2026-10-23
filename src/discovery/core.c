@@ -40,7 +40,7 @@ struct i_RantDiscoveryState {
     uint32_t      seat_misses;    /* records that wanted a slot and found none */
     uint16_t      cap_peers;      /* slots */
     uint16_t      meta_cap;       /* per peer meta buffer capacity */
-    uint8_t      *meta_pool;      /* cap_peers x meta_cap. NULL in hook mode */
+    uint8_t      *meta_pool;      /* cap_peers x meta_cap, in the arena or the bulk. NULL in hook mode */
     uint16_t      user_stride;         /* per peer user scratch bytes, 8 aligned, 0 = none */
     uint8_t      *user_pool;      /* cap_peers x user_stride */
     RantBytes       self_meta;        /* our overlay, a view of the node's buffer */
@@ -136,6 +136,11 @@ static uint16_t i_rant_discovery_record_reserve(const i_RantDiscoveryCoreConfig 
     return cfg->alloc ? cfg->max_peers : i_rant_discovery_record_bound(cfg);
 }
 
+/* The hook for the record array and the peer blobs. */
+static RantAllocFn i_rant_discovery_bulk(const i_RantDiscoveryCoreConfig *cfg){
+    return cfg->bulk ? cfg->bulk : cfg->alloc;
+}
+
 /* Rounded up to 8 so a consumer may store a pointer in its slot. */
 static uint16_t i_rant_discovery_user_stride(const i_RantDiscoveryCoreConfig *cfg){
     return cfg->peer_user_bytes ? (uint16_t)((cfg->peer_user_bytes + 7u) & ~7u) : 0u;
@@ -211,11 +216,12 @@ static void i_rant_discovery_layout(i_RantBump *b, const i_RantDiscoveryCoreConf
     uint16_t user_stride   = i_rant_discovery_user_stride(cfg);
     o->st        = (i_RantDiscoveryState*)i_rant_bump_take(b, sizeof(struct i_RantDiscoveryState), 8);
     o->slots     = (uint8_t*)i_rant_bump_take(b, (size_t)cfg->max_peers * sizeof(i_RantDiscoverySlot), 8);
-    /* hook mode allocates each blob on demand, only the pool path reserves the worst case */
-    o->meta_pool = cfg->alloc ? NULL
+    /* hook mode allocates each blob on demand, only the pool path reserves the worst case,
+       in the bulk when there is one */
+    o->meta_pool = (cfg->alloc || cfg->bulk) ? NULL
                  : (uint8_t*)i_rant_bump_take(b, (size_t)cfg->max_peers * meta_cap, 1);
     o->user_pool = user_stride ? (uint8_t*)i_rant_bump_take(b, (size_t)cfg->max_peers * user_stride, 8) : NULL;
-    i_rant_records_layout(b, i_rant_discovery_record_reserve(cfg), cfg->alloc != NULL, &o->records);
+    i_rant_records_layout(b, i_rant_discovery_record_reserve(cfg), cfg->alloc, cfg->bulk, &o->records);
 }
 
 size_t i_rant_discovery_required_memory(const i_RantDiscoveryCoreConfig *cfg){
@@ -261,13 +267,19 @@ i_RantDiscoveryState *i_rant_discovery_init(void *mem, size_t cap, const i_RantD
     st->meta_cap      = meta_cap;
     st->slots         = (i_RantDiscoverySlot *)blk.slots;
     st->meta_pool     = blk.meta_pool;
+    if (!cfg->alloc && cfg->bulk){
+        st->meta_pool = (uint8_t*)cfg->bulk(cfg->alloc_user, NULL, (size_t)cfg->max_peers * meta_cap);
+        if (!st->meta_pool) return NULL;
+    }
     st->user_stride   = i_rant_discovery_user_stride(cfg);
     st->user_pool     = blk.user_pool;
     st->started       = 0;
     i_rant_discovery_slots_reset(st, 0);
     if (!i_rant_records_init(&st->records, &blk.records, i_rant_discovery_record_reserve(cfg),
-                             i_rant_discovery_record_bound(cfg), cfg->alloc, cfg->alloc_user))
+                             i_rant_discovery_record_bound(cfg), cfg->alloc, cfg->bulk, cfg->alloc_user)){
+        i_rant_discovery_destroy(st);
         return NULL;
+    }
     st->self_meta         = cfg->meta;
     st->self_meta_version = 1;
     st->self_blob_resend  = RANT_DISCOVERY_BLOB_RESEND;
@@ -317,12 +329,16 @@ i_RantDiscoveryState *i_rant_discovery_core_migrate(i_RantDiscoveryState *old, v
 void i_rant_discovery_destroy(i_RantDiscoveryState *st){
     uint16_t i;
     if (!st) return;
-    if (st->cfg.alloc)                     /* pool mode has no hook allocated blob */
+    if (st->cfg.alloc){                    /* pool mode has no hook allocated blob */
         for (i=0;i<st->cap_peers;i++)
             if (st->slots[i].meta){
-                st->cfg.alloc(st->cfg.alloc_user, st->slots[i].meta, 0);
+                i_rant_discovery_bulk(&st->cfg)(st->cfg.alloc_user, st->slots[i].meta, 0);
                 st->slots[i].meta = NULL; st->slots[i].meta_cap = 0; st->slots[i].meta_len = 0;
             }
+    } else if (st->cfg.bulk && st->meta_pool){
+        st->cfg.bulk(st->cfg.alloc_user, st->meta_pool, 0);
+        st->meta_pool = NULL;
+    }
     i_rant_records_destroy(&st->records);
 }
 
@@ -732,7 +748,7 @@ static int i_rant_discovery_seat(i_RantDiscoveryState *st, uint16_t ri, i_RantDi
  * slot holds meta_cap, which on_datagram checked. */
 static int i_rant_discovery_slot_store(i_RantDiscoveryState *st, i_RantDiscoverySlot *slot, RantBytes blob){
     if (blob.len > slot->meta_cap){
-        uint8_t *nb = st->cfg.alloc ? (uint8_t*)st->cfg.alloc(st->cfg.alloc_user, slot->meta, blob.len) : NULL;
+        uint8_t *nb = st->cfg.alloc ? (uint8_t*)i_rant_discovery_bulk(&st->cfg)(st->cfg.alloc_user, slot->meta, blob.len) : NULL;
         if (!nb) return 0;
         slot->meta = nb; slot->meta_cap = (uint16_t)blob.len;
     }

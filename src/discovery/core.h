@@ -145,7 +145,10 @@ typedef struct {
     /* Optional hook. Per peer blobs are then allocated at their actual length instead of
      * a fixed max_peers x meta_cap pool. Pair with i_rant_discovery_destroy. */
     RantAllocFn alloc;
-    void       *alloc_user;
+    void       *alloc_user;   /* both hooks' user */
+    /* Optional, the record array and the peer blobs: grown through it with alloc, else their
+     * fixed blocks taken from it at init. NULL = alloc, or the arena. */
+    RantAllocFn bulk;
 } i_RantDiscoveryCoreConfig;
 
 typedef struct i_RantDiscoveryState i_RantDiscoveryState;

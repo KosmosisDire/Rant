@@ -269,7 +269,9 @@ a small target such as an ESP32 can define them lower.
 Every node also hosts the `@rant/meta` function, which answers a snapshot of its peers,
 topics and counters for tools like the explorer. The peers section lists the matched peers,
 so a small node's answer stays small on a big mesh. The node section counts them as
-`matched_peers` against `max_peers`, and `peers` counts every active peer heard.
+`matched_peers` against `max_peers`, and `peers` counts every active peer heard. Its
+`mem_in_use`, `mem_peak` and `alloc_calls` count the main pool, and a node with `opts.bulk`
+adds `bulk_in_use`, `bulk_peak` and `bulk_alloc_calls`.
 `rant_node_meta_function(n)` returns the handle to call it. The first call of it opens this node's asking side, which matches every
 node on the mesh, so a node that never asks matches nobody through meta.
 `opts.disable_meta` strips it.
