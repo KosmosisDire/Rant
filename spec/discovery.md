@@ -6,16 +6,16 @@ facing options are in docs/discovery.md.
 ## The announce
 
 Every node multicasts an announce every `announce_interval_us` (3 s) on its domain's
-group, and unicasts a copy to every peer it knows and to its seed peers. Every discovery
+group and sends copies by unicast to its seed peers and some known peers (Owed work and
+copies). Every discovery
 datagram carries the node's uuid, its name, its data port, the version of its blob and how
 long ago that blob last changed. The blob is opaque here: the fragment size, the shared
 memory host id and the interest list (spec/interest.md).
 
 The blob is full state and idempotent, so it is simply re sent on change. It rides the
-startup solicit, the first `RANT_DISCOVERY_BLOB_RESEND` (3) announces after a change, and
-unicast replies. Every announce carries the blob's version. A steady state announce
-without the blob but with a newer version makes the peer solicit the blob with a targeted
-request. So a connection forms from the announces the nodes already send, with no per
+opening datagram, the first announce after a change (`RANT_DISCOVERY_BLOB_RESEND`, 1) and
+every targeted send. Every announce carries the blob's version. A steady state announce
+without the blob but with a newer version makes the peer fetch the blob. So a connection forms from the announces the nodes already send, with no per
 topic handshake and no steady state metadata heartbeat. `on_peer_up` fires only on a
 change (first contact, address, blob, revive), never per announce.
 
@@ -56,14 +56,17 @@ Every discovery datagram is, little endian:
 | 36 | u8 the name's length, at most `RANT_NODE_NAME_MAX` |
 | 37 | the name, then the blob when BLOB is set |
 
-The flags are BYE 0x01, REQ 0x02 (a solicit, recipients announce back now) and BLOB 0x10
-(the blob follows the name, maybe empty). A steady state announce carries no blob. A
+The flags are BYE 0x01, REQ 0x02 (a solicit: answer with your blob), UNI 0x04 (a copy by
+unicast: copy your announces back), ALL 0x08 (an observer's solicit: answer at once), BLOB
+0x10 (the blob follows the name, maybe empty) and ONE 0x20 (a targeted send: a REQ in it is
+answered at once, and it starts no copies). A steady state announce carries no blob. A
 datagram longer or shorter than its fields say is malformed, except one whose blob arrived
 short: the OS cut it to our buffer, and the stated length says how big the peer is.
 `i_rant_discovery_encode` and `i_rant_discovery_decode` are the one codec. The change age
 is the sender's clock read when it builds the datagram, so a stale clock reads young.
 Version history: v3 added the versioned blob, v4 and v5 relaying, which v6 removed. v8 moved
-the data port and name out of the blob into every datagram and added the change age. Since
+the data port and name out of the blob into every datagram and added the change age and
+the flags UNI, ALL and ONE. Since
 v5 the number versions everything that crosses the wire, discovery or not, and any change to it
 bumps the number. The first eight bytes (magic, version, flags, domain) keep their place in
 every version, so a datagram of this domain on another version is recognized from them
@@ -75,10 +78,11 @@ overlay capacity defaults to `RANT_DISCOVERY_META_MAX` (64) bytes and the name t
 
 ## Timing
 
-The first announce is phased by a hash of the uuid within one interval, so nodes do not
-announce in lockstep, and a solicit goes out at startup. Peer timeout sweeps run on the
-announce cadence, so detection lags by at most one interval. `i_rant_discovery_next_due_us`
-tells a driving loop when the next timer is due. The defaults are a 3 s interval, a 12 s
+The opening sends the blob at once with no REQ, or REQ|ALL from an observer. The first
+steady announce is phased by a hash of the uuid within one interval, so nodes do not
+announce in lockstep. Peer timeout sweeps run four times per interval, so detection lags by
+at most a quarter interval. `i_rant_discovery_next_due_us` tells a driving loop when the
+next timer or owed send is due, a time already past while one is. The defaults are a 3 s interval, a 12 s
 peer timeout, a 2 min gone timeout and 16 peers. The interval, the peer count, the group
 and the port are stated once in `common/types.h`. A BYE is sent three times
 (`RANT_DISCOVERY_BYE_SENDS`), since one shot UDP may lose it and receivers dedup by uuid. The runtime drains a socket to empty on every pass, capped at
@@ -100,6 +104,26 @@ doubles. Without a hook the store sits in the arena at `max_peers` records and n
 With one, `max_peers` records are taken at init and the store doubles as it fills. A grow
 moves the slots into the new arena and leaves the records where they are, so only a core with
 the hook migrates, and never to fewer slots.
+
+## Owed work and copies
+
+A record can be owed two targeted sends, each carrying our blob and ONE:
+
+| owed | sent as | when |
+|---|---|---|
+| reply | BLOB\|ONE | A solicit marked UNI, ONE or ALL: at once. A group solicit: within one ms per live peer, placed by a hash of both uuids, so a crowd's answers spread. A record's first blob judged, from a datagram not marked ONE: at once, the match answer, since its sender may lack ours. Every record keeps its slot, so a later change needs none |
+| fetch | REQ\|ONE\|BLOB | While the peer advertises a version past the one judged: at once, then every 250 ms, four sends. A datagram after the last starts over, with one send when the last fetch went unanswered, as from a peer that refused us. The blob at the advertised version ends it, and so does one too big to hold, since a retry brings the same bytes |
+
+A fetch carries our blob, so it settles a reply owed too. The records owed work sit on one
+due queue in the record store, oldest first, so a poll walks only them. Each send settles
+its record or moves it to the tail with a later due time, and a peer that drops is owed
+nothing. Nothing goes out before the opening.
+
+Each announce goes by unicast to the seeds marked UNI, to every peer heard by a UNI copy
+within the peer timeout marked UNI, and to every other slotted peer plain. A UNI copy asks
+its receiver to copy back, which keeps two segments that share no group in touch through
+one seed. A plain copy never starts the receiver's own copies, so the copies between two
+peers end with their slots. A targeted send starts none either.
 
 ## Peer lifecycle
 
@@ -123,7 +147,7 @@ A new uuid announcing from an (ip, port) we already hold evicts the predecessor 
 first: one socket is one process, so it is provably dead. A port of 0 is not an endpoint, so
 it never triggers the eviction. When a hook
 allocation for a bigger blob fails, the stale blob and version are kept and the
-advertised version stays ahead, so the re fetch path retries.
+advertised version stays ahead, so the fetch retries.
 
 Reflection respects the lifecycle. A DROPPED peer is still listed by
 `rant_node_peers_next` and its last known entities are served as a ghost view, but the

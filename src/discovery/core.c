@@ -5,7 +5,10 @@
 #include "../common/hash.h"
 #include <string.h>
 
-#define RANT_DISCOVERY_BLOB_RESEND 3u          /* announces that carry the full blob after a change */
+#define RANT_DISCOVERY_BLOB_RESEND 1u          /* announces that carry the full blob after a change */
+#define RANT_DISCOVERY_FETCH_TRIES 4u          /* sends of one fetch, a later datagram starts over */
+#define RANT_DISCOVERY_FETCH_RETRY_US 250000u  /* an unanswered fetch goes again this soon */
+#define RANT_DISCOVERY_SWEEPS 4u               /* timeout sweeps per announce interval */
 
 /* What only a peer holding a slot needs. max_peers counts slots. */
 typedef struct {
@@ -23,8 +26,9 @@ typedef struct {
 struct i_RantDiscoveryState {
     i_RantDiscoveryCoreConfig    cfg;
     uint64_t      next_announce_us;
+    uint64_t      next_sweep_us;
     uint8_t       started;
-    uint8_t       want_solicit;   /* a multicast solicit is queued for the next update */
+    uint8_t       want_solicit;   /* a group solicit is queued for the next update */
     uint16_t      cap_peers;      /* slots */
     uint16_t      meta_cap;       /* per peer meta buffer capacity */
     uint8_t      *meta_pool;      /* cap_peers x meta_cap. NULL in hook mode */
@@ -36,7 +40,6 @@ struct i_RantDiscoveryState {
     char            self_name[RANT_NODE_NAME_MAX + 1];
     uint8_t         self_name_len;
     uint16_t        self_blob_resend; /* announces remaining that carry the full blob */
-    uint16_t        targeted_cursor;  /* round robin over records for poll_targeted */
     i_RantDiscoverySubnet local_nets[RANT_DISCOVERY_MAX_SUBNETS];
     uint8_t       n_local_nets;
     /* troubled sources, a live one never evicted, so the set stays stable on a big mesh */
@@ -493,12 +496,15 @@ static void i_rant_discovery_wire_mismatch(i_RantDiscoveryState *st, const RantA
 }
 
 /* A blob bigger than we hold: the OS cut it to our buffer, or it is past the accept bound.
- * The node grows the bound and re solicits on the event. wanted is the stated size. */
+ * The node grows the bound and re solicits on the event. wanted is the stated size. A
+ * fetch owed is settled, since a retry brings the same bytes. */
 static void i_rant_discovery_too_big(i_RantDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
                                      const i_RantDiscoveryWire *w, uint32_t wanted){
     RantAddr a;
-    const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i_rant_records_find(&st->records, w->uuid));
+    uint16_t ri = i_rant_records_find(&st->records, w->uuid);
+    const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
     uint32_t id = rec ? rec->local_id : 0;
+    i_rant_records_settle(&st->records, ri, I_RANT_OWE_FETCH);
     memset(&a, 0, sizeof a);
     if (src_ip){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
     a.port = w->data_port;
@@ -514,12 +520,48 @@ static void i_rant_discovery_take_name(i_RantDiscoveryRecord *rec, RantString na
     rec->name[nl] = '\0'; rec->name_len = nl;
 }
 
+/* Silent for more than limit_us. A time fed out of order reads as heard. */
+static int i_rant_discovery_silent_past(uint64_t now, uint64_t heard_us, uint64_t limit_us){
+    return now > heard_us && now - heard_us > limit_us;
+}
+
+/* A solicit's flags. An observer's carries ALL, which every peer answers at once. */
+static uint8_t i_rant_discovery_req_flags(const i_RantDiscoveryState *st){
+    return (uint8_t)(RANT_DISCOVERY_FLAG_REQ | (st->cfg.observer ? RANT_DISCOVERY_FLAG_ALL : 0u));
+}
+
+/* When to answer a solicit with these flags. A targeted, unicast or observer one at once. A
+ * group one within one ms per live peer, placed by both uuids, so a crowd's answers spread. */
+static uint64_t i_rant_discovery_reply_at(const i_RantDiscoveryState *st, const i_RantDiscoveryRecord *rec,
+                                          uint8_t flags, uint64_t now){
+    uint8_t pair[32];
+    const uint8_t at_once = RANT_DISCOVERY_FLAG_UNI | RANT_DISCOVERY_FLAG_ALL | RANT_DISCOVERY_FLAG_ONE;
+    if ((flags & at_once) || st->records.live <= 1u) return now;
+    memcpy(pair, st->cfg.uuid, 16); memcpy(pair + 16, rec->uuid, 16);
+    return now + (uint64_t)i_rant_hash_below(i_rant_fnv1a64(pair, 32), st->records.live) * 1000u;
+}
+
+/* A fetch is owed while the peer advertises a version past the one judged. One already owed
+ * keeps its tries, so a datagram starts it over only once they ran out. After a fetch that
+ * went unanswered, likely a peer that refused us, the next sends once. */
+static void i_rant_discovery_fetch_check(i_RantDiscoveryState *st, uint16_t ri, uint64_t now){
+    i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
+    if (rec->meta_version >= rec->adv_version){
+        rec->fetch_missed = 0;
+        i_rant_records_settle(&st->records, ri, I_RANT_OWE_FETCH);
+        return;
+    }
+    if (rec->owed & I_RANT_OWE_FETCH) return;
+    rec->fetch_tries = rec->fetch_missed ? 1u : RANT_DISCOVERY_FETCH_TRIES;
+    i_rant_records_owe(&st->records, ri, I_RANT_OWE_FETCH, now);
+}
+
 void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
                        RantBytes datagram, uint64_t now){
     const uint8_t *src_ip = (src && (src->ip_len==4 || src->ip_len==16)) ? src->ip : NULL;
     uint8_t  src_ip_len = src_ip ? src->ip_len : 0;
     i_RantDiscoveryWire w; i_RantDiscoveryDecode dr;
-    RantAddr addr; int addr_changed, first_contact=0, blob_changed=0, revived=0, have_blob;
+    RantAddr addr; int addr_changed, first_contact=0, blob_changed=0, first_blob=0, revived=0, have_blob;
     uint16_t ri;
     i_RantDiscoveryRecord *rec;
     i_RantDiscoverySlot *slot;
@@ -567,8 +609,12 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     }
     slot = i_rant_discovery_slot_of(st, rec);
     i_rant_discovery_take_name(rec, w.name);
-    if (rec->state == I_RANT_REC_DROPPED){ rec->state = I_RANT_REC_ACTIVE; revived = 1; }   /* resume it */
+    if (rec->state == I_RANT_REC_DROPPED){     /* resume it */
+        i_rant_records_set_state(&st->records, ri, I_RANT_REC_ACTIVE);
+        revived = 1;
+    }
     rec->last_heard_us = now;
+    if (w.flags & RANT_DISCOVERY_FLAG_UNI) rec->uni_us = now;
     if (src_ip) i_rant_discovery_note_path(slot, src_ip, src_ip_len, now);
 
     /* Rank the candidate against the incumbent so a multi path locator never flaps. See
@@ -594,63 +640,82 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
         slot->addr_heard_us = now;
 
     /* A newer version with the blob updates our copy. A newer version without it means we
-       fell behind, so re fetch with a targeted solicit. */
+       fell behind, so it is fetched. */
     if (w.version > rec->adv_version) rec->adv_version = w.version;
-    if (have_blob){
-        if (w.version > rec->meta_version){
-            int fits = 1;
-            if (w.overlay.len > slot->meta_cap){   /* hook mode resizes, pool slots are pre sized */
-                uint8_t *nb = st->cfg.alloc ? (uint8_t*)st->cfg.alloc(st->cfg.alloc_user, slot->meta, w.overlay.len)
-                                            : NULL;
-                if (nb){ slot->meta = nb; slot->meta_cap = (uint16_t)w.overlay.len; }
-                else fits = 0;                   /* OOM: keep the stale blob, re fetch retries */
-            }
-            if (fits){
-                if (w.overlay.len) memcpy(slot->meta, w.overlay.data, w.overlay.len);
-                slot->meta_len = (uint16_t)w.overlay.len; rec->meta_version = w.version;
-                blob_changed = 1;
-            }
+    if (have_blob && w.version > rec->meta_version){
+        int fits = 1;
+        if (w.overlay.len > slot->meta_cap){   /* hook mode resizes, pool slots are pre sized */
+            uint8_t *nb = st->cfg.alloc ? (uint8_t*)st->cfg.alloc(st->cfg.alloc_user, slot->meta, w.overlay.len)
+                                        : NULL;
+            if (nb){ slot->meta = nb; slot->meta_cap = (uint16_t)w.overlay.len; }
+            else fits = 0;                   /* OOM: keep the stale blob, the fetch retries */
         }
-        rec->solicit_due = 0;
-    } else if (w.version > rec->meta_version){
-        rec->solicit_due = 1;
+        if (fits){
+            if (w.overlay.len) memcpy(slot->meta, w.overlay.data, w.overlay.len);
+            first_blob = rec->meta_version == 0;
+            slot->meta_len = (uint16_t)w.overlay.len; rec->meta_version = w.version;
+            blob_changed = 1;
+        }
     }
+    i_rant_discovery_fetch_check(st, ri, now);
+
+    /* The match answer: the first blob judged of a peer, from a datagram not aimed at us,
+       whose sender may lack ours. Every record keeps its slot, so a later change needs none. */
+    if (first_blob && !(w.flags & RANT_DISCOVERY_FLAG_ONE))
+        i_rant_records_owe(&st->records, ri, I_RANT_OWE_REPLY, now);
+    if (w.flags & RANT_DISCOVERY_FLAG_REQ)
+        i_rant_records_owe(&st->records, ri, I_RANT_OWE_REPLY,
+                           i_rant_discovery_reply_at(st, rec, w.flags, now));
 
     if (first_contact || addr_changed || blob_changed || revived)
         i_rant_discovery_fire_up(st, rec, &addr);
-
-    if ((w.flags & RANT_DISCOVERY_FLAG_REQ) && st->started)
-        rec->reply_due = 1;   /* answer the solicit with a unicast announce and blob */
 }
 
-size_t i_rant_discovery_update(i_RantDiscoveryState *st, uint64_t now, void *out, size_t cap){
+/* Demotes the records silent past the timeout and frees the DROPPED ones silent past the
+ * gone timeout too. */
+static void i_rant_discovery_sweep(i_RantDiscoveryState *st, uint64_t now){
     uint16_t i;
-    st->now_us = now;
-    if (!st->started){
-        st->started = 1;
-        st->changed_us = now;   /* our overlay is new to the mesh from here */
-        st->next_announce_us = now + (i_rant_fnv1a64(st->cfg.uuid, 16) % st->cfg.announce_interval_us);
-        st->want_solicit = 1;   /* solicit on startup */
-    }
     for (i=0;i<st->records.cap;i++){
         i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
         if (!rec) continue;
         if (rec->state == I_RANT_REC_DROPPED){
-            /* silent past the gone timeout too: a return is no longer expected, free it */
-            if (st->cfg.gone_timeout_us &&
-                now - rec->last_heard_us > (uint64_t)st->cfg.peer_timeout_us + st->cfg.gone_timeout_us)
+            if (st->cfg.gone_timeout_us && i_rant_discovery_silent_past(now, rec->last_heard_us,
+                    (uint64_t)st->cfg.peer_timeout_us + st->cfg.gone_timeout_us))
                 i_rant_discovery_peer_gone(st, i);
             continue;
         }
-        if (now - rec->last_heard_us > st->cfg.peer_timeout_us){
-            /* fell silent: demote, keeping the record, slot and id so a same uuid return resumes */
-            rec->state = I_RANT_REC_DROPPED;
+        if (i_rant_discovery_silent_past(now, rec->last_heard_us, st->cfg.peer_timeout_us)){
+            /* the record, slot and id stay so a same uuid return resumes. Nothing owed goes
+               to a silent peer */
+            i_rant_records_set_state(&st->records, i, I_RANT_REC_DROPPED);
+            i_rant_records_settle(&st->records, i, 0xFFu);
             i_rant_discovery_fire_down(st, rec->local_id, RANT_DISCOVERY_DROP);
         }
     }
-    if (st->want_solicit){   /* multicast solicit: announce with the blob and ask peers to reply */
+}
+
+size_t i_rant_discovery_update(i_RantDiscoveryState *st, uint64_t now, void *out, size_t cap){
+    uint32_t sweep_us = st->cfg.announce_interval_us / RANT_DISCOVERY_SWEEPS;
+    st->now_us = now;
+    if (sweep_us == 0) sweep_us = 1;
+    if (!st->started){
+        /* the opening carries our blob, so the resend and a solicit asked before it ride it */
+        int ask = st->cfg.observer || st->want_solicit;
+        st->started = 1;
+        st->changed_us = now;   /* our overlay is new to the mesh from here */
+        st->next_announce_us = now + i_rant_hash_below(i_rant_fnv1a64(st->cfg.uuid, 16), st->cfg.announce_interval_us);
+        st->next_sweep_us = now + sweep_us;
         st->want_solicit = 0;
-        return i_rant_discovery_build(st, RANT_DISCOVERY_FLAG_REQ, 1, (uint8_t *)out, cap);
+        st->self_blob_resend = 0;
+        return i_rant_discovery_build(st, ask ? i_rant_discovery_req_flags(st) : 0u, 1, (uint8_t *)out, cap);
+    }
+    if (now >= st->next_sweep_us){
+        st->next_sweep_us = now + sweep_us;
+        i_rant_discovery_sweep(st, now);
+    }
+    if (st->want_solicit){   /* the group solicit: our blob, and peers answer with theirs */
+        st->want_solicit = 0;
+        return i_rant_discovery_build(st, i_rant_discovery_req_flags(st), 1, (uint8_t *)out, cap);
     }
     if (now >= st->next_announce_us){
         int with_blob = st->self_blob_resend > 0;
@@ -662,8 +727,13 @@ size_t i_rant_discovery_update(i_RantDiscoveryState *st, uint64_t now, void *out
 }
 
 uint64_t i_rant_discovery_next_due_us(const i_RantDiscoveryState *st){
+    uint64_t due; uint16_t i;
     if (!st || !st->started || st->want_solicit) return 0;
-    return st->next_announce_us;   /* 0 after an advertise: announce now */
+    /* next_announce_us is 0 after an advertise: announce now */
+    due = st->next_announce_us < st->next_sweep_us ? st->next_announce_us : st->next_sweep_us;
+    for (i = st->records.due_head; i != I_RANT_REC_NONE; i = st->records.recs[i].due_next)
+        if (st->records.recs[i].due_us < due) due = st->records.recs[i].due_us;
+    return due;
 }
 
 void i_rant_discovery_set_meta(i_RantDiscoveryState *st, RantBytes meta, uint64_t now_us){
@@ -691,26 +761,51 @@ void i_rant_discovery_set_local_subnets(i_RantDiscoveryState *st, const i_RantDi
     st->n_local_nets = k;
 }
 
-size_t i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, void *out, size_t cap,
+/* Each send settles its record or moves it past now, so a caller that drains this to 0 sends
+ * every due record once. */
+size_t i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, uint64_t now, void *out, size_t cap,
                                     RantAddr *to){
-    uint16_t n = st->records.cap, k;
-    for (k=0;k<n;k++){
-        uint16_t i = (uint16_t)(st->targeted_cursor % n);
-        i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
-        st->targeted_cursor = (uint16_t)((i+1u) % n);
-        if (!rec) continue;
-        if (rec->reply_due){                 /* reply to a soliciter with the blob */
-            rec->reply_due = 0;
-            i_rant_discovery_addr_of(rec, to);
-            return i_rant_discovery_build(st, 0, 1, (uint8_t *)out, cap);
+    uint16_t i;
+    st->now_us = now;
+    if (!st->started) return 0;
+    for (i = st->records.due_head; i != I_RANT_REC_NONE; i = st->records.recs[i].due_next){
+        i_RantDiscoveryRecord *rec = &st->records.recs[i];
+        int fetch = (rec->owed & I_RANT_OWE_FETCH) != 0;
+        if (rec->due_us > now) continue;
+        i_rant_discovery_addr_of(rec, to);
+        i_rant_records_settle(&st->records, i, I_RANT_OWE_REPLY);   /* a fetch carries our blob too */
+        if (fetch){
+            if (rec->fetch_tries > 1u){
+                rec->fetch_tries--;
+                i_rant_records_requeue(&st->records, i, now + RANT_DISCOVERY_FETCH_RETRY_US);
+            } else {
+                rec->fetch_missed = 1;          /* an answer to this last send clears it */
+                i_rant_records_settle(&st->records, i, I_RANT_OWE_FETCH);
+            }
         }
-        if (rec->solicit_due){               /* re fetch: ask this peer to announce back */
-            rec->solicit_due = 0;
-            i_rant_discovery_addr_of(rec, to);
-            return i_rant_discovery_build(st, RANT_DISCOVERY_FLAG_REQ, 1, (uint8_t *)out, cap);
-        }
+        return i_rant_discovery_build(st, fetch ? RANT_DISCOVERY_FLAG_REQ | RANT_DISCOVERY_FLAG_ONE
+                                                : RANT_DISCOVERY_FLAG_ONE, 1, (uint8_t *)out, cap);
     }
     return 0;
+}
+
+uint16_t i_rant_discovery_record_cap(const i_RantDiscoveryState *st){ return st->records.cap; }
+
+/* A slotted peer gets plain copies, which never start the receiver's own, so a pair's copies
+ * end with the slot. Copies marked UNI keep a pair in touch where the group does not reach. */
+int i_rant_discovery_copy_addr(const i_RantDiscoveryState *st, uint16_t i, RantAddr *out, int *uni){
+    const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+    if (!rec || rec->state != I_RANT_REC_ACTIVE) return 0;
+    *uni = rec->uni_us && !i_rant_discovery_silent_past(st->now_us, rec->uni_us, st->cfg.peer_timeout_us);
+    if (!*uni && rec->slot == I_RANT_REC_NONE) return 0;
+    i_rant_discovery_addr_of(rec, out);
+    return 1;
+}
+
+void i_rant_discovery_mark_copy(uint8_t *datagram, size_t len, int uni){
+    if (len <= 5) return;                    /* byte 5 is the flags, see the codec */
+    if (uni) datagram[5] |= RANT_DISCOVERY_FLAG_UNI;
+    else datagram[5] = (uint8_t)(datagram[5] & ~RANT_DISCOVERY_FLAG_UNI);
 }
 
 void i_rant_discovery_solicit(i_RantDiscoveryState *st){ if (st) st->want_solicit = 1; }
@@ -728,14 +823,8 @@ void i_rant_discovery_replay_peers(i_RantDiscoveryState *st){
     }
 }
 
-uint16_t i_rant_discovery_peer_count(const i_RantDiscoveryState *st){
-    uint16_t i, c = 0;   /* DROPPED records linger for resume and are not members */
-    for (i=0;i<st->records.cap;i++){
-        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
-        if (rec && rec->state == I_RANT_REC_ACTIVE) c++;
-    }
-    return c;
-}
+/* DROPPED records linger for resume and are not members. */
+uint16_t i_rant_discovery_peer_count(const i_RantDiscoveryState *st){ return st->records.live; }
 
 uint16_t i_rant_discovery_max_peers(const i_RantDiscoveryState *st){ return st->cap_peers; }
 
@@ -822,13 +911,4 @@ int i_rant_discovery_id_for_addr(const i_RantDiscoveryState *st, const uint8_t *
 
 size_t i_rant_discovery_leave(i_RantDiscoveryState *st, void *out, size_t cap){
     return i_rant_discovery_build(st, RANT_DISCOVERY_FLAG_BYE, 0, (uint8_t *)out, cap);
-}
-
-int i_rant_discovery_peer_addr(const i_RantDiscoveryState *st, uint16_t s, RantAddr *out){
-    const i_RantDiscoveryRecord *rec;
-    if (s >= st->cap_peers) return 0;
-    rec = i_rant_discovery_rec(st, st->slots[s].rec);
-    if (!rec || rec->state != I_RANT_REC_ACTIVE) return 0;   /* active only, a dropped peer just bounces */
-    i_rant_discovery_addr_of(rec, out);
-    return 1;
 }

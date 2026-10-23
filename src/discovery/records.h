@@ -15,12 +15,18 @@ typedef enum {
     I_RANT_REC_DROPPED              /* silent past peer_timeout_us, kept for a same uuid return */
 } i_RantRecState;
 
+/* The work a record is owed, the bits of its owed field. */
+#define I_RANT_OWE_REPLY 0x01u      /* our announce and blob */
+#define I_RANT_OWE_FETCH 0x02u      /* a request for its blob, which also carries ours */
+
 /* What a peer is, whether or not it holds a slot. */
 typedef struct {
     uint8_t  uuid[16];
     uint32_t local_id;               /* stable across a drop and return */
-    uint64_t last_heard_us;
     uint32_t meta_version;           /* the version of its blob judged, 0 = none yet */
+    uint64_t last_heard_us;
+    uint64_t uni_us;                 /* last heard by a unicast copy, 0 = never */
+    uint64_t due_us;                 /* when its owed work goes out, while queued */
     uint32_t adv_version;            /* the highest it advertised, above meta_version = stale */
     uint8_t  ip[16];                 /* the locator */
     uint16_t port;
@@ -29,8 +35,10 @@ typedef struct {
     uint16_t slot;                   /* I_RANT_REC_NONE without one */
     uint16_t uuid_next;              /* the uuid chain, or the free list while FREE */
     uint16_t id_next;                /* the id chain */
-    uint8_t  reply_due;              /* owes a unicast announce plus blob, it solicited us */
-    uint8_t  solicit_due;            /* owes a unicast REQ, its version is ahead of ours */
+    uint16_t due_prev, due_next;     /* the due queue, which holds exactly the records owed work */
+    uint8_t  owed;                   /* I_RANT_OWE_* */
+    uint8_t  fetch_tries;            /* sends left of the fetch owed */
+    uint8_t  fetch_missed;           /* the last fetch went unanswered */
     uint8_t  name_len;
     char     name[RANT_NODE_NAME_MAX + 1];
 } i_RantDiscoveryRecord;
@@ -40,6 +48,8 @@ typedef struct {
     i_RantDiscoveryRecord *recs;     /* [cap] */
     uint16_t   *heads;               /* uuid chains [mask + 1], then id chains [mask + 1] */
     uint16_t    cap, count, free_head, mask;
+    uint16_t    live;                /* ACTIVE records */
+    uint16_t    due_head, due_tail;  /* the due queue, oldest owed first */
     uint32_t    next_id;
     RantAllocFn alloc;               /* NULL: placed in the arena, fixed at its reserve */
     void       *alloc_user;
@@ -59,6 +69,15 @@ uint16_t i_rant_records_add(i_RantDiscoveryRecords *r, const uint8_t uuid[16]);
 void     i_rant_records_remove(i_RantDiscoveryRecords *r, uint16_t i);
 uint16_t i_rant_records_find(const i_RantDiscoveryRecords *r, const uint8_t uuid[16]);
 uint16_t i_rant_records_by_id(const i_RantDiscoveryRecords *r, uint32_t id);
+/* The one writer of a record's state, so live stays exact. */
+void     i_rant_records_set_state(i_RantDiscoveryRecords *r, uint16_t i, i_RantRecState state);
+/* Owes record i the work in bits by due_us at the latest. A record joins the queue's tail
+ * when it starts owing, and keeps its place and the earlier due time after. */
+void     i_rant_records_owe(i_RantDiscoveryRecords *r, uint16_t i, uint8_t bits, uint64_t due_us);
+/* Clears bits. A record that owes nothing more leaves the queue. */
+void     i_rant_records_settle(i_RantDiscoveryRecords *r, uint16_t i, uint8_t bits);
+/* Moves an owing record to the queue's tail, due at due_us, after a send that left work. */
+void     i_rant_records_requeue(i_RantDiscoveryRecords *r, uint16_t i, uint64_t due_us);
 
 /* The record at i, NULL when i holds none. A pointer is valid until the next add. */
 static inline i_RantDiscoveryRecord *i_rant_records_at(const i_RantDiscoveryRecords *r, uint16_t i){

@@ -29,7 +29,10 @@ extern "C" {
 #define RANT_DISCOVERY_HEAD_MAX  (RANT_DISCOVERY_FIXED_LEN + RANT_NODE_NAME_MAX)
 #define RANT_DISCOVERY_FLAG_BYE  0x01u   /* leaving */
 #define RANT_DISCOVERY_FLAG_REQ  0x02u   /* a solicit: answer with an announce and the blob */
+#define RANT_DISCOVERY_FLAG_UNI  0x04u   /* a copy by unicast: copy your announces back */
+#define RANT_DISCOVERY_FLAG_ALL  0x08u   /* an observer's solicit: every peer answers at once */
 #define RANT_DISCOVERY_FLAG_BLOB 0x10u   /* the overlay follows the name, maybe empty */
+#define RANT_DISCOVERY_FLAG_ONE  0x20u   /* a targeted send: a REQ is answered at once, no copies */
 
 typedef struct {
     uint8_t        flags;
@@ -91,6 +94,7 @@ typedef struct {
     uint32_t peer_timeout_us;    /* drop a peer after this much silence */
     uint32_t gone_timeout_us;    /* DROPPED to GONE this long after the drop, 0 = never */
     uint16_t max_peers;
+    uint8_t  observer;      /* 1 = our solicits carry ALL, so every peer answers at once */
     RantString name;        /* advertised name, copied at init, cut to RANT_NODE_NAME_MAX */
     RantBytes meta;         /* the initial overlay. Must stay valid, .len <= meta_cap */
     uint16_t meta_cap;      /* per peer overlay capacity, 0 = RANT_DISCOVERY_META_MAX */
@@ -129,12 +133,15 @@ i_RantDiscoveryState *i_rant_discovery_core_migrate(i_RantDiscoveryState *old, v
 /* src NULL means the IO layer cannot say, so the locator comes from the blob alone. */
 void           i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
                                         RantBytes datagram, uint64_t now_us);
+/* The first call opens: it returns our blob at once, with REQ|ALL from an observer. Later
+ * calls return an announce or a solicit for the group, seeds and copies, when one is due. */
 size_t         i_rant_discovery_update(i_RantDiscoveryState *st, uint64_t now_us, void *out, size_t cap);
-/* When update next wants to run its timers. 0 means now. Peer timeout sweeps ride the
- * announce cadence. */
+/* When update or poll_targeted next has work: an announce, a timeout sweep or owed work. A
+ * time at or before now, or 0, means now. */
 uint64_t       i_rant_discovery_next_due_us(const i_RantDiscoveryState *st);
 size_t         i_rant_discovery_leave(i_RantDiscoveryState *st, void *out, size_t cap);
-/* Queues a one shot solicit. The next update asks peers to announce now. */
+/* Queues a one shot group solicit. The next update asks peers to answer with their blob,
+ * spread over a few ms, or at once for an observer. */
 void           i_rant_discovery_solicit(i_RantDiscoveryState *st);
 /* Re fires peer up for every live peer with the blob we hold, so a caller that changed
  * its own advertised data re applies every peer's interest. */
@@ -148,10 +155,19 @@ uint32_t       i_rant_discovery_meta_version(const i_RantDiscoveryState *st);
  * zero mask is ignored. */
 void           i_rant_discovery_set_local_subnets(i_RantDiscoveryState *st,
                                       const i_RantDiscoverySubnet *nets, uint8_t n);
-/* Drains one unicast datagram: a solicit reply or a re fetch request. Returns bytes and
- * fills *to, the peer's locator, or 0. */
-size_t         i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, void *out, size_t cap,
-                                      RantAddr *to);
+/* One owed targeted send that is due by now_us: a reply (BLOB|ONE) or a fetch
+ * (REQ|ONE|BLOB). Returns bytes and fills *to, the peer's locator, or 0 when none is due.
+ * Nothing goes out before the first update. */
+size_t         i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, uint64_t now_us,
+                                      void *out, size_t cap, RantAddr *to);
+/* How many records the store holds room for, the index range of copy_addr. */
+uint16_t       i_rant_discovery_record_cap(const i_RantDiscoveryState *st);
+/* 1 when record i takes a unicast copy of each announce, with its locator in *out. *uni is 1
+ * when the copy must carry UNI: the record heard us by unicast lately, so it may hear no group. */
+int            i_rant_discovery_copy_addr(const i_RantDiscoveryState *st, uint16_t i,
+                                      RantAddr *out, int *uni);
+/* Sets or clears UNI in a built datagram, per copy of one announce. */
+void           i_rant_discovery_mark_copy(uint8_t *datagram, size_t len, int uni);
 /* A source this node heard but cannot take as a peer: another wire version (value is its
  * version), a full table (RANT_E_PEER_REFUSED) or a blob too big (value is its bytes). */
 #ifndef RANT_DISCOVERY_TROUBLE_MAX
@@ -174,11 +190,8 @@ int            i_rant_discovery_trouble_more(const i_RantDiscoveryState *st, Ran
 int            i_rant_discovery_trouble_new(const i_RantDiscoveryState *st);
 /* Live peers, DROPPED entries excluded. */
 uint16_t       i_rant_discovery_peer_count(const i_RantDiscoveryState *st);
-/* Table capacity, the slot range for peer_addr and peer_at. */
+/* Table capacity, the slot range for peer_at. */
 uint16_t       i_rant_discovery_max_peers(const i_RantDiscoveryState *st);
-/* The locator of the ACTIVE peer in a slot, for discovery TX. 1 if it holds one. */
-int            i_rant_discovery_peer_addr(const i_RantDiscoveryState *st, uint16_t slot,
-                                      RantAddr *out);
 /* Read only view of the peer in a slot, ACTIVE or DROPPED. 1 if it holds one. */
 int            i_rant_discovery_peer_at(const i_RantDiscoveryState *st, uint16_t slot,
                                       i_RantDiscoveryPeerView *out);

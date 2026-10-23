@@ -17,18 +17,23 @@ static void dc_error(const RantEvent *ev){
     if (ev->error==RANT_E_WIRE_VERSION) dc_wire_n++;
 }
 
-/* craft a datagram for sender `uid` (uuid = all uid bytes) carrying an empty blob into a
-   RANT_DISCOVERY_WIRE_MAX buffer. flags RANT_DISCOVERY_FLAG_BYE for a bye */
-static size_t dc_wire(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port,
-                      const char *name, uint32_t mver){
+/* craft a datagram for sender `uid` (uuid = all uid bytes) with exactly these flags, an
+   empty blob when BLOB is set, into a RANT_DISCOVERY_WIRE_MAX buffer */
+static size_t dc_enc(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port,
+                     const char *name, uint32_t mver){
     static uint8_t uuid[16];
     i_RantDiscoveryWire w;
     memset(uuid, uid, 16);
     memset(&w, 0, sizeof w);
-    w.flags = (uint8_t)(flags | RANT_DISCOVERY_FLAG_BLOB); w.domain = dom; w.uuid = uuid;
+    w.flags = flags; w.domain = dom; w.uuid = uuid;
     w.version = mver; w.data_port = port;
     w.name = name ? rant_cstr(name) : rant_string(NULL, 0);
     return i_rant_discovery_encode(&w, p, RANT_DISCOVERY_WIRE_MAX);
+}
+/* the same carrying the blob. flags RANT_DISCOVERY_FLAG_BYE for a bye */
+static size_t dc_wire(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port,
+                      const char *name, uint32_t mver){
+    return dc_enc(p, uid, (uint8_t)(flags | RANT_DISCOVERY_FLAG_BLOB), dom, port, name, mver);
 }
 static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port, uint32_t mver){
     return dc_wire(p, uid, flags, dom, port, NULL, mver);
@@ -395,6 +400,16 @@ static int rs_find_all(const i_RantDiscoveryRecords *r, const uint16_t *at, cons
     return 1;
 }
 
+/* The due queue head to tail into q. -1 when its back links or tail disagree. */
+static int rs_queue(const i_RantDiscoveryRecords *r, uint16_t *q, int max){
+    uint16_t i, prev = I_RANT_REC_NONE; int n = 0;
+    for (i = r->due_head; i != I_RANT_REC_NONE && n < max; i = r->recs[i].due_next){
+        if (r->recs[i].due_prev != prev) return -1;
+        q[n++] = i; prev = i;
+    }
+    return (i == I_RANT_REC_NONE && r->due_tail == prev) ? n : -1;
+}
+
 /* Records are found by uuid and by id through growth and reuse, an id is never handed out
    twice, and a store without a hook stays at its reserve. */
 static void records_checks(void){
@@ -465,6 +480,44 @@ static void records_checks(void){
     CHECK(ma.in_use == 0, "records: destroy frees the hook memory (%u in use)",
           (unsigned)ma.in_use);
     rant_allocator_reset(&ma);
+
+    /* The due queue holds exactly the records owed work, oldest first, and live counts the
+       ACTIVE records through every change of state */
+    {   uint16_t d[4], q[4];
+        memset(&b, 0, sizeof b); b.base = mem; b.cap = sizeof mem;
+        i_rant_records_layout(&b, 4, 0, &blk);
+        CHECK(i_rant_records_init(&r, &blk, 4, NULL, NULL), "records: a store for the queue opens");
+        for (k = 0; k < 4; k++){ memset(uuid, 0, 16); uuid[0] = (uint8_t)(k + 1); d[k] = i_rant_records_add(&r, uuid); }
+        i_rant_records_owe(&r, d[0], I_RANT_OWE_REPLY, 500);
+        i_rant_records_owe(&r, d[1], I_RANT_OWE_FETCH, 300);
+        i_rant_records_owe(&r, d[2], I_RANT_OWE_REPLY, 400);
+        i_rant_records_owe(&r, d[0], I_RANT_OWE_FETCH, 100);
+        i_rant_records_owe(&r, d[2], I_RANT_OWE_REPLY, 450);
+        CHECK(rs_queue(&r, q, 4) == 3 && q[0] == d[0] && q[1] == d[1] && q[2] == d[2]
+              && r.recs[d[0]].due_us == 100 && r.recs[d[2]].due_us == 400
+              && r.recs[d[0]].owed == (I_RANT_OWE_REPLY | I_RANT_OWE_FETCH),
+              "records: owing joins the queue once and keeps the earliest due time");
+        i_rant_records_settle(&r, d[0], I_RANT_OWE_REPLY);
+        i_rant_records_requeue(&r, d[0], 900);
+        i_rant_records_remove(&r, d[1]);
+        i_rant_records_settle(&r, d[3], I_RANT_OWE_REPLY);
+        i_rant_records_requeue(&r, d[3], 50);
+        CHECK(rs_queue(&r, q, 4) == 2 && q[0] == d[2] && q[1] == d[0] && r.recs[d[0]].due_us == 900
+              && r.recs[d[0]].owed == I_RANT_OWE_FETCH,
+              "records: a requeue moves to the tail, a removed record leaves, one owing nothing never joins");
+        i_rant_records_settle(&r, d[0], I_RANT_OWE_FETCH);
+        i_rant_records_settle(&r, d[2], I_RANT_OWE_REPLY);
+        CHECK(rs_queue(&r, q, 4) == 0 && r.due_head == I_RANT_REC_NONE, "records: settling all empties the queue");
+        i_rant_records_set_state(&r, d[0], I_RANT_REC_DROPPED);
+        i_rant_records_set_state(&r, d[0], I_RANT_REC_DROPPED);
+        i_rant_records_set_state(&r, d[2], I_RANT_REC_DROPPED);
+        i_rant_records_remove(&r, d[2]);
+        k = r.live;
+        i_rant_records_set_state(&r, d[0], I_RANT_REC_ACTIVE);
+        CHECK(k == 1 && r.live == 2 && r.count == 2,
+              "records: live counts the ACTIVE records through drops, returns and removes (%d then %u)",
+              k, (unsigned)r.live);
+    }
 }
 
 /* A grow keeps every peer with its id and scratch and takes the one it refused. Only a hook
@@ -516,9 +569,182 @@ static void migrate_checks(void){
     rant_allocator_reset(&ma);
 }
 
+/* The flags of a datagram a core built, -1 for none. */
+static int dc_sent(const uint8_t *out, size_t n){
+    i_RantDiscoveryWire r;
+    if (!n || i_rant_discovery_decode(rant_bytes(out, n), &r) != I_RANT_DISC_OK) return -1;
+    return r.flags;
+}
+
+/* Sends every targeted datagram due by now. How many went out, the last one's flags and port. */
+static int dc_drain(i_RantDiscoveryState *st, uint64_t now, int *flags, uint16_t *port){
+    uint8_t out[RANT_DISCOVERY_WIRE_MAX]; RantAddr to; size_t n; int k = 0;
+    *flags = -1; *port = 0;
+    while (k < 64 && (n = i_rant_discovery_poll_targeted(st, now, out, sizeof out, &to)) != 0){
+        *flags = dc_sent(out, n); *port = to.port; k++;
+    }
+    return k;
+}
+
+/* 1 when the core copies its announces to the record with this data port, marked as *uni. */
+static int dc_copy_of(const i_RantDiscoveryState *st, uint16_t port, int *uni){
+    uint16_t i; RantAddr a;
+    for (i = 0; i < i_rant_discovery_record_cap(st); i++)
+        if (i_rant_discovery_copy_addr(st, i, &a, uni) && a.port == port) return 1;
+    *uni = 0;
+    return 0;
+}
+
+/* The work owed to peers: the opening, answers at once or spread, the match answer, a fetch
+   while a version is ahead and its retries, copies by unicast, and the timeout sweep. */
+static void owed_checks(void){
+    static uint8_t mem[16384];
+    const uint8_t F_REQ = RANT_DISCOVERY_FLAG_REQ, F_BLOB = RANT_DISCOVERY_FLAG_BLOB, F_ONE = RANT_DISCOVERY_FLAG_ONE,
+                  F_UNI = RANT_DISCOVERY_FLAG_UNI, F_ALL = RANT_DISCOVERY_FLAG_ALL;
+    uint8_t buf[RANT_DISCOVERY_WIRE_MAX], out[RANT_DISCOVERY_WIRE_MAX], ip[4] = {10,0,0,1};
+    i_RantDiscoveryCoreConfig c; i_RantDiscoveryState *st;
+    uint64_t t = 1000000u; size_t n; int k, fl, uni, sends; uint16_t port;
+    memset(&c,0,sizeof c); memset(c.uuid,0xEE,16);
+    c.domain_id=99; c.announce_interval_us=1000000; c.peer_timeout_us=4000000; c.max_peers=8;
+
+    c.observer = 1;
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    n = st ? i_rant_discovery_update(st, t, out, sizeof out) : 0;
+    CHECK(dc_sent(out, n) == (F_REQ | F_ALL | F_BLOB), "owed: an observer opens asking every peer to answer at once");
+    c.observer = 0;
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    CHECK(st != NULL, "owed: init");
+    if (!st) return;
+
+    n = dc_wire(buf,1,(uint8_t)(F_REQ|F_ONE),99,5001,NULL,1); dc_feed(st,ip,6730,buf,n,t);
+    CHECK(dc_drain(st,t,&fl,&port) == 0, "owed: nothing goes out before the opening");
+    n = i_rant_discovery_update(st, t, out, sizeof out);
+    CHECK(dc_sent(out, n) == F_BLOB, "owed: the opening carries our blob and asks nothing (flags %d)", dc_sent(out, n));
+    CHECK(dc_drain(st,t,&fl,&port) == 1 && fl == (F_ONE|F_BLOB) && port == 5001,
+          "owed: a targeted solicit is answered at once with BLOB|ONE (flags %d port %u)", fl, port);
+
+    /* the match answer: a blob judged new, from a datagram not aimed at us */
+    n = dc_wire(buf,2,0,99,5002,NULL,1); dc_feed(st,ip,6730,buf,n,t);
+    CHECK(dc_drain(st,t,&fl,&port) == 1 && fl == (F_ONE|F_BLOB) && port == 5002,
+          "owed: a new blob from the group is answered at once (flags %d)", fl);
+    n = dc_wire(buf,3,F_ONE,99,5003,NULL,1); dc_feed(st,ip,6730,buf,n,t);
+    sends = dc_drain(st,t,&fl,&port);
+    n = dc_wire(buf,2,0,99,5002,NULL,1); dc_feed(st,ip,6730,buf,n,t);
+    sends += dc_drain(st,t,&fl,&port);
+    n = dc_wire(buf,2,0,99,5002,NULL,2); dc_feed(st,ip,6730,buf,n,t);
+    CHECK(sends == 0 && dc_drain(st,t,&fl,&port) == 0,
+          "owed: a first blob from a targeted send is not answered, nor one judged before, nor a change");
+
+    for (k = 0; k < 3; k++){
+        uint8_t how = (uint8_t)(k == 0 ? F_UNI : k == 1 ? F_ONE : F_ALL);
+        n = dc_wire(buf,2,(uint8_t)(F_REQ|how),99,5002,NULL,1); dc_feed(st,ip,6730,buf,n,t);
+        CHECK(dc_drain(st,t,&fl,&port) == 1 && port == 5002,
+              "owed: a solicit marked %s is answered at once", k == 0 ? "UNI" : k == 1 ? "ONE" : "ALL");
+    }
+    for (k = 4; k <= 8; k++){ n = dc_wire(buf,(uint8_t)k,F_ONE,99,(uint16_t)(5000+k),NULL,1); dc_feed(st,ip,6730,buf,n,t); }
+    for (k = 1; k <= 8; k++){ n = dc_wire(buf,(uint8_t)k,F_REQ,99,(uint16_t)(5000+k),NULL,1); dc_feed(st,ip,6730,buf,n,t); }
+    {   int got = dc_drain(st,t,&fl,&port), total = got, spots = got > 0, ms;
+        for (ms = 1; ms < 8; ms++){
+            got = dc_drain(st, t + (uint64_t)ms*1000u, &fl, &port);
+            total += got; spots += got > 0;
+        }
+        CHECK(i_rant_discovery_peer_count(st) == 8 && total == 8 && spots >= 3,
+              "owed: a group solicit is answered within one ms per live peer, spread (%d by 7 ms over %d ms)",
+              total, spots);
+    }
+
+    /* a version ahead without the blob: fetched at once, then every 250 ms, four sends */
+    t += 10000u;
+    n = dc_enc(buf,4,0,99,5004,NULL,2); dc_feed(st,ip,6730,buf,n,t);
+    CHECK(i_rant_discovery_next_due_us(st) <= t, "owed: next due is now once a fetch is owed");
+    sends = dc_drain(st,t,&fl,&port);
+    CHECK(sends == 1 && fl == (F_REQ|F_ONE|F_BLOB) && port == 5004,
+          "owed: a version ahead is fetched at once with REQ|ONE and our blob (flags %d)", fl);
+    CHECK(dc_drain(st, t + 249000u, &fl, &port) == 0, "owed: an unanswered fetch waits 250 ms");
+    for (k = 1; k < 4; k++) sends += dc_drain(st, t + (uint64_t)k*250000u, &fl, &port);
+    CHECK(sends == 4 && dc_drain(st, t + 1250000u, &fl, &port) == 0,
+          "owed: a fetch goes four times 250 ms apart, then stops (%d)", sends);
+    t += 1500000u;
+    n = dc_enc(buf,4,0,99,5004,NULL,2); dc_feed(st,ip,6730,buf,n,t);
+    sends = dc_drain(st,t,&fl,&port);
+    CHECK(sends == 1 && fl == (F_REQ|F_ONE|F_BLOB) && dc_drain(st, t + 250000u, &fl, &port) == 0,
+          "owed: after a fetch that went unanswered, a later announce fetches once");
+    n = dc_wire(buf,4,F_ONE,99,5004,NULL,2); dc_feed(st,ip,6730,buf,n,t + 260000u);
+    t += 500000u;
+    n = dc_enc(buf,4,0,99,5004,NULL,3); dc_feed(st,ip,6730,buf,n,t);
+    sends = dc_drain(st,t,&fl,&port) + dc_drain(st, t + 250000u, &fl, &port);
+    n = dc_wire(buf,4,F_ONE,99,5004,NULL,3); dc_feed(st,ip,6730,buf,n,t + 251000u);
+    CHECK(sends == 2 && dc_drain(st, t + 500000u, &fl, &port) == 0,
+          "owed: the blob at the advertised version ends a fetch, and the next goes four times again");
+
+    /* a fetch carries our blob, so it settles an answer owed too */
+    t += 500000u;
+    n = dc_wire(buf,5,F_REQ,99,5005,NULL,1); dc_feed(st,ip,6730,buf,n,t);
+    n = dc_enc(buf,5,0,99,5005,NULL,2); dc_feed(st,ip,6730,buf,n,t);
+    sends = dc_drain(st,t,&fl,&port);
+    CHECK(sends == 1 && fl == (F_REQ|F_ONE|F_BLOB) && dc_drain(st, t + 10000u, &fl, &port) == 0,
+          "owed: a fetch settles the answer owed to the same peer (%d sends)", sends);
+    n = dc_wire(buf,5,F_ONE,99,5005,NULL,2); dc_feed(st,ip,6730,buf,n,t + 20000u);
+
+    /* an answer too big to hold ends the fetch, since a retry brings the same bytes */
+    t += 500000u;
+    n = dc_enc(buf,6,0,99,5006,NULL,2); dc_feed(st,ip,6730,buf,n,t);
+    sends = dc_drain(st,t,&fl,&port);
+    {   uint8_t big[256], ov[100], uuid6[16]; i_RantDiscoveryWire w;
+        memset(uuid6, 6, 16); memset(ov, 0, sizeof ov); memset(&w, 0, sizeof w);
+        w.flags = (uint8_t)(F_BLOB|F_ONE); w.domain = 99; w.uuid = uuid6; w.version = 2; w.data_port = 5006;
+        w.overlay = rant_bytes(ov, sizeof ov);
+        n = i_rant_discovery_encode(&w, big, sizeof big);
+        dc_feed(st,ip,6730,big,n,t + 1000u);
+    }
+    CHECK(sends == 1 && dc_drain(st, t + 250000u, &fl, &port) == 0, "owed: an answer too big to hold ends the fetch");
+
+    /* copies: marked UNI to a record heard by a unicast copy within the peer timeout, plain
+       to a slotted one, none to a DROPPED one */
+    t += 500000u;
+    n = dc_wire(buf,7,F_UNI,99,5007,NULL,1); dc_feed(st,ip,6730,buf,n,t);
+    k = dc_copy_of(st, 5007, &uni) && uni;
+    CHECK(k && dc_copy_of(st, 5008, &uni) && !uni && dc_drain(st,t,&fl,&port) == 0,
+          "owed: a record heard by a unicast copy takes copies marked UNI, a slotted one plain copies");
+    n = dc_enc(buf,7,0,99,5007,NULL,1); dc_feed(st,ip,6730,buf,n,t + 4500000u);
+    CHECK(dc_copy_of(st, 5007, &uni) && !uni, "owed: UNI ends a peer timeout after the last unicast copy");
+    n = dc_wire(buf,1,F_REQ,99,5001,NULL,1);
+    i_rant_discovery_mark_copy(buf, n, 1); k = dc_sent(buf, n);
+    i_rant_discovery_mark_copy(buf, n, 0);
+    CHECK(k == (F_REQ|F_BLOB|F_UNI) && dc_sent(buf, n) == (F_REQ|F_BLOB), "owed: mark_copy sets and clears UNI alone");
+
+    /* the sweep runs a few times per interval: a peer silent past the timeout drops within a
+       quarter interval, nothing owed goes to it, and the live count follows */
+    t += 4500001u;
+    i_rant_discovery_update(st, t, out, sizeof out);
+    CHECK(i_rant_discovery_peer_count(st) == 1 && !dc_copy_of(st, 5008, &uni),
+          "owed: the silent peers drop and take no copies (%u live)", (unsigned)i_rant_discovery_peer_count(st));
+    {   uint64_t heard = t, at = 0, now;
+        n = dc_wire(buf,7,F_REQ,99,5007,NULL,1); dc_feed(st,ip,6730,buf,n,heard);
+        for (now = heard + 3900000u; now < heard + 4400000u && !at; now += 10000u){
+            i_rant_discovery_update(st, now, out, sizeof out);
+            if (i_rant_discovery_peer_count(st) == 0) at = now;
+        }
+        CHECK(at > heard + 4000000u && at <= heard + 4260000u && dc_drain(st, at, &fl, &port) == 0,
+              "owed: a drop comes within a quarter interval of the timeout and settles what was owed (%u ms late)",
+              (unsigned)((at - heard - 4000000u) / 1000u));
+        n = dc_enc(buf,7,0,99,5007,NULL,1); dc_feed(st,ip,6730,buf,n,at + 1000u);
+        CHECK(i_rant_discovery_peer_count(st) == 1, "owed: a return counts as live again");
+        t = at + 1000u;
+    }
+
+    /* a change rides one announce, the next is bare again */
+    i_rant_discovery_set_meta(st, rant_bytes(NULL, 0), t);
+    n = i_rant_discovery_update(st, t, out, sizeof out);
+    k = dc_sent(out, n);
+    n = i_rant_discovery_update(st, t + c.announce_interval_us + 1u, out, sizeof out);
+    CHECK(k == F_BLOB && dc_sent(out, n) == 0, "owed: a change rides one announce (flags %d then %d)", k, dc_sent(out, n));
+}
+
 static const TestCase cases[] = {
     { "records",        records_checks },
     { "migrate",        migrate_checks },
+    { "owed",           owed_checks },
     { "wire",           wire_checks },
     { "change_age",     change_age_checks },
     { "discovery_core", disc_core_checks },

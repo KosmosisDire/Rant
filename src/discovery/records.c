@@ -73,6 +73,7 @@ int i_rant_records_init(i_RantDiscoveryRecords *r, const i_RantDiscoveryRecordsB
     }
     r->cap = reserve; r->mask = (uint16_t)(nb - 1u);
     r->free_head = I_RANT_REC_NONE;
+    r->due_head = r->due_tail = I_RANT_REC_NONE;
     r->next_id = 1;
     memset(r->recs, 0, (size_t)reserve * sizeof(i_RantDiscoveryRecord));
     i_rant_records_free_from(r, 0);
@@ -84,7 +85,8 @@ void i_rant_records_destroy(i_RantDiscoveryRecords *r){
     if (!r->alloc) return;      /* arena memory stays the caller's */
     if (r->recs) r->alloc(r->alloc_user, r->recs, 0);
     if (r->heads) r->alloc(r->alloc_user, r->heads, 0);
-    r->recs = NULL; r->heads = NULL; r->cap = 0; r->count = 0; r->free_head = I_RANT_REC_NONE;
+    r->recs = NULL; r->heads = NULL; r->cap = 0; r->count = 0; r->live = 0;
+    r->free_head = r->due_head = r->due_tail = I_RANT_REC_NONE;
 }
 
 /* Doubles a hook store. The chains grow with it when the hook allows, else they lengthen. */
@@ -121,8 +123,10 @@ uint16_t i_rant_records_add(i_RantDiscoveryRecords *r, const uint8_t uuid[16]){
     rec->local_id = r->next_id++;
     rec->state = I_RANT_REC_ACTIVE;
     rec->slot = I_RANT_REC_NONE;
+    rec->due_prev = rec->due_next = I_RANT_REC_NONE;
     i_rant_records_link(r, i);
     r->count++;
+    r->live++;
     return i;
 }
 
@@ -136,8 +140,10 @@ static void i_rant_records_unlink(i_RantDiscoveryRecords *r, uint16_t *head, uin
 void i_rant_records_remove(i_RantDiscoveryRecords *r, uint16_t i){
     i_RantDiscoveryRecord *rec = i_rant_records_at(r, i);
     if (!rec) return;
+    i_rant_records_settle(r, i, 0xFFu);
     i_rant_records_unlink(r, &r->heads[i_rant_records_uuid_bucket(r, rec->uuid)], i, 0);
     i_rant_records_unlink(r, &i_rant_records_id_heads(r)[i_rant_records_id_bucket(r, rec->local_id)], i, 1);
+    if (rec->state == I_RANT_REC_ACTIVE) r->live--;
     rec->state = I_RANT_REC_FREE;
     rec->uuid_next = r->free_head; r->free_head = i;
     r->count--;
@@ -153,4 +159,51 @@ uint16_t i_rant_records_by_id(const i_RantDiscoveryRecords *r, uint32_t id){
     uint16_t i = i_rant_records_id_heads(r)[i_rant_records_id_bucket(r, id)];
     while (i != I_RANT_REC_NONE && r->recs[i].local_id != id) i = r->recs[i].id_next;
     return i;
+}
+
+void i_rant_records_set_state(i_RantDiscoveryRecords *r, uint16_t i, i_RantRecState state){
+    i_RantDiscoveryRecord *rec = i_rant_records_at(r, i);
+    if (!rec || state == I_RANT_REC_FREE || rec->state == (uint8_t)state) return;
+    if (state == I_RANT_REC_ACTIVE) r->live++; else r->live--;
+    rec->state = (uint8_t)state;
+}
+
+static void i_rant_records_due_unlink(i_RantDiscoveryRecords *r, uint16_t i){
+    i_RantDiscoveryRecord *rec = &r->recs[i];
+    if (rec->due_prev != I_RANT_REC_NONE) r->recs[rec->due_prev].due_next = rec->due_next;
+    else r->due_head = rec->due_next;
+    if (rec->due_next != I_RANT_REC_NONE) r->recs[rec->due_next].due_prev = rec->due_prev;
+    else r->due_tail = rec->due_prev;
+    rec->due_prev = rec->due_next = I_RANT_REC_NONE;
+}
+
+static void i_rant_records_due_append(i_RantDiscoveryRecords *r, uint16_t i){
+    i_RantDiscoveryRecord *rec = &r->recs[i];
+    rec->due_prev = r->due_tail; rec->due_next = I_RANT_REC_NONE;
+    if (r->due_tail != I_RANT_REC_NONE) r->recs[r->due_tail].due_next = i;
+    else r->due_head = i;
+    r->due_tail = i;
+}
+
+void i_rant_records_owe(i_RantDiscoveryRecords *r, uint16_t i, uint8_t bits, uint64_t due_us){
+    i_RantDiscoveryRecord *rec = i_rant_records_at(r, i);
+    if (!rec || !bits) return;
+    if (!rec->owed){ rec->due_us = due_us; i_rant_records_due_append(r, i); }
+    else if (due_us < rec->due_us) rec->due_us = due_us;
+    rec->owed |= bits;
+}
+
+void i_rant_records_settle(i_RantDiscoveryRecords *r, uint16_t i, uint8_t bits){
+    i_RantDiscoveryRecord *rec = i_rant_records_at(r, i);
+    if (!rec || !(rec->owed & bits)) return;
+    rec->owed &= (uint8_t)~bits;
+    if (!rec->owed) i_rant_records_due_unlink(r, i);
+}
+
+void i_rant_records_requeue(i_RantDiscoveryRecords *r, uint16_t i, uint64_t due_us){
+    i_RantDiscoveryRecord *rec = i_rant_records_at(r, i);
+    if (!rec || !rec->owed) return;
+    i_rant_records_due_unlink(r, i);
+    rec->due_us = due_us;
+    i_rant_records_due_append(r, i);
 }

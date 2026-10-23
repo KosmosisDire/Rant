@@ -13,6 +13,12 @@ static inline uint64_t i_rant_fnv1a64(const void *data, size_t n){
     return h;
 }
 
+/* A value below n from a hash. The high half is the well mixed one: the low bits of FNV
+ * follow the low bits of each byte alone. */
+static inline uint32_t i_rant_hash_below(uint64_t h, uint32_t n){
+    return (uint32_t)(((h >> 32) * (uint64_t)n) >> 32);
+}
+
 /* Over a C string. NULL gives 0. */
 static inline uint64_t i_rant_fnv1a64_str(const char *s){
     uint64_t h = 1469598103934665603ull;

@@ -63,7 +63,7 @@ program in this order.
 | Program | Cases |
 |---|---|
 | `unit.transport` | basics, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
-| `unit.discovery` | records, migrate, wire, change_age, discovery_core, node_core |
+| `unit.discovery` | records, migrate, owed, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
@@ -128,9 +128,20 @@ What each phase pins, grouped by layer.
 
 - Records: a store is found by uuid and by id through doubling and reuse, every add mints a
   new id that skips 0, an arena store stays at its reserve, and a refused growth leaves
-  every record in place.
+  every record in place. The due queue holds exactly the records owed work, oldest first,
+  keeps the earliest due time and loses a removed record, and the live count follows every
+  change of state.
 - Migrate: a grow keeps each peer's id, scratch, locator and name and takes the peer it
   refused. A pool core does not migrate, nor does any to fewer slots.
+- Owed work: the opening carries the blob with no REQ, an observer's asks REQ|ALL, nothing
+  goes out before it. A targeted, unicast or observer solicit is answered at once, a group
+  one within one ms per live peer and spread. A first blob from the group is answered, one
+  from a targeted send or a change is not. A version ahead is fetched at once, four sends
+  250 ms apart, a later announce starts over with one send after a fetch that went
+  unanswered, the blob at that version or one too big ends it, and a fetch settles an
+  answer owed too. Copies go marked UNI to a record heard by unicast
+  within the peer timeout and plain to a slotted one, none to a dropped one. A silent peer
+  drops within a quarter interval of its timeout, and a change rides one announce.
 - Wire: every field round trips and every short, long or cut datagram is refused as such.
 - Change age: it counts from the start, restarts at each change and saturates.
 - Lifecycle: two announces are two ups, silence past the timeout drops both but keeps

@@ -179,7 +179,7 @@ fingerprint is served to peers.
 
 Matching a fresh topic to a present peer costs an announce and detail round trip after
 create. A send in that window would commit to zero subscribers. The node closes the
-window: discovery solicits at open, create's replay re fires peer up so detail requests
+window: discovery sends our blob at open and peers answer with theirs, create's replay re fires peer up so detail requests
 queue and the kick sends them, and a send that would reach zero subscribers WHILE a
 candidate is resolving blocks, bounded by `opts.match_wait_ms`. Resolving means a cached
 announce nominates this topic but its verdicts are in flight, or the post open gather
