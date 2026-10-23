@@ -10,6 +10,7 @@
 #define RANT_DISCOVERY_ASK_RETRY_US 250000u    /* an unanswered ask goes again this soon */
 #define RANT_DISCOVERY_SWEEPS 4u               /* timeout sweeps per announce interval */
 #define RANT_DISCOVERY_JUDGE_MARGIN_US 250000u /* a peer's change this close to ours is not assumed judged */
+#define RANT_DISCOVERY_LOOSE 8u                /* replies owed to askers that have no record */
 
 /* What only a peer holding a slot needs. max_peers counts slots. */
 typedef struct {
@@ -24,6 +25,9 @@ typedef struct {
        data may leave from any of them, whichever locator it holds for us. */
     struct { uint8_t ip[16]; uint8_t ip_len; uint64_t heard_us; } paths[4];
 } i_RantDiscoverySlot;
+
+/* A reply owed to an asker that has no record here, sent as a record's reply. */
+typedef struct { uint8_t ip[16]; uint8_t ip_len; uint16_t port; uint64_t due_us; } i_RantDiscoveryLoose;
 
 struct i_RantDiscoveryState {
     i_RantDiscoveryCoreConfig    cfg;
@@ -53,6 +57,9 @@ struct i_RantDiscoveryState {
     uint8_t       trouble_new;      /* the last note was news, see i_rant_discovery_trouble_new */
     uint64_t      trouble_more_us[3];   /* when a source past the table was last heard, by kind */
     uint64_t      now_us;         /* the latest time fed in, which ages the paths */
+    uint64_t      forgot_us;      /* when a live peer was last forgotten for room, 0 = never */
+    i_RantDiscoveryLoose loose[RANT_DISCOVERY_LOOSE];
+    uint8_t       n_loose;
     i_RantDiscoveryRecords records;
     i_RantDiscoverySlot   *slots;   /* [cap_peers] */
 };
@@ -402,6 +409,31 @@ static uint16_t i_rant_discovery_record_take(i_RantDiscoveryState *st, const uin
     return i_rant_records_add(&st->records, uuid);
 }
 
+/* A live peer was forgotten for room. It may hold us and be a first contact again, so none
+ * is assumed judged from now, and the node shows the directory partial for a while. */
+static void i_rant_discovery_forgot(i_RantDiscoveryState *st){
+    st->distrust = 1;
+    st->forgot_us = st->now_us;
+}
+
+/* A record for a match whose source has none: the place of the oldest heard live record
+ * that holds no slot and wants none, forgotten. NONE when every live one holds or wants one. */
+static uint16_t i_rant_discovery_record_evict(i_RantDiscoveryState *st, const uint8_t uuid[16]){
+    uint16_t i, victim = I_RANT_REC_NONE;
+    uint64_t oldest = (uint64_t)-1;
+    for (i = 0; i < st->records.cap; i++){
+        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+        if (rec && rec->state == I_RANT_REC_ACTIVE && rec->slot == I_RANT_REC_NONE
+            && rec->want == I_RANT_ADMIT_NO && rec->last_heard_us <= oldest){
+            oldest = rec->last_heard_us; victim = i;
+        }
+    }
+    if (victim == I_RANT_REC_NONE) return I_RANT_REC_NONE;
+    i_rant_discovery_peer_gone(st, victim);
+    i_rant_discovery_forgot(st);
+    return i_rant_records_add(&st->records, uuid);
+}
+
 /* A new uuid from an (ip, port) we hold means that process restarted, so the old record is
  * evicted as GONE. Port 0 is not an endpoint. */
 static void i_rant_discovery_evict_endpoint(i_RantDiscoveryState *st, const RantAddr *addr){
@@ -540,6 +572,10 @@ int i_rant_discovery_trouble_new(const i_RantDiscoveryState *st){
     return st->trouble_new;
 }
 
+int i_rant_discovery_partial(const i_RantDiscoveryState *st){
+    return i_rant_discovery_trouble_live(st, st->forgot_us);
+}
+
 /* A datagram of this domain on another wire version. Its sender announces every interval, so
    each source is reported once while the trouble table remembers it, and once for the rest. */
 static void i_rant_discovery_wire_mismatch(i_RantDiscoveryState *st, const RantAddr *src,
@@ -592,12 +628,12 @@ static uint8_t i_rant_discovery_req_flags(const i_RantDiscoveryState *st){
 
 /* When to answer a solicit with these flags. A targeted, unicast or observer one at once. A
  * group one within one ms per live peer, placed by both uuids, so a crowd's answers spread. */
-static uint64_t i_rant_discovery_reply_at(const i_RantDiscoveryState *st, const i_RantDiscoveryRecord *rec,
+static uint64_t i_rant_discovery_reply_at(const i_RantDiscoveryState *st, const uint8_t *uuid,
                                           uint8_t flags, uint64_t now){
     uint8_t pair[32];
     const uint8_t at_once = RANT_DISCOVERY_FLAG_UNI | RANT_DISCOVERY_FLAG_ALL | RANT_DISCOVERY_FLAG_ONE;
     if ((flags & at_once) || st->records.live <= 1u) return now;
-    memcpy(pair, st->cfg.uuid, 16); memcpy(pair + 16, rec->uuid, 16);
+    memcpy(pair, st->cfg.uuid, 16); memcpy(pair + 16, uuid, 16);
     return now + (uint64_t)i_rant_hash_below(i_rant_fnv1a64(pair, 32), st->records.live) * 1000u;
 }
 
@@ -790,6 +826,47 @@ static int i_rant_discovery_assume_judged(const i_RantDiscoveryState *st, uint32
     return (uint64_t)changed_ago_ms * 1000u > ours + RANT_DISCOVERY_JUDGE_MARGIN_US;
 }
 
+/* The word on a source with no record, its blob judged with no id into a scratch filter. A
+ * header alone says nothing of it, unless no hook judges, when every peer meets us. */
+static i_RantDiscoveryAdmit i_rant_discovery_stranger_verdict(i_RantDiscoveryState *st,
+                                                              const i_RantDiscoveryWire *w, int have_blob){
+    uint8_t scratch[RANT_DISCOVERY_FILTER_BYTES];
+    if (!st->cfg.admit) return I_RANT_ADMIT_YES;
+    if (!have_blob) return I_RANT_ADMIT_NO;
+    memset(scratch, 0, sizeof scratch);
+    return st->cfg.admit(st->cfg.user, 0, w->overlay, w->version, scratch);
+}
+
+/* Owes an asker with no record a reply. One already queued keeps the earlier time, and a
+ * full queue drops it, since the asker asks again. */
+static void i_rant_discovery_loose_owe(i_RantDiscoveryState *st, const RantAddr *a, uint64_t due_us){
+    i_RantDiscoveryLoose *l;
+    uint8_t i;
+    for (i = 0; i < st->n_loose; i++){
+        l = &st->loose[i];
+        if (!i_rant_discovery_addr_is(a, l->ip, l->ip_len, l->port)) continue;
+        if (due_us < l->due_us) l->due_us = due_us;
+        return;
+    }
+    if (st->n_loose >= RANT_DISCOVERY_LOOSE) return;
+    l = &st->loose[st->n_loose++];
+    memcpy(l->ip, a->ip, 16); l->ip_len = a->ip_len; l->port = a->port; l->due_us = due_us;
+}
+
+/* A source that found no record is forgotten, and judged again each time its blob passes
+ * by. A match among them is refused, and a solicit is answered from the loose queue. */
+static void i_rant_discovery_stranger(i_RantDiscoveryState *st, const i_RantDiscoveryWire *w,
+                                      const RantAddr *addr, i_RantDiscoveryAdmit verdict, uint64_t now){
+    i_rant_discovery_forgot(st);
+    if (verdict == I_RANT_ADMIT_YES){
+        (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_REFUSED, addr, st->cap_peers, 0);
+        i_rant_discovery_fire_error(st, RANT_E_PEER_REFUSED, 0, addr, 0);
+    }
+    if (w->flags & RANT_DISCOVERY_FLAG_REQ)
+        i_rant_discovery_loose_owe(st, addr, i_rant_discovery_reply_at(st, w->uuid, w->flags, now));
+    if (st->slots_opened) i_rant_discovery_offer_slots(st, now);
+}
+
 void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
                        RantBytes datagram, uint64_t now){
     const uint8_t *src_ip = (src && (src->ip_len==4 || src->ip_len==16)) ? src->ip : NULL;
@@ -830,15 +907,17 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     addr.port = w.data_port;
 
     if (!rec){
+        i_RantDiscoveryAdmit verdict = I_RANT_ADMIT_NO;
         /* a new uuid from a held endpoint means a restart: evict the dead predecessor */
         i_rant_discovery_evict_endpoint(st, &addr);
-        ri  = i_rant_discovery_record_take(st, w.uuid);
+        ri = i_rant_discovery_record_take(st, w.uuid);
+        if (ri == I_RANT_REC_NONE){      /* every record is live: only a match takes one's place */
+            verdict = i_rant_discovery_stranger_verdict(st, &w, have_blob);
+            if (verdict == I_RANT_ADMIT_YES) ri = i_rant_discovery_record_evict(st, w.uuid);
+        }
         rec = i_rant_discovery_rec(st, ri);
-        if (!rec){       /* every record is live: refuse, never forget one */
-            st->distrust = 1;          /* it may hold us, and would be a first contact again */
-            (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_REFUSED, &addr, st->cap_peers, 0);
-            i_rant_discovery_fire_error(st, RANT_E_PEER_REFUSED, 0, &addr, 0);
-            if (st->slots_opened) i_rant_discovery_offer_slots(st, now);
+        if (!rec){
+            i_rant_discovery_stranger(st, &w, &addr, verdict, now);
             return;
         }
         first_contact = 1;
@@ -900,7 +979,7 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     i_rant_discovery_fetch_check(st, ri, now);
     if (w.flags & RANT_DISCOVERY_FLAG_REQ)
         i_rant_records_owe(&st->records, ri, I_RANT_OWE_REPLY,
-                           i_rant_discovery_reply_at(st, rec, w.flags, now));
+                           i_rant_discovery_reply_at(st, rec->uuid, w.flags, now));
 
     slot = i_rant_discovery_slot_of(st, rec);
     if (slot){
@@ -981,6 +1060,8 @@ uint64_t i_rant_discovery_next_due_us(const i_RantDiscoveryState *st){
     due = st->next_announce_us < st->next_sweep_us ? st->next_announce_us : st->next_sweep_us;
     for (i = st->records.due_head; i != I_RANT_REC_NONE; i = st->records.recs[i].due_next)
         if (st->records.recs[i].due_us < due) due = st->records.recs[i].due_us;
+    for (i = 0; i < st->n_loose; i++)
+        if (st->loose[i].due_us < due) due = st->loose[i].due_us;
     return due;
 }
 
@@ -1016,6 +1097,14 @@ size_t i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, uint64_t now, vo
     uint16_t i;
     st->now_us = now;
     if (!st->started) return 0;
+    for (i = 0; i < st->n_loose; i++){
+        const i_RantDiscoveryLoose l = st->loose[i];
+        if (l.due_us > now) continue;
+        memset(to, 0, sizeof *to);
+        memcpy(to->ip, l.ip, 16); to->ip_len = l.ip_len; to->port = l.port;
+        st->loose[i] = st->loose[--st->n_loose];
+        return i_rant_discovery_build(st, RANT_DISCOVERY_FLAG_ONE, 1, (uint8_t *)out, cap);
+    }
     for (i = st->records.due_head; i != I_RANT_REC_NONE; i = st->records.recs[i].due_next){
         i_RantDiscoveryRecord *rec = &st->records.recs[i];
         int ask = (rec->owed & I_RANT_OWE_ASK) != 0;

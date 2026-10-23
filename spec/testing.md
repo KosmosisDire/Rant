@@ -63,7 +63,7 @@ program in this order.
 | Program | Cases |
 |---|---|
 | `unit.transport` | basics, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
-| `unit.discovery` | records, migrate, owed, judge, unmatched, filter, first_contact, too_big, wire, change_age, discovery_core, node_core |
+| `unit.discovery` | records, migrate, owed, judge, unmatched, filter, forgotten, first_contact, too_big, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
@@ -76,9 +76,9 @@ program in this order.
 | `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
 | `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate |
 | `e2e.tasks` | task, task_matrix |
-| `e2e.entities` | reflect_dropped, churn, republish, log_and_meta, status, rant_conditions, rant_refused, rant_cap |
+| `e2e.entities` | reflect_dropped, churn, republish, log_and_meta, status, rant_conditions, rant_refused, rant_partial, rant_cap |
 | `e2e.matchwait` | matchwait |
-| `e2e.mesh` | builtins_quiet, seeded_segments, meta_from_callbacks, directed_first_call, static_bounded, static_meta_peers, observer_fast, grow_at_once, big_peer, slot_back, runtime_topic |
+| `e2e.mesh` | builtins_quiet, seeded_segments, meta_from_callbacks, directed_first_call, static_bounded, static_meta_peers, observer_fast, grow_at_once, big_peer, slot_back, crowd_late_match, runtime_topic |
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
 | `bench.memscale` | `rant_bench memscale`, a steady state send never allocates |
@@ -170,10 +170,17 @@ What each phase pins, grouped by layer.
   blob, without asking maybe. Each judge folds a fresh filter, the answers give filters to
   the records that had none, a slot rejudged no match keeps its blob's filter, and no maybe
   fetches every record judged no match.
+- Forgotten: a full store forgets a header unjudged and unseen, and judges a blob that meets
+  nothing without keeping it. A match takes the record of the oldest heard peer that
+  neither holds nor wants a slot, seen down, then a free slot and an ask, or a refusal under
+  its id when no slot is free. A match with no such record is refused under no id. A
+  forgotten peer's fetch is answered at once from the loose queue, group solicits spread,
+  one reply per asker, and a full queue drops the rest. Partial holds while peers are
+  forgotten and ages out three announce intervals after the last.
 - First contact: without a blob it is judged by assumption when its blob changed before our
   last change by the margin, the margin alone before our opening, else fetched, and an age
-  past our uptime never wraps. An observer, a core without a hook and one that refused a peer
-  without a record assume nothing. A refused peer that takes a slot without its blob is still
+  past our uptime never wraps. An observer, a core without a hook and one that forgot a peer
+  for room assume nothing. A refused peer that takes a slot without its blob is still
   fetched.
 - Too big: the header keeps the record under its id with no fetch, a newer version is
   fetched once and a too big answer ends it, a grown bound fetches that peer alone and its
@@ -191,7 +198,8 @@ What each phase pins, grouped by layer.
   address. A blob that stops meeting us gives the slot back as PEER_INTEREST with no matches,
   never PEER_DOWN, and meeting us again takes a slot with no second PEER_UP. A nameless
   announce becomes "unknown-peer". A peer sharing nothing is up for the app with no slot, one
-  past the records is refused and the node forwards the event.
+  past the records that shares nothing is forgotten with no event, and one that meets us
+  takes the unmatched record and its refusal for a slot reaches the app.
 - Domain groups: two domains on one host each discover themselves, and no announce of the
   other domain reaches either discovery socket. On Linux this fails without
   `IP_MULTICAST_ALL` off. Other programs' unicast seeds to the discovery port are not counted.
@@ -335,7 +343,9 @@ What each phase pins, grouped by layer.
   their cause. 20 refusals fold into one condition under the kind alone, and three left
   are listed one by one again, while the app keeps its room. Six kinds of three list 15
   and count 3 in more_problems. A static node with room for one peer holds peer_refused
-  naming the address of the next that meets it, and drops it once that node goes quiet. In the discovery
+  naming the address of the next that meets it, and drops it once that node goes quiet. A
+  static node remembering 4 among 6 unrelated peers holds directory_partial, a warning, and
+  no peer_refused, until they go quiet. In the discovery
   core 20 sources on another wire keep the first 16 tracked, report 17 times in all, and
   age out together.
 - Handle gate: 20 callers, each with a req schema whose wire (1325 to 1350 bytes) fills
@@ -416,7 +426,9 @@ What each phase pins, grouped by layer.
   which lists and counts as `matched_peers` only the observer that asked. An
   observer sees every peer within 100 ms. A new topic matches every known subscriber past
   the starting table. A peer too big for one announce never takes the slot a subscriber
-  needs, and a peer that stops sharing gives its slot back. A runtime topic nobody wants
+  needs, and a peer that stops sharing gives its slot back. A static node whose 8 records
+  hold 30 unrelated publishers matches a subscriber that opens last, turning nobody away.
+  A runtime topic nobody wants
   sends at once, and one three peers want reaches all three.
 
 ### Benches

@@ -245,8 +245,9 @@ while its cause does and clears itself, and its text names the peer, topic or ad
 | Kind | Level | Holds while |
 |---|---|---|
 | `wire_version` | Error | a node at that address speaks another wire version |
-| `peer_refused` | Error | the peer table is full and a node keeps being turned away |
+| `peer_refused` | Error | a peer that meets this node finds every slot taken |
 | `peer_too_big` | Error | a peer's announce or topic map is too big for this node |
+| `directory_partial` | Warn | this node hears more peers than it remembers, so it forgets some (docs/discovery.md) |
 | `schema_mismatch` | Error | a match is refused because the schemas do not fit |
 | `qos_incompatible` | Error | a reliable subscriber here meets a best effort publisher |
 | `kind_mismatch` | Error | the name is another kind of entity at a peer |
@@ -257,7 +258,7 @@ while its cause does and clears itself, and its text names the peer, topic or ad
 | `more_problems` | Error | more than the `RANT_STATUS_RANT_MAX` (16) slots hold |
 
 A source that is not a peer (`wire_version`, `peer_refused`) clears 3 announce intervals
-after it goes quiet. Rant tracks `RANT_DISCOVERY_TROUBLE_MAX` (16) such sources and counts
+after it goes quiet, and `directory_partial` 3 intervals after the last peer forgotten. Rant tracks `RANT_DISCOVERY_TROUBLE_MAX` (16) such sources and counts
 any more as "16 or more", so a big mesh costs no memory past them. Each tracked source
 fires its `RANT_ERROR` event once, and the rest once together. Rant's conditions have their
 own cap, so they never take the app's `RANT_STATUS_MAX`. All three caps are build options:

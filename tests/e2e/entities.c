@@ -957,6 +957,39 @@ done:
     rant_allocator_reset(&sa); rant_allocator_reset(&aa); rant_allocator_reset(&ba);
 }
 
+/* A static node that hears more peers than it remembers holds directory_partial, a warning,
+ * and no peer_refused, since none of them meets it. It ages out once they go quiet. */
+static void rc_partial_checks(void){
+    static uint8_t mem[1u << 20];
+    RantAllocator da = rant_allocator_static(mem, sizeof mem);
+    RantNodeOpts o, d; RantNode *D = NULL, *C[6]; RantAddr seed;
+    char tx[512], nm[24]; uint64_t lv = 0; int k, nd;
+    memset(C, 0, sizeof C);
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+47; o.discovery.announce_interval_us=200000;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    d = o; d.discovery.max_peers = 1;
+    D = rant_node_open(&da, "rc-partial", NULL, NULL, &d);
+    CHECK(D != NULL, "rantpartial: the static node opens");
+    if (!D) return;
+    for (k = 0; k < 6; k++){
+        RantAllocator ca = rant_allocator_heap(0);
+        snprintf(nm, sizeof nm, "rc-crowd%d", k);
+        C[k] = rant_node_open(&ca, nm, NULL, NULL, &o);
+        snprintf(nm, sizeof nm, "rc/crowd%d", k);
+        if (C[k]){ rant_node_create_topic(C[k], nm, RANT_PUB_ONLY, NULL, NULL); rant_node_start(C[k]); }
+    }
+    PUMP_UNTIL(D, NULL, 6000, rc_kind(D, "directory_partial", NULL, 0, NULL) == 1);
+    nd = rc_kind(D, "directory_partial", tx, sizeof tx, &lv);
+    CHECK(nd == 1 && lv == RANT_LEVEL_WARN && strstr(tx, "remembers 4 peers") && strstr(tx, "raise max_peers")
+          && rc_kind(D, "peer_refused", NULL, 0, NULL) == 0,
+          "rantpartial: among more peers than it remembers it warns and refuses none (n=%d: %s)", nd, tx);
+    for (k = 0; k < 6; k++) if (C[k]) rant_node_close(C[k], 1);
+    PUMP_UNTIL(D, NULL, 3000, rc_kind(D, "directory_partial", NULL, 0, NULL) == 0);
+    CHECK(rc_kind(D, "directory_partial", NULL, 0, NULL) == 0, "rantpartial: it ages out once they go quiet");
+    rant_node_close(D, 1);
+}
+
 static const TestCase cases[] = {
     { "reflect_dropped", reflect_dropped_checks },
     { "churn", churn_checks },
@@ -965,6 +998,7 @@ static const TestCase cases[] = {
     { "status", status_checks },
     { "rant_conditions", rant_conditions_checks },
     { "rant_refused", rc_refused_checks },
+    { "rant_partial", rc_partial_checks },
     { "rant_cap", rc_cap_checks },
 };
 

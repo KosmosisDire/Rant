@@ -199,6 +199,7 @@ struct RantNode {
     uint8_t         status_dirty;        /* changed since its last publish */
     uint8_t         problems_dirty;      /* a source of Rant's conditions changed: rebuild them */
     uint64_t        problems_next_us;    /* when a problem that ages out needs the next rebuild */
+    uint8_t         partial_shown;       /* the directory partial as the last rebuild saw it */
     uint32_t        problem_over[I_RANT_PROB_KINDS];   /* each kind's problems past the cap */
     /* the @rant/meta snapshot scratch, grown on demand */
     uint8_t      *snap_buf; uint32_t snap_cap;
@@ -1908,15 +1909,15 @@ static void i_rant_node_status_remove(RantNode *n, int i){
 
 /* Rant's own conditions, spec/node.md. Each kind's key prefix, in i_RantProblemKind order */
 static const char *const i_rant_problem_names[I_RANT_PROB_KINDS] = {
-    "wire_version", "peer_refused", "peer_too_big", "schema_mismatch", "qos_incompatible",
-    "kind_mismatch", "bridge", "announce_overflow", "duplicate_authority", "forced"
+    "wire_version", "peer_refused", "peer_too_big", "directory_partial", "schema_mismatch",
+    "qos_incompatible", "kind_mismatch", "bridge", "announce_overflow", "duplicate_authority", "forced"
 };
 #define I_RANT_PROB_MORE "more_problems"   /* the reserved last slot: a count of the unlisted */
 
 /* a kind folded into one condition: its count, " or more" when the source tracks fewer */
 static const char *const i_rant_problem_folds[I_RANT_PROB_KINDS] = {
-    "%u%s nodes speak another wire version", "%u%s nodes turned away, the peer table is full",
-    "%u%s peers are too big for this node", "%u%s matches refused for their schemas",
+    "%u%s nodes speak another wire version", "%u%s matching peers find no slot",
+    "%u%s peers are too big for this node", "%u%s directory problems", "%u%s matches refused for their schemas",
     "%u%s matches refused for their reliability", "%u%s names are another kind of entity at a peer",
     "%u%s bridge problems", "%u%s announce problems", "%u%s rivals provide or own this node's entities",
     "%u%s variables are forced, forcing is for debugging only"
@@ -2129,13 +2130,22 @@ static void i_rant_node_problems_rebuild(RantNode *n){
     for (i = 0; i < nt && !n->alloc_dynamic; i++){   /* a dynamic table grows instead */
         if (tr[i].kind != RANT_E_PEER_REFUSED) continue;
         i_rant_problem_addr(&tr[i].addr, addr, sizeof addr);
-        snprintf(text, sizeof text, "%s turned away: the peer table holds %u peers, raise max_peers",
+        snprintf(text, sizeof text, "%s meets this node but finds all %u slots taken, raise max_peers",
                  addr, (unsigned)tr[i].value);
         i_rant_node_problem(&one, i_rant_problem_addr_id(&tr[i].addr), RANT_LEVEL_ERROR, text);
         aging = 1;
     }
     if (!n->alloc_dynamic)
         one.more = (uint8_t)i_rant_discovery_trouble_more(i_rant_discovery_state(n->discovery), RANT_E_PEER_REFUSED);
+    i_rant_node_problems_end(&one);
+    n->partial_shown = (uint8_t)i_rant_discovery_partial(i_rant_discovery_state(n->discovery));
+    i_rant_node_problems_begin(n, &one, I_RANT_PROB_DIRECTORY_PARTIAL);
+    if (n->partial_shown){
+        snprintf(text, sizeof text, "this node remembers %u peers and forgets the rest, %s",
+                 (unsigned)i_rant_discovery_record_cap(i_rant_discovery_state(n->discovery)),
+                 n->alloc_dynamic ? "memory ran out" : "raise max_peers");
+        i_rant_node_problem(&one, 0, RANT_LEVEL_WARN, text);
+    }
     i_rant_node_problems_end(&one);
     i_rant_node_problems_begin(n, &big, I_RANT_PROB_PEER_TOO_BIG);
     for (i = 0; i < nt; i++){
@@ -2479,7 +2489,9 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
     /* Rant's own lines and a changed status set publish now, before the TX pull, so they
        ride this pass */
     if (n->log_pend_n || n->log_pend_dropped) i_rant_node_log_flush(n);
-    if (n->status_topic && (n->problems_dirty || i_rant_plat_now_us() >= n->problems_next_us))
+    /* forgetting a peer fires no event, so the partial condition is watched as a state */
+    if (n->status_topic && (n->problems_dirty || i_rant_plat_now_us() >= n->problems_next_us
+            || i_rant_discovery_partial(i_rant_discovery_state(n->discovery)) != n->partial_shown))
         i_rant_node_problems_rebuild(n);
     if (n->status_dirty) i_rant_node_status_flush(n);
 

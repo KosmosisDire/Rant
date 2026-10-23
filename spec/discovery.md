@@ -111,6 +111,19 @@ from open and a crowd costs it nothing later. A grow moves the slots into the ne
 leaves the records where they are, so only a core with the hook migrates, and never to fewer
 slots.
 
+A store full of live records forgets a newcomer, and one on the hook does so only when it
+cannot grow. A forgotten peer has no record:
+
+- Its header alone does nothing. Its blob is judged each time it passes by (a change, an
+  answer, an ask) with peer id 0 and a scratch filter, and nothing is kept.
+- A match among them takes the record of the oldest heard live peer that holds no slot and
+  wants none. That peer is forgotten, the seen hook hearing it go, and the match goes the
+  first contact path. With no such record to take, the match is refused under no id.
+- A solicit from it is answered from the loose queue (Owed work and copies).
+- Forgetting a live peer, either way, sets the distrust (Judging on arrival) and notes the
+  time. `partial` says one was forgotten within three announce intervals, which the node
+  shows as its `directory_partial` condition (spec/node.md).
+
 ## Judging on arrival
 
 The admit hook says of a blob whether its peer takes a slot: NO (nothing of ours to meet),
@@ -151,8 +164,8 @@ current blob since, and asks if it meets us. Else it is fetched. Our last change
 open, orders a pair, so of two nodes meeting the one that changed earlier fetches and they
 never both assume. It is a comparison, so an age past our uptime never wraps. An observer
 assumes nothing, since it admits peers that would not admit it, nor does a core without a
-hook, nor one that refused a peer without a record or forgot one for room: that peer may hold
-us and would be a first contact again.
+hook, nor one that forgot a peer for room: that peer may hold us and would be a first
+contact again.
 
 A blob past our bound, cut by the OS or bigger than `meta_cap`, leaves the header, which
 counts and makes the record. Its fetch stops until a newer version, or a migrate that grew
@@ -193,6 +206,11 @@ due queue in the record store, oldest first, so a poll walks only them. Each sen
 its record or moves it to the tail with a later due time, and a peer that drops is owed
 nothing. Nothing goes out before the opening.
 
+A solicit from a peer with no record owes a reply from the loose queue: 8 entries in the
+core (`RANT_DISCOVERY_LOOSE`), each a locator and a due time, timed as a record's reply and
+sent by `poll_targeted` the same way. A second solicit from a queued locator keeps the
+earlier time, and a full queue drops the solicit, since the asker asks again in 250 ms.
+
 Each announce goes by unicast to the seeds marked UNI, to every peer heard by a UNI copy
 within the peer timeout marked UNI, and to every other slotted peer plain. A UNI copy asks
 its receiver to copy back, which keeps two segments that share no group in touch through
@@ -203,7 +221,7 @@ peers end with their slots. A targeted send starts none either.
 
 | state | meaning |
 |---|---|
-| ACTIVE | heard within `peer_timeout_us` (12 s). Flow controlled, never evicted |
+| ACTIVE | heard within `peer_timeout_us` (12 s). Flow controlled, its slot never taken |
 | DROPPED | silent past the timeout. The record, any slot and `local_id` are kept, `on_peer_seen` fires down and, for a slotted peer, `on_peer_down` with reason `RANT_DISCOVERY_DROP`. The node marks it dormant: out of flow control, proxies and delivery position kept, inbound still processed |
 | GONE | freed. A DROPPED peer silent past `gone_timeout_us` (2 min, 0 = never) is promoted on its own. A `BYE` is GONE at once |
 
@@ -211,8 +229,9 @@ The same uuid returning resumes under the same `local_id`: `on_peer_up` fires ag
 the subscriber kept its `deliver_upto`, so the writer fills only the gap and replayed
 history is deduped (spec/transport.md, peer resume). A new uuid is a fresh peer and gets
 `catch_up`. When a match needs a slot, or a newcomer a record, the oldest DROPPED peer is
-forgotten (reason `RANT_DISCOVERY_GONE`). A table full of live peers refuses the newcomer
-(a `RANT_E_PEER_REFUSED` event) rather than evicting a live one.
+forgotten (reason `RANT_DISCOVERY_GONE`). A live slot is never taken: a match that finds
+every slot live is refused (a `RANT_E_PEER_REFUSED` event). A store full of live records
+forgets the newcomer, or for a match the oldest unmatched record (Records and slots).
 `timeout_us` is the single tolerance knob. A separate grace timer was rejected as part of
 the timeout. One helper fires PEER_DOWN then frees the slot for BYE, both eviction sweeps,
 allocation eviction and GONE promotion.

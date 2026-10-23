@@ -101,7 +101,7 @@ namespace Rant
         PeerMetaTooBig,
         /// <summary>A received message could not be buffered: TooBigBytes.</summary>
         MessageTooBig,
-        /// <summary>The peer table is full of active peers, so a new one was refused.</summary>
+        /// <summary>A peer that meets this node finds every slot taken.</summary>
         PeerRefused,
         /// <summary>A send overwrote history no subscriber had been sent: Topic, LostFirst,
         /// LostCount.</summary>

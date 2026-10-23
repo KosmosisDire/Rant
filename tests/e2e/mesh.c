@@ -404,6 +404,36 @@ static void slot_back_checks(void){
     rant_node_close(T, 1);
 }
 
+/* A static node whose records are all taken by peers it shares nothing with still matches a
+   subscriber that opens last, in the place of one of them, and turns nobody away. */
+static void crowd_late_match_checks(void){
+    static uint8_t abuf[1u << 20];
+    RantAllocator a = rant_allocator_static(abuf, sizeof abuf);
+    uint16_t dom = (uint16_t)(TEST_DOMAIN + 12);
+    RantNodeOpts ot = ms_opts(dom, 2, 4, 500000), ol = ms_opts(dom, 0, 2, 500000);
+    MsEvents et; RantNode *T, *L = NULL; RantTopic *pub; int known;
+    memset(&et, 0, sizeof et);
+    ot.user_data = &et;
+    T = rant_node_open(&a, "ms-late", NULL, ms_on_event, &ot);
+    CHECK(T != NULL, "crowd late match: opens");
+    if (!T) return;
+    pub = rant_node_create_topic(T, "ms/late", RANT_PUB_ONLY, NULL, NULL);
+    rant_node_start(T);
+    ms_crowd_open(dom, 30, 1, 500000);
+    MS_WAIT_UNTIL(8000, ms_crowd_all_see("ms-late"));
+    ms_wait(1000);
+    known = ms_active(T);
+    L = ms_heap("ms-late-sub", &ol);
+    if (L){ rant_node_create_topic(L, "ms/late", RANT_SUB_ONLY, NULL, NULL); rant_node_start(L); }
+    MS_WAIT_UNTIL(6000, pub && rant_topic_match_count(pub) == 1);
+    CHECK(known == 8 && pub && rant_topic_match_count(pub) == 1 && et.refused == 0,
+          "crowd late match: the late subscriber matched, nobody turned away (known %d, matched %d, refused %lld)",
+          known, pub ? rant_topic_match_count(pub) : 0, et.refused);
+    if (L) rant_node_close(L, 1);
+    rant_node_close(T, 1);
+    ms_crowd_close();
+}
+
 /* A topic made at runtime among peers that hold no blob here: one nobody wants sends at once,
    and one three peers want reaches all three with its first message. */
 static void ms_rt_msg(const RantMsg *m){ if (m->user) *(volatile int*)m->user = 1; }
@@ -488,6 +518,7 @@ static const TestCase cases[] = {
     { "grow_at_once",        grow_at_once_checks },
     { "big_peer",            big_peer_checks },
     { "slot_back",           slot_back_checks },
+    { "crowd_late_match",    crowd_late_match_checks },
     { "runtime_topic",       runtime_topic_checks },
 };
 

@@ -46,7 +46,11 @@ the slot of the oldest dropped peer. With none:
 
 A node on `rant_allocator_static` takes all its records at open, `RANT_RECORDS_PER_PEER`
 (4) per slot, so a crowd of unrelated peers costs it no memory later. Past them the oldest
-dropped peer is forgotten, and with none a newcomer is refused.
+dropped peer is forgotten, and with none the newcomer:
+
+- A forgotten peer is judged each time its topic list passes by, and kept only when it
+  matches, in the place of the oldest peer that matches nothing.
+- The node holds a `directory_partial` warning while it forgets peers (docs/node.md).
 
 ## Interfaces
 

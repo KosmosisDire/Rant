@@ -131,7 +131,8 @@ typedef struct {
     void (*on_peer_down)(void *user, uint32_t peer, i_RantDiscoveryDownReason reason);
     /* Optional. Whether a peer takes a slot, judged from its blob at version: on arrival
      * without a slot, on a newer version with one, and from rejudge and replay_peers. A NO has
-     * folded the blob's keys into filter, zeroed here. NULL admits every peer at first contact. */
+     * folded the blob's keys into filter, zeroed here. Peer 0 is a source with no record, which
+     * a match evicts one for. NULL admits every peer at first contact. */
     i_RantDiscoveryAdmit (*admit)(void *user, uint32_t peer, RantBytes meta, uint32_t version,
                                   uint8_t *filter);
     /* Optional. Every record, slotted or not: up at first contact and on a return, down at
@@ -207,7 +208,7 @@ int            i_rant_discovery_copy_addr(const i_RantDiscoveryState *st, uint16
 /* Sets or clears UNI in a built datagram, per copy of one announce. */
 void           i_rant_discovery_mark_copy(uint8_t *datagram, size_t len, int uni);
 /* A source this node heard but cannot take as a peer: another wire version (value is its
- * version), a full table (RANT_E_PEER_REFUSED) or a blob too big (value is its bytes). */
+ * version), a match with no slot (RANT_E_PEER_REFUSED) or a blob too big (value is its bytes). */
 #ifndef RANT_DISCOVERY_TROUBLE_MAX
 #define RANT_DISCOVERY_TROUBLE_MAX 16   /* sources tracked, the rest only counted as more */
 #endif
@@ -226,6 +227,9 @@ int            i_rant_discovery_trouble_more(const i_RantDiscoveryState *st, Ran
 /* 1 when the trouble the last datagram noted was news: a source not tracked before, or the
  * first heard past the table's size. The node reports repeats of a trouble only once. */
 int            i_rant_discovery_trouble_new(const i_RantDiscoveryState *st);
+/* 1 while a live peer was forgotten for room within three announce intervals: one found no
+ * record, or a match took its record. The node's directory partial condition. */
+int            i_rant_discovery_partial(const i_RantDiscoveryState *st);
 /* Live records, slotted or not, DROPPED ones excluded. */
 uint16_t       i_rant_discovery_peer_count(const i_RantDiscoveryState *st);
 /* Slots holding a record, DROPPED holders included. */

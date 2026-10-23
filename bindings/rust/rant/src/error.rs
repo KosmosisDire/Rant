@@ -26,7 +26,7 @@ pub enum ErrorKind {
     PeerMetaTooBig,
     /// A received message could not be buffered.
     MessageTooBig,
-    /// The peer table is full of active peers.
+    /// A peer that meets this node finds every slot taken.
     PeerRefused,
     /// A send overwrote history nobody had received yet.
     EvictedUnsent,

@@ -158,7 +158,7 @@ typedef enum {
     RANT_E_META_TRUNCATED_INTEREST, /* our overlay overflowed, peers see no topics */
     RANT_E_PEER_META_TOO_BIG,/* a peer's blob exceeds our buffer: .peer (0 = new), .too_big_bytes */
     RANT_E_MSG_TOO_BIG,        /* a received message could not be buffered: .too_big_bytes */
-    RANT_E_PEER_REFUSED,       /* the peer table is full of active peers: .ip, .ip_len, .port */
+    RANT_E_PEER_REFUSED,       /* a peer that meets us finds every slot taken: .ip, .ip_len, .port */
     RANT_E_EVICTED_UNSENT,     /* a send overwrote unsent history: .topic, .lost_first, .lost_count */
     RANT_E_UNMATCHED_SEND,     /* a send committed to nobody while a match was resolving: .topic */
     RANT_E_DUPLICATE_AUTHORITY, /* a peer also claims the handler side: .topic, .peer. Diagnostic */

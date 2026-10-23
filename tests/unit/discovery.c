@@ -323,7 +323,8 @@ static void node_core_checks(void){
         n=dc_wire_meta(buf,1,99,5001,"nc-self",3,mb); dc_feed(st,sa,6730,buf,n,2002); }
 
     /* A peer whose interest names only another topic is up for the app but takes no slot.
-       One past the records is REFUSED, and the node forwards it */
+       One past the records that shares nothing is forgotten. One that meets us takes the
+       unmatched peer's record, finds no slot, and the node forwards the refusal */
     {   i_RantTopicDef och[1]; i_RantTransportState *ot;
         memset(och,0,sizeof och); och[0].name="nc/other";
         tc.topics=och; ot = i_rant_transport_init(omem, sizeof omem, &tc);
@@ -335,7 +336,13 @@ static void node_core_checks(void){
           && i_rant_discovery_peer_count(st)==3,
           "node-core: a peer sharing nothing is up, with no slot");
     n=dc_wire(buf,4,0,99,5004,"four",1); dc_feed(st,sd,6730,buf,n,2003);
-    CHECK(nc_refused_n==1, "node-core: refused forwarded (refused=%u)", nc_refused_n);
+    CHECK(nc_refused_n==0 && nc_up_n==1 && i_rant_discovery_peer_count(st)==3 && i_rant_discovery_partial(st),
+          "node-core: one past the records that shares nothing is forgotten, not refused (refused=%u)", nc_refused_n);
+    nc_down_n=0;
+    n=dc_wire_meta(buf,4,99,5004,"four",1,mb); dc_feed(st,sd,6730,buf,n,2003);
+    CHECK(nc_refused_n==1 && nc_down_n==1 && i_rant_discovery_peer_count(st)==3,
+          "node-core: one that meets us takes the unmatched record, and its refusal is forwarded (refused=%u down=%u)",
+          nc_refused_n, nc_down_n);
 
     /* Silence past the timeout DROPS all three: a PEER_DOWN each, but the slots are kept (resolve) */
     nc_down_n=0;
@@ -1100,9 +1107,91 @@ static void filter_checks(void){
     jg_fold = 0;
 }
 
+/* A store full of live records: a source with no record is forgotten, its blob judged each
+   time it passes by and never kept. A match takes the record of the oldest heard peer that
+   neither holds nor wants a slot, and a solicit is answered from the loose queue. */
+static void forgotten_checks(void){
+    static uint8_t mem[16384];
+    const uint8_t F_REQ = RANT_DISCOVERY_FLAG_REQ, F_BLOB = RANT_DISCOVERY_FLAG_BLOB, F_ONE = RANT_DISCOVERY_FLAG_ONE;
+    const uint8_t NO = I_RANT_ADMIT_NO, YES = I_RANT_ADMIT_YES;
+    uint8_t out[RANT_DISCOVERY_WIRE_MAX];
+    i_RantDiscoveryCoreConfig c; i_RantDiscoveryState *st; i_RantDiscoveryTrouble tr[4];
+    uint64_t t = 1000000u; int fl, k, nt, found; uint16_t port; uint32_t asks, seen, refused;
+    jg_config(&c, 2);
+    c.max_records = 4;
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    CHECK(st != NULL, "forgotten: init");
+    if (!st) return;
+    i_rant_discovery_update(st, t, out, sizeof out);
+    dc_up_n = dc_down_n = dc_refused_n = jg_seen_up = jg_seen_down = 0;
+
+    jg_blob(st, 1, F_ONE, 1, YES, t);
+    jg_blob(st, 2, F_ONE, 1, YES, t);
+    jg_blob(st, 3, 0, 1, YES, t + 1000u);           /* refused: waits for a slot */
+    jg_blob(st, 4, 0, 1, NO, t + 2000u);
+    (void)dc_drain(st, t + 2000u, &fl, &port);
+    t += 3000u;
+    asks = jg_asks; seen = jg_seen_up; refused = dc_refused_n;
+    jg_head(st, 5, 0, 1, 0, t);
+    CHECK(!jg_id(st, 5) && i_rant_discovery_partial(st) && jg_asks == asks && jg_seen_up == seen
+          && dc_refused_n == refused && dc_drain(st, t, &fl, &port) == 0,
+          "forgotten: a full store forgets a header, unjudged and unseen");
+    jg_blob(st, 5, 0, 1, NO, t);
+    CHECK(!jg_id(st, 5) && jg_asks == asks + 1u && i_rant_discovery_peer_count(st) == 4,
+          "forgotten: a blob that meets nothing is judged and not kept");
+    jg_blob(st, 5, 0, 1, YES, t + 1000u);
+    CHECK(jg_id(st, 5) && !jg_id(st, 4) && jg_id(st, 3) && jg_seen_down == 1 && dc_down_n == 0
+          && dc_refused_n == refused + 1u && i_rant_discovery_slots_used(st) == 2,
+          "forgotten: a match takes the unmatched record, seen down, never a slotted or waiting one, and is refused for a slot");
+    jg_blob(st, 6, 0, 1, YES, t + 2000u);
+    nt = i_rant_discovery_troubles(st, tr, 4);
+    for (k = 0, found = 0; k < nt; k++) found |= tr[k].kind == RANT_E_PEER_REFUSED && !tr[k].peer && tr[k].addr.port == 5006;
+    CHECK(!jg_id(st, 6) && dc_refused_n == refused + 2u && found,
+          "forgotten: a match with no record to take is refused with no id");
+
+    jg_config(&c, 2);
+    c.max_records = 3;
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    t = 1000000u;
+    i_rant_discovery_update(st, t, out, sizeof out);
+    dc_up_n = jg_seen_down = 0;
+    jg_blob(st, 1, F_ONE, 1, YES, t);
+    jg_blob(st, 2, 0, 1, NO, t + 1000u);
+    jg_blob(st, 3, 0, 1, NO, t + 2000u);
+    (void)dc_drain(st, t + 2000u, &fl, &port);
+    t += 3000u;
+    jg_blob(st, 4, 0, 1, YES, t);
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(jg_id(st, 4) && !jg_id(st, 2) && jg_id(st, 3) && jg_seen_down == 1 && dc_up_n == 2
+          && i_rant_discovery_slots_used(st) == 2 && k == 1 && fl == (F_REQ|F_ONE|F_BLOB) && port == 5004,
+          "forgotten: it takes the oldest heard one's record and a free slot, and is told (port %u)", port);
+    jg_blob(st, 4, F_ONE, 1, YES, t);
+
+    jg_blob(st, 5, (uint8_t)(F_REQ|F_ONE), 1, NO, t);
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(!jg_id(st, 5) && k == 1 && fl == (F_ONE|F_BLOB) && port == 5005,
+          "forgotten: a fetch from a forgotten peer is answered at once from the loose queue");
+    jg_head(st, 6, F_REQ, 1, 0, t);
+    jg_head(st, 7, F_REQ, 1, 0, t);
+    jg_head(st, 8, F_REQ, 1, 0, t);
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(k < 3 && k + dc_drain(st, t + 3000u, &fl, &port) == 3,
+          "forgotten: group solicits are answered spread over a ms per live peer (%d at once)", k);
+    for (k = 0; k < 8; k++) jg_blob(st, (uint8_t)(10 + k), (uint8_t)(F_REQ|F_ONE), 1, NO, t);
+    jg_blob(st, 10, (uint8_t)(F_REQ|F_ONE), 1, NO, t);
+    jg_blob(st, 18, (uint8_t)(F_REQ|F_ONE), 1, NO, t);
+    {   RantAddr to; int to18 = 0;
+        for (k = 0; k < 64 && i_rant_discovery_poll_targeted(st, t, out, sizeof out, &to); k++) to18 |= to.port == 5018;
+        CHECK(k == 8 && !to18, "forgotten: one reply per asker, and a full loose queue drops the rest (%d sent)", k); }
+
+    CHECK(i_rant_discovery_partial(st), "forgotten: the store is partial while it forgets");
+    i_rant_discovery_update(st, t + 3u * c.announce_interval_us + 1u, out, sizeof out);
+    CHECK(!i_rant_discovery_partial(st), "forgotten: partial ages out three announce intervals after the last");
+}
+
 /* A first contact heard without a blob: assumed judged when its blob changed before ours by
    the margin, else fetched, and never by an observer, without a hook, or once a peer was
-   refused for room. */
+   forgotten for room. */
 static void first_contact_checks(void){
     static uint8_t mem[16384];
     const uint8_t F_REQ = RANT_DISCOVERY_FLAG_REQ, F_BLOB = RANT_DISCOVERY_FLAG_BLOB, F_ONE = RANT_DISCOVERY_FLAG_ONE;
@@ -1171,8 +1260,8 @@ static void first_contact_checks(void){
     jg_head(st, 2, 0, 3, 5000u, t);
     jg_head(st, 1, RANT_DISCOVERY_FLAG_BYE, 3, 0, t);
     jg_head(st, 3, 0, 3, 5000u, t);
-    CHECK(dc_refused_n == 1 && i_rant_discovery_pending(st) == 1,
-          "first contact: once a peer was refused without a record, every first contact is fetched");
+    CHECK(dc_refused_n == 0 && i_rant_discovery_pending(st) == 1,
+          "first contact: once a peer was forgotten for room, every first contact is fetched");
 }
 
 /* A blob past our bound keeps its header and record, stops its fetch, and is fetched alone
@@ -1228,6 +1317,7 @@ static const TestCase cases[] = {
     { "judge",          judge_checks },
     { "unmatched",      unmatched_checks },
     { "filter",         filter_checks },
+    { "forgotten",      forgotten_checks },
     { "first_contact",  first_contact_checks },
     { "too_big",        too_big_checks },
     { "wire",           wire_checks },

@@ -315,7 +315,8 @@ Conditions are derived from state, never from events, since most causes end sile
 source reports its whole current set of one kind between `i_rant_node_problems_begin` and
 `_end`, and end removes that kind's conditions that went unreported. The runtime rebuilds
 its kinds at the poll pass when `problems_dirty` is set (any RANT_ERROR, a peer up, down or
-interest change, our own re advertise) or when an aging problem is due:
+interest change, our own re advertise), when an aging problem is due, or when discovery's
+`partial` differs from what the last rebuild saw:
 
 - Match refusals (`schema_mismatch`, `qos_incompatible`, `kind_mismatch`): each interest
   apply re derives `RANT__AST_REF_*` bits per (peer, entry) where it fires the events, and
@@ -333,6 +334,11 @@ interest change, our own re advertise) or when an aging problem is due:
   the growth signal of a dynamic node. A dynamic node grows instead of refusing, so it
   reports a refusal or a blob only past what it can reach. A source taken as a peer leaves
   the refused entries at once.
+- `directory_partial` is discovery's `partial`: a live peer forgotten for room within three
+  announce intervals (spec/discovery.md, Records and slots). Forgetting fires no event, so it
+  is watched as a state. One condition, a warning, stating the records held, and for a
+  static node to raise `max_peers`. A peer refused a slot stays `peer_refused`, so a crowd
+  that meets nothing here is never reported as refused.
 - `peer_too_big` also covers a peer whose index map failed to allocate, `bridge` reads the
   tunnel's link state each look while down, since a reconnect says nothing, and
   `announce_overflow` is the transport's `interest_truncated`.
