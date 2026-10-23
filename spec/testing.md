@@ -63,7 +63,7 @@ program in this order.
 | Program | Cases |
 |---|---|
 | `unit.transport` | basics, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
-| `unit.discovery` | discovery_core, node_core |
+| `unit.discovery` | records, migrate, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
@@ -78,6 +78,7 @@ program in this order.
 | `e2e.tasks` | task, task_matrix |
 | `e2e.entities` | reflect_dropped, churn, republish, log_and_meta, status, rant_conditions, rant_refused, rant_cap |
 | `e2e.matchwait` | matchwait |
+| `e2e.mesh` | builtins_quiet, seeded_segments, meta_from_callbacks, directed_first_call, static_bounded, static_meta_peers, observer_fast, grow_at_once, big_peer, slot_back, runtime_topic |
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
 | `bench.memscale` | `rant_bench memscale`, a steady state send never allocates |
@@ -125,6 +126,13 @@ What each phase pins, grouped by layer.
 
 ### Discovery core
 
+- Records: a store is found by uuid and by id through doubling and reuse, every add mints a
+  new id that skips 0, an arena store stays at its reserve, and a refused growth leaves
+  every record in place.
+- Migrate: a grow keeps each peer's id, scratch, locator and name and takes the peer it
+  refused. A pool core does not migrate, nor does any to fewer slots.
+- Wire: every field round trips and every short, long or cut datagram is refused as such.
+- Change age: it counts from the start, restarts at each change and saturates.
 - Lifecycle: two announces are two ups, silence past the timeout drops both but keeps
   their slots, the same uuid resumes under the same local id, and a new uuid from a held
   address evicts the predecessor as GONE because one socket is one process.
@@ -339,10 +347,18 @@ What each phase pins, grouped by layer.
 - Status: two raises before anyone listens coalesce into one set and a repeat sends
   nothing, a late joiner gets the whole set, an update keeps `since_us`, a clear that is
   not clearable, names an old raise or a missing key changes nothing and leaves a Debug
-  note, an accepted clear fires `RANT_STATUS_CLEARED` with the asker, and a full set
-  refuses one more.
+  note, an accepted clear fires `RANT_STATUS_CLEARED` with the asker, a full set refuses
+  one more, and a node that reads no status has no clear to send (`RANT_ERR_ROLE`).
 - Launch log level: `RANT_LOG_LEVEL` in any case fills a level the code left at 0, never
   one it set, and a word that is no level, or a bad `opts.log_level`, refuses the open.
+- Mesh: two nodes that share nothing match nothing, builtins included, until one asks meta.
+  Seeded segments with no shared topic keep hearing each other. Meta asked only from
+  callbacks is answered. A call aimed at one provider waits for that provider. A static
+  node among many unrelated peers stays bounded in memory and in its meta peers answer. An
+  observer sees every peer within 100 ms. A new topic matches every known subscriber past
+  the starting table. A peer too big for one announce never takes the slot a subscriber
+  needs, and a peer that stops sharing gives its slot back. A runtime topic nobody wants
+  sends at once, and one three peers want reaches all three.
 
 ### Benches
 

@@ -1,6 +1,6 @@
-/* The discovery core and the node core, sans IO: peer lifecycle, paths, and the node's
- * peer table over a real discovery core with no sockets. spec/testing.md says what each
- * case pins. */
+/* The discovery core and the node core, sans IO: the record store, peer lifecycle, paths,
+ * and the node's peer table over a real discovery core with no sockets. spec/testing.md
+ * says what each case pins. */
 #include "support/test.h"
 
 /* the discovery core's callbacks, recorded for the lifecycle checks */
@@ -374,7 +374,151 @@ static void change_age_checks(void){
           "change age: past 49 days it stays at the most it can say");
 }
 
+/* the record store's hook, failing on demand to check that a refused growth leaves it whole */
+static int rs_fail;
+static void *rs_alloc(void *u, void *ptr, size_t size){
+    if (rs_fail && size) return NULL;
+    return rant_allocator_alloc(u, ptr, size);
+}
+
+static int rs_find_all(const i_RantDiscoveryRecords *r, const uint16_t *at, const uint32_t *ids, int n){
+    int k;
+    for (k = 0; k < n; k++){
+        uint8_t uuid[16]; memset(uuid, 0, 16); uuid[0] = (uint8_t)k; uuid[1] = (uint8_t)(k >> 8);
+        if (at[k] == I_RANT_REC_NONE){
+            if (i_rant_records_find(r, uuid) != I_RANT_REC_NONE || i_rant_records_by_id(r, ids[k]) != I_RANT_REC_NONE)
+                return 0;
+        } else if (i_rant_records_find(r, uuid) != at[k] || i_rant_records_by_id(r, ids[k]) != at[k]
+                   || i_rant_records_at(r, at[k])->local_id != ids[k])
+            return 0;
+    }
+    return 1;
+}
+
+/* Records are found by uuid and by id through growth and reuse, an id is never handed out
+   twice, and a store without a hook stays at its reserve. */
+static void records_checks(void){
+    static uint8_t mem[4096];
+    RantAllocator ma = rant_allocator_heap(0);
+    i_RantDiscoveryRecords r; i_RantDiscoveryRecordsBlocks blk; i_RantBump b;
+    uint16_t at[300]; uint32_t ids[300], id_max = 0; uint8_t uuid[16];
+    int k, ok;
+
+    memset(&b, 0, sizeof b); b.base = mem; b.cap = sizeof mem;
+    i_rant_records_layout(&b, 3, 0, &blk);
+    CHECK(i_rant_records_init(&r, &blk, 3, NULL, NULL), "records: an arena store opens");
+    for (k = 0; k < 3; k++){
+        memset(uuid, 0, 16); uuid[0] = (uint8_t)k;
+        at[k] = i_rant_records_add(&r, uuid); ids[k] = i_rant_records_at(&r, at[k])->local_id;
+    }
+    memset(uuid, 0, 16); uuid[0] = 3;
+    CHECK(i_rant_records_add(&r, uuid) == I_RANT_REC_NONE && r.count == 3,
+          "records: an arena store stays at its reserve (count %u)", (unsigned)r.count);
+    i_rant_records_remove(&r, at[1]);
+    at[1] = I_RANT_REC_NONE;
+    memset(uuid, 0, 16); uuid[0] = 1;
+    CHECK(rs_find_all(&r, at, ids, 3), "records: a removed record is gone by uuid and by id");
+    at[1] = i_rant_records_add(&r, uuid); ids[1] = i_rant_records_at(&r, at[1])->local_id;
+    CHECK(ids[1] == 4 && rs_find_all(&r, at, ids, 3),
+          "records: the place is reused under a fresh id (id %u)", (unsigned)ids[1]);
+
+    CHECK(i_rant_records_init(&r, &blk, 2, rs_alloc, &ma), "records: a hook store opens");
+    for (k = 0; k < 300; k++){
+        memset(uuid, 0, 16); uuid[0] = (uint8_t)k; uuid[1] = (uint8_t)(k >> 8);
+        at[k] = i_rant_records_add(&r, uuid);
+        ids[k] = at[k] != I_RANT_REC_NONE ? i_rant_records_at(&r, at[k])->local_id : 0;
+    }
+    CHECK(r.count == 300 && r.cap >= 300 && rs_find_all(&r, at, ids, 300),
+          "records: a hook store grows and finds every record (count %u cap %u)",
+          (unsigned)r.count, (unsigned)r.cap);
+    for (k = 0; k < 300; k += 2){ i_rant_records_remove(&r, at[k]); at[k] = I_RANT_REC_NONE; }
+    ok = rs_find_all(&r, at, ids, 300);
+    for (k = 0; k < 300; k++) if (ids[k] > id_max) id_max = ids[k];
+    for (k = 0; k < 300; k += 2){
+        memset(uuid, 0, 16); uuid[0] = (uint8_t)k; uuid[1] = (uint8_t)(k >> 8);
+        at[k] = i_rant_records_add(&r, uuid); ids[k] = i_rant_records_at(&r, at[k])->local_id;
+        if (ids[k] <= id_max) ok = 0;
+    }
+    CHECK(ok && rs_find_all(&r, at, ids, 300) && r.count == 300,
+          "records: removing half and adding them back keeps every lookup and mints new ids");
+
+    rs_fail = 1;
+    {   uint16_t cap = r.cap, got = 0;
+        for (k = 300; k < 300 + cap; k++){
+            memset(uuid, 0, 16); uuid[0] = (uint8_t)k; uuid[1] = (uint8_t)(k >> 8);
+            if (i_rant_records_add(&r, uuid) != I_RANT_REC_NONE) got++;
+        }
+        CHECK(r.cap == cap && r.count == 300 + got && got == (uint16_t)(cap - 300) && rs_find_all(&r, at, ids, 300),
+              "records: a refused growth fills what is there and keeps every record (%u more)", (unsigned)got);
+    }
+    rs_fail = 0;
+
+    r.next_id = 0xFFFFFFFFu;
+    memset(uuid, 0xA5, 16);
+    i_rant_records_remove(&r, at[1]);
+    {   uint16_t i1 = i_rant_records_add(&r, uuid), i2;
+        uuid[0] = 0x5A; i_rant_records_remove(&r, at[3]); i2 = i_rant_records_add(&r, uuid);
+        CHECK(i_rant_records_at(&r, i1)->local_id == 0xFFFFFFFFu && i_rant_records_at(&r, i2)->local_id == 1u,
+              "records: the id counter wraps past 0, which is RANT_SELF");
+    }
+    i_rant_records_destroy(&r);
+    CHECK(ma.in_use == 0, "records: destroy frees the hook memory (%u in use)",
+          (unsigned)ma.in_use);
+    rant_allocator_reset(&ma);
+}
+
+/* A grow keeps every peer with its id and scratch and takes the one it refused. Only a hook
+   core migrates, and never to fewer slots. */
+static void migrate_checks(void){
+    static uint8_t m1[16384], m2[16384], m3[16384];
+    RantAllocator ma = rant_allocator_heap(0);
+    uint8_t buf[RANT_DISCOVERY_WIRE_MAX], out[RANT_DISCOVERY_WIRE_MAX];
+    uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3};
+    i_RantDiscoveryCoreConfig c; i_RantDiscoveryState *st, *st2; RantAddr addr;
+    uint32_t idA, idB, ups; size_t n; uint64_t *mark;
+    memset(&c,0,sizeof c); memset(c.uuid,0xEE,16);
+    c.domain_id=99; c.announce_interval_us=1000000; c.peer_timeout_us=4000000; c.max_peers=2;
+    c.peer_user_bytes=8; c.on_peer_up=dc_up; c.on_peer_down=dc_down; c.on_event=dc_error;
+    st = i_rant_discovery_init(m3, sizeof m3, &c);
+    CHECK(st && i_rant_discovery_core_migrate(st, m2, sizeof m2, 4, 0, NULL, NULL) == NULL,
+          "migrate: a pool core does not migrate");
+    c.alloc=rant_allocator_alloc; c.alloc_user=&ma;
+    st = i_rant_discovery_init(m1, sizeof m1, &c);
+    CHECK(st != NULL, "migrate: init");
+    if (!st) return;
+    i_rant_discovery_update(st, 1000, out, sizeof out);
+    dc_up_n=dc_refused_n=0;
+    n=dc_wire(buf,1,0,99,5001,"alpha",1); dc_feed(st,sa,6730,buf,n,2000); idA=dc_up_id;
+    n=dc_wire(buf,2,0,99,5002,"beta",1);  dc_feed(st,sb,6730,buf,n,2000); idB=dc_up_id;
+    n=dc_mk(buf,3,0,99,5003,1); dc_feed(st,sc,6730,buf,n,2000);
+    mark = (uint64_t*)i_rant_discovery_peer_user(st, idA);
+    if (mark) *mark = 0x1234;
+    CHECK(dc_up_n == 2 && dc_refused_n == 1 && mark, "migrate: two peers up, the third refused");
+
+    st2 = i_rant_discovery_core_migrate(st, m2, sizeof m2, 4, 0, NULL, NULL);
+    CHECK(st2 && i_rant_discovery_max_peers(st2) == 4 && i_rant_discovery_peer_count(st2) == 2,
+          "migrate: the grown core holds both peers in 4 slots");
+    if (!st2) return;
+    mark = (uint64_t*)i_rant_discovery_peer_user(st2, idA);
+    CHECK(mark && *mark == 0x1234 && i_rant_discovery_addr_of_id(st2, idB, &addr) && addr.port == 5002
+          && i_rant_discovery_peer_name(st2, idB).len == 4,
+          "migrate: ids keep their scratch, locator and name");
+    ups = dc_up_n;
+    n=dc_wire(buf,1,0,99,5001,"alpha",1); dc_feed(st2,sa,6730,buf,n,3000);
+    CHECK(dc_up_n == ups, "migrate: a known peer is not new after the move");
+    n=dc_mk(buf,3,0,99,5003,1); dc_feed(st2,sc,6730,buf,n,3000);
+    CHECK(dc_up_n == ups + 1 && dc_up_id != idA && dc_up_id != idB && i_rant_discovery_peer_count(st2) == 3,
+          "migrate: the refused peer takes a new slot");
+    CHECK(i_rant_discovery_core_migrate(st2, m1, sizeof m1, 2, 0, NULL, NULL) == NULL,
+          "migrate: never to fewer slots");
+    i_rant_discovery_destroy(st2);
+    CHECK(ma.in_use == 0, "migrate: destroy frees every hook block (%u in use)", (unsigned)ma.in_use);
+    rant_allocator_reset(&ma);
+}
+
 static const TestCase cases[] = {
+    { "records",        records_checks },
+    { "migrate",        migrate_checks },
     { "wire",           wire_checks },
     { "change_age",     change_age_checks },
     { "discovery_core", disc_core_checks },

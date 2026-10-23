@@ -86,6 +86,21 @@ and the port are stated once in `common/types.h`. A BYE is sent three times
 alive. Multicast loop stays on, since several instances on one host
 need it, and the uuid self filter drops the echoes.
 
+## Records and slots
+
+Every peer heard has a record: its uuid and local id, its locator, name and last heard time,
+the version of its blob judged and the highest it advertised, and the work owed to it. Two
+hash indexes find a record by uuid and by id. What only a connected peer needs sits in a
+slot: the blob, the node's per peer scratch, the source paths and the locator's freshness.
+`max_peers` counts slots. Every record takes a slot, so a peer is refused exactly when every
+slot holds a live one.
+
+Records are referenced by index, never by pointer, because a store on the hook moves when it
+doubles. Without a hook the store sits in the arena at `max_peers` records and never grows.
+With one, `max_peers` records are taken at init and the store doubles as it fills. A grow
+moves the slots into the new arena and leaves the records where they are, so only a core with
+the hook migrates, and never to fewer slots.
+
 ## Peer lifecycle
 
 | state | meaning |
