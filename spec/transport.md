@@ -39,6 +39,13 @@ cached counter. The send path kicks the waker only when something is still pendi
 its own drain (`i_rant_transport_tx_pending`, or a held datagram): the waker is a loopback
 send that costs about 36 us on Windows. See spec/node.md for the inline drain.
 
+A new reliable reader's lane starts at the join seqno: the head less `catch_up` cached
+samples, and while the topic's first match window is open every cached sample since it came
+up. The node opens the window at create, role change and retype and closes it
+`match_wait_ms` later (`i_rant_transport_topic_fresh`), so a reader that matches just after
+the first repairs what it missed and no send waits for it. A best effort reader and a
+directed topic join at the head. The `fresh_join` case of `unit.transport` pins it.
+
 The poll wait is capped at `next_deadline_us`, the earliest armed timer, fed at the arm
 sites. Immediate acks are deliberately not tracked, so the no loss hot path keeps no
 deadline. The win is on the deferred paths (a gap repair NACK, a lost final message HB),

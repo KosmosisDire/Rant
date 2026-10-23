@@ -785,8 +785,43 @@ done:
     rant_allocator_reset(&rp.main); rant_allocator_reset(&rp.bulk);
 }
 
+/* The first match window: a reader joining a reliable topic inside it starts at the first
+   sample still cached since it opened, after it at the head. Best effort never replays. */
+static void fresh_join_checks(void){
+    TestPair rp, bp; RantQos q; i_RantTopic *rel, *be; uint8_t buf[16]; int k;
+    memset(&q, 0, sizeof q); q.reliability = RANT_RELIABLE; q.keep_last = 8;
+    memset(buf, 0, sizeof buf);
+    if (!test_pair_open(&rp, "f/rel", q, q, NULL)){ CHECK(0, "fresh: reliable pair opens"); return; }
+    q.reliability = RANT_BEST_EFFORT;
+    if (!test_pair_open(&bp, "f/be", q, q, NULL)){ CHECK(0, "fresh: best effort pair opens"); test_pair_close(&rp); return; }
+    test_apply_verified(rp.w, 2u, rp.r); test_apply_verified(bp.w, 2u, bp.r);
+    rel = i_rant_topic_at(rp.w, 0, NULL); be = i_rant_topic_at(bp.w, 0, NULL);
+    CHECK(rel->matched_writers == 1 && be->matched_writers == 1, "fresh: both writers matched their reader (%u, %u)",
+          rel->matched_writers, be->matched_writers);
+    i_rant_transport_topic_fresh(rp.w, 0, 1); i_rant_transport_topic_fresh(bp.w, 0, 1);
+    for (k = 0; k < 3; k++){
+        i_rant_transport_send(rp.w, 0, rant_bytes(buf, sizeof buf), 0);
+        i_rant_transport_send(bp.w, 0, rant_bytes(buf, sizeof buf), 0);
+    }
+    CHECK(rel->next_seqno == 3 && i_rant_topic_unicast_join_seqno(rel) == 0,
+          "fresh: inside the window a reliable reader joins at the first sample (%llu of %llu)",
+          (unsigned long long)i_rant_topic_unicast_join_seqno(rel), (unsigned long long)rel->next_seqno);
+    CHECK(be->next_seqno == 3 && i_rant_topic_unicast_join_seqno(be) == 3,
+          "fresh: a best effort reader joins at the head (%llu)", (unsigned long long)i_rant_topic_unicast_join_seqno(be));
+    i_rant_transport_topic_fresh(rp.w, 0, 0);
+    CHECK(i_rant_topic_unicast_join_seqno(rel) == 3, "fresh: after the window at the head (%llu)",
+          (unsigned long long)i_rant_topic_unicast_join_seqno(rel));
+    i_rant_transport_topic_fresh(rp.w, 0, 1);
+    for (k = 0; k < 10; k++) i_rant_transport_send(rp.w, 0, rant_bytes(buf, sizeof buf), 0);
+    CHECK(rel->next_seqno == 13 && i_rant_topic_unicast_join_seqno(rel) == 5,
+          "fresh: a window longer than the history starts at the oldest kept (%llu)",
+          (unsigned long long)i_rant_topic_unicast_join_seqno(rel));
+    test_pair_close(&rp); test_pair_close(&bp);
+}
+
 static const TestCase cases[] = {
     { "basics", basics_checks },
+    { "fresh_join", fresh_join_checks },
     { "bulk", bulk_checks },
     { "want_set", want_set_checks },
     { "want_filter", want_filter_checks },

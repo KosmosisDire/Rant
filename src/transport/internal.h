@@ -204,7 +204,9 @@ typedef struct {
     uint16_t  history_head;    /* next slot to overwrite */
     uint64_t  next_seqno;
     uint64_t  first_seqno;  /* lowest seqno still cached */
+    uint64_t  fresh_from;   /* next_seqno when the topic came up */
     uint8_t   have_first;
+    uint8_t   fresh;        /* inside its first match window: a reliable reader joins at fresh_from */
     uint32_t  matched_writers; /* exact count of used writer proxies, dormant included */
     uint32_t  matched_readers; /* the same for reader proxies */
     uint32_t  lane_head;       /* first matched lane record, the send path walks this chain */

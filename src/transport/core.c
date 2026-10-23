@@ -322,21 +322,31 @@ void i_rant_transport_fire_event(i_RantTransportState *st, RantErrorKind error, 
 }
 
 
-/* the head minus catch_up cached samples, reliable only */
+/* the head minus catch_up cached samples, and in the first match window every cached sample
+ * since the topic came up, reliable only */
 uint64_t i_rant_topic_unicast_join_seqno(const i_RantTopic *topic){
     uint16_t depth = topic->qos.keep_last;   /* normalized at init */
     uint16_t want = topic->qos.catch_up, k, i;
     uint64_t s = topic->next_seqno;
-    if (topic->qos.reliability != RANT_RELIABLE || want == 0) return s;
+    int fresh = topic->fresh && !topic->directed;    /* directed history never replays */
+    if (topic->qos.reliability != RANT_RELIABLE || (want == 0 && !fresh)) return s;
     if (want > depth) want = depth;
     i = topic->history_head;
-    for (k=0; k<want; k++){
+    for (k=0; k<depth; k++){
         uint16_t j = (uint16_t)(i ? i-1 : depth-1);
-        if (!topic->history[j].valid) break;        /* fewer than want cached */
+        if (!topic->history[j].valid) break;        /* fewer cached */
+        if (k >= want && !(fresh && topic->history[j].base >= topic->fresh_from)) break;
         s = topic->history[j].base;
         i = j;
     }
     return s;
+}
+
+void i_rant_transport_topic_fresh(i_RantTransportState *st, uint16_t topic_index, int open){
+    i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
+    if (!topic) return;
+    topic->fresh = (uint8_t)(open != 0);
+    if (open) topic->fresh_from = topic->next_seqno;
 }
 
 

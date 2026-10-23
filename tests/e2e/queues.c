@@ -289,6 +289,7 @@ static void callback_queue_checks(void){
     RantTopic *in;
     RantTopicOpts co;
     uint32_t waiting = 0, dropped = 0;
+    uint64_t a_up;
     int i, r;
     memset(ca, 0, sizeof ca); memset(payload, 0, sizeof payload);
     ca[0].name="cq/x";  ca[0].role=RANT_PUB_ONLY; ca[0].qos.reliability=RANT_RELIABLE;
@@ -298,6 +299,7 @@ static void callback_queue_checks(void){
     ao = (RantNodeOpts){ .domain=TEST_DOMAIN+5, .discovery={ .max_peers=4 }, .net={ .multicast_interface="127.0.0.1" } };
     bo = ao; bo.max_topics = 3;
     a = test_node_open("cqa-node", NULL, NULL, ao, ca, 3);
+    a_up = i_rant_plat_now_us();     /* a's topics came up: their first match window opens */
     b = test_node_open("cqb-node", cq_on_message, cq_on_event, bo, NULL, 0);
     CHECK(a && b, "cqueue: nodes open");
     if (!a || !b){ if (a) rant_node_close(a,0); if (b) rant_node_close(b,0); return; }
@@ -365,7 +367,9 @@ static void callback_queue_checks(void){
       CHECK(r==0 && i_rant_plat_now_us()-t0 >= 25000u, "cqueue: a timed wait pumps and returns 0 (%d)", r); }
 
     /* CQ3: y comes back on the queue in its retired slot, and a retire from outside drops
-       what it had not run yet */
+       what it had not run yet. Past a's first match window, so the re formed lane joins at
+       the head and does not replay what the old reader had */
+    while (i_rant_plat_now_us() - a_up < (uint64_t)RANT_MATCH_WAIT_MS * 1000u + 100000u) test_pump(a,b,10);
     co.queue = cq_q;
     cq_y = rant_node_create_topic(b, "cq/y", RANT_SUB_ONLY, NULL, &co);
     CHECK(cq_y != NULL, "cqueue: y recreated on the queue");

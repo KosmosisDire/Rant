@@ -62,7 +62,7 @@ program in this order.
 
 | Program | Cases |
 |---|---|
-| `unit.transport` | basics, bulk, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
+| `unit.transport` | basics, fresh_join, bulk, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
 | `unit.discovery` | records, migrate, owed, judge, unmatched, offer, filter, forgotten, churn, first_contact, too_big, bulk, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |
@@ -431,9 +431,10 @@ What each phase pins, grouped by layer.
   heals through reliable repair once its verdict lands, so delivery is writer
   authoritative. A first send waits for an already present subscriber. A disabled wait
   drops at once but loudly with RANT_E_UNMATCHED_SEND. With one subscriber matched at once
-  and another that answers the fetch 300 ms later, a send never waits: it reaches the one
-  matched, fires no RANT_E_UNMATCHED_SEND, and the later one misses it. The ports the wire
-  tap drops by are the ones the nodes bound.
+  and another that answers the fetch 300 ms later, a reliable send never waits: it reaches
+  the one matched, fires no RANT_E_UNMATCHED_SEND, and the later one gets it from history
+  inside the first match window. With a 300 ms window and the later one answering after
+  700 ms, it misses it. The ports the wire tap drops by are the ones the nodes bound.
 
 ### End to end
 
@@ -475,8 +476,8 @@ What each phase pins, grouped by layer.
   hold 30 unrelated publishers matches a subscriber that opens last, turning nobody away.
   A static node with a static bulk opens smaller than the same node without one, a crowd
   leaves its main flat, a late subscriber still matches, and its meta answer reports the
-  bulk. A runtime topic nobody wants sends at once, and one three peers want reaches the
-  first match with its first send and all three once they matched.
+  bulk. A runtime topic nobody wants sends at once, and a reliable one three peers want
+  reaches all three with its first send, the later matches from history.
 
 ### Benches
 

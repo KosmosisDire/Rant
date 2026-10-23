@@ -491,7 +491,7 @@ static void static_bulk_checks(void){
 }
 
 /* A topic made at runtime among peers that hold no blob here: one nobody wants sends at once,
-   one three peers want reaches the first match with its first message and all three after. */
+   and a reliable one three peers want reaches all three with its first message. */
 static void ms_rt_msg(const RantMsg *m){ if (m->user) *(volatile int*)m->user = 1; }
 static void runtime_topic_checks(void){
     uint16_t dom = (uint16_t)(TEST_DOMAIN + 10);
@@ -526,16 +526,13 @@ static void runtime_topic_checks(void){
               (unsigned long long)blocked_ms);
         wanted = rant_node_create_topic(T, "ms/rt/wanted", RANT_PUB_ONLY, NULL,
                                         &(RantTopicOpts){ .qos = { .reliability = RANT_RELIABLE } });
+        t0 = i_rant_plat_now_us();
         rant_topic_send(wanted, rant_bytes("first", 5), NULL);
-        MS_WAIT_UNTIL(2000, got[0] || got[1] || got[2]);
-        for (k = 0; k < 3; k++) reached += got[k] != 0;
-        CHECK(reached >= 1, "runtime topic: the first send waits for a match and reaches it (%d of 3)", reached);
-        MS_WAIT_UNTIL(3000, rant_topic_match_count(wanted) == 3);
-        for (k = 0; k < 3; k++) got[k] = 0;
-        rant_topic_send(wanted, rant_bytes("again", 5), NULL);
+        blocked_ms = (i_rant_plat_now_us() - t0) / 1000u;
         MS_WAIT_UNTIL(2000, got[0] && got[1] && got[2]);
-        for (reached = 0, k = 0; k < 3; k++) reached += got[k] != 0;
-        CHECK(reached == 3, "runtime topic: once all three matched a send reaches them all (%d of 3)", reached);
+        for (k = 0; k < 3; k++) reached += got[k] != 0;
+        CHECK(reached == 3, "runtime topic: the first send reaches all three, late matches from history (%d of 3, blocked %llu ms)",
+              reached, (unsigned long long)blocked_ms);
         rant_node_close(T, 1);
     }
     for (k = 0; k < 3; k++) if (S[k]) rant_node_close(S[k], 1);

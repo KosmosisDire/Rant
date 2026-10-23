@@ -79,7 +79,8 @@ struct RantTopic {
     uint64_t  rx_msgs, rx_bytes;         /* delivered to us, parked excluded */
     uint32_t  resolve_epoch;             /* match_epoch at the last convergence, 0 = never */
     uint64_t  came_up_us;                /* our last create, role change or retype: the match wait's anchor */
-    uint8_t   prefix_bytes;              /* pattern header bytes split into .header, 0 = plain */
+    uint8_t   fresh;                     /* its first match window is open in the transport */
+    uint8_t   prefix_bytes;             /* pattern header bytes split into .header, 0 = plain */
     uint8_t   prefix_string;             /* [u8 len][bytes] follows the prefix on a response kind */
     uint8_t   kind;                      /* i_RantTopicKind */
     uint8_t   role;                      /* RantRole, mirrored at create and set_role */
@@ -171,7 +172,8 @@ struct RantNode {
     uint32_t         match_wait_us;   /* 0 = disabled */
     uint64_t         open_us;         /* when the node opened, the gather anchor */
     uint8_t          gather_done;     /* latched once the post open gather settles */
-    uint32_t         match_epoch;     /* bumps on peer or interest change, create and set_role */
+    uint64_t         fresh_next_us;   /* the earliest open first match window's end, 0 = none */
+    uint32_t         match_epoch;    /* bumps on peer or interest change, create and set_role */
     uint16_t         advertise_hold;  /* i_rant_node_advertise_hold nesting, see spec/patterns.md */
     uint8_t          advertise_pending; /* an interest change waits for the hold's release */
     void            *patterns;        /* the patterns layer's per node manager, opaque here */
@@ -1538,6 +1540,35 @@ static void i_rant_node_create_fail(RantNode *n, RantErrorKind err, const char *
     n->last_error.peer_name = NULL; n->last_error.detail = NULL;
 }
 
+static uint64_t i_rant_node_match_window_us(RantNode *n);     /* with the match wait */
+
+/* A create, role change or retype: the match wait's anchor, and the first match window the
+ * transport keeps open so a reliable reader matching inside it repairs from history. */
+static void i_rant_node_topic_came_up(RantNode *n, RantTopic *h){
+    uint64_t end;
+    h->came_up_us = i_rant_plat_now_us();
+    h->fresh = 1;
+    i_rant_transport_topic_fresh(n->transport, h->index, 1);
+    end = h->came_up_us + i_rant_node_match_window_us(n);
+    if (!n->fresh_next_us || end < n->fresh_next_us) n->fresh_next_us = end;
+}
+
+/* Closes the first match windows that ended and finds the next end. Runs only at an end. */
+static void i_rant_node_fresh_close(RantNode *n, uint64_t now){
+    uint16_t i, hi = i_rant_node_topic_hi(n);
+    uint64_t window = i_rant_node_match_window_us(n), next = 0;
+    for (i = 0; i < hi; i++){
+        RantTopic *h = n->handles[i];
+        if (!h || !h->fresh) continue;
+        if (now - h->came_up_us >= window){
+            h->fresh = 0;
+            i_rant_transport_topic_fresh(n->transport, i, 0);
+        } else if (!next || h->came_up_us + window < next)
+            next = h->came_up_us + window;
+    }
+    n->fresh_next_us = next;
+}
+
 static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRole role,
                               const RantSchema *schema, const RantTopicOpts *opts,
                               uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
@@ -1672,7 +1703,7 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
        kind so every creator of the kind splits alike */
     h->prefix_string = (uint8_t)(kind == RANT_KIND_FUNC_RSP || kind == RANT_KIND_TASK_RSP);
     h->role = (uint8_t)role;
-    h->came_up_us = i_rant_plat_now_us();
+    i_rant_node_topic_came_up(n, h);
     h->sys_on_message = sys_msg; h->sys_msg_user = sys_user;
     {   /* the stable name copy, queued views must not point into the arena */
         size_t nl = strlen(name);
@@ -2538,6 +2569,7 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
     /* latch the post open gather the moment it settles, so a later create's replay events
        cannot reset the quiet clock and make a first send re wait */
     if (!n->gather_done) (void)i_rant_node_gather_done(n, now);
+    if (n->fresh_next_us && now >= n->fresh_next_us) i_rant_node_fresh_close(n, now);
 
     /* the patterns tick runs under the lock like a callback and returns the next deadline */
     if (n->sys_tick) n->sys_tick_next = n->sys_tick(n->sys_user, i_rant_plat_now_us());
@@ -3098,7 +3130,7 @@ static int i_rant_topic_set_role_one(RantTopic *topic, RantRole role){
     r = i_rant_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
     if (r == 0){
         topic->role = (uint8_t)role;
-        topic->came_up_us = i_rant_plat_now_us();
+        i_rant_node_topic_came_up(topic->n, topic);
         i_rant_node_interest_changed(topic->n);     /* a role flip may raise fresh candidates */
     }
     return r;
@@ -3260,7 +3292,7 @@ int i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reli
     if (rc != 0) return rc == -4 ? RANT_ERR_OOM : RANT_ERR_STATE;
     i_rant_node_core_topic_rebound(n->core, idx);
     i_rant_node_core_set_topic_schema(n->core, idx, topic->schema);
-    topic->came_up_us = i_rant_plat_now_us();
+    i_rant_node_topic_came_up(n, topic);
     i_rant_node_interest_changed(n);
     return RANT_OK;
 }

@@ -229,10 +229,12 @@ window: discovery sends our blob at open and peers answer with theirs, create's 
 queue and the kick sends them, and a send that would reach zero subscribers WHILE a
 candidate is resolving blocks until the first match forms or matching converges, bounded by
 `opts.match_wait_ms`. A send never waits once a subscriber matched, since latency once
-matched comes first: a subscriber that matches after the first misses the sends before it,
-unless the topic keeps history. Waiting for every candidate held each publisher's first
-sends at least the gather's quiet window, and the backlog that built up then overflowed
-peers at high rates. Resolving means a
+matched comes first. A reliable subscriber that matches later inside the topic's first match
+window still gets those sends: while the window is open its writer lane joins at the first
+sample cached since the topic came up (`i_rant_transport_topic_fresh`), and repair delivers
+them. A best effort one misses them. Waiting for every candidate instead held each
+publisher's first sends at least the gather's quiet window, and the backlog that built up
+then overflowed peers at high rates. Resolving means a
 held announce nominates this topic but its verdicts are in flight, a record without a slot
 is being fetched, or the post open gather has not settled. The gather settles on matches
 alone, never peers coming and going, and ends one match window after open at the latest,

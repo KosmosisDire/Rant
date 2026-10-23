@@ -306,6 +306,10 @@ void        i_rant_transport_want_new_clear(i_RantTransportState *st);
 /* Rematches peers locally. The caller re advertises. 0 ok, negative unknown. */
 int         i_rant_transport_set_role(i_RantTransportState *st, uint16_t topic_index, uint8_t role);
 
+/* Opens or closes a topic's first match window. While open a reliable reader that matches
+ * joins at the first sample since it opened, so history repairs what it missed. */
+void        i_rant_transport_topic_fresh(i_RantTransportState *st, uint16_t topic_index, int open);
+
 /* Defines a reserved slot: name, qos, role, a history ring and a rematch. 0 ok, -1 bad
  * index, name or slot, -4 out of memory. Re advertise after. */
 int         i_rant_transport_topic_define(i_RantTransportState *st, uint16_t topic_index, const i_RantTopicDef *def);
