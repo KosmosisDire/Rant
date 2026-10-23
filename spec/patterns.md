@@ -259,8 +259,10 @@ node successor definition's values were dropped forever.
 ## Duplicate authority
 
 Two authorities never form a lane (pub and pub, sub and sub), so the layer checks the
-announce interest instead: at authority create against known peers, and on every
-interest apply. It fires `RANT_E_DUPLICATE_AUTHORITY` once per (entity, peer) on both
+announce interest instead: at authority create against the matched peers, and on every
+interest apply. A rival matches without a lane, since the authority is a rival key of the
+want set (spec/interest.md), so an unmatched rival takes a slot when either side's blob is
+judged next and its interest apply reports it. It fires `RANT_E_DUPLICATE_AUTHORITY` once per (entity, peer) on both
 rivals. This is a diagnostic, not a refusal: calls take the first response and remotes
 converge on the last write. The per apply check is one walk of the peer's entities
 against a sorted (kind, hash) index of the local authorities, rebuilt lazily after a

@@ -488,9 +488,9 @@ struct NodeOptions {
     std::string              bridge;
     std::string              bridge_passphrase;   /* empty takes RANT_BRIDGE_PASSPHRASE */
     /* discovery cadence */
-    std::chrono::microseconds announce_interval{ 0 };   /* 0 = 1 s */
-    std::chrono::microseconds peer_timeout{ 0 };        /* 0 = 3.5 s */
-    uint16_t                 max_peers            = 0;   /* 0 = 16 */
+    std::chrono::microseconds announce_interval{ 0 };   /* 0 = 3 s */
+    std::chrono::microseconds peer_timeout{ 0 };        /* 0 = 12 s */
+    uint16_t                 max_peers            = 0;   /* matched peers held at once, 0 = 16 */
     /* Leave memory null for the heap. A buffer and its size mean static mode: no heap, no
      * growth, shared memory off, and the open fails when the buffer is too small. */
     void*                    memory      = nullptr;
@@ -1045,7 +1045,7 @@ struct Peer {
     uint64_t                last_heard_us = 0;
     uint32_t                epoch = 0;       /* bumps on every reflected change at this peer */
     bool                    catching_up = false;   /* it advertises newer state than we hold yet */
-    uint16_t                fragment_size = 0;
+    uint16_t                fragment_size = 0;   /* 0 while it shares nothing with us */
     uint32_t                rtt_us = 0;   /* the smoothed round trip, 0 samples = none yet */
     uint32_t                rtt_jitter_us = 0;
     uint32_t                rtt_min_us = 0;
@@ -2785,7 +2785,7 @@ struct MetaSnapshot {
         uint64_t uptime_us = 0, wall_us = 0;
         uint64_t mem_in_use = 0, mem_peak = 0, alloc_calls = 0;
         uint64_t evicted_unsent = 0, bp_waited_us = 0, bp_waits = 0;
-        uint64_t peers = 0, max_peers = 0, topics = 0, max_topics = 0;
+        uint64_t peers = 0, matched_peers = 0, max_peers = 0, topics = 0, max_topics = 0;
         uint64_t shm_tx = 0, shm_rx = 0, last_error = 0;
         std::string last_error_text;
     } node;
@@ -2823,6 +2823,7 @@ struct MetaSnapshot {
             s.node.bp_waited_us   = u("bp_waited_us");
             s.node.bp_waits       = u("bp_waits");
             s.node.peers          = u("peers");
+            s.node.matched_peers  = u("matched_peers");
             s.node.max_peers      = u("max_peers");
             s.node.topics         = u("topics");
             s.node.max_topics     = u("max_topics");

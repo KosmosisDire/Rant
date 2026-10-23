@@ -9,14 +9,43 @@ multicast. spec/discovery.md explains how announces and peer state work inside.
 
 ## Peer lifecycle
 
-A peer heard within `peer_timeout_us` (default 12 s) is ACTIVE. On silence past that it
-is DROPPED: `RANT_PEER_DOWN` fires and the peer leaves flow control, but its transport
-state is kept. If the same node returns it resumes where it left off: `RANT_PEER_UP`
-fires again, the subscriber keeps its position and the writer fills only the gap. A
-restarted node is a new peer and gets `catch_up`. A dropped peer silent for 2 minutes is
-GONE and its slot is freed. When a new peer needs a slot the oldest dropped one is
-evicted. A table full of active peers refuses a new one with `RANT_E_PEER_REFUSED`, which
-means raise `opts.discovery.max_peers` (default 16).
+Every node of the domain that this node hears is a peer, whatever its topics.
+
+- `RANT_PEER_UP` fires when a peer is first heard and when it returns.
+- A peer heard within `peer_timeout_us` (default 12 s) is ACTIVE. On silence past that it
+  is DROPPED and `RANT_PEER_DOWN` fires.
+- If the same node returns it resumes where it left off: the subscriber keeps its
+  position and the writer fills only the gap. A restarted node is a new peer and gets
+  `catch_up`.
+- A dropped peer silent for 2 minutes, or one that closed, is GONE.
+
+## Matched peers
+
+A peer is matched when it shares something with this node: it publishes a topic this node
+subscribes to, subscribes to one this node publishes, or also owns a variable or provides a
+function this node does (the duplicate authority warning). Only a matched peer takes a slot:
+transport state, flow control and its topic list. Two nodes with nothing in common cost each
+other only a small record, and send each other nothing past discovery.
+
+- A peer is judged when its topic list arrives and again each time it changes.
+- `RANT_PEER_INTEREST` fires when a match forms or changes, with the topics this node now
+  publishes to the peer and receives from it.
+- A matched peer whose topics stop meeting ours gives its slot back. `RANT_PEER_INTEREST`
+  fires with both counts 0, never `RANT_PEER_DOWN`, and the peer stays listed and ACTIVE.
+- A new topic of ours asks the unmatched peers again, so its first send reaches every
+  peer that wants it (docs/topics.md, The first send).
+- `opts.fetch_details` matches every peer, for observer tools.
+
+`opts.discovery.max_peers` (default 16) counts the slots. A match that finds none free takes
+the slot of the oldest dropped peer. With none:
+
+- On `rant_allocator_dynamic` the table grows at once to fit every match.
+- On `rant_allocator_static` the match is refused with `RANT_E_PEER_REFUSED`, which means
+  raise `max_peers`, and admitted once a slot frees.
+
+A node on `rant_allocator_static` takes all its records at open, `RANT_RECORDS_PER_PEER`
+(4) per slot, so a crowd of unrelated peers costs it no memory later. Past them the oldest
+dropped peer is forgotten, and with none a newcomer is refused.
 
 ## Interfaces
 
@@ -93,7 +122,7 @@ theirs down from 6739.
 | `bridge`, `bridge_passphrase` | run on a bridge's sockets (Through a bridge) |
 
 `opts.discovery` holds `announce_interval_us` (3 s), `peer_timeout_us` (12 s) and
-`max_peers` (16).
+`max_peers` (16 matched peers).
 
 A message has no flow control inside it, so a fragment the receive buffer cannot hold is
 dropped and repair carries it instead. Raise `recv_buffer_bytes` to at least the largest
@@ -106,4 +135,6 @@ takes both under its own name.
 `rant_node_peers_next` walks the peers with a `RantPeerInfo`: id, uuid, name, address,
 liveness, last heard time, an epoch that bumps on every change, fragment size, and the
 measured round trip (`rtt_us`, `rtt_jitter_us`, `rtt_min_us`, `rtt_samples`). A dropped
-peer is still listed. Gate on `.liveness`. See docs/reflection.md.
+peer is still listed. Gate on `.liveness`. An unmatched peer is listed too, with no
+entities, no fragment size and no round trip, since this node keeps none of its topics.
+See docs/reflection.md.

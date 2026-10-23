@@ -657,6 +657,11 @@ def handles():
         peers = a.reflection.peers()
         check("the peer is listed active",
               any(x.name == "HB" and x.active for x in peers))
+        hb = next((x for x in peers if x.name == "HB" and x.active), None)
+        snap = a.reflection.meta(hb.id, rant.MetaSection.NODE, 3.0) if hb else None
+        check("meta counts the matched peers",
+              snap is not None and snap.valid and snap.name == "HB"
+              and 1 <= snap.matched_peers <= snap.max_peers)
         mine = a.reflection.entities()
         check("this node's entities carry the function",
               any(e.kind == rant.EntityKind.FUNCTION and e.name == "double" and e.provides

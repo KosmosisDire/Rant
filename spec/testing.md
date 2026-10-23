@@ -399,7 +399,8 @@ What each phase pins, grouped by layer.
 - Mesh: two nodes that share nothing match nothing, builtins included, until one asks meta.
   Seeded segments with no shared topic keep hearing each other. Meta asked only from
   callbacks is answered. A call aimed at one provider waits for that provider. A static
-  node among many unrelated peers stays bounded in memory and in its meta peers answer. An
+  node among many unrelated peers stays bounded in memory and in its meta peers answer,
+  which lists and counts as `matched_peers` only the observer that asked. An
   observer sees every peer within 100 ms. A new topic matches every known subscriber past
   the starting table. A peer too big for one announce never takes the slot a subscriber
   needs, and a peer that stops sharing gives its slot back. A runtime topic nobody wants

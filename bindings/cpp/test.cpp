@@ -1808,6 +1808,8 @@ static bool factory_leg() {
     chk("reflection: B sees A", a_id != 0);
     rant::MetaSnapshot snap = b.reflection().meta(a_id, rant::MetaNode, 2s);
     chk("reflection: blocking meta answers", snap.valid && snap.node.name == "FA");
+    chk("reflection: meta counts the matched peers", snap.node.matched_peers >= 1
+        && snap.node.matched_peers <= snap.node.max_peers);
     std::atomic<bool> async_named{ false };
     chk("reflection: meta_async launches", b.reflection().meta_async(a_id,
         [&](const rant::MetaSnapshot& s) { async_named = s.valid && s.node.name == "FA"; })

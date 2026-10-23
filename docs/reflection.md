@@ -20,9 +20,12 @@ while (rant_node_mesh_next(n, &it3, &e)) ...                      /* the whole m
   liveness, last heard time, an `epoch` that bumps on every change, fragment size, and
   the measured round trip. A dropped peer is still listed, so gate on `.liveness`.
 - `rant_node_entities_next(n, peer, ...)` lists what one node offers, `RANT_SELF` for this
-  one. A dropped peer's last known view is served as a ghost.
+  one. A dropped peer's last known view is served as a ghost. A peer that shares nothing
+  with this node lists nothing (docs/discovery.md, Matched peers), unless the node set
+  `opts.fetch_details`.
 - `rant_node_mesh_next` and `rant_node_mesh_find(n, kind, name, &e)` fold the whole mesh:
-  one `RantEntityInfo` per kind and name across every active peer and this node.
+  one `RantEntityInfo` per kind and name across every active matched peer and this node,
+  so a tool that walks the whole mesh sets `opts.fetch_details`.
 
 An entity is never a channel. A function's request and response pair is one function, a
 task's three channels are one task, and a variable's set channel folds in as `writable`.

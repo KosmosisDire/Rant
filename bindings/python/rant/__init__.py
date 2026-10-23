@@ -255,6 +255,7 @@ class MetaSnapshot:
     bp_waited_us: int = 0
     bp_waits: int = 0
     peers: int = 0
+    matched_peers: int = 0
     max_peers: int = 0
     topics: int = 0
     max_topics: int = 0
@@ -293,7 +294,8 @@ class MetaSnapshot:
             s.mem_in_use = int(g("mem_in_use", 0)); s.mem_peak = int(g("mem_peak", 0))
             s.alloc_calls = int(g("alloc_calls", 0)); s.evicted_unsent = int(g("evicted_unsent", 0))
             s.bp_waited_us = int(g("bp_waited_us", 0)); s.bp_waits = int(g("bp_waits", 0))
-            s.peers = int(g("peers", 0)); s.max_peers = int(g("max_peers", 0))
+            s.peers = int(g("peers", 0)); s.matched_peers = int(g("matched_peers", 0))
+            s.max_peers = int(g("max_peers", 0))
             s.topics = int(g("topics", 0)); s.max_topics = int(g("max_topics", 0))
             s.shm_tx = int(g("shm_tx", 0)); s.shm_rx = int(g("shm_rx", 0))
             s.last_error = int(g("last_error", 0)); s.last_error_text = g("last_error_text", "") or ""
@@ -1851,7 +1853,8 @@ class QueueStats(_typing.NamedTuple):
 @_dataclasses.dataclass
 class Peer:
     """One discovered peer, from node.reflection.peers(). A dropped peer stays listed, so
-        gate on active. rtt_samples 0 = no round trip estimate yet."""
+        gate on active. rtt_samples 0 = no round trip estimate yet, fragment_size 0 = it
+        shares nothing with this node."""
     id: int
     uuid: bytes
     name: str

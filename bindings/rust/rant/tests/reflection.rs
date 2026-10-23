@@ -78,6 +78,7 @@ fn meta_snapshots_a_peer() {
     assert_eq!(snap.provider, peer.id);
     assert_eq!(snap.node.name, "meta_a");
     assert!(snap.node.uptime_us > 0 && snap.node.mem_in_use > 0, "{:?}", snap.node);
+    assert!(snap.node.matched_peers >= 1 && snap.node.matched_peers <= snap.node.max_peers, "{:?}", snap.node);
     assert!(snap.info.contains_key("node") && snap.info.contains_key("topics"));
 
     let only_node = block_on(r.meta_async(peer.id, MetaSections::NODE).unwrap()).unwrap();

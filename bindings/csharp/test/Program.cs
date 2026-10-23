@@ -1370,6 +1370,7 @@ static class Program
         Check("the peer is known", aId != 0);
         var snap = b.Reflection.Meta(aId, MetaSection.All, 2000);
         Check("blocking meta names the peer", snap.Name == "rsrv");
+        Check("meta counts the matched peers", snap.MatchedPeers >= 1 && snap.MatchedPeers <= snap.MaxPeers);
 
         // a payload that does not decode is an event naming the topic, never a silent drop
         RantEvent decodeEvt = null;

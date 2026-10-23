@@ -130,7 +130,7 @@ typedef struct {
 typedef struct {
     uint32_t              announce_interval_us; /* RANT_ANNOUNCE_INTERVAL_US */
     uint32_t              peer_timeout_us;   /* drop a peer after this silence, 12 s */
-    uint16_t              max_peers;         /* RANT_MAX_PEERS */
+    uint16_t              max_peers;         /* matched peers held at once, RANT_MAX_PEERS */
 } RantNodeDiscovery;
 
 /* The one event type, fired by every layer. Four lifecycle kinds, RANT_ERROR, whose .error

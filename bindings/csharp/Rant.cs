@@ -1090,7 +1090,7 @@ namespace Rant
         public uint AnnounceIntervalUs;
         /// <summary>Drop a peer after this many microseconds of silence, 0 = 12 s.</summary>
         public uint PeerTimeoutUs;
-        /// <summary>The peers this node tracks at once, 0 = 16.</summary>
+        /// <summary>The matched peers this node holds at once, 0 = 16.</summary>
         public ushort MaxPeers;
         /// <summary>ServiceThread starts the C service thread at construction and callbacks
         /// fire on it. Manual leaves the loop to your Poll() calls, so they fire there.
@@ -2206,9 +2206,11 @@ namespace Rant
         public ulong BpWaitedUs;
         /// <summary>How many reliable sends paused for a slow subscriber.</summary>
         public ulong BpWaits;
-        /// <summary>The peers the node knows.</summary>
+        /// <summary>The active peers the node hears, matched or not.</summary>
         public ulong Peers;
-        /// <summary>The peers the node can track.</summary>
+        /// <summary>The peers holding a slot, the ones the peers section lists.</summary>
+        public ulong MatchedPeers;
+        /// <summary>The slots, the most matched peers the node holds now.</summary>
         public ulong MaxPeers;
         /// <summary>The node's own topics, the built in ones left out.</summary>
         public ulong Topics;
@@ -2265,7 +2267,8 @@ namespace Rant
                 s.MemInUse = U(node, "mem_in_use"); s.MemPeak = U(node, "mem_peak");
                 s.AllocCalls = U(node, "alloc_calls"); s.EvictedUnsent = U(node, "evicted_unsent");
                 s.BpWaitedUs = U(node, "bp_waited_us"); s.BpWaits = U(node, "bp_waits");
-                s.Peers = U(node, "peers"); s.MaxPeers = U(node, "max_peers");
+                s.Peers = U(node, "peers"); s.MatchedPeers = U(node, "matched_peers");
+                s.MaxPeers = U(node, "max_peers");
                 s.Topics = U(node, "topics"); s.MaxTopics = U(node, "max_topics");
                 s.ShmTx = U(node, "shm_tx"); s.ShmRx = U(node, "shm_rx");
                 s.LastError = U(node, "last_error"); s.LastErrorText = S(node, "last_error_text");
@@ -2484,7 +2487,7 @@ namespace Rant
         public uint Epoch;
         /// <summary>True while it advertises newer state than this node holds.</summary>
         public bool CatchingUp;
-        /// <summary>Its UDP payload bytes per fragment.</summary>
+        /// <summary>Its UDP payload bytes per fragment, 0 while it shares nothing with this node.</summary>
         public ushort FragmentSize;
         /// <summary>The smoothed round trip in microseconds, from reliable traffic.</summary>
         public uint RttUs;

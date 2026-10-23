@@ -68,9 +68,9 @@ options! {
         send_buffer_bytes: u32 = 0,
         /// How often the node announces itself. Zero = 3 s.
         announce_interval: Duration = Duration::ZERO,
-        /// Drop a peer after this silence. Zero = 4 announce intervals.
+        /// Drop a peer after this silence. Zero = 12 s.
         peer_timeout: Duration = Duration::ZERO,
-        /// Peers the table holds. 0 = 16.
+        /// Matched peers held at once. 0 = 16.
         max_peers: u16 = 0,
         /// Static mode: the node runs inside one block of this many bytes taken at open,
         /// with no growth and no shared memory, and the open fails when it is too small.

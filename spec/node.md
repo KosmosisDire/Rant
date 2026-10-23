@@ -356,9 +356,10 @@ stack.
 queue after creation, the one handle queue that changes. A binding sets it before widening
 the role, so the catch up replay parks rather than landing inline.
 
-`@rant/meta` is one handle carrying both sides: PUBSUB channels, a handler plus a pending
-list, directed requests so a call aimed at one peer never wakes the rest, keep_last 2
-rings, created with `.multi`. The request is an optional 4 byte section mask (NODE, PROC,
+`@rant/meta` is one handle carrying both sides: the answering side advertised from open and
+the asking side once the app takes the handle (spec/patterns.md, The meta function), a
+handler plus a pending list, directed requests so a call aimed at one peer never wakes the
+rest, keep_last 2 rings, created with `.multi`. The request is an optional 4 byte section mask (NODE, PROC,
 TOPICS, PEERS, empty = all). The response is `RantMeta { info: map }` with node, proc,
 topics and peers sections. The peers section lists the peers holding a slot, so a small
 node's answer stays small on a big mesh, and the node section counts them as

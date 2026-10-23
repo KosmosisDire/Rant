@@ -147,6 +147,7 @@ export interface NodeStats {
     backpressureWaitedUs: number; backpressureWaits: number;
 }
 
+/* fragmentSize is 0 while the peer shares nothing with this node */
 export interface Peer {
     id: number; uuid: string; name: string; address: string; active: boolean; lastHeardUs: number; epoch: number;
     catchingUp: boolean; fragmentSize: number; rttUs: number; rttJitterUs: number; rttMinUs: number; rttSamples: number;

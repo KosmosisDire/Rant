@@ -70,7 +70,7 @@ pub struct Peer {
     pub epoch: u32,
     /// It advertises newer state than this node holds yet.
     pub catching_up: bool,
-    /// Its UDP payload bytes per fragment.
+    /// Its UDP payload bytes per fragment, 0 while it shares nothing with this node.
     pub fragment_size: u16,
     /// The smoothed round trip in microseconds, meaningful once `rtt_samples` is above 0.
     pub rtt_us: u32,
@@ -185,6 +185,7 @@ pub struct MetaNode {
     pub bp_waited_us: u64,
     pub bp_waits: u64,
     pub peers: u64,
+    pub matched_peers: u64,
     pub max_peers: u64,
     pub topics: u64,
     pub max_topics: u64,
@@ -240,6 +241,7 @@ impl MetaSnapshot {
             bp_waited_us: uint(&m, "bp_waited_us"),
             bp_waits: uint(&m, "bp_waits"),
             peers: uint(&m, "peers"),
+            matched_peers: uint(&m, "matched_peers"),
             max_peers: uint(&m, "max_peers"),
             topics: uint(&m, "topics"),
             max_topics: uint(&m, "max_topics"),

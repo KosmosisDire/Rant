@@ -30,7 +30,7 @@ typedef struct {
     uint64_t           last_heard_us;
     uint32_t           epoch;          /* bumps on every reflected change at this peer */
     uint8_t            catching_up;    /* 1 = it advertises newer state than we hold */
-    uint16_t           fragment_size;  /* its advertised UDP fragment size */
+    uint16_t           fragment_size;  /* its advertised UDP fragment size, 0 while unmatched */
     /* the round trip as our reliable traffic measured it, samples 0 = no estimate yet */
     uint32_t         rtt_us;
     uint32_t         rtt_jitter_us;

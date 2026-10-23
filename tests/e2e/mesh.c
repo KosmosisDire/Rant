@@ -237,14 +237,14 @@ static void static_bounded_checks(void){
 }
 
 /* An observer asking a static node for its peers among many gets an answer whose size and
-   cost do not grow with the mesh. */
+   cost do not grow with the mesh, listing and counting only the peer it matched. */
 static void static_meta_peers_checks(void){
     static uint8_t abuf[1u << 20];
     RantAllocator a = rant_allocator_static(abuf, sizeof abuf);
     uint16_t dom = (uint16_t)(TEST_DOMAIN + 5);
     RantNodeOpts ot = ms_opts(dom, 4, 4, 500000), oo = ms_opts(dom, 0, 4, 500000);
     RantNode *T, *O; RantResponse out; uint32_t id; int r = 0;
-    size_t before = 0, after = 0; uint8_t mask[4] = { 8, 0, 0, 0 };     /* RANT_META_PEERS */
+    size_t before = 0, after = 0; uint8_t mask[4] = { 9, 0, 0, 0 };     /* RANT_META_NODE and PEERS */
     T = rant_node_open(&a, "ms-robot", NULL, NULL, &ot);
     O = ms_heap("ms-observer", &oo);
     CHECK(T && O, "static meta peers: open");
@@ -264,6 +264,15 @@ static void static_meta_peers_checks(void){
     CHECK(r == 1 && out.data.len <= 2048u, "static meta peers: the answer stays small among 30 peers (%u bytes)",
           r == 1 ? (unsigned)out.data.len : 0u);
     CHECK(after <= before + 8192u, "static meta peers: the ask costs the node %ld bytes", (long)after - (long)before);
+    if (r == 1 && out.status == RANT_CALL_OK && out.schema){
+        RantBytes info = rant_get_map(out.data, out.schema, "info");
+        RantValue node, peers, matched, live;
+        int ok = rant_map_get(info, "node", &node) && rant_map_get(info, "peers", &peers)
+              && rant_map_get(node.bytes, "matched_peers", &matched) && rant_map_get(node.bytes, "peers", &live);
+        CHECK(ok && matched.v.u == 1 && peers.count == 1 && live.v.u > 1,
+              "static meta peers: only the observer is matched and listed (matched %u, listed %u, heard %u)",
+              ok ? (unsigned)matched.v.u : 0u, ok ? (unsigned)peers.count : 0u, ok ? (unsigned)live.v.u : 0u);
+    }
 done:
     if (O) rant_node_close(O, 1);
     if (T) rant_node_close(T, 1);
