@@ -641,6 +641,12 @@ static int wf_maybe(const uint8_t *filter, const char *name, uint8_t role){
     s = i_rant_transport_init(mem, sizeof mem, &tc);
     return s && i_rant_transport_want_new_maybe(s, filter, RANT_DISCOVERY_FILTER_BYTES);
 }
+/* The false hit rate of a filter holding a 20 item peer, three bits per item: 60 bits set. */
+static double wf_expected(void){
+    double clear = 1.0, m = 8.0 * RANT_DISCOVERY_FILTER_BYTES; int i;
+    for (i = 0; i < 60; i++) clear *= 1.0 - 1.0 / m;
+    return (1.0 - clear) * (1.0 - clear) * (1.0 - clear);
+}
 static void want_filter_checks(void){
     static uint8_t tmem[1<<17], amem[1<<14];
     static RantAllocator A;
@@ -648,6 +654,7 @@ static void want_filter_checks(void){
             fb[RANT_DISCOVERY_FILTER_BYTES], fc[RANT_DISCOVERY_FILTER_BYTES], none[RANT_DISCOVERY_FILTER_BYTES];
     i_RantTransportConfig tc; i_RantTransportState *st; i_RantTopicDef d;
     char name[16]; int k, missed = 0, wrong = 0, hits = 0;
+    double p = wf_expected();
     wf_filter(pubs, NULL, 20, RANT_PUB_ONLY);
     wf_filter(subs, NULL, 20, RANT_SUB_ONLY);
     for (k = 0; k < 20; k++){
@@ -656,12 +663,13 @@ static void want_filter_checks(void){
         wrong  += wf_maybe(pubs, name, RANT_PUB_ONLY) + wf_maybe(subs, name, RANT_SUB_ONLY);
     }
     CHECK(missed == 0, "want filter: every pairing a peer takes is found, both sides (%d missed)", missed);
-    CHECK(wrong <= 1, "want filter: the side counts, a publisher's filter holds no subscriber (%d of 40)", wrong);
+    CHECK(wrong <= 2.0 * 40.0 * p + 2.0, "want filter: the side counts, a publisher's filter holds no subscriber (%d of 40)", wrong);
     for (k = 0; k < 400; k++){
         sprintf(name, "wf/q%03d", k);
         hits += wf_maybe(pubs, name, RANT_SUB_ONLY) + wf_maybe(subs, name, RANT_PUB_ONLY);
     }
-    CHECK(hits < 24, "want filter: a name a small peer lacks rarely hits (%d of 800, near 1%% expected)", hits);
+    CHECK(hits <= 2.0 * 800.0 * p + 8.0, "want filter: a name a small peer lacks rarely hits (%d of 800, %.1f%% expected)",
+          hits, 100.0 * p);
 
     wf_filter(fa, "wf/a", 0, RANT_SUB_ONLY);
     wf_filter(fb, "wf/b", 0, RANT_SUB_ONLY);

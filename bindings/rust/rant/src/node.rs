@@ -130,8 +130,9 @@ impl NodeOptions {
         self
     }
 
-    /// How long a send that would reach nobody waits for a match still resolving. Zero
-    /// never waits and raises an UnmatchedSend error instead. The default is 1 s.
+    /// How long a send waits for matches still resolving, so it reaches every peer that
+    /// wants it. Zero never waits, and a send that reaches nobody raises an UnmatchedSend
+    /// error. The default is 1 s.
     pub fn match_wait(mut self, wait: Duration) -> Self {
         self.match_wait = Some(wait);
         self

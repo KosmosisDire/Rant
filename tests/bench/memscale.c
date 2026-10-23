@@ -123,6 +123,8 @@ static uint64_t ms_bulk_grid(void){
 
 int memscale_main(void){
     uint64_t steady;
+    const char *env = getenv("RANT_TEST_DOMAIN");   /* ctest's block: two runs on one domain match each other */
+    if (env && *env) ms_domain = (unsigned)strtoul(env, NULL, 10);
     printf("Rant allocator scale test (in process, reliable, loopback)\n");
     printf("peak = live message buffer bytes, warm and steady_alloc = heap allocations (pub and subs), cold and warm_us = send call time\n");
     steady = ms_grid(1);   /* the allocation relevant path */

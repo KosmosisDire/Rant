@@ -65,8 +65,6 @@ void test_on_event(const RantEvent *ev);
 
 /* 1 when e is a builtin under @rant/. Unfetched, it is known only by its primary hash */
 int test_builtin(const RantEntityInfo *e);
-/* The first UDP port from port up that binds now. Another program may hold the derived one */
-uint16_t test_free_port(uint16_t port);
 /* Heap page sources that tag their pages, for nodes on two pools each. A page another source
    is asked to free is counted in test_page_foreign and kept, so a block crossing pools shows */
 #define TEST_PAGE_SOURCES 4

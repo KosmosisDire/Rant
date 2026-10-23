@@ -396,7 +396,9 @@ static void slot_back_checks(void){
     Y = ms_heap("ms-slot-y", &oy);
     if (Y){ rant_node_create_topic(Y, "ms/slot", RANT_SUB_ONLY, NULL, NULL); rant_node_start(Y); }
     MS_WAIT_UNTIL(6000, pub && rant_topic_match_count(pub) == 1);
-    CHECK(pub && rant_topic_match_count(pub) == 1 && X && ms_liveness(T, "ms-slot-x") == RANT_PEER_ACTIVE,
+    /* with a record per slot only, the first is forgotten to make room */
+    CHECK(pub && rant_topic_match_count(pub) == 1 && X
+          && (RANT_RECORDS_PER_PEER < 2 || ms_liveness(T, "ms-slot-x") == RANT_PEER_ACTIVE),
           "slot back: the next subscriber gets the slot while the first lives (matched %d)",
           pub ? rant_topic_match_count(pub) : 0);
     if (Y) rant_node_close(Y, 1);
@@ -426,7 +428,7 @@ static void crowd_late_match_checks(void){
     L = ms_heap("ms-late-sub", &ol);
     if (L){ rant_node_create_topic(L, "ms/late", RANT_SUB_ONLY, NULL, NULL); rant_node_start(L); }
     MS_WAIT_UNTIL(6000, pub && rant_topic_match_count(pub) == 1);
-    CHECK(known == 8 && pub && rant_topic_match_count(pub) == 1 && et.refused == 0,
+    CHECK(known == 2 * (int)RANT_RECORDS_PER_PEER && pub && rant_topic_match_count(pub) == 1 && et.refused == 0,
           "crowd late match: the late subscriber matched, nobody turned away (known %d, matched %d, refused %lld)",
           known, pub ? rant_topic_match_count(pub) : 0, et.refused);
     if (L) rant_node_close(L, 1);
@@ -452,7 +454,8 @@ static void static_bulk_checks(void){
     ot.user_data = &et; ot.bulk = &b;
     T = rant_node_open(&a, "ms-bulk", NULL, ms_on_event, &ot);
     if (T) rant_node_mem_stats(T, &open, NULL, NULL);
-    CHECK(T && U && open + 1024u <= whole, "static bulk: opens %ld bytes smaller than without a bulk",
+    CHECK(T && U && open + 2u * RANT_RECORDS_PER_PEER * sizeof(i_RantDiscoveryRecord) <= whole,
+          "static bulk: opens %ld bytes smaller than without a bulk",
           (long)whole - (long)open);
     if (!T) return;
     pub = rant_node_create_topic(T, "ms/bulk", RANT_PUB_ONLY, NULL, NULL);
@@ -466,7 +469,7 @@ static void static_bulk_checks(void){
     ms_wait(1000);
     rant_node_mem_stats(T, &m30, NULL, NULL);
     known = ms_active(T);
-    CHECK(m30 <= m10 + 2048u && known == 8, "static bulk: 20 more peers cost the main %ld bytes (known %d)",
+    CHECK(m30 <= m10 + 2048u && known == 2 * (int)RANT_RECORDS_PER_PEER, "static bulk: 20 more peers cost the main %ld bytes (known %d)",
           (long)m30 - (long)m10, known);
     L = ms_heap("ms-bulk-sub", &ol);
     if (L){ rant_node_create_topic(L, "ms/bulk", RANT_SUB_ONLY, NULL, NULL); (void)rant_node_meta_function(L); rant_node_start(L); }

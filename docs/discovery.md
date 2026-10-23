@@ -18,6 +18,9 @@ Every node of the domain that this node hears is a peer, whatever its topics.
   position and the writer fills only the gap. A restarted node is a new peer and gets
   `catch_up`.
 - A dropped peer silent for 2 minutes, or one that closed, is GONE.
+- A node that forgets a peer for room (Matched peers below) fires `RANT_PEER_DOWN` for it
+  though it still runs, and `RANT_PEER_UP` once it keeps it again. The peer list shows the
+  same.
 
 ## Matched peers
 
@@ -50,6 +53,8 @@ dropped peer is forgotten, and with none the newcomer:
 
 - A forgotten peer is judged each time its topic list passes by, and kept only when it
   matches, in the place of the oldest peer that matches nothing.
+- A peer that reaches this node only through seed copies is kept in the place of one the
+  multicast group reaches, since only its record's copies carry this node's changes to it.
 - The node holds a `directory_partial` warning while it forgets peers (docs/node.md).
 
 ## Interfaces

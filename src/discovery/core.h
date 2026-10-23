@@ -32,7 +32,7 @@ extern "C" {
 #define RANT_DISCOVERY_FLAG_UNI  0x04u   /* a copy by unicast: copy your announces back */
 #define RANT_DISCOVERY_FLAG_ALL  0x08u   /* an observer's solicit: every peer answers at once */
 #define RANT_DISCOVERY_FLAG_BLOB 0x10u   /* the overlay follows the name, maybe empty */
-#define RANT_DISCOVERY_FLAG_ONE  0x20u   /* a targeted send: a REQ is answered at once, no copies */
+#define RANT_DISCOVERY_FLAG_ONE  0x20u   /* a targeted send or a plain copy: a REQ is answered at once, no copies */
 
 typedef struct {
     uint8_t        flags;
@@ -208,8 +208,10 @@ uint16_t       i_rant_discovery_record_cap(const i_RantDiscoveryState *st);
  * when the copy must carry UNI: the record heard us by unicast lately, so it may hear no group. */
 int            i_rant_discovery_copy_addr(const i_RantDiscoveryState *st, uint16_t i,
                                       RantAddr *out, int *uni);
-/* Sets or clears UNI in a built datagram, per copy of one announce. */
-void           i_rant_discovery_mark_copy(uint8_t *datagram, size_t len, int uni);
+/* The marks of one announce per destination: the group's as built, UNI, or ONE for a plain
+ * copy, which goes only to a slotted peer and so says its sender holds our blob. */
+typedef enum { I_RANT_COPY_GROUP = 0, I_RANT_COPY_UNI, I_RANT_COPY_PLAIN } i_RantCopyMark;
+void           i_rant_discovery_mark_copy(uint8_t *datagram, size_t len, i_RantCopyMark mark);
 /* A source this node heard but cannot take as a peer: another wire version (value is its
  * version), a match with no slot (RANT_E_PEER_REFUSED) or a blob too big (value is its bytes). */
 #ifndef RANT_DISCOVERY_TROUBLE_MAX

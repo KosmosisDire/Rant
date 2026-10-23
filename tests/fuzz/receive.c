@@ -24,11 +24,11 @@ static void rx_on_request(RantRequest *req, void *user){
 
 /* the node under test: a typed reliable subscription, a raw topic, a function and a variable.
    Shared memory is off, so a same host peer's payloads ride the datagrams too */
-static RantNode *rx_open(RantAllocator *a){
+static RantNode *rx_open(RantAllocator *a, uint16_t max_peers){
     RantNodeOpts o;
     RantNode *n;
     memset(&o, 0, sizeof o);
-    o.domain = FUZZ_RX_DOMAIN; o.disable_shm = 1; o.discovery.max_peers = 8;
+    o.domain = FUZZ_RX_DOMAIN; o.disable_shm = 1; o.discovery.max_peers = max_peers;
     o.net.multicast_interface = "127.0.0.1";
     n = rant_node_open(a, "fuzz-rx", rx_on_message, NULL, &o);
     if (!n) return NULL;
@@ -66,26 +66,35 @@ static void reflect(RantNode *n){
     }
 }
 
+/* Each chunk goes to a growing node and to one on a fixed pool with one slot and four
+   records, whose directory the input's peers overflow: strangers and the loose queue */
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size){
     static const uint8_t lo[4] = { 127, 0, 0, 1 };
-    RantAllocator a = rant_allocator_heap(0);
+    static uint8_t small_mem[1u << 20];
+    RantAllocator a = rant_allocator_heap(0), sa = rant_allocator_static(small_mem, sizeof small_mem);
     FuzzIn in;
     const uint8_t *c;
     size_t n;
-    RantNode *node;
+    RantNode *node[2];
+    int k;
     wire_tap_write(&wire_tap.isolate, 1);
-    node = rx_open(&a);
-    FUZZ_REQUIRE(node != NULL);
+    node[0] = rx_open(&a, 8);
+    node[1] = rx_open(&sa, 1);
+    FUZZ_REQUIRE(node[0] != NULL && node[1] != NULL);
     in.p = data; in.left = size;
     while (fuzz_chunk(&in, &c, &n)){
         if (n < 2) continue;
-        rant_node_lock(node);
-        i_rant_node_rx_one(node, node->fd, c + 2, n - 2, lo, (uint16_t)(c[0] | (c[1] << 8)));
-        rant_node_unlock(node);
+        for (k = 0; k < 2; k++){
+            rant_node_lock(node[k]);
+            i_rant_node_rx_one(node[k], node[k]->fd, c + 2, n - 2, lo, (uint16_t)(c[0] | (c[1] << 8)));
+            rant_node_unlock(node[k]);
+        }
     }
-    rant_node_poll(node, 0);           /* timers, detail requests and repairs, all vanish */
-    reflect(node);
-    rant_node_close(node, 0);
+    for (k = 0; k < 2; k++){
+        rant_node_poll(node[k], 0);    /* timers, detail requests and repairs, all vanish */
+        reflect(node[k]);
+        rant_node_close(node[k], 0);
+    }
     rant_allocator_reset(&a);
     wire_tap_write(&wire_tap.isolate, 0);
     return 0;
@@ -120,6 +129,46 @@ static uint32_t image(const RantSchema *s, uint8_t *buf, size_t cap, size_t byte
 
 static void on_response(const RantResponse *r){ (void)r; }
 
+/* The second seed: seven peers that share nothing with the node, the last an observer,
+   open around it and leave. They outnumber the small node's records, and their fetches and
+   the observer's solicit reach it from sources it forgot */
+#define FUZZ_CROWD 7
+static void crowd_seed(FuzzEmit emit){
+    RantAllocator ra = rant_allocator_heap(0), ca[FUZZ_CROWD];
+    RantNode *rx, *crowd[FUZZ_CROWD];
+    uint64_t end;
+    int k;
+    g_session.len = 0;
+    rx = rx_open(&ra, 8);
+    FUZZ_REQUIRE(rx != NULL);
+    g_rx_data = (long long)rx->fd;
+    g_rx_disc = (long long)rx->discovery->fd;
+    wire_tap_on_recv = capture;
+    for (k = 0; k < FUZZ_CROWD; k++){
+        RantNodeOpts o; char nm[16], tp[16];
+        memset(&o, 0, sizeof o);
+        o.domain = FUZZ_RX_DOMAIN; o.disable_shm = 1; o.discovery.max_peers = 8;
+        o.net.multicast_interface = "127.0.0.1";
+        o.fetch_details = (uint8_t)(k == FUZZ_CROWD - 1);
+        sprintf(nm, "fuzz-c%d", k); sprintf(tp, "fuzz/c%d", k);
+        ca[k] = rant_allocator_heap(0);
+        crowd[k] = rant_node_open(&ca[k], nm, NULL, NULL, &o);
+        if (crowd[k]) rant_node_create_topic(crowd[k], tp, RANT_PUB_ONLY, NULL, NULL);
+    }
+    for (end = i_rant_plat_now_us() + 800000u; i_rant_plat_now_us() < end; ){
+        rant_node_poll(rx, 1);
+        for (k = 0; k < FUZZ_CROWD; k++) if (crowd[k]) rant_node_poll(crowd[k], 0);
+    }
+    for (k = 0; k < FUZZ_CROWD; k++) if (crowd[k]) rant_node_close(crowd[k], 1);
+    test_pump(rx, NULL, 50);
+    wire_tap_on_recv = NULL;
+    rant_node_close(rx, 0);
+    for (k = 0; k < FUZZ_CROWD; k++) rant_allocator_reset(&ca[k]);
+    rant_allocator_reset(&ra);
+    FUZZ_REQUIRE(g_session.len > 0);
+    emit(g_session.buf, g_session.len);
+}
+
 void fuzz_seeds(FuzzEmit emit){
     RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0);
     RantNodeOpts o;
@@ -130,7 +179,7 @@ void fuzz_seeds(FuzzEmit emit){
     static uint8_t buf[8192];
     uint32_t len;
     g_session.len = 0;
-    rx = rx_open(&aa);
+    rx = rx_open(&aa, 8);
     memset(&o, 0, sizeof o);
     o.domain = FUZZ_RX_DOMAIN; o.disable_shm = 1; o.discovery.max_peers = 8;
     o.net.multicast_interface = "127.0.0.1";
@@ -171,4 +220,5 @@ void fuzz_seeds(FuzzEmit emit){
     rant_allocator_reset(&ba);
     FUZZ_REQUIRE(g_session.len > 0);
     emit(g_session.buf, g_session.len);
+    crowd_seed(emit);
 }

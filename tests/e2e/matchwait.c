@@ -18,27 +18,36 @@ static void mw_on_event(const RantEvent *ev){
     if (ev->kind == RANT_ERROR && ev->error == RANT_E_UNMATCHED_SEND) test_atomic_add(&mw_unmatched, 1);
 }
 
+/* (e)'s pair of subscribers, and the one a helper thread starts late */
+static long long mw_part_got[2];
+static RantNode *mw_part_node;
+static void mw_part_message(const RantMsg *m){ test_atomic_add((long long*)m->user, 1); }
+static void mw_part_start(void *arg){ (void)arg; test_sleep_ms(300); rant_node_start(mw_part_node); }
+
+/* The data port a node bound, which the tap drops by. Read after the open, so no other
+   program can take it first. */
+static uint16_t mw_port(const RantNode *n){ return i_rant_plat_local_port(n->fd); }
+
 static void matchwait_checks(void){
     RantAddr seed; int t;
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
 
     /* (a) WRITER-AUTHORITATIVE HEAL: B never receives DETAIL_RESPs, so it cannot verify A
        while A matches B. Unblocking lets B verify and repair must deliver the original sample. */
-    { /* a fixed port, only so the tap can drop by port. The domain base keeps parallel
-         programs apart */
-      const uint16_t MW_PORT = test_free_port((uint16_t)(40000u + test_domain_base % 20000u));
+    { uint16_t MW_PORT = 0;
       RantAllocator aa = rant_allocator_heap(0);
       RantAllocator ba = rant_allocator_heap(0);
       RantNodeOpts ao, bo; RantNode *A, *B; RantTopic *at=NULL, *bt=NULL;
       memset(&bo,0,sizeof bo); bo.domain=TEST_DOMAIN+24; bo.disable_shm=1; bo.discovery.max_peers=4;
       bo.discovery.announce_interval_us=200000;
       bo.net.multicast_interface="127.0.0.1"; bo.net.seed_peers=&seed; bo.net.n_seed_peers=1;
-      ao=bo; bo.net.data_port=MW_PORT;
+      ao=bo;
       mw_recv=0; mw_lost=0; mw_last[0]=0;
       B = rant_node_open(&ba, "mw-b", mw_on_message, mw_on_event, &bo);
-      CHECK(B!=NULL, "matchwait: sub node opens (is port %d free?)", (int)MW_PORT);
+      CHECK(B!=NULL, "matchwait: sub node opens");
       if (B) bt = rant_node_create_topic(B, "mw-auth", RANT_SUB_ONLY, NULL,
                       &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
+      if (B) MW_PORT = mw_port(B);
       wire_tap_write(&wire_tap.drop_detail_resp_port, MW_PORT);   /* B stays PENDING on every candidate */
       A = rant_node_open(&aa, "mw-a", NULL, NULL, &ao);
       at = A ? rant_node_create_topic(A, "mw-auth", RANT_PUB_ONLY, NULL,
@@ -78,21 +87,20 @@ static void matchwait_checks(void){
     /* (a2) THE WINDOW: A never receives B's DETAIL_RESPs, so B stays a candidate forever. The
        wait bridges A's own coming up only: one window after the create, then no send waits,
        and a subscriber that appears later never blocks a send at all. */
-    { const uint16_t MW_PORT2 = test_free_port((uint16_t)(40000u + (test_domain_base + 1u) % 20000u));
-      RantAllocator aa = rant_allocator_heap(0);
+    { RantAllocator aa = rant_allocator_heap(0);
       RantAllocator ba = rant_allocator_heap(0);
       RantNodeOpts ao, bo; RantNode *A, *B; RantTopic *poison=NULL, *late=NULL;
       memset(&bo,0,sizeof bo); bo.domain=TEST_DOMAIN+13; bo.disable_shm=1; bo.discovery.max_peers=4;
       bo.discovery.announce_interval_us=200000;
       bo.net.multicast_interface="127.0.0.1"; bo.net.seed_peers=&seed; bo.net.n_seed_peers=1;
-      ao=bo; ao.net.data_port=MW_PORT2; ao.match_wait_ms=300;
+      ao=bo; ao.match_wait_ms=300;
       mw_unmatched=0;
       B = rant_node_open(&ba, "mw-wb", mw_on_message, mw_on_event, &bo);
       if (B) (void)rant_node_create_topic(B, "mw-poison", RANT_SUB_ONLY, NULL, NULL);
       if (B) rant_node_start(B);
-      wire_tap_write(&wire_tap.drop_detail_resp_port, MW_PORT2);
       A = rant_node_open(&aa, "mw-wa", NULL, mw_on_event, &ao);
-      CHECK(A && B, "matchwait: window pair up (is port %d free?)", (int)MW_PORT2);
+      if (A) wire_tap_write(&wire_tap.drop_detail_resp_port, mw_port(A));   /* before A's first poll */
+      CHECK(A && B, "matchwait: window pair up");
       if (A && B){
           uint64_t t0, first, worst = 0;
           poison = rant_node_create_topic(A, "mw-poison", RANT_PUB_ONLY, NULL, NULL);
@@ -100,8 +108,9 @@ static void matchwait_checks(void){
           t0 = i_rant_plat_now_us();
           (void)rant_topic_send(poison, rant_bytes("x",1), NULL);
           first = i_rant_plat_now_us() - t0;
-          CHECK(first >= 100000u && first < 600000u,
-                   "matchwait: the first send waits out the window once (%.0f ms)", first/1000.0);
+          CHECK(first >= 100000u && first < 600000u && test_atomic_load(&mw_unmatched) == 1,
+                   "matchwait: the first send waits out the window once, and reaching nobody says so (%.0f ms, %lld)",
+                   first/1000.0, test_atomic_load(&mw_unmatched));
           for (t=0;t<5;t++){
               uint64_t s0 = i_rant_plat_now_us(), dt;
               (void)rant_topic_send(poison, rant_bytes("x",1), NULL);
@@ -175,6 +184,87 @@ static void matchwait_checks(void){
       if (A) rant_node_close(A,1);
       if (B) rant_node_close(B,1);
       rant_allocator_reset(&aa); rant_allocator_reset(&ba);
+    }
+#endif
+
+#ifdef RANT_THREADS
+    /* (e) A PARTIAL MATCH: one subscriber matches at once, another answers the publisher's
+       fetch only 300 ms later. The first send waits for it, so it reaches both. */
+    { RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0), ca = rant_allocator_heap(0);
+      RantNodeOpts o; RantNode *A, *B, *C; RantTopic *at = NULL, *bt = NULL, *ct = NULL;
+      i_RantThread later; int started = 0;
+      memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+27; o.disable_shm=1; o.discovery.max_peers=4;
+      o.discovery.announce_interval_us=200000;
+      o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+      mw_part_got[0] = mw_part_got[1] = 0;
+      o.user_data = &mw_part_got[0];
+      B = rant_node_open(&ba, "mw-part-b", mw_part_message, NULL, &o);
+      o.user_data = &mw_part_got[1];
+      C = rant_node_open(&ca, "mw-part-c", mw_part_message, NULL, &o);
+      o.user_data = NULL;
+      A = rant_node_open(&aa, "mw-part-a", NULL, NULL, &o);
+      if (B) bt = rant_node_create_topic(B, "mw-part", RANT_SUB_ONLY, NULL, &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
+      if (C) ct = rant_node_create_topic(C, "mw-part", RANT_SUB_ONLY, NULL, &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
+      CHECK(A && B && C && bt && ct, "matchwait: partial trio up");
+      if (A && B && C && bt && ct){
+          rant_node_start(A); rant_node_start(B);
+          for (t = 0; t < 150 && i_rant_discovery_peer_count(i_rant_discovery_state(A->discovery)) < 2; t++)
+              rant_node_poll(C, 10);           /* C is heard, then goes quiet until it starts */
+          for (t = 0; t < 100; t++) rant_node_poll(C, 10);
+          mw_part_node = C;
+          started = i_rant_plat_thread_start(&later, mw_part_start, NULL);
+          at = rant_node_create_topic(A, "mw-part", RANT_PUB_ONLY, NULL, &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
+          WAIT_UNTIL(3000, at && rant_topic_match_count(at) >= 1);
+          CHECK(at && rant_topic_match_count(at) == 1 && test_atomic_load(&mw_part_got[1]) == 0,
+                "matchwait: one subscriber matched, the other still answering (%d)", at ? rant_topic_match_count(at) : -1);
+          if (at) rant_topic_send(at, rant_bytes("partial", 7), NULL);
+          WAIT_UNTIL(3000, test_atomic_load(&mw_part_got[0]) && test_atomic_load(&mw_part_got[1]));
+          CHECK(test_atomic_load(&mw_part_got[0]) == 1 && test_atomic_load(&mw_part_got[1]) == 1,
+                "matchwait: the first send waits for the one still answering and reaches both (%lld, %lld)",
+                test_atomic_load(&mw_part_got[0]), test_atomic_load(&mw_part_got[1]));
+      }
+      if (started) i_rant_plat_thread_join(&later);
+      if (A) rant_node_close(A,1);
+      if (B) rant_node_close(B,1);
+      if (C) rant_node_close(C,1);
+    }
+
+    /* (f) the one still answering never does: the send waits out the window and reaches the
+       other, which is no unmatched send */
+    { RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0), ca = rant_allocator_heap(0);
+      RantNodeOpts o; RantNode *A, *B, *C; RantTopic *at = NULL, *bt = NULL, *ct = NULL;
+      uint64_t t0 = 0, took = 0;
+      memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+28; o.disable_shm=1; o.discovery.max_peers=4;
+      o.discovery.announce_interval_us=200000;
+      o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+      mw_part_got[0] = mw_part_got[1] = 0; mw_unmatched = 0;
+      o.user_data = &mw_part_got[0];
+      B = rant_node_open(&ba, "mw-mute-b", mw_part_message, NULL, &o);
+      o.user_data = &mw_part_got[1];
+      C = rant_node_open(&ca, "mw-mute-c", mw_part_message, NULL, &o);
+      o.user_data = NULL; o.match_wait_ms = 300;    /* ends while the silent one's asks still run */
+      A = rant_node_open(&aa, "mw-mute-a", NULL, mw_on_event, &o);
+      if (B) bt = rant_node_create_topic(B, "mw-mute", RANT_SUB_ONLY, NULL, &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
+      if (C) ct = rant_node_create_topic(C, "mw-mute", RANT_SUB_ONLY, NULL, &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
+      CHECK(A && B && C && bt && ct, "matchwait: mute trio up");
+      if (A && B && C && bt && ct){
+          rant_node_start(A); rant_node_start(B);
+          for (t = 0; t < 150 && i_rant_discovery_peer_count(i_rant_discovery_state(A->discovery)) < 2; t++)
+              rant_node_poll(C, 10);
+          for (t = 0; t < 100; t++) rant_node_poll(C, 10);
+          at = rant_node_create_topic(A, "mw-mute", RANT_PUB_ONLY, NULL, &(RantTopicOpts){ .qos={ .reliability=RANT_RELIABLE } });
+          WAIT_UNTIL(3000, at && rant_topic_match_count(at) >= 1);
+          t0 = i_rant_plat_now_us();
+          if (at) rant_topic_send(at, rant_bytes("mute", 4), NULL);
+          took = i_rant_plat_now_us() - t0;
+          WAIT_UNTIL(2000, test_atomic_load(&mw_part_got[0]));
+          CHECK(test_atomic_load(&mw_part_got[0]) == 1 && test_atomic_load(&mw_unmatched) == 0 && took < 1500000u,
+                "matchwait: one that never answers bounds the wait, and reaching the other is no unmatched send (%lld, %lld, %.0f ms)",
+                test_atomic_load(&mw_part_got[0]), test_atomic_load(&mw_unmatched), took / 1000.0);
+      }
+      if (A) rant_node_close(A,1);
+      if (B) rant_node_close(B,1);
+      if (C) rant_node_close(C,1);
     }
 #endif
 

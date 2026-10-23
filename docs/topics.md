@@ -60,15 +60,15 @@ A send that would overwrite unacked reliable history blocks, bounded by
 ## The first send
 
 Matching a new topic to a peer that is already present takes one announce round trip. A
-send inside that window would reach nobody. So a send that would reach zero subscribers
-while a match is still resolving blocks, bounded by `opts.match_wait_ms` (0 = 1 s,
-negative = off), until every peer that may want the topic has answered and its matches
-formed. The wait only covers the
+send inside that window would miss the peers still matching. So a send while a match is
+still resolving blocks, bounded by `opts.match_wait_ms` (0 = 1 s, negative = off), until
+every peer that may want the topic has answered and its matches formed, even when some
+already matched. The wait only covers the
 topic's own start: it ends `match_wait_ms` after the topic was created, re roled or re
 typed. A subscriber that appears later never blocks a send. A topic that keeps history
 (reliable with `catch_up` above 0) is exempt, since replay covers it. A topic nobody
 advertises interest in proceeds at once. A wait that cannot happen or that times out
-proceeds and fires `RANT_E_UNMATCHED_SEND`.
+proceeds, and fires `RANT_E_UNMATCHED_SEND` when the send reaches nobody.
 
 For a GUI, disable the wait and check `rant_topic_ready(t)` instead. It uses the same
 predicate. `rant_topic_pending_count` is the raw count of unresolved candidates.

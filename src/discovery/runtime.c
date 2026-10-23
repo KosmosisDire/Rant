@@ -55,12 +55,12 @@ static void i_rant_discovery_tx_group(i_RantDiscovery *d, const uint8_t *out, si
 }
 
 /* The group, then copies by unicast: every seed marked UNI, and each record the core says
- * takes one, marked as it says. */
+ * takes one, marked as it says. out is left as built, so a resend reaches the group unmarked. */
 static void i_rant_discovery_tx(i_RantDiscovery *d, uint8_t *out, size_t n_bytes){
     uint16_t s, i, n_recs = i_rant_discovery_record_cap(d->core), discovery_port = d->discovery_port;
     RantAddr addr; int uni;
     i_rant_discovery_tx_group(d, out, n_bytes);
-    i_rant_discovery_mark_copy(out, n_bytes, 1);
+    i_rant_discovery_mark_copy(out, n_bytes, I_RANT_COPY_UNI);
     for (s=0; s<d->n_seeds; s++){
         const RantAddr *seed = &d->seeds[s];
         if (seed->ip_len != 4) continue;
@@ -68,9 +68,10 @@ static void i_rant_discovery_tx(i_RantDiscovery *d, uint8_t *out, size_t n_bytes
     }
     for (i=0; i<n_recs; i++)
         if (i_rant_discovery_copy_addr(d->core, i, &addr, &uni)){
-            i_rant_discovery_mark_copy(out, n_bytes, uni);
+            i_rant_discovery_mark_copy(out, n_bytes, uni ? I_RANT_COPY_UNI : I_RANT_COPY_PLAIN);
             i_rant_discovery_tx_to(d, out, n_bytes, &addr);
         }
+    i_rant_discovery_mark_copy(out, n_bytes, I_RANT_COPY_GROUP);
 }
 
 void i_rant_discovery_feed(i_RantDiscovery *d, const RantAddr *src, RantBytes datagram){

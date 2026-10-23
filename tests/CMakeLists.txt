@@ -189,6 +189,7 @@ set_tests_properties(build.strict PROPERTIES LABELS build TIMEOUT 600)
 # The steady state of a send must not allocate. memscale exits 1 when one did.
 add_test(NAME bench.memscale COMMAND rant_bench memscale)
 set_tests_properties(bench.memscale PROPERTIES LABELS bench TIMEOUT 120)
+rant_test_domain(bench.memscale)
 
 # The layout of every public struct a binding mirrors, written at build time for the layout
 # legs of the C# and Python suites.

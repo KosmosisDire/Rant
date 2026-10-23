@@ -226,9 +226,10 @@ and one that meets it asks us.
 Matching a fresh topic to a present peer costs an announce and detail round trip after
 create. A send in that window would commit to zero subscribers. The node closes the
 window: discovery sends our blob at open and peers answer with theirs, create's replay re fires peer up so detail requests
-queue and the kick sends them, and a send that would reach zero subscribers WHILE a
-candidate is resolving blocks until matching converges, so it reaches every candidate
-that matches and not only the first, bounded by `opts.match_wait_ms`. Resolving means a
+queue and the kick sends them, and a send WHILE a candidate is resolving blocks until
+matching converges, so it reaches every candidate that matches and not only the first,
+bounded by `opts.match_wait_ms`. That holds with some subscribers matched already: a send
+to the first matches alone would be lost to a later one, which joins after it. Resolving means a
 held announce nominates this topic but its verdicts are in flight, a record without a slot
 is being fetched, or the post open gather has not settled. The gather settles on matches
 alone, never peers coming and going, and ends one match window after open at the latest,
@@ -247,8 +248,8 @@ cannot block a send. A subscriber that joins later and wants what it missed uses
 `catch_up`. A disabled wait keeps the default window for the diagnostic.
 
 A wait that cannot happen
-(disabled, or a reentrant send) or that times out proceeds and fires
-`RANT_E_UNMATCHED_SEND`. `rant_topic_ready` shares the exact predicate. A variable
+(disabled, or a reentrant send) or that times out proceeds, and fires
+`RANT_E_UNMATCHED_SEND` when the send reaches nobody. `rant_topic_ready` shares the exact predicate. A variable
 accessor's first write rides the same wait without the send and without the error.
 `e2e.matchwait` pins it.
 

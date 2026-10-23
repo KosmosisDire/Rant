@@ -63,13 +63,13 @@ program in this order.
 | Program | Cases |
 |---|---|
 | `unit.transport` | basics, bulk, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
-| `unit.discovery` | records, migrate, owed, judge, unmatched, filter, forgotten, first_contact, too_big, bulk, wire, change_age, discovery_core, node_core |
+| `unit.discovery` | records, migrate, owed, judge, unmatched, offer, filter, forgotten, churn, first_contact, too_big, bulk, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
 | `unit.tunnel` | hash, handshake, frame, json, batch |
 | `e2e.stream` | stream, scale, named, collision |
-| `e2e.node` | open_fail, bulk_pools, bulk_shm, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups |
+| `e2e.node` | open_fail, bye_marks, bulk_pools, bulk_queued, bulk_shm, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups |
 | `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema |
 | `e2e.detail` | detail_live, interest_external, interest_bulk, filter_fetch |
 | `e2e.shm` | shm_node |
@@ -155,7 +155,8 @@ What each phase pins, grouped by layer.
   250 ms apart, a later announce starts over with one send after a fetch that went
   unanswered, the blob at that version or one too big ends it, and a fetch settles an
   answer owed too. Copies go marked UNI to a record heard by unicast
-  within the peer timeout and plain to a slotted one, none to a dropped one. A silent peer
+  within the peer timeout and plain, marked ONE, to a slotted one, none to a dropped one,
+  and the group's datagram carries neither. A silent peer
   drops within a quarter interval of its timeout, and a change rides one announce.
 - Judge: a peer that meets nothing is known and seen but holds no slot and gets no answer
   or copies, and its blob is judged each time it comes. A match takes a slot and asks back
@@ -165,12 +166,17 @@ What each phase pins, grouped by layer.
   again when heard, a slot given back fetches it at once and its answer takes the slot. A
   loan waits unrefused for a free slot, a match takes a live loan's, rejudge tells a loan
   that now matches and gives back a slot that meets nothing, as replay does for all. A drop
-  is seen for every record and reaches the slot hooks for slotted ones.
+  is seen for every record and reaches the slot hooks for slotted ones. A match given back
+  at its next version is asked no more.
 - Unmatched: a held match judged a loan at a newer version keeps its slot from a match and
   is asked nothing when judged a match again. A refused match and a waiting loan each count a
   seat miss and a wanted slot. A record is pending while its fetch is in flight and no longer
   once the asks ran out. A grown want set fetches the records judged no match, not those
   waiting, and an answer ends the fetch. The uuid is found by id.
+- Offer: a slot given back fetches the first waiting record four times. Once those went
+  unanswered the slot goes to the next, whose answer takes it, and the silent one heard
+  again is refused. A later slot opening passes over the one that never answered, which is
+  fetched once each time it is heard and not after.
 - Filter: a grown want set fetches a record judged no match only when maybe says its filter
   may meet us, and fetches anyway one judged by assumption or advertising past its judged
   blob, without asking maybe. Each judge folds a fresh filter, the answers give filters to
@@ -182,11 +188,21 @@ What each phase pins, grouped by layer.
   its id when no slot is free. A match with no such record is refused under no id. A
   forgotten peer's fetch is answered at once from the loose queue, group solicits spread,
   one reply per asker, and a full queue drops the rest. Partial holds while peers are
-  forgotten and ages out three announce intervals after the last.
+  forgotten and ages out three announce intervals after the last. A source heard by UNI
+  copies takes the record of a peer the group reaches, though that one is younger than
+  another heard by UNI, and is fetched and copied to. It never takes the record of one
+  heard by UNI, a plain copy takes none, and a match takes the oldest heard by UNI when no
+  other is left.
+- Churn: 2000 fresh peers that meet nothing, a tenth of them asking, keep a static core at
+  its 8 records and the loose queue within its bound, with one reply at most per datagram.
+  A match among them still finds a record and a slot, a held match changing its blob at
+  every announce asks nothing and one past a missed version asks, and the partial note ages
+  out once the stream stops.
 - First contact: without a blob it is judged by assumption when its blob changed before our
   last change by the margin, the margin alone before our opening, else fetched, and an age
-  past our uptime never wraps. An observer, a core without a hook and one that forgot a peer
-  for room assume nothing. A refused peer that takes a slot without its blob is still
+  past our uptime never wraps. A plain copy, a header marked ONE, comes from a peer that
+  holds us and asks nothing, so it is fetched. An observer, a core without a hook and one
+  that forgot a peer for room assume nothing. A refused peer that takes a slot without its blob is still
   fetched.
 - Too big: the header keeps the record under its id with no fetch, a newer version is
   fetched once and a too big answer ends it, a grown bound fetches that peer alone and its
@@ -209,7 +225,8 @@ What each phase pins, grouped by layer.
   never PEER_DOWN, and meeting us again takes a slot with no second PEER_UP. A nameless
   announce becomes "unknown-peer". A peer sharing nothing is up for the app with no slot, one
   past the records that shares nothing is forgotten with no event, and one that meets us
-  takes the unmatched record and its refusal for a slot reaches the app.
+  takes the unmatched record and its refusal for a slot reaches the app. A blob buffer
+  that cannot grow keeps the last blob and raises RANT_E_OOM with its bytes.
 - Domain groups: two domains on one host each discover themselves, and no announce of the
   other domain reaches either discovery socket. On Linux this fails without
   `IP_MULTICAST_ALL` off. Other programs' unicast seeds to the discovery port are not counted.
@@ -217,7 +234,11 @@ What each phase pins, grouped by layer.
   leaves the platform balanced. A join the wire tap fails (`fail_join`) unwinds the node
   and `rant_last_error(NULL)` names MCAST_JOIN. An occupied data port collides, since the
   unicast bind takes no reuse, and names RANT_E_BIND with the port and errno. An over
-  long topic name is refused at create and the node stays usable.
+  long topic name is refused at create and the node stays usable. Every open refused for
+  memory, over a sweep of a dynamic main's bound and then of a static bulk's size, is
+  RANT_E_OOM with the bytes its pool refused.
+- BYE marks: a closing node sends its BYE three times from one buffer. Each reaches the
+  group with BYE alone, and each copy to the slotted peer carries ONE.
 - User data forwarding: a shared memory capable node rewraps the transport callbacks, and a
   transport fired event must still reach `on_event` with the app's user data. A crafted
   name collision is the deterministic transport event that proves it.
@@ -225,7 +246,11 @@ What each phase pins, grouped by layer.
   pages. Two 200 kB streams, a queued copy, a 150 kB variable value and the first meta call
   grow the bulks by megabytes and the mains by under 1 kB, the meta answer reports both
   pools, and every page goes back to its own source at close. The main allocator passed as
-  the bulk is one pool. Over shared memory the copy out of the segment lands in the bulk.
+  the bulk is one pool. Over shared memory the copy out of the segment lands in the bulk. A
+  bulk too small for a static node's records refuses the open with OOM and the bytes asked.
+- Bulk queued: three calls made before any provider grow the caller's bulk, not its main.
+  The one answered after its provider matches, the cancelled one and the one with no
+  provider each end, and every page goes back to its own source at close.
 - Dynamic growth: creating topics past the reserve relocates the node into a bigger arena.
   A stream on the original handle loses, duplicates and reorders nothing across it.
 
@@ -399,12 +424,16 @@ What each phase pins, grouped by layer.
 - Republish: a `fetch_details` viewer that judged a new publisher while its own slot was
   retired still receives it once an identical subscriber reuses the slot.
 - Match wait window (Windows): a publisher that never receives a candidate's DETAIL_RESP
-  waits out one window on its first send, then no send waits, and a subscriber that
+  waits out one window on its first send, which reaching nobody fires
+  RANT_E_UNMATCHED_SEND, then no send waits, and a subscriber that
   appears after the window never blocks a send.
 - Match wait: a sample committed after our side matched but before the peer verified us
   heals through reliable repair once its verdict lands, so delivery is writer
   authoritative. A first send waits for an already present subscriber. A disabled wait
-  drops at once but loudly with RANT_E_UNMATCHED_SEND.
+  drops at once but loudly with RANT_E_UNMATCHED_SEND. With one subscriber matched at once
+  and another that answers the fetch 300 ms later, the first send waits and reaches both,
+  and with the other never answering it waits out the window, reaches the one, and fires no
+  RANT_E_UNMATCHED_SEND. The ports the wire tap drops by are the ones the nodes bound.
 
 ### End to end
 
@@ -457,7 +486,8 @@ What each phase pins, grouped by layer.
   survive a control peer flap, entries are tagged with domain and run nonce, workers
   HELLO at startup, and both machines must share a subnet.
 - memscale: steady state must be alloc free and warm sends pay no allocation. The command
-  exits 1 when a steady state send allocated. A last grid gives every node a bulk pool
+  exits 1 when a steady state send allocated. It takes its domains from ctest's block, since
+  two runs on one domain match each other's nodes and allocate for them. A last grid gives every node a bulk pool
   from a counted page source, whose heap takes count as allocations, and shows the main
   peaks flat at every payload size.
 - threadbench: keep_last 64 so the drain guard rather than ack flow control engages, and
@@ -534,7 +564,8 @@ docs/building.md) run the C and C++ entries instrumented.
 - ASan and UBSan pass on Linux and Windows. A leak, an overflow or undefined behaviour stops
   the program, so the entry fails.
 - TSan flags the node lock's reentrancy check (`lock_held`, `lock_owner` in
-  `src/node/runtime.c`), which reads the owner outside the mutex. Only the holder writes
+  `src/node/runtime.c`), which reads the owner outside the mutex, and nothing else in the
+  suite. Only the holder writes
   its id and zeroes it before release, so the check is sound, but TSan fails the threaded
   entries until those reads are atomic, which the platform layer offers only under `RANT_SHM`.
 - Coverage counters update atomically (`-fprofile-update=atomic`), or service threads
@@ -554,11 +585,14 @@ over valid inputs the live code builds. Every build links it with `replay.c` as
 `tests/fuzz/crashes/<name>/`. `RANT_FUZZ` (the `*-fuzz` presets) also links it with libFuzzer
 as `fuzz_<name>`. Fuzzing itself runs by hand, never in CI.
 
-- `receive` opens a node and hands each chunk, a source port and a datagram, to the
-  runtime's own dispatch (`i_rant_node_rx_one`), then polls once and walks the reflection.
-  The wire tap isolates it, so sends vanish and no real datagram arrives, and it runs on
-  domain 65000, which the seed carries. The seed is a recorded session: a peer on loopback
-  matches every entity, publishes a small and a fragmented image, calls, writes and leaves.
+- `receive` opens two nodes and hands each chunk, a source port and a datagram, to the
+  runtime's own dispatch (`i_rant_node_rx_one`) of both, then polls once and walks the
+  reflection. One grows, the other sits on a fixed pool with one slot and four records, so
+  the input's peers overflow its directory into the forgotten tier and the loose queue. The
+  wire tap isolates them, so sends vanish and no real datagram arrives, and they run on
+  domain 65000, which the seeds carry. The seeds are recorded sessions: a peer on loopback
+  matches every entity, publishes a small and a fragmented image, calls, writes and leaves,
+  and seven peers that share nothing, the last an observer, open around the node and leave.
 - `schema` compiles DSL text (first byte even) or parses a peer's wire (odd). Any schema
   reparses to the same hash and validates its default message. A compiled one also names
   every option, reads itself and prints back to the same schema. A wire may hold what text
@@ -570,9 +604,13 @@ as `fuzz_<name>`. Fuzzing itself runs by hand, never in CI.
 - `FUZZ_REQUIRE` states a property beyond not crashing. A failure aborts, which libFuzzer
   saves as a crash.
 - Once a crash is fixed, its input goes to `tests/fuzz/crashes/<name>/` under a name that
-  says what it caught, so every build replays it. A receive input opens with recorded
-  announces, so a `RANT_WIRE_VERSION` bump rewrites their version byte, or the peer is never
-  accepted and the input reaches nothing.
+  says what it caught, so every build replays it. A receive input opens with a recorded
+  session, so a wire change rebuilds each one on a fresh seed, or the peer is never accepted
+  and the input reaches nothing: the seed's chunks up to its first transport chunk (the
+  announces and the detail exchange), then the input's transport chunks with the old peer's
+  source port moved to the seed's. A marker at the condition the fix guards shows the
+  rebuilt input still reaches it, since GCC's UBSan misses a zero offset on NULL and only
+  libFuzzer's malloc limit flags a huge allocation.
 - Found so far, fixed with their inputs saved: a zero length fragment of an empty sample
   offset a NULL buffer, the same empty sample offset NULL again in delivery, a DATA header
   claiming a sample longer than its fragments sized a 3 GB allocation, and a type name with

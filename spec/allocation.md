@@ -46,7 +46,9 @@ static over a PSRAM buffer, or dynamic over `heap_caps_realloc` with `MALLOC_CAP
 main mode sets the node's shape. A static main keeps fixed tables, and takes its record
 array and blob pool from the bulk at open, so the arena keeps only the record chains. A
 dynamic main grows the records and blobs in the bulk. Each pool fails on its own with
-`RANT_E_OOM`, and a failed record growth takes the forgotten tier.
+`RANT_E_OOM`, and a failed record growth takes the forgotten tier. An open refused for
+memory names in `too_big_bytes` the take its pool refused, the arena or a block either core
+takes at init.
 
 Each core takes the second hook beside its first, with the same user:
 `i_RantTransportConfig.bulk`, `i_RantDiscoveryCoreConfig.bulk` and

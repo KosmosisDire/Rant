@@ -212,6 +212,7 @@ struct RantNode {
     /* the node's pools, copied from the caller's allocators at open and reset on close */
     RantAllocator pool;
     RantAllocator bulk;            /* the message sized and cold buffers, when has_bulk */
+    size_t         oom_bytes;      /* the last take a pool refused, which an open failure reports */
     uint8_t        has_bulk;
     uint8_t        alloc_dynamic;
     uint32_t       seat_misses;    /* discovery's count when the table last grew for them */
@@ -256,12 +257,17 @@ struct RantNode {
 /* The node's allocator hook for the transport, schemas and handles: one freeable pool
  * allocation per call, so reset reclaims all. u is the node. */
 static void *i_rant_node_alloc(void *u, void *ptr, size_t size){
-    return rant_allocator_alloc(&((RantNode*)u)->pool, ptr, size);
+    RantNode *n = (RantNode*)u;
+    void *p = rant_allocator_alloc(&n->pool, ptr, size);
+    if (!p && size) n->oom_bytes = size;
+    return p;
 }
 /* The hook for the message sized and cold buffers. spec/allocation.md, Two pools */
 static void *i_rant_node_bulk_alloc(void *u, void *ptr, size_t size){
     RantNode *n = (RantNode*)u;
-    return rant_allocator_alloc(n->has_bulk ? &n->bulk : &n->pool, ptr, size);
+    void *p = rant_allocator_alloc(n->has_bulk ? &n->bulk : &n->pool, ptr, size);
+    if (!p && size) n->oom_bytes = size;
+    return p;
 }
 /* Frees all the node holds. The main pool is copied out first, since its reset frees n. */
 static void i_rant_node_pools_reset(RantNode *n){
@@ -1253,7 +1259,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
 #endif
 
     n->transport = i_rant_transport_init(blocks.transport, blocks.transport_bytes, &tc);
-    if (!n->transport){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, 0); goto fail_threads; }
+    if (!n->transport){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, n->oom_bytes); goto fail_threads; }
 #ifdef RANT_SHM
     {   uint32_t n_segments = (uint32_t)max_topics * RANT_SHM_N_CLASSES; uint32_t i;
         n->shm_n_topics = max_topics;
@@ -1289,7 +1295,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
         cc.oob_capable = n->shm_capable; memcpy(cc.oob_host, n->shm_host, 16);
 #endif
         n->core = i_rant_node_core_init(blocks.node_core, blocks.node_core_bytes, &cc);
-        if (!n->core){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, 0); goto fail_threads; }
+        if (!n->core){ (void)i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, n->oom_bytes); goto fail_threads; }
     }
 
     /* a bridge's session first: the sockets below are the ones it lends */
@@ -1330,9 +1336,9 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     dc.meta = i_rant_node_core_meta(n->core);
     n->discovery = i_rant_discovery_place(blocks.discovery, blocks.discovery_bytes, &dc, &o.net, n->tunnel);
     if (!n->discovery){
-        (void)i_rant_node_open_fail(on_event, o.user_data, i_rant_discovery_last_error(),
-                                    i_rant_discovery_last_os_error(),
-                                    o.net.discovery_port, 0);
+        RantErrorKind why = i_rant_discovery_last_error();
+        (void)i_rant_node_open_fail(on_event, o.user_data, why, i_rant_discovery_last_os_error(),
+                                    o.net.discovery_port, why == RANT_E_OOM ? n->oom_bytes : 0);
         goto fail_sock;
     }
     /* the node core delegates address resolution and per peer scratch to discovery's table */
@@ -2659,11 +2665,14 @@ static int i_rant_node_match_wait_done(RantNode *n, void *ctx, uint64_t now, uin
     i_RantMatchWait *c = (i_RantMatchWait*)ctx;
     *deadline = c->deadline;
     c->matched = i_rant_transport_publisher_match_count(n->transport, c->index);
+    /* past the window the topic reads as converged, so a wait that ran out would never
+       time out: there only a convergence memoized before counts */
+    if (now >= c->deadline) return c->h->resolve_epoch == n->match_epoch;
     return !i_rant_node_topic_unsettled(n, c->h, now);
 }
 
-/* Bounded wait for a forming match before a zero subscriber send commits. Returns the
- * matched count. loud fires RANT_E_UNMATCHED_SEND on timeout, a pattern write passes 0. */
+/* Bounded wait for forming matches before a send commits. Returns the matched count. loud
+ * fires RANT_E_UNMATCHED_SEND on a timeout with none matched, a pattern write passes 0. */
 static int i_rant_node_match_wait(RantNode *n, uint16_t topic_index, RantTopic *h, int loud){
     i_RantMatchWait c; i_RantWait w = { 0 };
     c.h = h; c.index = topic_index; c.matched = 0;
@@ -2671,7 +2680,7 @@ static int i_rant_node_match_wait(RantNode *n, uint16_t topic_index, RantTopic *
     w.done = i_rant_node_match_wait_done; w.ctx = &c;
     w.cv_cap_us = 50000u;   /* re check the clock: gather settling is partly time driven */
     w.pump_ms   = 1;        /* a nested tick: the lock stays held */
-    if (i_rant_node_wait_until(n, &w) == RANT__WAIT_TIMEOUT && loud){
+    if (i_rant_node_wait_until(n, &w) == RANT__WAIT_TIMEOUT && loud && !c.matched){
         RantEvent e; memset(&e, 0, sizeof e);
         e.kind = RANT_ERROR; e.error = RANT_E_UNMATCHED_SEND;
         e.topic = topic_index; e.topic_name = i_rant_node_topic_name(n, topic_index);
@@ -2741,17 +2750,17 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
     size_t len = ts_bytes + cap_bytes + hdr.len + data.len;
     int guarded = 0;   /* the unsent eviction check runs after the wait */
 
-    /* a send to zero subscribers while a match forms waits for it to converge. A topic
-       that retains history is exempt, since its history replays. See spec/interest.md */
-    if (!matched && topic_index < n->max_topics
-        && !(q && q->reliability == RANT_RELIABLE && q->catch_up > 0)){
+    /* a send while matching still forms waits for it to converge, so it reaches every peer
+       that wants it, not only those that matched first. A topic that retains history is
+       exempt, since its history replays. See spec/interest.md */
+    if (topic_index < n->max_topics && !(q && q->reliability == RANT_RELIABLE && q->catch_up > 0)){
         RantTopic *h = n->handles[topic_index];
         if (h && i_rant_role_pubs(h->role)
               && i_rant_node_topic_unsettled(n, h, i_rant_plat_now_us())){
             if (may_wait && n->match_wait_us){
                 matched = i_rant_node_match_wait(n, topic_index, h, 1);
                 q = i_rant_transport_topic_qos(n->transport, topic_index);     /* the arena may move */
-            } else {
+            } else if (!matched){
                 RantEvent e; memset(&e, 0, sizeof e);
                 e.kind = RANT_ERROR; e.error = RANT_E_UNMATCHED_SEND;
                 e.topic = topic_index; e.topic_name = i_rant_node_topic_name(n, topic_index);

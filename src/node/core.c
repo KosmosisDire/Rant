@@ -1394,6 +1394,17 @@ int i_rant_node_core_schema_check(i_RantNodeCore *c, uint32_t peer, uint16_t top
 #endif
 }
 
+/* fires a RANT_ERROR. too_big carries the OOM or meta too big byte count */
+static void i_rant_node_core_fire_error(i_RantNodeCore *c, RantErrorKind err, uint32_t id,
+                            const RantAddr *addr, uint64_t too_big){
+    RantEvent ev;
+    if (!c->on_event) return;
+    memset(&ev, 0, sizeof ev);
+    ev.kind = RANT_ERROR; ev.error = err; ev.peer = id; ev.user = c->user; ev.too_big_bytes = too_big;
+    if (addr){ memcpy(ev.ip, addr->ip, 16); ev.ip_len = addr->ip_len; ev.port = addr->port; }
+    c->on_event(&ev);
+}
+
 /* Rebuilds our overlay from the core's fields. The whole announce must fit one datagram,
    else the bootstrap form goes out and peers page the interest. See spec/interest.md. */
 uint16_t i_rant_node_core_build_meta(i_RantNodeCore *c){
@@ -1403,7 +1414,10 @@ uint16_t i_rant_node_core_build_meta(i_RantNodeCore *c){
     if (external) need = i_rant_transport_meta_bootstrap_size();
     if (need > c->meta_cap){   /* size the blob buffer to the exact content */
         uint8_t *nb = (uint8_t*)c->alloc(c->alloc_user, c->meta_buf, need);
-        if (!nb) return c->meta_len;   /* OOM: keep the previous blob, stale but consistent */
+        if (!nb){   /* the previous blob stays, stale but consistent, and the app hears why */
+            i_rant_node_core_fire_error(c, RANT_E_OOM, 0, NULL, need);
+            return c->meta_len;
+        }
         c->meta_buf = nb; c->meta_cap = need;
     }
     c->meta_len = i_rant_transport_meta_build(c->transport, c->meta_buf, c->meta_cap,
@@ -1455,17 +1469,6 @@ static void i_rant_node_core_fire(i_RantNodeCore *c, RantEventKind kind, uint32_
     if (!c->on_event) return;
     memset(&ev, 0, sizeof ev);
     ev.kind = kind; ev.peer = id; ev.user = c->user;
-    if (addr){ memcpy(ev.ip, addr->ip, 16); ev.ip_len = addr->ip_len; ev.port = addr->port; }
-    c->on_event(&ev);
-}
-
-/* fires a RANT_ERROR. too_big carries the OOM or meta too big byte count */
-static void i_rant_node_core_fire_error(i_RantNodeCore *c, RantErrorKind err, uint32_t id,
-                            const RantAddr *addr, uint64_t too_big){
-    RantEvent ev;
-    if (!c->on_event) return;
-    memset(&ev, 0, sizeof ev);
-    ev.kind = RANT_ERROR; ev.error = err; ev.peer = id; ev.user = c->user; ev.too_big_bytes = too_big;
     if (addr){ memcpy(ev.ip, addr->ip, 16); ev.ip_len = addr->ip_len; ev.port = addr->port; }
     c->on_event(&ev);
 }

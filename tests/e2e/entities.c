@@ -963,8 +963,9 @@ static void rc_partial_checks(void){
     static uint8_t mem[1u << 20];
     RantAllocator da = rant_allocator_static(mem, sizeof mem);
     RantNodeOpts o, d; RantNode *D = NULL, *C[6]; RantAddr seed;
-    char tx[512], nm[24]; uint64_t lv = 0; int k, nd;
+    char tx[512], nm[24], want[32]; uint64_t lv = 0; int k, nd;
     memset(C, 0, sizeof C);
+    snprintf(want, sizeof want, "remembers %u peers", (unsigned)RANT_RECORDS_PER_PEER);   /* one slot's records */
     memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
     memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+47; o.discovery.announce_interval_us=200000;
     o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
@@ -981,7 +982,7 @@ static void rc_partial_checks(void){
     }
     PUMP_UNTIL(D, NULL, 6000, rc_kind(D, "directory_partial", NULL, 0, NULL) == 1);
     nd = rc_kind(D, "directory_partial", tx, sizeof tx, &lv);
-    CHECK(nd == 1 && lv == RANT_LEVEL_WARN && strstr(tx, "remembers 4 peers") && strstr(tx, "raise max_peers")
+    CHECK(nd == 1 && lv == RANT_LEVEL_WARN && strstr(tx, want) && strstr(tx, "raise max_peers")
           && rc_kind(D, "peer_refused", NULL, 0, NULL) == 0,
           "rantpartial: among more peers than it remembers it warns and refuses none (n=%d: %s)", nd, tx);
     for (k = 0; k < 6; k++) if (C[k]) rant_node_close(C[k], 1);

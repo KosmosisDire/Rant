@@ -206,17 +206,6 @@ RantPageFn test_page_source(int k){
 }
 void test_page_clear(void){ memset(test_page_live, 0, sizeof test_page_live); test_page_foreign = 0; }
 
-uint16_t test_free_port(uint16_t port){
-    uint16_t k;
-    for (k = 0; k < 100; k++){
-        i_RantSock s = i_rant_plat_udp_open();
-        int ok = s != RANT_SOCK_BAD && i_rant_plat_bind(s, i_rant_plat_ipv4(127,0,0,1), (uint16_t)(port + k), 0);
-        if (s != RANT_SOCK_BAD) i_rant_plat_close(s);
-        if (ok) return (uint16_t)(port + k);
-    }
-    return port;
-}
-
 void test_setenv(const char *name, const char *value){
 #ifdef _WIN32
     _putenv_s(name, value);     /* an empty value removes it */

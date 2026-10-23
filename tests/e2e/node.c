@@ -76,6 +76,26 @@ static void open_fail_checks(void){
         if (n) rant_node_close(n, 0);
     }
 
+    /* every open refused for memory names the bytes its pool refused, whichever take that was:
+       a dynamic main bounded below what the open takes, then a static bulk too small */
+    {   static uint8_t bulk[1u << 15]; size_t cap; int pass, refused = 0, unnamed = 0;
+        RantNodeOpts o; RantAllocator a, b;
+        memset(&o, 0, sizeof o); o.domain = TEST_DOMAIN; o.net.multicast_interface = "127.0.0.1";
+        for (pass = 0; pass < 2; pass++)
+            for (cap = 1024, n = NULL; !n && cap <= sizeof bulk + (pass ? 0u : (1u << 20)); cap += 256){
+                RantEvent err;
+                if (pass){ a = rant_allocator_static(mem, sizeof mem); b = rant_allocator_static(bulk, cap); o.bulk = &b; }
+                else { a = rant_allocator_heap(0); a.max_bytes = cap; }
+                n = rant_node_open(&a, NULL, NULL, NULL, &o);
+                if (n){ rant_node_close(n, 0); break; }
+                err = rant_last_error(NULL);
+                refused++;
+                unnamed += err.error != RANT_E_OOM || err.too_big_bytes == 0;
+            }
+        CHECK(refused > 0 && unnamed == 0,
+              "open-fail: each of %d opens refused for memory is OOM with the bytes asked (%d without)", refused, unnamed);
+    }
+
     /* after the failed opens a normal open must still succeed (cleanup balanced) */
     {   RantAllocator a = rant_allocator_static(mem, sizeof mem);
         n = rant_node_open(&a, NULL, NULL, NULL,
@@ -372,6 +392,53 @@ static void domaingroup_checks(void){
     rant_allocator_reset(&aa); rant_allocator_reset(&ab); rant_allocator_reset(&ba);
 }
 
+static long long bm_sock_group, bm_sock_data, bm_group, bm_group_marked, bm_copies, bm_copies_one;
+static uint8_t bm_uuid[16]; static uint16_t bm_dom;
+static void bm_on_recv(long long sock, const unsigned char *buf, long len, const struct sockaddr *from){
+    (void)from;
+    if (len < 24 || memcmp(buf, "uDSC", 4) != 0 || !(buf[5] & RANT_DISCOVERY_FLAG_BYE)) return;
+    if ((uint16_t)(buf[6] | (buf[7] << 8)) != bm_dom || memcmp(buf + 8, bm_uuid, 16) != 0) return;
+    if (sock == bm_sock_group){
+        test_atomic_add(&bm_group, 1);
+        if (buf[5] != RANT_DISCOVERY_FLAG_BYE) test_atomic_add(&bm_group_marked, 1);
+    } else if (sock == bm_sock_data){
+        test_atomic_add(&bm_copies, 1);
+        if (buf[5] & RANT_DISCOVERY_FLAG_ONE) test_atomic_add(&bm_copies_one, 1);
+    }
+}
+/* A closing node sends its BYE several times from one buffer. Each to the group carries BYE
+   alone, since a copy's mark is per copy, and each copy to the slotted peer carries ONE. */
+static void bye_marks_checks(void){
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *A, *B; RantTopic *pub = NULL, *sub = NULL;
+    memset(&o, 0, sizeof o);
+    o.domain = bm_dom = (uint16_t)(TEST_DOMAIN + 53); o.disable_shm = 1; o.net.multicast_interface = "127.0.0.1";
+    A = rant_node_open(&aa, "bm-a", NULL, NULL, &o);
+    B = rant_node_open(&ba, "bm-b", NULL, NULL, &o);
+    CHECK(A && B, "bye marks: both open");
+    if (!A || !B) goto done;
+    pub = rant_node_create_topic(A, "bm/t", RANT_PUB_ONLY, NULL, NULL);
+    sub = rant_node_create_topic(B, "bm/t", RANT_SUB_ONLY, NULL, NULL);
+    rant_node_start(A); rant_node_start(B);
+    WAIT_UNTIL(5000, pub && rant_topic_match_count(pub) == 1);
+    memcpy(bm_uuid, i_rant_discovery_uuid(i_rant_discovery_state(A->discovery)), 16);
+    bm_sock_group = (long long)B->discovery->fd; bm_sock_data = (long long)B->fd;
+    bm_group = bm_group_marked = bm_copies = bm_copies_one = 0;
+    wire_tap_on_recv = bm_on_recv;
+    rant_node_close(A, 1); A = NULL;
+    WAIT_UNTIL(1000, test_atomic_load(&bm_group) >= 3 && test_atomic_load(&bm_copies) >= 3);
+    wire_tap_on_recv = NULL;
+    CHECK(sub && test_atomic_load(&bm_group) >= 3 && test_atomic_load(&bm_group_marked) == 0
+          && test_atomic_load(&bm_copies) >= 3 && test_atomic_load(&bm_copies_one) == test_atomic_load(&bm_copies),
+          "bye marks: each BYE to the group is unmarked, each copy is ONE (%lld group, %lld marked, %lld copies, %lld ONE)",
+          test_atomic_load(&bm_group), test_atomic_load(&bm_group_marked), test_atomic_load(&bm_copies),
+          test_atomic_load(&bm_copies_one));
+done:
+    wire_tap_on_recv = NULL;
+    if (A) rant_node_close(A, 1);
+    if (B) rant_node_close(B, 1);
+}
+
 static uint32_t bk_peer_id(RantNode *n, const char *name){
     RantIter it; RantPeerInfo p; size_t l = strlen(name);
     memset(&it, 0, sizeof it);
@@ -407,9 +474,9 @@ static void bulk_pools_checks(void){
     {   static uint8_t tiny[256]; RantAllocator ta = rant_allocator_static(tiny, sizeof tiny), ma = rant_allocator_static(ref, sizeof ref);
         o.bulk = &ta;
         O = rant_node_open(&ma, "bk-tiny", NULL, NULL, &o);
-        CHECK(!O && rant_last_error(NULL).error == RANT_E_OOM,
-              "bulk pools: a static node whose bulk cannot hold its records refuses the open with OOM (error %d)",
-              (int)rant_last_error(NULL).error);
+        CHECK(!O && rant_last_error(NULL).error == RANT_E_OOM && rant_last_error(NULL).too_big_bytes > sizeof tiny,
+              "bulk pools: a static node whose bulk cannot hold its records refuses the open with OOM and the bytes asked (error %d, %llu bytes)",
+              (int)rant_last_error(NULL).error, (unsigned long long)rant_last_error(NULL).too_big_bytes);
         if (O) rant_node_close(O, 0);
         o.bulk = NULL;
     }
@@ -496,6 +563,67 @@ done:
           test_page_live[0], test_page_live[1], test_page_foreign);
 }
 
+static volatile int bq_ok, bq_cancelled, bq_no_provider;
+static void bq_on_rsp(const RantResponse *r){
+    if (r->status == RANT_CALL_OK && r->data.len == 4) bq_ok++;
+    else if (r->status == RANT_CALL_CANCELLED) bq_cancelled++;
+    else if (r->status == RANT_CALL_NO_PROVIDER) bq_no_provider++;
+}
+static void bq_on_req(RantRequest *req, void *user){
+    uint8_t len[4];
+    (void)user;
+    len[0] = (uint8_t)req->data.len; len[1] = (uint8_t)(req->data.len >> 8);
+    len[2] = (uint8_t)(req->data.len >> 16); len[3] = (uint8_t)(req->data.len >> 24);
+    rant_request_reply(req, rant_bytes(len, 4));
+}
+
+/* A call made before its provider matched waits in the caller's bulk. It is sent once the
+   provider matches, or ends cancelled or with no provider, and every page goes home. */
+static void bulk_queued_checks(void){
+    static uint8_t req[120000];
+    RantAllocator cm = rant_allocator_dynamic(test_page_source(0), 0), cb = rant_allocator_dynamic(test_page_source(1), 0);
+    RantAllocator pa = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *C, *P = NULL; RantFunction *fn = NULL, *none = NULL, *def = NULL;
+    size_t m0 = 0, m1 = 0; long long b0; uint32_t cid = 0; int r1, r2, r3, rc;
+    test_page_clear(); bq_ok = bq_cancelled = bq_no_provider = 0;
+    memset(req, 0x3C, sizeof req);
+    memset(&o, 0, sizeof o);
+    o.domain = (uint16_t)(TEST_DOMAIN + 52); o.disable_shm = 1; o.net.multicast_interface = "127.0.0.1";
+    o.bulk = &cb;
+    C = rant_node_open(&cm, "bq-caller", NULL, NULL, &o);
+    CHECK(C != NULL, "bulk queued: the caller opens on a main and a bulk pool");
+    if (!C) return;
+    fn = rant_node_create_remote_function(C, "bq/fn", NULL, NULL, NULL);
+    none = rant_node_create_remote_function(C, "bq/none", NULL, NULL, &(RantFunctionOpts){ .timeout_us = 300000 });
+    rant_node_start(C);
+    test_sleep_ms(200);
+    rant_node_mem_stats(C, &m0, NULL, NULL);
+    b0 = test_page_live[1];
+    r1 = rant_function_call_async(fn, rant_bytes(req, sizeof req), bq_on_rsp, NULL, NULL);
+    r2 = rant_function_call_async(fn, rant_bytes(req, sizeof req), bq_on_rsp, NULL, &(RantCallOpts){ .id_out = &cid });
+    rc = rant_function_cancel(fn, cid);
+    r3 = rant_function_call_async(none, rant_bytes(req, sizeof req), bq_on_rsp, NULL, NULL);
+    rant_node_mem_stats(C, &m1, NULL, NULL);
+    CHECK(fn && none && r1 == RANT_OK && r2 == RANT_OK && r3 == RANT_OK && rc == RANT_OK
+          && test_page_live[1] - b0 >= 2ll * (long long)sizeof req && m1 <= m0 + 1024u,
+          "bulk queued: three calls with no provider wait in the bulk (it grew %lld kB, the main %ld bytes)",
+          (test_page_live[1] - b0) / 1024, (long)m1 - (long)m0);
+    WAIT_UNTIL(3000, bq_no_provider == 1);
+    o.bulk = NULL;
+    P = rant_node_open(&pa, "bq-provider", NULL, NULL, &o);
+    def = P ? rant_node_create_function_definition(P, "bq/fn", NULL, NULL, bq_on_req, NULL, NULL) : NULL;
+    if (P) rant_node_start(P);
+    WAIT_UNTIL(5000, bq_ok == 1);
+    CHECK(def && bq_ok == 1 && bq_cancelled == 1 && bq_no_provider == 1,
+          "bulk queued: the waiting call is answered once its provider matches, the others end cancelled and with no provider (%d, %d, %d)",
+          bq_ok, bq_cancelled, bq_no_provider);
+    rant_node_close(C, 1);
+    CHECK(test_page_live[0] == 0 && test_page_live[1] == 0 && test_page_foreign == 0,
+          "bulk queued: the closed caller gives every page back to its own source (main %lld, bulk %lld, foreign %lld)",
+          test_page_live[0], test_page_live[1], test_page_foreign);
+    if (P) rant_node_close(P, 1);
+}
+
 /* On the same host the one copy out of shared memory lands in the bulk, the main flat. */
 static void bulk_shm_checks(void){
     static uint8_t big[200000];
@@ -533,7 +661,9 @@ done:
 
 static const TestCase cases[] = {
     { "open_fail", open_fail_checks },
+    { "bye_marks", bye_marks_checks },
     { "bulk_pools", bulk_pools_checks },
+    { "bulk_queued", bulk_queued_checks },
     { "bulk_shm", bulk_shm_checks },
     { "event_user", event_user_checks },
     { "dynamic_grow", dynamic_grow_checks },

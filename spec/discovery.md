@@ -58,8 +58,8 @@ Every discovery datagram is, little endian:
 
 The flags are BYE 0x01, REQ 0x02 (a solicit: answer with your blob), UNI 0x04 (a copy by
 unicast: copy your announces back), ALL 0x08 (an observer's solicit: answer at once), BLOB
-0x10 (the blob follows the name, maybe empty) and ONE 0x20 (a targeted send: a REQ in it is
-answered at once, and it starts no copies). A steady state announce carries no blob. A
+0x10 (the blob follows the name, maybe empty) and ONE 0x20 (a targeted send or a plain copy,
+whose sender holds our blob: a REQ in it is answered at once, and it starts no copies). A steady state announce carries no blob. A
 datagram longer or shorter than its fields say is malformed, except one whose blob arrived
 short: the OS cut it to our buffer, and the stated length says how big the peer is.
 `i_rant_discovery_encode` and `i_rant_discovery_decode` are the one codec. The change age
@@ -116,9 +116,13 @@ cannot grow. A forgotten peer has no record:
 
 - Its header alone does nothing. Its blob is judged each time it passes by (a change, an
   answer, an ask) with peer id 0 and a scratch filter, and nothing is kept.
-- A match among them takes the record of the oldest heard live peer that holds no slot and
-  wants none. That peer is forgotten, the seen hook hearing it go, and the match goes the
-  first contact path. With no such record to take, the match is refused under no id.
+- A match among them takes the record of a live peer that holds no slot and wants none, the
+  oldest heard of those the group reaches, else of those heard by UNI. That peer is
+  forgotten, the seen hook hearing it go, and the match goes the first contact path. With no
+  such record to take, the match is refused under no id.
+- A source heard by a UNI copy takes such a record too, but only one the group reaches. Only
+  a record's UNI copies carry our changes to it, while a peer the group reaches still hears
+  them and asks us when one meets it, so forgetting it loses nothing.
 - A solicit from it is answered from the loose queue (Owed work and copies).
 - Forgetting a live peer, either way, sets the distrust (Judging on arrival) and notes the
   time. `partial` says one was forgotten within three announce intervals, which the node
@@ -141,7 +145,10 @@ when first heard, blob or not.
 A refused match is noted under its id for the node's condition and refused again each time
 it is heard. When a slot opens (given back, a slotted peer gone or dropped, a migrate), as
 many records that wanted one as there are spare slots are fetched, and their answers take
-the slots. `rejudge` judges one slotted peer again by the blob it holds, `replay_peers` every
+the slots. A slot is promised to a fetched record only while its fetch runs, so one that
+never answers gives it to the next once its asks ran out. A record whose last ask went
+unanswered is passed over when a slot opens and fetched once each time it is heard while
+one is spare, so a peer we cannot reach holds no slot and costs one ask per announce. `rejudge` judges one slotted peer again by the blob it holds, `replay_peers` every
 live one: a slot that meets nothing is given back, a loan that now meets us is told.
 
 Each refused match and each loan left waiting bumps `seat_misses`, so a node that can grow
@@ -156,7 +163,7 @@ datagram marked ONE comes from it: a new match, or a held one whose version skip
 the peer may have given us back on the version we missed. Consecutive versions need no
 answer: the pairings are symmetric, so a pair's verdicts agree at each step. Nor does a match
 from a datagram marked ONE (its sender holds our blob or asks for it) or ALL (an observer
-never assumes).
+never assumes). A slot given back ends the ask, since the peer is no match now.
 
 A first contact heard without a blob is judged by assumption when its change age exceeds the
 time since our own last change by 250 ms, the margin alone before our opening: it judged our
@@ -165,7 +172,8 @@ open, orders a pair, so of two nodes meeting the one that changed earlier fetche
 never both assume. It is a comparison, so an age past our uptime never wraps. An observer
 assumes nothing, since it admits peers that would not admit it, nor does a core without a
 hook, nor one that forgot a peer for room: that peer may hold us and would be a first
-contact again.
+contact again. Nor is a plain copy (Owed work and copies) assumed judged, since its sender
+holds us already and asks nothing.
 
 A blob past our bound, cut by the OS or bigger than `meta_cap`, leaves the header, which
 counts and makes the record. Its fetch stops until a newer version, or a migrate that grew
@@ -212,10 +220,14 @@ sent by `poll_targeted` the same way. A second solicit from a queued locator kee
 earlier time, and a full queue drops the solicit, since the asker asks again in 250 ms.
 
 Each announce goes by unicast to the seeds marked UNI, to every peer heard by a UNI copy
-within the peer timeout marked UNI, and to every other slotted peer plain. A UNI copy asks
-its receiver to copy back, which keeps two segments that share no group in touch through
-one seed. A plain copy never starts the receiver's own copies, so the copies between two
-peers end with their slots. A targeted send starts none either.
+within the peer timeout marked UNI, and to every other slotted peer plain, which is marked
+ONE. A UNI copy asks its receiver to copy back, which keeps two segments that share no group
+in touch through one seed. A plain copy never starts the receiver's own copies, so the copies
+between two peers end with their slots. A targeted send starts none either. A plain copy goes
+only to a slotted peer, so its ONE says what any targeted send does: the sender holds our
+blob. That ends a match ask owed to it, and a first contact by one is fetched, never assumed
+judged, since its sender asks nothing (a record lost to the gone timeout while the peer kept
+us is matched again this way).
 
 ## Peer lifecycle
 
