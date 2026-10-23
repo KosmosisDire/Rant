@@ -62,7 +62,7 @@ program in this order.
 
 | Program | Cases |
 |---|---|
-| `unit.transport` | basics, fresh_join, bulk, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
+| `unit.transport` | basics, fresh_join, ack_coalesce, bulk, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
 | `unit.discovery` | records, migrate, owed, judge, unmatched, offer, filter, forgotten, churn, first_contact, too_big, bulk, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |

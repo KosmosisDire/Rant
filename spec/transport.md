@@ -13,8 +13,8 @@ even at high fan out, and it carried group join, membership cap and interface co
 
 Submessage headers: DATA is 13 bytes for a single fragment (`frag`, `count` and `len` are
 implied) or 21 for multi fragment, HB is 23, NACK is 21. Byte 0 is `type | flags` (the
-single fragment bit lives here, and `(b[0] & 0x07)` in 1 to 3 picks out a transport
-datagram). Bytes 1 and 2 are the topic index. Every message carries 8 little endian bytes
+single fragment bit lives here, a DATA's `RANT_F_ACKREQ` 0x40 asks for an ack at once, and
+`(b[0] & 0x07)` in 1 to 3 picks out a transport datagram). Bytes 1 and 2 are the topic index. Every message carries 8 little endian bytes
 of `written_us` inside the sample ahead of any pattern header, unless the topic opted out,
 so repair, replay, shared memory and the queue all keep the original stamp. Bit 63 of that
 stamp marks a second 8 byte `capture_us` slot behind it, which the sender adds per message
@@ -47,8 +47,8 @@ the first repairs what it missed and no send waits for it. A best effort reader 
 directed topic join at the head. The `fresh_join` case of `unit.transport` pins it.
 
 The poll wait is capped at `next_deadline_us`, the earliest armed timer, fed at the arm
-sites. Immediate acks are deliberately not tracked, so the no loss hot path keeps no
-deadline. The win is on the deferred paths (a gap repair NACK, a lost final message HB),
+sites. Immediate acks are not tracked, and a coalesced one arms its deadline once per ack,
+not per message, so the no loss hot path stays cheap. The win is on the deferred paths (a gap repair NACK, a lost final message HB),
 which fire at their timer instead of up to a sweep period later.
 
 ## Flow control
@@ -65,11 +65,17 @@ heartbeats, no waiting for acks.
 
 ## Acks and repair
 
-A completed in order sample arms its cumulative ack as due now. Partial, out of order and
-heartbeat acks keep the deferred `repair_delay_us` timer. Reliable throughput is window
-depth over ack round trip, and a deferred in order ack put that at the mercy of the HB
-sweep (a keep_last 4 stream capped near 100 msg/s). The ack is still armed after
-delivery, which the reader owns copy and zero copy SHM invariants require.
+A completed in order sample's cumulative ack coalesces: it is due `RANT_ACK_DELAY_US` (1
+ms, one poll tick) after the first unacked delivery, with its deadline armed so it fires on
+time, and due now when the DATA carried `RANT_F_ACKREQ`. The writer sets that flag on its
+round trip probe and on every half history of samples pushed, so a full history always has
+an ack on the way and throughput stays window depth over ack round trip. Acking every
+sample cost a datagram per message, on Windows about 9 us of sendto and a quarter of a
+reliable message's CPU. A deferred ack once waited for the HB sweep, which capped a
+keep_last 4 stream near 100 msg/s. Partial, out of order and heartbeat acks keep the
+deferred `repair_delay_us` timer. The ack is still armed after delivery, which the reader
+owns copy and zero copy SHM invariants require. The `ack_coalesce` case of
+`unit.transport` pins it.
 
 Repair is gap triggered, received bounded and in flight deduped. A fixed re NACK cadence
 collapsed the repair channel, since a far behind reader re requested its whole window
@@ -145,7 +151,9 @@ The transport keeps one estimator per peer (`i_RantPeerRtt`, RFC 6298 shape: smo
 value, mean deviation, floor, sample count), fed by the reliable path with no probe
 traffic. The first sample seeds srtt = R and rttvar = R/2, then rttvar = (3v + |srtt - R|)
 / 4 and srtt = (7s + R) / 8. A writer times the push of a sample's LAST fragment to the
-cumulative ack that covers it (armed at the sample boundary only). A reader times a repair
+cumulative ack that covers it (armed at the sample boundary only), and asks for that ack at
+once. A lane's first `RANT_RTT_WARM_PROBES` (16) run back to back so the estimate settles,
+later ones come at most every `RANT_RTT_PROBE_US` (50 ms), so probes cost no ack traffic. A reader times a repair
 request to the resend it brings (the lowest seqno of a NACK never asked before). Only
 unambiguous samples count (Karn's rule: a seqno asked twice, a resent sample, a resync or
 an eviction jump disarms the probe). Both directions feed the same estimator, so a node
@@ -165,7 +173,8 @@ One lost resend then costs one round trip instead of 50 ms. Read it through
 
 When a reliable lane's send queue drains, the next HB comes after `RANT_HB_TAIL_US` (or
 the peer's measured bound) instead of `heartbeat_us`, so a lost final message repairs
-fast. The reader's immediate ack suppresses it when nothing was lost.
+fast. The reader's coalesced ack, due well inside that bound, suppresses it when nothing was
+lost.
 
 ## Rate throttle
 

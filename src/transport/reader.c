@@ -36,6 +36,18 @@ static void i_rant_reader_ack_now(i_RantTransportState *st, i_RantTopic *topic, 
     i_rant_lane_wake(st, topic_index, peer_slot);
 }
 
+/* An in order delivery's cumulative ack: at once when the writer asked or now is 0, else
+ * coalesced one tick after the first unacked delivery. See spec/transport.md. */
+static void i_rant_reader_ack_delivered(i_RantTransportState *st, i_RantTopic *topic, i_RantReaderProxy *r,
+                                        uint16_t topic_index, uint32_t peer_slot, uint64_t now){
+    if (r->ack_req || !now){ i_rant_reader_ack_now(st, topic, r, topic_index, peer_slot, 1, 0); return; }
+    r->ack_force = 1;
+    if (r->ack_pending) return;                 /* an armed ack keeps its earlier due */
+    i_rant_reader_arm(topic, r, 0);
+    r->ack_pending = 1; r->ack_due_us = now + RANT_ACK_DELAY_US;
+    i_rant_transport_arm_deadline(st, r->ack_due_us);    /* the sweep wakes the lane then */
+}
+
 
 /* The head sample (cur) and one sample held ahead of it (next). Nothing here moves
  * deliver_upto, only a delivery, the floor and the lapped rule do. See spec/transport.md. */
@@ -80,7 +92,8 @@ static i_RantAssembly *i_rant_reader_ahead(i_RantReaderProxy *r, uint64_t base){
 
 /* Hands up every complete sample from the head on. A reliable refusal parks the head, a
  * best effort one drops. Lane pointers are re derived after each callback. */
-static void i_rant_reader_deliver(i_RantTransportState *st, uint16_t topic_index, uint32_t peer_slot){
+static void i_rant_reader_deliver(i_RantTransportState *st, uint16_t topic_index, uint32_t peer_slot,
+                                  uint64_t now){
     i_RantTopic *topic=&st->topics[topic_index];
     i_RantReaderProxy *r=i_rant_reader_proxy_at(st,topic_index,peer_slot);
     int reliable = (topic->qos.reliability==RANT_RELIABLE);
@@ -101,7 +114,7 @@ static void i_rant_reader_deliver(i_RantTransportState *st, uint16_t topic_index
         i_rant_reader_settle(r);
     }
     if (delivered && reliable)              /* ack after delivery, the reader owns copy invariant */
-        i_rant_reader_ack_now(st,topic,r,topic_index,peer_slot,1,0);
+        i_rant_reader_ack_delivered(st,topic,r,topic_index,peer_slot,now);
 }
 
 
@@ -142,8 +155,11 @@ void i_rant_reader_shm(i_RantTransportState *st, int topic_index, int peer_slot,
     uint16_t count = i_rant_le_r16(p+RANT_OFFSET_SHM_COUNT);
     const uint8_t *desc = p+RANT_OFFSET_SHM_DESC;
     if (!r || !r->used || count==0) return;
+    if (reliable && (p[0] & RANT_F_ACKREQ)) r->ack_req = 1;
     if (r->parked){ topic->repair_stats.frags_ahead++; return; }   /* a held sample blocks */
     {   i_RantReaderOrder ord = i_rant_reader_order_arrival(st, topic_index, peer_slot, r, base, base+count-1);
+        if (ord==RANT_ORDER_OLD && r->ack_req)     /* a resend we hold: the writer still waits */
+            i_rant_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,1,0);
         if (ord==RANT_ORDER_OLD || ord==RANT_ORDER_GAP) return;       /* old, dup, or gap armed */
     }
     r->started = 1; r->cur.active = 0;   /* a partial inline assembly of it is superseded */
@@ -161,8 +177,8 @@ void i_rant_reader_shm(i_RantTransportState *st, int topic_index, int peer_slot,
             r->deliver_upto = base + count;
             i_rant_reader_settle(r);
             if (reliable)                   /* ack after delivery */
-                i_rant_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,1,0);
-            i_rant_reader_deliver(st,(uint16_t)topic_index,(uint32_t)peer_slot);     /* held ahead */
+                i_rant_reader_ack_delivered(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,now);
+            i_rant_reader_deliver(st,(uint16_t)topic_index,(uint32_t)peer_slot,now);     /* held ahead */
             return;
         }
         if (ok < 0){                        /* refused downstream */
@@ -222,8 +238,12 @@ void i_rant_reader_data(i_RantTransportState *st, int topic_index, int peer_slot
     if (count==0 || frag>=count || (uint64_t)sample_len > (uint64_t)count*st->peer_frag[peer_slot]){
         topic->repair_stats.frags_malformed++; return;
     }
+    if (reliable && (p[0] & RANT_F_ACKREQ)) r->ack_req = 1;
     switch (i_rant_reader_order_arrival(st, topic_index, peer_slot, r, base, seqno)){
-        case RANT_ORDER_OLD:       topic->repair_stats.frags_old++;   return;   /* already seen */
+        case RANT_ORDER_OLD:       topic->repair_stats.frags_old++;   /* already seen */
+            if (r->ack_req)        /* a resend we hold: the writer still waits for the ack */
+                i_rant_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,1,0);
+            return;
         case RANT_ORDER_GAP:     /* a future sample: hold one ahead */
             a = i_rant_reader_ahead(r, base);
             if (!a){ topic->repair_stats.frags_ahead++; return; }   /* hold taken */
@@ -244,7 +264,7 @@ void i_rant_reader_data(i_RantTransportState *st, int topic_index, int peer_slot
         r->deliver_upto = base + count; r->cur.active = 0;
         i_rant_reader_settle(r);
         if (reliable) i_rant_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,1,0);
-        i_rant_reader_deliver(st,(uint16_t)topic_index,(uint32_t)peer_slot);
+        i_rant_reader_deliver(st,(uint16_t)topic_index,(uint32_t)peer_slot,now);
         return;
     }
     if (!a->active){
@@ -272,7 +292,7 @@ void i_rant_reader_data(i_RantTransportState *st, int topic_index, int peer_slot
     if (a != &r->cur) return;    /* held ahead: it delivers when the head does */
     /* Deliver a complete head. A partial head re arms only when this frag opened a real
        gap below received_high, so a healthy in order fill owes nothing. */
-    if (a->low == count) i_rant_reader_deliver(st,(uint16_t)topic_index,(uint32_t)peer_slot);
+    if (a->low == count) i_rant_reader_deliver(st,(uint16_t)topic_index,(uint32_t)peer_slot,now);
     else if (reliable && new_frag && r->deliver_upto + a->low <= r->received_high)
         i_rant_reader_ack_now(st,topic,r,(uint16_t)topic_index,(uint32_t)peer_slot,0,0);
 }
@@ -282,7 +302,6 @@ void i_rant_reader_hb(i_RantTransportState *st, int topic_index, int peer_slot, 
     i_RantTopic *topic=&st->topics[topic_index];
     i_RantReaderProxy *r=i_rant_reader_proxy_at(st,topic_index,peer_slot);
     uint64_t first=i_rant_le_r64(p+RANT_OFFSET_SEQNO), last=i_rant_le_r64(p+RANT_OFFSET_HB_LAST);
-    (void)now;
     if (!r || !r->used) return;
     if (topic->qos.reliability!=RANT_RELIABLE) return;
     /* An unstarted reader adopts no position from a heartbeat. A first inside the sample
@@ -309,7 +328,7 @@ void i_rant_reader_hb(i_RantTransportState *st, int topic_index, int peer_slot, 
 #endif
         /* the floor may have landed on the sample held ahead: it is the head now */
         i_rant_reader_settle(r);
-        i_rant_reader_deliver(st,(uint16_t)topic_index,(uint32_t)peer_slot);
+        i_rant_reader_deliver(st,(uint16_t)topic_index,(uint32_t)peer_slot,now);
         r=i_rant_reader_proxy_at(st,topic_index,peer_slot);
     }
     if (r->parked) return;      /* still parked: silent, the writer's flow control backpressures */
@@ -332,7 +351,7 @@ size_t i_rant_reader_emit(i_RantTransportState *st, int topic_index, int peer_sl
     if (topic->qos.reliability!=RANT_RELIABLE) return 0;
     if (cap<RANT_HEADER_NACK) return 0;
     if (!r->ack_pending || now<r->ack_due_us) return 0;
-    r->ack_pending=0; force=r->ack_force; r->ack_force=0;
+    r->ack_pending=0; force=r->ack_force; r->ack_force=0; r->ack_req=0;
     if (r->parked) return 0;    /* parked: silent, and the lane stays unscheduled */
 
     if (!r->started)   /* no position yet: F_UNPOS announces our epoch */
@@ -431,14 +450,14 @@ uint32_t i_rant_transport_deliver_parked(i_RantTransportState *st, uint16_t topi
                     i_rant_reader_settle(r);
                     if (topic->qos.reliability==RANT_RELIABLE)      /* ack after delivery */
                         i_rant_reader_ack_now(st,topic,r,topic_index,peer_slot,1,0);
-                    i_rant_reader_deliver(st,topic_index,peer_slot);
+                    i_rant_reader_deliver(st,topic_index,peer_slot,0);     /* an unpark acks at once */
                 }
             } else
 #endif
             {
                 /* un park and run the ordinary delivery, which re parks on a refusal */
                 r->parked = 0;
-                i_rant_reader_deliver(st,topic_index,peer_slot);
+                i_rant_reader_deliver(st,topic_index,peer_slot,0);
                 accepted = !st->lanes[li].r.parked;
             }
             if (!accepted) still++;

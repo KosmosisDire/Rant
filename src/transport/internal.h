@@ -16,6 +16,15 @@
 #ifdef RANT_SHM
 #define RANT_F_SHM      0x20u     /* DATA: the body is a descriptor, no payload */
 #endif
+#define RANT_F_ACKREQ   0x40u     /* DATA: the writer asks for a cumulative ack at once */
+
+#ifndef RANT_ACK_DELAY_US
+#define RANT_ACK_DELAY_US 1000u   /* an in order delivery's ack coalesces this long, one poll tick */
+#endif
+#ifndef RANT_RTT_PROBE_US
+#define RANT_RTT_PROBE_US 50000u  /* past the warm up a writer lane times one round trip this often */
+#endif
+#define RANT_RTT_WARM_PROBES 16u  /* a new lane's first probes run back to back, so the estimate settles */
 
 #define RANT_NACK_WINDOW 32u      /* seqnos covered by one ACKNACK bitmap */
 #define RANT__NIL 0xFFFFFFFFu
@@ -129,6 +138,9 @@ typedef struct {        /* writer side, per (topic, peer) */
     uint8_t  rtt_probe;  /* armed at rtt_probe_seq, pushed at rtt_probe_us, any repair disarms it */
     uint64_t rtt_probe_seq;
     uint64_t rtt_probe_us;
+    uint64_t probe_next_us; /* the earliest next probe past the warm up */
+    uint32_t pushed;     /* samples pushed since the last ack request */
+    uint8_t  probes;     /* probes armed, saturating at RANT_RTT_WARM_PROBES */
 } i_RantWriterProxy;
 
 /* One sample's reassembly state. Buffers grow through the hook and are kept across rematch. */
@@ -159,6 +171,7 @@ typedef struct {        /* reader side, per (topic, peer) */
     uint8_t  started;       /* accepted any DATA from this writer yet */
     uint8_t  ack_force;     /* owes a cumulative ack even at an unchanged repair floor */
     uint8_t  ack_pending;
+    uint8_t  ack_req;       /* a DATA asked for an immediate ack, kept until one goes out */
     uint8_t  parked;        /* the head is held after a downstream refusal, spec/transport.md */
     uint8_t  lapped;        /* a floor skip took a sample being fetched, nothing delivered since */
     uint8_t  rtt_probe;     /* a probe is armed at rtt_probe_seq, first asked at rtt_probe_us */

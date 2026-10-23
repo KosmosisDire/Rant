@@ -335,8 +335,26 @@ static size_t i_rant_writer_hb(i_RantTransportState *st, i_RantTopic *topic, i_R
 }
 
 
+/* Whether a sample's last fragment asks the reader to ack at once: the round trip probe,
+ * back to back while the lane warms up and then once per RANT_RTT_PROBE_US, and every half
+ * history, so a full one always has an ack on the way. The reader coalesces every other
+ * ack. See spec/transport.md. */
+static int i_rant_writer_ask(const i_RantTopic *topic, i_RantWriterProxy *w, uint64_t now){
+    uint32_t half = topic->qos.keep_last > 1u ? (uint32_t)topic->qos.keep_last / 2u : 1u;
+    int ask = 0;
+    if (!w->rtt_probe && (w->probes < RANT_RTT_WARM_PROBES || now >= w->probe_next_us)){
+        w->rtt_probe = 1; w->rtt_probe_seq = w->sent_upto; w->rtt_probe_us = now;
+        w->probe_next_us = now + RANT_RTT_PROBE_US;
+        if (w->probes < RANT_RTT_WARM_PROBES) w->probes++;
+        ask = 1;
+    }
+    if (++w->pushed >= half){ w->pushed = 0; ask = 1; }
+    return ask;
+}
+
+
 /* The queue just drained: the next HB comes within the tail window so a lost final message
- * repairs fast. The reader's immediate ack normally suppresses it, so healthy traffic is free. */
+ * repairs fast. The reader's coalesced ack normally comes first, so healthy traffic is free. */
 static void i_rant_writer_arm_tail(i_RantTransportState *st, i_RantWriterProxy *w, uint32_t peer_slot, uint64_t now){
     uint64_t tail = now + i_rant_rtt_rto(st, peer_slot, RANT_HB_TAIL_US);
     if (w->hb_next_us <= now || w->hb_next_us > tail) w->hb_next_us = tail;
@@ -515,14 +533,18 @@ size_t i_rant_writer_emit(i_RantTransportState *st, int topic_index, int peer_sl
 #ifdef RANT_SHM
             /* peer_shm is set before data flows, so this is a sample boundary: one SHM-DATA */
             if (st->peer_shm[peer_slot] && s->shm){
+                int ask = 0;
+                size_t n;
                 if (cap < RANT_SHM_DATA_BYTES) return 0;
                 w->sent_upto = s->base + s->count;
                 if (reliable && w->reader_reliable){
-                    if (!w->rtt_probe){ w->rtt_probe = 1; w->rtt_probe_seq = w->sent_upto; w->rtt_probe_us = now; }
+                    ask = i_rant_writer_ask(topic, w, now);
                     if (w->sent_upto >= topic->next_seqno) i_rant_writer_arm_tail(st, w, (uint32_t)peer_slot, now);
                 }
-                return i_rant_wire_mk_shm(out,index,per_lane ? s->base - w->wire_skip : s->base,
-                                          s->count,s->desc);
+                n = i_rant_wire_mk_shm(out,index,per_lane ? s->base - w->wire_skip : s->base,
+                                       s->count,s->desc);
+                if (ask) out[0] |= (uint8_t)RANT_F_ACKREQ;
+                return n;
             }
 #endif
             {
@@ -530,18 +552,21 @@ size_t i_rant_writer_emit(i_RantTransportState *st, int topic_index, int peer_sl
             uint32_t offset=(uint32_t)frag_index*st->frag;
             uint16_t payload_len=(uint16_t)((s->len-offset)<st->frag?(s->len-offset):st->frag);
             if (cap < (size_t)(s->count==1?RANT_HEADER_DATA_SINGLE:RANT_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;
+            int ask = 0;
+            size_t n;
             w->sent_upto++;
             topic->repair_stats.frags_sent++;                       /* new data */
             if (reliable && w->reader_reliable){
-                /* the sample's last fragment arms the RTT probe: its in order ack comes one
-                   round trip after this push */
-                if (!w->rtt_probe && w->sent_upto == s->base + s->count){
-                    w->rtt_probe = 1; w->rtt_probe_seq = w->sent_upto; w->rtt_probe_us = now; }
+                /* the sample's last fragment may arm the RTT probe: its ack, asked at once,
+                   comes one round trip after this push */
+                if (w->sent_upto == s->base + s->count) ask = i_rant_writer_ask(topic, w, now);
                 if (w->sent_upto >= topic->next_seqno)
                     i_rant_writer_arm_tail(st, w, (uint32_t)peer_slot, now);     /* tail HB */
             }
-            return i_rant_wire_mk_data(out,index,per_lane ? seqno - w->wire_skip : seqno,
-                                       s,frag_index,i_rant_sample_buf(s)+offset,payload_len);
+            n = i_rant_wire_mk_data(out,index,per_lane ? seqno - w->wire_skip : seqno,
+                                    s,frag_index,i_rant_sample_buf(s)+offset,payload_len);
+            if (ask) out[0] |= (uint8_t)RANT_F_ACKREQ;
+            return n;
             }
         } else {
             /* fell out of the ring unsent. A fire and forget lane advances and its reader

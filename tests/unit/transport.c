@@ -819,9 +819,46 @@ static void fresh_join_checks(void){
     test_pair_close(&rp); test_pair_close(&bp);
 }
 
+/* Coalesced acks on a virtual clock, samples 10 us apart: past the round trip warm up a
+   writer asks for an ack once per half history and the reader answers each ask at once.
+   Samples between asks owe one ack, due one ack delay later. */
+static int ac_move(i_RantTransportState *from, uint32_t from_id, i_RantTransportState *to_st,
+                   uint8_t kind, uint8_t flag, uint64_t clk){
+    uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t ol; int n = 0;
+    while (i_rant_transport_poll_send(from, &to, buf, sizeof buf, &ol, clk)){
+        if ((buf[0] & RANT_MSG_MASK) == kind && (!flag || (buf[0] & flag))) n++;
+        i_rant_transport_on_datagram(to_st, from_id, rant_bytes(buf, ol), clk);
+    }
+    return n;
+}
+static void ack_coalesce_checks(void){
+    TestPair p; RantQos q; uint8_t msg[16]; uint64_t clk = 1000000; int k, asks = 0, acks = 0;
+    memset(&q, 0, sizeof q); q.reliability = RANT_RELIABLE; q.keep_last = 8; q.heartbeat_us = 200000;
+    memset(msg, 0, sizeof msg);
+    if (!test_pair_open(&p, "ack", q, q, NULL)){ CHECK(0, "ack: pair opens"); return; }
+    test_apply_verified(p.r, 1u, p.w); test_apply_verified(p.w, 2u, p.r);
+    for (k = 0; k < (int)RANT_RTT_WARM_PROBES + 64; k++){
+        int a, n;
+        i_rant_transport_send(p.w, 0, rant_bytes(msg, sizeof msg), clk);
+        a = ac_move(p.w, 1u, p.r, RANT_DATA, RANT_F_ACKREQ, clk);
+        n = ac_move(p.r, 2u, p.w, RANT_NACK, 0, clk);
+        if (k >= (int)RANT_RTT_WARM_PROBES){ asks += a; acks += n; }
+        clk += 10;
+    }
+    CHECK(asks == 16 && acks == 16, "ack: past the warm up 64 samples ask %d times and get %d acks, one per half history",
+          asks, acks);
+    for (k = 0; k < 2; k++){ i_rant_transport_send(p.w, 0, rant_bytes(msg, sizeof msg), clk); ac_move(p.w, 1u, p.r, RANT_DATA, 0, clk); }
+    acks = ac_move(p.r, 2u, p.w, RANT_NACK, 0, clk);
+    CHECK(acks == 0, "ack: samples between asks owe their ack later (%d now)", acks);
+    acks = ac_move(p.r, 2u, p.w, RANT_NACK, 0, clk + RANT_ACK_DELAY_US);
+    CHECK(acks == 1, "ack: one ack for both, one ack delay later (%d)", acks);
+    test_pair_close(&p);
+}
+
 static const TestCase cases[] = {
     { "basics", basics_checks },
     { "fresh_join", fresh_join_checks },
+    { "ack_coalesce", ack_coalesce_checks },
     { "bulk", bulk_checks },
     { "want_set", want_set_checks },
     { "want_filter", want_filter_checks },
