@@ -6,10 +6,10 @@ facing options are in docs/discovery.md.
 ## The announce
 
 Every node multicasts an announce every `announce_interval_us` (3 s) on its domain's
-group, and unicasts a copy to every peer it knows and to its seed peers. The announce
-carries the node's uuid, its name, and an opaque versioned meta blob: the data port, the
-fragment size, the shared memory host id, the protocol version and the interest list
-(spec/interest.md).
+group, and unicasts a copy to every peer it knows and to its seed peers. Every discovery
+datagram carries the node's uuid, its name, its data port, the version of its blob and how
+long ago that blob last changed. The blob is opaque here: the fragment size, the shared
+memory host id and the interest list (spec/interest.md).
 
 The blob is full state and idempotent, so it is simply re sent on change. It rides the
 startup solicit, the first `RANT_DISCOVERY_BLOB_RESEND` (3) announces after a change, and
@@ -34,18 +34,36 @@ datagram arrived whole and a NULL data pointer when the OS truncated it.
 
 Unicast discovery traffic leaves the DATA socket (`i_rant_discovery_set_tx_fd`). Group sends
 stay on the multicast socket. So all unicast between two nodes uses one port pair, and each
-announce is identity plus return path in one datagram. Per peer unicast goes to one port: the peer's data port once its blob named
-one, else the discovery port. Discovery always runs inside a node, so the locator it
+announce is identity plus return path in one datagram. Per peer unicast goes to one port: the data port
+every datagram names, else the discovery port when that is 0. Discovery always runs inside a node, so the locator it
 advertises is the node's data socket and it owns no unicast socket of its own.
 
 ## Wire format
 
-Every discovery datagram starts with a 24 byte header: the magic `uDSC`, the wire version
-(`RANT_WIRE_VERSION` = 7), a flags byte, the u16 domain and the sender's 16 byte uuid. Then `[u32 meta_version][u16 meta_len]` and the blob. The blob is
-the discovery section `[u16 data_port][u8 name_len][name]`
-followed by the opaque overlay. A steady state announce carries meta_len 0 and only the
-version. The flags are BYE 0x01 and REQ 0x02 (a solicit, recipients announce back now).
-Version history: v3 added the versioned blob, v4 and v5 relaying, which v6 removed. Since
+Every discovery datagram is, little endian:
+
+| bytes | field |
+|---|---|
+| 0 | the magic `uDSC` |
+| 4 | the wire version, `RANT_WIRE_VERSION` = 8 |
+| 5 | flags |
+| 6 | the u16 domain |
+| 8 | the sender's 16 byte uuid |
+| 24 | u32 the version of the sender's blob |
+| 28 | u32 how many ms ago that blob last changed, saturating |
+| 32 | u16 the blob's length, 0 without BLOB |
+| 34 | u16 the sender's data port |
+| 36 | u8 the name's length, at most `RANT_NODE_NAME_MAX` |
+| 37 | the name, then the blob when BLOB is set |
+
+The flags are BYE 0x01, REQ 0x02 (a solicit, recipients announce back now) and BLOB 0x10
+(the blob follows the name, maybe empty). A steady state announce carries no blob. A
+datagram longer or shorter than its fields say is malformed, except one whose blob arrived
+short: the OS cut it to our buffer, and the stated length says how big the peer is.
+`i_rant_discovery_encode` and `i_rant_discovery_decode` are the one codec. The change age
+is the sender's clock read when it builds the datagram, so a stale clock reads young.
+Version history: v3 added the versioned blob, v4 and v5 relaying, which v6 removed. v8 moved
+the data port and name out of the blob into every datagram and added the change age. Since
 v5 the number versions everything that crosses the wire, discovery or not, and any change to it
 bumps the number. The first eight bytes (magic, version, flags, domain) keep their place in
 every version, so a datagram of this domain on another version is recognized from them
@@ -87,9 +105,8 @@ the timeout. One helper fires PEER_DOWN then frees the slot for BYE, both evicti
 allocation eviction and GONE promotion.
 
 A new uuid announcing from an (ip, port) we already hold evicts the predecessor as GONE
-first: one socket is one process, so it is provably dead. A port of 0 (a peer first seen
-through a blob less announce) is not an endpoint, so it never triggers the eviction, or
-several same host instances awaiting their blobs would evict each other. When a hook
+first: one socket is one process, so it is provably dead. A port of 0 is not an endpoint, so
+it never triggers the eviction. When a hook
 allocation for a bigger blob fails, the stale blob and version are kept and the
 advertised version stays ahead, so the re fetch path retries.
 
@@ -133,7 +150,7 @@ announce intervals. A path two peers share attributes to neither.
 
 ## Node names
 
-The node name rides the announce blob once, never per message, capped at
+The node name rides every discovery datagram, never a data message, capped at
 `RANT_NODE_NAME_MAX` (32) bytes. `RantMsg.publisher_name` is a view into discovery state.
 A NULL or empty name becomes `node-` plus eight random hex digits, from the pid when
 there is no entropy source.

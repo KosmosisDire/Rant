@@ -17,22 +17,21 @@ static void dc_error(const RantEvent *ev){
     if (ev->error==RANT_E_WIRE_VERSION) dc_wire_n++;
 }
 
-/* craft an announce for sender `uid` (uuid = all uid bytes) with no name and no overlay */
+/* craft a datagram for sender `uid` (uuid = all uid bytes) carrying an empty blob into a
+   RANT_DISCOVERY_WIRE_MAX buffer. flags RANT_DISCOVERY_FLAG_BYE for a bye */
+static size_t dc_wire(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port,
+                      const char *name, uint32_t mver){
+    static uint8_t uuid[16];
+    i_RantDiscoveryWire w;
+    memset(uuid, uid, 16);
+    memset(&w, 0, sizeof w);
+    w.flags = (uint8_t)(flags | RANT_DISCOVERY_FLAG_BLOB); w.domain = dom; w.uuid = uuid;
+    w.version = mver; w.data_port = port;
+    w.name = name ? rant_cstr(name) : rant_string(NULL, 0);
+    return i_rant_discovery_encode(&w, p, RANT_DISCOVERY_WIRE_MAX);
+}
 static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port, uint32_t mver){
-    size_t off = RANT_DISCOVERY_META_OFF;
-    uint8_t *b = p + off;
-    memset(p, 0, off);
-    p[0]='u';p[1]='D';p[2]='S';p[3]='C';
-    p[4]=(uint8_t)RANT_WIRE_VERSION;
-    p[5]=flags;                                   /* 0x01 = BYE (internal flag) */
-    p[6]=(uint8_t)dom; p[7]=(uint8_t)(dom>>8);
-    memset(p+8, uid, 16);                         /* a distinct uuid per uid */
-    p[off-6]=(uint8_t)mver; p[off-5]=(uint8_t)(mver>>8);
-    p[off-4]=(uint8_t)(mver>>16); p[off-3]=(uint8_t)(mver>>24);
-    /* blob = the discovery section [u16 data_port][u8 name_len 0], no overlay */
-    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=0;
-    p[off-2]=3; p[off-1]=0;                        /* meta_len = 3 (the discovery section) */
-    return off + 3;
+    return dc_wire(p, uid, flags, dom, port, NULL, mver);
 }
 
 /* feed one crafted datagram to a core as if received from (ip, sport) */
@@ -198,28 +197,6 @@ static void nc_event(const RantEvent *ev){
     else if (ev->kind==RANT_PEER_DOWN)     { nc_down_n++; nc_down_id=ev->peer; }
     else if (ev->kind==RANT_ERROR && ev->error==RANT_E_PEER_REFUSED){ nc_refused_n++; }
 }
-/* feed the node core through a real sans IO discovery core: build an announce datagram
-   with no overlay so discovery fires events into the node core. flags 0x01 = BYE. */
-static size_t nc_dgram(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port,
-                       const char *name, uint32_t mver){
-    size_t off = RANT_DISCOVERY_META_OFF;
-    uint8_t *b = p + off;
-    uint8_t nl = name ? (uint8_t)strlen(name) : 0;
-    uint16_t ml = (uint16_t)(3u + nl);
-    memset(p, 0, off);
-    p[0]='u';p[1]='D';p[2]='S';p[3]='C';
-    p[4]=(uint8_t)RANT_WIRE_VERSION;
-    p[5]=flags;
-    p[6]=(uint8_t)dom; p[7]=(uint8_t)(dom>>8);
-    memset(p+8, uid, 16);                          /* a distinct uuid per uid */
-    p[off-6]=(uint8_t)mver; p[off-5]=(uint8_t)(mver>>8);
-    p[off-4]=(uint8_t)(mver>>16); p[off-3]=(uint8_t)(mver>>24);
-    b[0]=(uint8_t)port; b[1]=(uint8_t)(port>>8); b[2]=nl;   /* port, name_len */
-    if (nl) memcpy(b+3, name, nl);
-    p[off-2]=(uint8_t)ml; p[off-1]=(uint8_t)(ml>>8);
-    return off + ml;
-}
-
 /* node core peer lifecycle, fully sans IO: a transport plus a real discovery core, the
    node core delegating its peer table to discovery. */
 static void node_core_checks(void){
@@ -269,8 +246,8 @@ static void node_core_checks(void){
 
     /* Two peers announce: two ups, discovery assigns the ids, resolve each way */
     nc_up_n=nc_down_n=nc_refused_n=0;
-    n=nc_dgram(buf,1,0,99,5001,"nc-self",1); dc_feed(st,sa,6730,buf,n,2000); idA=nc_up_id;
-    n=nc_dgram(buf,2,0,99,5002,"nc-self",1); dc_feed(st,sb,6730,buf,n,2000); idB=nc_up_id;
+    n=dc_wire(buf,1,0,99,5001,"nc-self",1); dc_feed(st,sa,6730,buf,n,2000); idA=nc_up_id;
+    n=dc_wire(buf,2,0,99,5002,"nc-self",1); dc_feed(st,sb,6730,buf,n,2000); idB=nc_up_id;
     CHECK(nc_up_n==2, "node-core: two peers up (ups=%u)", nc_up_n);
     {   RantString pn = i_rant_node_core_peer_name(nc, idA);
         CHECK(pn.data && pn.len==7 && memcmp(pn.data,"nc-self",7)==0,
@@ -282,15 +259,15 @@ static void node_core_checks(void){
 
     /* a nameless announce falls back to "unknown-peer", never empty or NULL */
     {   RantString pn;
-        n=nc_dgram(buf,1,0,99,5001,NULL,2);     dc_feed(st,sa,6730,buf,n,2001);
+        n=dc_wire(buf,1,0,99,5001,NULL,2);     dc_feed(st,sa,6730,buf,n,2001);
         pn = i_rant_node_core_peer_name(nc, idA);
         CHECK(pn.data && pn.len==12 && memcmp(pn.data,"unknown-peer",12)==0,
                  "node-core: nameless announce -> unknown-peer (%.*s)", (int)pn.len, pn.data?pn.data:"(null)");
-        n=nc_dgram(buf,1,0,99,5001,"nc-self",3); dc_feed(st,sa,6730,buf,n,2002); }
+        n=dc_wire(buf,1,0,99,5001,"nc-self",3); dc_feed(st,sa,6730,buf,n,2002); }
 
     /* A third peer is REFUSED while the table is full of ACTIVE peers, the node forwards it */
     nc_refused_n=0;
-    n=nc_dgram(buf,3,0,99,5003,"three",1); dc_feed(st,sc,6730,buf,n,2003);
+    n=dc_wire(buf,3,0,99,5003,"three",1); dc_feed(st,sc,6730,buf,n,2003);
     CHECK(nc_refused_n==1, "node-core: refused forwarded (refused=%u)", nc_refused_n);
 
     /* Silence past the timeout DROPS both: a PEER_DOWN each, but the slots are kept (resolve) */
@@ -301,17 +278,105 @@ static void node_core_checks(void){
 
     /* The same uuid returns: RESUME re fires PEER_UP under the same id */
     nc_up_n=0;
-    n=nc_dgram(buf,1,0,99,5001,"nc-self",4); dc_feed(st,sa,6730,buf,n,1100000);
+    n=dc_wire(buf,1,0,99,5001,"nc-self",4); dc_feed(st,sa,6730,buf,n,1100000);
     CHECK(nc_up_n==1 && nc_up_id==idA, "node-core: resume re-ups same id (ups=%u id=%u)", nc_up_n, nc_up_id);
 
     /* GONE (BYE) on the active peer: one PEER_DOWN, and it does not resolve any more */
     nc_down_n=0;
-    n=nc_dgram(buf,1,0x01,99,5001,NULL,1); dc_feed(st,sa,6730,buf,n,1100001);
+    n=dc_wire(buf,1,0x01,99,5001,NULL,1); dc_feed(st,sa,6730,buf,n,1100001);
     CHECK(nc_down_n==1, "node-core: GONE on active fires down (downs=%u)", nc_down_n);
     CHECK(i_rant_node_core_resolve(nc,idA,&d)==0, "node-core: GONE peer freed (no resolve)");
 }
 
+/* The codec: decode reads back what encode wrote, and each way a datagram is refused. */
+static void wire_checks(void){
+    static const uint8_t uuid[16] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 };
+    static const uint8_t ov[5] = { 9, 8, 7, 6, 5 };
+    uint8_t buf[256]; size_t n; i_RantDiscoveryWire w, r;
+    char longname[RANT_NODE_NAME_MAX + 8];
+    memset(&w, 0, sizeof w);
+    w.flags = RANT_DISCOVERY_FLAG_REQ | RANT_DISCOVERY_FLAG_BLOB; w.domain = 77; w.uuid = uuid;
+    w.version = 0x01020304u; w.changed_ago_ms = 0xA0B0C0D0u; w.data_port = 6801;
+    w.name = rant_cstr("wire-node"); w.overlay = rant_bytes(ov, sizeof ov);
+    n = i_rant_discovery_encode(&w, buf, sizeof buf);
+    CHECK(n == RANT_DISCOVERY_FIXED_LEN + 9u + 5u,
+          "wire: encode writes the fixed part, the name and the overlay (%u)", (unsigned)n);
+    CHECK(i_rant_discovery_decode(rant_bytes(buf, n), &r) == I_RANT_DISC_OK
+          && r.flags == w.flags && r.domain == 77 && memcmp(r.uuid, uuid, 16) == 0
+          && r.version == w.version && r.changed_ago_ms == w.changed_ago_ms && r.data_port == 6801
+          && r.name.len == 9 && memcmp(r.name.data, "wire-node", 9) == 0
+          && r.overlay.len == 5 && memcmp(r.overlay.data, ov, 5) == 0 && r.overlay_len == 5,
+          "wire: decode reads back what encode wrote");
+    CHECK(i_rant_discovery_encode(&w, buf, n - 1) == 0, "wire: encode refuses a buffer too small");
+    w.flags = 0;
+    n = i_rant_discovery_encode(&w, buf, sizeof buf);
+    CHECK(n == RANT_DISCOVERY_FIXED_LEN + 9u && i_rant_discovery_decode(rant_bytes(buf, n), &r) == I_RANT_DISC_OK
+          && r.overlay.len == 0 && r.overlay_len == 0, "wire: the overlay rides only with BLOB");
+    memset(longname, 'n', sizeof longname - 1); longname[sizeof longname - 1] = '\0';
+    w.name = rant_cstr(longname);
+    n = i_rant_discovery_encode(&w, buf, sizeof buf);
+    CHECK(i_rant_discovery_decode(rant_bytes(buf, n), &r) == I_RANT_DISC_OK && r.name.len == RANT_NODE_NAME_MAX,
+          "wire: a long name is cut to RANT_NODE_NAME_MAX (%u)", (unsigned)r.name.len);
+
+    w.name = rant_cstr("x"); w.flags = RANT_DISCOVERY_FLAG_BLOB;
+    n = i_rant_discovery_encode(&w, buf, sizeof buf);
+    CHECK(i_rant_discovery_decode(rant_bytes(buf, 7), &r) == I_RANT_DISC_FOREIGN, "wire: under 8 bytes is foreign");
+    buf[0] = 'x';
+    CHECK(i_rant_discovery_decode(rant_bytes(buf, n), &r) == I_RANT_DISC_FOREIGN, "wire: another magic is foreign");
+    buf[0] = 'u'; buf[4] = (uint8_t)(RANT_WIRE_VERSION + 1);
+    CHECK(i_rant_discovery_decode(rant_bytes(buf, n), &r) == I_RANT_DISC_WIRE
+          && r.wire == (uint8_t)(RANT_WIRE_VERSION + 1) && r.domain == 77 && r.flags == RANT_DISCOVERY_FLAG_BLOB,
+          "wire: another version is known by its first eight bytes");
+    buf[4] = (uint8_t)RANT_WIRE_VERSION;
+    CHECK(i_rant_discovery_decode(rant_bytes(buf, RANT_DISCOVERY_FIXED_LEN - 1), &r) == I_RANT_DISC_MALFORMED
+          && i_rant_discovery_decode(rant_bytes(buf, RANT_DISCOVERY_FIXED_LEN), &r) == I_RANT_DISC_MALFORMED,
+          "wire: a cut fixed part or name is malformed");
+    CHECK(i_rant_discovery_decode(rant_bytes(buf, n - 2), &r) == I_RANT_DISC_CUT && r.overlay_len == 5
+          && r.data_port == 6801, "wire: a cut overlay says how much was meant");
+    buf[n] = 0;
+    CHECK(i_rant_discovery_decode(rant_bytes(buf, n + 1), &r) == I_RANT_DISC_MALFORMED,
+          "wire: a trailing byte is malformed");
+    buf[36] = RANT_NODE_NAME_MAX + 1;
+    CHECK(i_rant_discovery_decode(rant_bytes(buf, sizeof buf), &r) == I_RANT_DISC_MALFORMED,
+          "wire: a name past the cap is malformed");
+    buf[36] = 1; buf[5] = 0;
+    CHECK(i_rant_discovery_decode(rant_bytes(buf, n), &r) == I_RANT_DISC_MALFORMED,
+          "wire: an overlay without BLOB is malformed");
+}
+
+/* Every datagram says how long ago our blob changed: from the start, then from each change,
+   saturating rather than wrapping. */
+static void change_age_checks(void){
+    static uint8_t mem[8192];
+    uint8_t out[RANT_DISCOVERY_WIRE_MAX]; size_t n;
+    i_RantDiscoveryCoreConfig c; i_RantDiscoveryState *st; i_RantDiscoveryWire r;
+    uint64_t t0 = 5000000u;
+    memset(&c,0,sizeof c); memset(c.uuid,0xEE,16);
+    c.domain_id=99; c.announce_interval_us=1000000; c.peer_timeout_us=4000000; c.max_peers=2;
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    CHECK(st != NULL, "change age: init");
+    if (!st) return;
+    n = i_rant_discovery_update(st, t0, out, sizeof out);
+    CHECK(n && i_rant_discovery_decode(rant_bytes(out, n), &r) == I_RANT_DISC_OK && r.changed_ago_ms == 0,
+          "change age: the start counts as the first change (%u ms)", (unsigned)r.changed_ago_ms);
+    i_rant_discovery_solicit(st);
+    n = i_rant_discovery_update(st, t0 + 2500000u, out, sizeof out);
+    CHECK(n && i_rant_discovery_decode(rant_bytes(out, n), &r) == I_RANT_DISC_OK && r.changed_ago_ms == 2500,
+          "change age: it grows with the clock (%u ms)", (unsigned)r.changed_ago_ms);
+    i_rant_discovery_set_meta(st, rant_bytes(NULL, 0), t0 + 3000000u);
+    n = i_rant_discovery_update(st, t0 + 3250000u, out, sizeof out);
+    CHECK(n && i_rant_discovery_decode(rant_bytes(out, n), &r) == I_RANT_DISC_OK && r.changed_ago_ms == 250
+          && r.version == 2, "change age: a change restarts it (%u ms, version %u)",
+          (unsigned)r.changed_ago_ms, (unsigned)r.version);
+    i_rant_discovery_solicit(st);
+    n = i_rant_discovery_update(st, t0 + 3000000u + 0x100000000ull * 1000u, out, sizeof out);
+    CHECK(n && i_rant_discovery_decode(rant_bytes(out, n), &r) == I_RANT_DISC_OK && r.changed_ago_ms == 0xFFFFFFFFu,
+          "change age: past 49 days it stays at the most it can say");
+}
+
 static const TestCase cases[] = {
+    { "wire",           wire_checks },
+    { "change_age",     change_age_checks },
     { "discovery_core", disc_core_checks },
     { "node_core", node_core_checks },
 };

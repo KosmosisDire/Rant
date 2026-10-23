@@ -16,16 +16,47 @@ extern "C" {
 /* What every discovery datagram carries in byte 4. Any change to what crosses the wire bumps
    it, discovery or not, so two nodes either speak one wire or one reports the other. */
 #ifndef RANT_WIRE_VERSION
-#define RANT_WIRE_VERSION 7
+#define RANT_WIRE_VERSION 8
 #endif
 
 #define RANT_DISCOVERY_META_MAX 64     /* default per peer overlay capacity */
-/* The fixed header is 24 bytes, then [u32 meta_version][u16 meta_len][meta]. */
-#define RANT_DISCOVERY_META_OFF 30
-/* Largest discovery section of the blob: port and name. The overlay follows. */
-#define RANT_DISCOVERY_DISC_MAX (2u + 1u + RANT_NODE_NAME_MAX)
 /* Smallest datagram buffer. The runtime grows it to fit meta_cap. */
 #define RANT_DISCOVERY_WIRE_MAX 128
+
+/* One discovery datagram. The layout is in spec/discovery.md, Wire format: the fixed part
+ * runs through name_len, the name follows, then the overlay when BLOB is set. */
+#define RANT_DISCOVERY_FIXED_LEN 37
+#define RANT_DISCOVERY_HEAD_MAX  (RANT_DISCOVERY_FIXED_LEN + RANT_NODE_NAME_MAX)
+#define RANT_DISCOVERY_FLAG_BYE  0x01u   /* leaving */
+#define RANT_DISCOVERY_FLAG_REQ  0x02u   /* a solicit: answer with an announce and the blob */
+#define RANT_DISCOVERY_FLAG_BLOB 0x10u   /* the overlay follows the name, maybe empty */
+
+typedef struct {
+    uint8_t        flags;
+    uint16_t       domain;
+    const uint8_t *uuid;            /* 16 bytes */
+    uint32_t       version;         /* the sender's blob version */
+    uint32_t       changed_ago_ms;  /* how long ago that blob last changed, saturating */
+    uint16_t       data_port;
+    RantString     name;            /* not NUL terminated */
+    RantBytes      overlay;         /* the blob, when flags has BLOB */
+    uint16_t       overlay_len;     /* the length the sender stated, past overlay.len when cut */
+    uint8_t        wire;            /* the wire version byte, for I_RANT_DISC_WIRE */
+} i_RantDiscoveryWire;
+
+typedef enum {
+    I_RANT_DISC_OK,
+    I_RANT_DISC_FOREIGN,     /* not a discovery datagram */
+    I_RANT_DISC_WIRE,        /* another wire version: flags, domain and wire hold */
+    I_RANT_DISC_MALFORMED,
+    I_RANT_DISC_CUT          /* the overlay arrived shorter than stated: all but overlay hold */
+} i_RantDiscoveryDecode;
+
+/* Writes w into out. overlay rides only with BLOB, a name past RANT_NODE_NAME_MAX is cut.
+ * 0 when it does not fit. */
+size_t i_rant_discovery_encode(const i_RantDiscoveryWire *w, uint8_t *out, size_t cap);
+/* Views of the datagram's bytes, valid while the datagram is. */
+i_RantDiscoveryDecode i_rant_discovery_decode(RantBytes datagram, i_RantDiscoveryWire *out);
 
 #define RANT_DISCOVERY_MAX_SUBNETS 16
 /* One IPv4 subnet this host is on, network order bytes. */
@@ -60,7 +91,7 @@ typedef struct {
     uint32_t peer_timeout_us;    /* drop a peer after this much silence */
     uint32_t gone_timeout_us;    /* DROPPED to GONE this long after the drop, 0 = never */
     uint16_t max_peers;
-    RantString name;        /* advertised name, copied at init */
+    RantString name;        /* advertised name, copied at init, cut to RANT_NODE_NAME_MAX */
     RantBytes meta;         /* the initial overlay. Must stay valid, .len <= meta_cap */
     uint16_t meta_cap;      /* per peer overlay capacity, 0 = RANT_DISCOVERY_META_MAX */
     uint16_t peer_user_bytes;    /* scratch reserved per peer, 0 = none */
@@ -108,8 +139,9 @@ void           i_rant_discovery_solicit(i_RantDiscoveryState *st);
 /* Re fires peer up for every live peer with the blob we hold, so a caller that changed
  * its own advertised data re applies every peer's interest. */
 void           i_rant_discovery_replay_peers(i_RantDiscoveryState *st);
-/* Replaces the overlay and bumps its version so peers re fetch it. meta must stay valid. */
-void           i_rant_discovery_set_meta(i_RantDiscoveryState *st, RantBytes meta);
+/* Replaces the overlay and bumps its version so peers re fetch it. meta must stay valid.
+ * now_us dates the change, which every announce reports as its age. */
+void           i_rant_discovery_set_meta(i_RantDiscoveryState *st, RantBytes meta, uint64_t now_us);
 /* The version our announces advertise, 0 if none. Detail responses are stamped with it. */
 uint32_t       i_rant_discovery_meta_version(const i_RantDiscoveryState *st);
 /* Our own subnets, for locator ranking. Re callable when the interface set changes. A

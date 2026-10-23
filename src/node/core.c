@@ -1393,7 +1393,7 @@ int i_rant_node_core_schema_check(i_RantNodeCore *c, uint32_t peer, uint16_t top
    else the bootstrap form goes out and peers page the interest. See spec/interest.md. */
 uint16_t i_rant_node_core_build_meta(i_RantNodeCore *c){
     uint16_t need = i_rant_transport_meta_size(c->transport);
-    int external = ((size_t)RANT_DISCOVERY_META_OFF + RANT_DISCOVERY_DISC_MAX + need
+    int external = ((size_t)RANT_DISCOVERY_HEAD_MAX + need
                     > (size_t)RANT_DGRAM_MAX);
     if (external) need = i_rant_transport_meta_bootstrap_size();
     if (need > c->meta_cap){   /* size the blob buffer to the exact content */

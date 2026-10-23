@@ -78,7 +78,7 @@ void i_rant_discovery_set_tx_fd(i_RantDiscovery *d, i_RantSock fd){
 }
 
 void i_rant_discovery_advertise(i_RantDiscovery *d, RantBytes meta){
-    if (d) i_rant_discovery_set_meta(d->core, meta);
+    if (d) i_rant_discovery_set_meta(d->core, meta, i_rant_plat_now_us());
 }
 
 void i_rant_discovery_replay(i_RantDiscovery *d){

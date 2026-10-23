@@ -4,9 +4,6 @@
 #include "../common/arena.h"
 #include <string.h>
 
-#define RANT_DISCOVERY_HDR_LEN 24              /* magic(4) ver(1) flags(1) domain(2) uuid(16) */
-#define RANT_DISCOVERY_FLAG_BYE 0x01
-#define RANT_DISCOVERY_FLAG_REQ 0x02           /* solicit: recipients announce back now */
 #define RANT_DISCOVERY_BLOB_RESEND 3u          /* announces that carry the full blob after a change */
 
 struct i_RantDiscoveryPeer {
@@ -48,6 +45,7 @@ struct i_RantDiscoveryState {
     uint8_t      *user_pool;      /* cap_peers x user_stride */
     RantBytes       self_meta;        /* our overlay, a view of the node's buffer */
     uint32_t        self_meta_version;
+    uint64_t        changed_us;       /* when our overlay last changed, our start at first */
     char            self_name[RANT_NODE_NAME_MAX + 1];
     uint8_t         self_name_len;
     uint16_t        self_blob_resend; /* announces remaining that carry the full blob */
@@ -128,9 +126,54 @@ void i_rant_discovery_config_defaults(i_RantDiscoveryCoreConfig *cfg){
 
 uint32_t i_rant_discovery_wire_size(uint16_t meta_cap){
     uint32_t cap = meta_cap ? meta_cap : RANT_DISCOVERY_META_MAX;
-    /* the blob is the discovery section plus the overlay */
-    uint32_t w = (uint32_t)RANT_DISCOVERY_META_OFF + RANT_DISCOVERY_DISC_MAX + cap;
+    uint32_t w = (uint32_t)RANT_DISCOVERY_HEAD_MAX + cap;
     return w < RANT_DISCOVERY_WIRE_MAX ? RANT_DISCOVERY_WIRE_MAX : w;
+}
+
+/* The codec. Bytes 0 to 7 (magic, wire version, flags, domain) keep their place in every
+ * version, so a node of this domain on another wire is still recognized. */
+size_t i_rant_discovery_encode(const i_RantDiscoveryWire *w, uint8_t *out, size_t cap){
+    uint8_t nl = w->name.len > RANT_NODE_NAME_MAX ? (uint8_t)RANT_NODE_NAME_MAX : (uint8_t)w->name.len;
+    size_t ol = (w->flags & RANT_DISCOVERY_FLAG_BLOB) ? w->overlay.len : 0u;
+    size_t len = (size_t)RANT_DISCOVERY_FIXED_LEN + nl + ol;
+    if (!out || !w->uuid || ol > 0xFFFFu || len > cap) return 0;
+    out[0]='u'; out[1]='D'; out[2]='S'; out[3]='C';
+    out[4] = (uint8_t)RANT_WIRE_VERSION;
+    out[5] = w->flags;
+    i_rant_le_w16(out + 6, w->domain);
+    memcpy(out + 8, w->uuid, 16);
+    i_rant_le_w32(out + 24, w->version);
+    i_rant_le_w32(out + 28, w->changed_ago_ms);
+    i_rant_le_w16(out + 32, (uint16_t)ol);
+    i_rant_le_w16(out + 34, w->data_port);
+    out[36] = nl;
+    if (nl) memcpy(out + RANT_DISCOVERY_FIXED_LEN, w->name.data, nl);
+    if (ol) memcpy(out + RANT_DISCOVERY_FIXED_LEN + nl, w->overlay.data, ol);
+    return len;
+}
+
+i_RantDiscoveryDecode i_rant_discovery_decode(RantBytes datagram, i_RantDiscoveryWire *w){
+    const uint8_t *p = datagram.data; size_t len = datagram.len, at; uint8_t nl;
+    memset(w, 0, sizeof *w);
+    if (!p || len < 8 || p[0]!='u' || p[1]!='D' || p[2]!='S' || p[3]!='C') return I_RANT_DISC_FOREIGN;
+    w->wire = p[4]; w->flags = p[5]; w->domain = i_rant_le_r16(p + 6);
+    if (w->wire != (uint8_t)RANT_WIRE_VERSION) return I_RANT_DISC_WIRE;
+    if (len < (size_t)RANT_DISCOVERY_FIXED_LEN) return I_RANT_DISC_MALFORMED;
+    w->uuid           = p + 8;
+    w->version        = i_rant_le_r32(p + 24);
+    w->changed_ago_ms = i_rant_le_r32(p + 28);
+    w->overlay_len    = i_rant_le_r16(p + 32);
+    w->data_port      = i_rant_le_r16(p + 34);
+    nl = p[36];
+    at = (size_t)RANT_DISCOVERY_FIXED_LEN + nl;
+    if (nl > RANT_NODE_NAME_MAX || len < at) return I_RANT_DISC_MALFORMED;
+    w->name = rant_string((const char*)(p + RANT_DISCOVERY_FIXED_LEN), nl);
+    if (!(w->flags & RANT_DISCOVERY_FLAG_BLOB))
+        return (w->overlay_len || len != at) ? I_RANT_DISC_MALFORMED : I_RANT_DISC_OK;
+    if (len < at + w->overlay_len) return I_RANT_DISC_CUT;      /* the OS cut it to our buffer */
+    if (len > at + w->overlay_len) return I_RANT_DISC_MALFORMED;
+    w->overlay = rant_bytes(p + at, w->overlay_len);
+    return I_RANT_DISC_OK;
 }
 
 /* The one arena layout. Measure mode feeds required_memory and build mode feeds init. */
@@ -299,29 +342,27 @@ static int i_rant_discovery_addr_is(const RantAddr *a, const uint8_t *ip, uint8_
     return a->ip_len == ip_len && a->port == port && memcmp(a->ip, ip, ip_len) == 0;
 }
 
-/* Builds an announce, solicit or bye. with_blob adds the discovery section and the overlay. */
+/* How long ago our overlay changed, from the latest time fed in. A stale clock reads it
+ * younger, the safe side: a peer then fetches what it might otherwise assume judged. */
+static uint32_t i_rant_discovery_change_age_ms(const i_RantDiscoveryState *st){
+    uint64_t ms = st->now_us > st->changed_us ? (st->now_us - st->changed_us) / 1000u : 0u;
+    return ms > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)ms;
+}
+
+/* Builds an announce, solicit or bye. with_blob adds the overlay. */
 static size_t i_rant_discovery_build(i_RantDiscoveryState *st, uint8_t flags, int with_blob,
                                    uint8_t *p, size_t cap){
-    uint16_t meta_len = 0;
-    if (cap < (size_t)RANT_DISCOVERY_META_OFF) return 0;
-    p[0]='u'; p[1]='D'; p[2]='S'; p[3]='C';
-    p[4]=(uint8_t)RANT_WIRE_VERSION;
-    p[5]=flags;
-    i_rant_le_w16(p+6, st->cfg.domain_id);
-    memcpy(p+8, st->cfg.uuid, 16);
-    if (with_blob){
-        uint8_t *b = p + RANT_DISCOVERY_META_OFF, *bend = p + cap;
-        size_t need = 2u + 1u + st->self_name_len + st->self_meta.len;
-        if ((size_t)(bend - b) < need) return 0;
-        i_rant_le_w16(b, st->cfg.data_port); b += 2;              /* discovery section: data port */
-        *b++ = st->self_name_len;                             /* name */
-        if (st->self_name_len){ memcpy(b, st->self_name, st->self_name_len); b += st->self_name_len; }
-        if (st->self_meta.len){ memcpy(b, st->self_meta.data, st->self_meta.len); b += st->self_meta.len; }
-        meta_len = (uint16_t)(b - (p + RANT_DISCOVERY_META_OFF));
-    }
-    i_rant_le_w32(p+RANT_DISCOVERY_HDR_LEN, st->self_meta_version);
-    i_rant_le_w16(p+RANT_DISCOVERY_HDR_LEN+4, meta_len);
-    return (size_t)RANT_DISCOVERY_META_OFF + meta_len;
+    i_RantDiscoveryWire w;
+    memset(&w, 0, sizeof w);
+    w.flags          = (uint8_t)(flags | (with_blob ? RANT_DISCOVERY_FLAG_BLOB : 0u));
+    w.domain         = st->cfg.domain_id;
+    w.uuid           = st->cfg.uuid;
+    w.version        = st->self_meta_version;
+    w.changed_ago_ms = i_rant_discovery_change_age_ms(st);
+    w.data_port      = st->cfg.data_port;
+    w.name           = rant_string(st->self_name, st->self_name_len);
+    w.overlay        = st->self_meta;
+    return i_rant_discovery_encode(&w, p, cap);
 }
 
 /* Higher wins: 2 on one of our subnets, 1 routed, 0 link local. See spec/discovery.md. */
@@ -440,88 +481,61 @@ static void i_rant_discovery_wire_mismatch(i_RantDiscoveryState *st, const RantA
         i_rant_discovery_fire_error(st, RANT_E_WIRE_VERSION, 0, &a, 0);
 }
 
+/* A blob bigger than we hold: the OS cut it to our buffer, or it is past the accept bound.
+ * The node grows the bound and re solicits on the event. wanted is the stated size. */
+static void i_rant_discovery_too_big(i_RantDiscoveryState *st, const uint8_t *src_ip, uint8_t src_ip_len,
+                                     const i_RantDiscoveryWire *w, uint32_t wanted){
+    RantAddr a; int at = i_rant_discovery_find(st, w->uuid);
+    uint32_t id = at >= 0 ? st->peers[at].local_id : 0;
+    memset(&a, 0, sizeof a);
+    if (src_ip){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
+    a.port = w->data_port;
+    (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_META_TOO_BIG, &a, wanted, id);
+    i_rant_discovery_fire_error(st, RANT_E_PEER_META_TOO_BIG, id, &a, wanted);
+}
+
+/* Takes the name every datagram carries. A uuid keeps its name for life, so this only fills it. */
+static void i_rant_discovery_take_name(i_RantDiscoveryPeer *peer, RantString name){
+    uint8_t nl = name.len > RANT_NODE_NAME_MAX ? (uint8_t)RANT_NODE_NAME_MAX : (uint8_t)name.len;
+    if (peer->name_len == nl && (!nl || memcmp(peer->name, name.data, nl) == 0)) return;
+    if (nl) memcpy(peer->name, name.data, nl);
+    peer->name[nl] = '\0'; peer->name_len = nl;
+}
+
 void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
                        RantBytes datagram, uint64_t now){
-    const uint8_t *p = datagram.data; size_t len = datagram.len;
     const uint8_t *src_ip = (src && (src->ip_len==4 || src->ip_len==16)) ? src->ip : NULL;
     uint8_t  src_ip_len = src_ip ? src->ip_len : 0;
-    uint8_t flags; uint16_t meta_len; uint32_t meta_version;
-    const uint8_t *uuid, *blob;
-    RantAddr addr; int idx, addr_changed, first_contact=0, blob_changed=0, revived=0;
+    i_RantDiscoveryWire w; i_RantDiscoveryDecode dr;
+    RantAddr addr; int idx, addr_changed, first_contact=0, blob_changed=0, revived=0, have_blob;
     i_RantDiscoveryPeer *peer;
-    /* the blob's discovery section, valid when have_disc. disc_name is not NUL terminated */
-    int have_disc=0; uint16_t disc_port=0;
-    RantBytes overlay = {NULL, 0}; RantString disc_name = {NULL, 0};
 
     st->now_us = now;
-    /* the magic, the wire version, the flags and the domain keep bytes 0 to 7 in every
-       version, so a node of this domain on another wire is recognized and reported */
-    if (len < 8) return;
-    if (p[0]!='u'||p[1]!='D'||p[2]!='S'||p[3]!='C') return;
-    if (i_rant_le_r16(p+6) != st->cfg.domain_id) return;
-    if (p[4]!=(uint8_t)RANT_WIRE_VERSION){ i_rant_discovery_wire_mismatch(st, src, p[4]); return; }
-    if (len < (size_t)RANT_DISCOVERY_META_OFF) return;
-    uuid = p+8;
-    if (memcmp(uuid, st->cfg.uuid, 16)==0) return;  /* ignore self */
-    meta_version = i_rant_le_r32(p+RANT_DISCOVERY_HDR_LEN);
-    meta_len = i_rant_le_r16(p+RANT_DISCOVERY_HDR_LEN+4);
-    if ((size_t)RANT_DISCOVERY_META_OFF + meta_len > len){
-        /* the OS truncated the datagram. The intact header says how much the peer wanted
-           to send, so an IO layer that can grow does so and re solicits. */
-        RantAddr a; int at = i_rant_discovery_find(st, uuid);
-        memset(&a, 0, sizeof a);
-        if (src_ip && (src_ip_len==4 || src_ip_len==16)){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
-        (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_META_TOO_BIG, &a, meta_len,
-                                            at >= 0 ? st->peers[at].local_id : 0);
-        i_rant_discovery_fire_error(st, RANT_E_PEER_META_TOO_BIG,
-                                    at >= 0 ? st->peers[at].local_id : 0, &a, meta_len);
+    dr = i_rant_discovery_decode(datagram, &w);
+    if (dr == I_RANT_DISC_FOREIGN || w.domain != st->cfg.domain_id) return;
+    if (dr == I_RANT_DISC_WIRE){ i_rant_discovery_wire_mismatch(st, src, w.wire); return; }
+    if (dr == I_RANT_DISC_MALFORMED || memcmp(w.uuid, st->cfg.uuid, 16) == 0) return;   /* or self */
+    if (dr == I_RANT_DISC_CUT){ i_rant_discovery_too_big(st, src_ip, src_ip_len, &w, w.overlay_len); return; }
+    have_blob = (w.flags & RANT_DISCOVERY_FLAG_BLOB) != 0;
+    if (have_blob && w.overlay.len > st->meta_cap){     /* this side can never hold it, so say so */
+        i_rant_discovery_too_big(st, src_ip, src_ip_len, &w, (uint32_t)w.overlay.len);
         return;
     }
-    blob = p + RANT_DISCOVERY_META_OFF;
-    flags = p[5];
 
-    /* the discovery section, then the opaque overlay. A malformed blob drops the datagram */
-    if (meta_len){
-        const uint8_t *b = blob, *bend = blob + meta_len;
-        if (b + 3 > bend) return;                          /* port(2) name_len(1) */
-        disc_port = i_rant_le_r16(b); b += 2;
-        {   uint8_t dnl = *b++;
-            if (dnl){ if (b + dnl > bend) return; disc_name = rant_string((const char*)b, dnl); b += dnl; } }
-        overlay = rant_bytes(b, (size_t)(bend - b));
-        if (overlay.len > st->meta_cap){   /* this side can never hold it, so say so */
-            RantAddr a; int at = i_rant_discovery_find(st, uuid);
-            memset(&a, 0, sizeof a);
-            if (src_ip){ memcpy(a.ip, src_ip, src_ip_len); a.ip_len = src_ip_len; }
-            a.port = disc_port;
-            (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_META_TOO_BIG, &a, (uint32_t)overlay.len,
-                                                at >= 0 ? st->peers[at].local_id : 0);
-            i_rant_discovery_fire_error(st, RANT_E_PEER_META_TOO_BIG,
-                                        at >= 0 ? st->peers[at].local_id : 0, &a, overlay.len);
-            return;
-        }
-        have_disc = 1;
-    }
+    idx = i_rant_discovery_find(st, w.uuid);
 
-    idx = i_rant_discovery_find(st, uuid);
-
-    if (flags & RANT_DISCOVERY_FLAG_BYE){
+    if (w.flags & RANT_DISCOVERY_FLAG_BYE){
         if (idx >= 0) i_rant_discovery_peer_gone(st, &st->peers[idx]);     /* a BYE is GONE */
         return;
     }
 
-    /* The IP is a candidate from the source. See spec/discovery.md. */
+    /* The IP is a candidate from the source, the port the one every datagram names. See
+       spec/discovery.md. */
     memset(&addr, 0, sizeof addr);
-    if (have_disc){
-        if (src_ip && (src_ip_len==4 || src_ip_len==16)){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
-        else return;
-        addr.port = disc_port;
-    } else if (idx >= 0){
-        addr.port = st->peers[idx].port;
-        if (src_ip && (src_ip_len==4 || src_ip_len==16)){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
-        else { addr.ip_len = st->peers[idx].ip_len; memcpy(addr.ip, st->peers[idx].ip, 16); }
-    } else if (src_ip && (src_ip_len==4 || src_ip_len==16)){
-        addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len);   /* port from the blob */
-    } else return;
+    if (src_ip){ addr.ip_len = src_ip_len; memcpy(addr.ip, src_ip, src_ip_len); }
+    else if (idx >= 0){ addr.ip_len = st->peers[idx].ip_len; memcpy(addr.ip, st->peers[idx].ip, 16); }
+    else return;
+    addr.port = w.data_port;
 
     if (idx < 0){
         uint8_t *keep_meta, *keep_user; uint16_t keep_cap;
@@ -543,12 +557,13 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
         st->peers[idx].user     = keep_user;
         if (keep_user) memset(keep_user, 0, st->user_stride);   /* fresh scratch for the new peer */
         st->peers[idx].used     = 1;
-        memcpy(st->peers[idx].uuid, uuid, 16);
+        memcpy(st->peers[idx].uuid, w.uuid, 16);
         st->peers[idx].local_id = st->next_local_id++;
         st->peers[idx].ip_len   = 0xFF;   /* force first peer_up */
         first_contact = 1;
     }
     peer = &st->peers[idx];
+    i_rant_discovery_take_name(peer, w.name);
     if (peer->dropped){ peer->dropped = 0; revived = 1; }   /* a DROPPED peer returned: resume it */
     peer->last_heard_us = now;
     if (src_ip) i_rant_discovery_note_path(peer, src_ip, src_ip_len, now);
@@ -577,34 +592,31 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
 
     /* A newer version with the blob updates our copy. A newer version without it means we
        fell behind, so re fetch with a targeted solicit. */
-    if (meta_version > peer->adv_version) peer->adv_version = meta_version;
-    if (have_disc){
-        if (meta_version > peer->meta_version){
-            uint8_t nl = disc_name.len > RANT_NODE_NAME_MAX ? RANT_NODE_NAME_MAX : (uint8_t)disc_name.len;
+    if (w.version > peer->adv_version) peer->adv_version = w.version;
+    if (have_blob){
+        if (w.version > peer->meta_version){
             int fits = 1;
-            if (overlay.len > peer->meta_cap){   /* hook mode resizes, pool slots are pre sized */
-                uint8_t *nb = st->cfg.alloc ? (uint8_t*)st->cfg.alloc(st->cfg.alloc_user, peer->meta, overlay.len)
+            if (w.overlay.len > peer->meta_cap){   /* hook mode resizes, pool slots are pre sized */
+                uint8_t *nb = st->cfg.alloc ? (uint8_t*)st->cfg.alloc(st->cfg.alloc_user, peer->meta, w.overlay.len)
                                             : NULL;
-                if (nb){ peer->meta = nb; peer->meta_cap = (uint16_t)overlay.len; }
+                if (nb){ peer->meta = nb; peer->meta_cap = (uint16_t)w.overlay.len; }
                 else fits = 0;                   /* OOM: keep the stale blob, re fetch retries */
             }
             if (fits){
-                if (overlay.len) memcpy(peer->meta, overlay.data, overlay.len);
-                peer->meta_len = (uint16_t)overlay.len; peer->meta_version = meta_version;
-                if (disc_name.data && nl) memcpy(peer->name, disc_name.data, nl);
-                peer->name[nl] = '\0'; peer->name_len = nl;
+                if (w.overlay.len) memcpy(peer->meta, w.overlay.data, w.overlay.len);
+                peer->meta_len = (uint16_t)w.overlay.len; peer->meta_version = w.version;
                 blob_changed = 1;
             }
         }
         peer->solicit_due = 0;
-    } else if (meta_version > peer->meta_version){
+    } else if (w.version > peer->meta_version){
         peer->solicit_due = 1;
     }
 
     if (first_contact || addr_changed || blob_changed || revived)
         i_rant_discovery_fire_up(st, peer, &addr);
 
-    if ((flags & RANT_DISCOVERY_FLAG_REQ) && st->started)
+    if ((w.flags & RANT_DISCOVERY_FLAG_REQ) && st->started)
         peer->reply_due = 1;   /* answer the solicit with a unicast announce and blob */
 }
 
@@ -613,6 +625,7 @@ size_t i_rant_discovery_update(i_RantDiscoveryState *st, uint64_t now, void *out
     st->now_us = now;
     if (!st->started){
         st->started = 1;
+        st->changed_us = now;   /* our overlay is new to the mesh from here */
         st->next_announce_us = now + (i_rant_discovery_fnv(st->cfg.uuid,16) % st->cfg.announce_interval_us);
         st->want_solicit = 1;   /* solicit on startup */
     }
@@ -649,10 +662,11 @@ uint64_t i_rant_discovery_next_due_us(const i_RantDiscoveryState *st){
     return st->next_announce_us;   /* 0 after an advertise: announce now */
 }
 
-void i_rant_discovery_set_meta(i_RantDiscoveryState *st, RantBytes meta){
+void i_rant_discovery_set_meta(i_RantDiscoveryState *st, RantBytes meta, uint64_t now_us){
     if (!st || meta.len > st->meta_cap) return;   /* the node sizes meta_cap to fit */
     st->self_meta         = meta;
     st->self_meta_version++;
+    st->changed_us        = now_us;
     st->self_blob_resend  = RANT_DISCOVERY_BLOB_RESEND;
     st->next_announce_us  = 0;   /* announce the change now */
 }
