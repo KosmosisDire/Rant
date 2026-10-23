@@ -13,7 +13,11 @@ fn main() -> ExitCode {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let crate_dir = here.parent().expect("ffigen sits in the workspace").join("rant");
     let target = crate_dir.join("src/ffi.rs");
-    let header = match amalgamate(&crate_dir, &std::env::temp_dir().join("rant-ffigen")) {
+    // packed beside this exe, in the checkout's own target folder: two checkouts checking at
+    // once would replace each other's header in a shared one
+    let exe = std::env::current_exe().expect("ffigen: cannot locate itself");
+    let pack = exe.parent().expect("ffigen runs from a target folder").join("ffigen-dist");
+    let header = match amalgamate(&crate_dir, &pack) {
         Ok(dir) => dir.join("rant.h"),
         Err(e) => {
             eprintln!("ffigen: {e}");
