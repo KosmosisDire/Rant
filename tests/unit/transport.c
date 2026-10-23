@@ -855,10 +855,49 @@ static void ack_coalesce_checks(void){
     test_pair_close(&p);
 }
 
+/* A delivery that leaves received data past the front asks for the rest at once. Three
+   samples of 3 fragments, A's middle one lost: B is held ahead and C's fragments drop as the
+   hold is taken. A's repair delivers A and B, and C's NACK must not wait the ack delay. */
+static int ah2_move(i_RantTransportState *from, uint32_t from_id, i_RantTransportState *to_st,
+                    uint64_t drop, int *nack_bits, uint64_t clk){
+    uint8_t buf[RANT_DGRAM_MAX]; uint32_t to; size_t ol; int n = 0;
+    while (i_rant_transport_poll_send(from, &to, buf, sizeof buf, &ol, clk)){
+        if ((buf[0] & RANT_MSG_MASK) == RANT_DATA && !(buf[0] & RANT_F_SINGLE)
+            && i_rant_le_r64(buf + RANT_OFFSET_SEQNO) == drop) continue;
+        if ((buf[0] & RANT_MSG_MASK) == RANT_NACK && i_rant_le_r16(buf + RANT_OFFSET_NACK_NBITS) > 0){
+            n++; if (nack_bits) *nack_bits = 1; }
+        i_rant_transport_on_datagram(to_st, from_id, rant_bytes(buf, ol), clk);
+    }
+    return n;
+}
+static void ack_holes_checks(void){
+    TestPair p; RantQos q; static uint8_t big[3 * RANT_FRAG_SIZE - 100]; uint8_t small[16];
+    uint64_t clk = 1000000, base; int k, repairs;
+    i_RantTopic *topic;
+    memset(&q, 0, sizeof q); q.reliability = RANT_RELIABLE; q.keep_last = 8; q.heartbeat_us = 200000;
+    memset(small, 0, sizeof small); memset(big, 7, sizeof big);
+    if (!test_pair_open(&p, "holes", q, q, NULL)){ CHECK(0, "holes: pair opens"); return; }
+    test_apply_verified(p.r, 1u, p.w); test_apply_verified(p.w, 2u, p.r);
+    for (k = 0; k < (int)RANT_RTT_WARM_PROBES; k++){       /* past the probe warm up */
+        i_rant_transport_send(p.w, 0, rant_bytes(small, sizeof small), clk);
+        ah2_move(p.w, 1u, p.r, ~0ull, NULL, clk); ah2_move(p.r, 2u, p.w, ~0ull, NULL, clk);
+    }
+    topic = i_rant_topic_at(p.w, 0, NULL);
+    base = topic->next_seqno;                               /* A's first fragment */
+    for (k = 0; k < 3; k++) i_rant_transport_send(p.w, 0, rant_bytes(big, sizeof big), clk);
+    ah2_move(p.w, 1u, p.r, base + 1, NULL, clk);             /* A without its middle */
+    ah2_move(p.r, 2u, p.w, ~0ull, NULL, clk);                /* A's NACK */
+    ah2_move(p.w, 1u, p.r, ~0ull, NULL, clk);                /* A's repair: A and B deliver */
+    repairs = ah2_move(p.r, 2u, p.w, ~0ull, NULL, clk);
+    CHECK(repairs == 1, "holes: the delivery that leaves C behind asks for it at once (%d NACKs)", repairs);
+    test_pair_close(&p);
+}
+
 static const TestCase cases[] = {
     { "basics", basics_checks },
     { "fresh_join", fresh_join_checks },
     { "ack_coalesce", ack_coalesce_checks },
+    { "ack_holes", ack_holes_checks },
     { "bulk", bulk_checks },
     { "want_set", want_set_checks },
     { "want_filter", want_filter_checks },

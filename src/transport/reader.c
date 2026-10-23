@@ -36,11 +36,15 @@ static void i_rant_reader_ack_now(i_RantTransportState *st, i_RantTopic *topic, 
     i_rant_lane_wake(st, topic_index, peer_slot);
 }
 
-/* An in order delivery's cumulative ack: at once when the writer asked or now is 0, else
- * coalesced one tick after the first unacked delivery. See spec/transport.md. */
+/* An in order delivery's cumulative ack: at once when the writer asked, when data received
+ * past the new front owes a repair request, or when now is 0, else coalesced one tick after
+ * the first unacked delivery. See spec/transport.md. */
 static void i_rant_reader_ack_delivered(i_RantTransportState *st, i_RantTopic *topic, i_RantReaderProxy *r,
                                         uint16_t topic_index, uint32_t peer_slot, uint64_t now){
-    if (r->ack_req || !now){ i_rant_reader_ack_now(st, topic, r, topic_index, peer_slot, 1, 0); return; }
+    if (r->ack_req || !now || r->received_high >= r->deliver_upto){
+        i_rant_reader_ack_now(st, topic, r, topic_index, peer_slot, 1, 0);
+        return;
+    }
     r->ack_force = 1;
     if (r->ack_pending) return;                 /* an armed ack keeps its earlier due */
     i_rant_reader_arm(topic, r, 0);

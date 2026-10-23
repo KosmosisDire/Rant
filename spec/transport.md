@@ -67,7 +67,10 @@ heartbeats, no waiting for acks.
 
 A completed in order sample's cumulative ack coalesces: it is due `RANT_ACK_DELAY_US` (1
 ms, one poll tick) after the first unacked delivery, with its deadline armed so it fires on
-time, and due now when the DATA carried `RANT_F_ACKREQ`. The writer sets that flag on its
+time. It is due now when the DATA carried `RANT_F_ACKREQ`, or when data received past the
+new front means a repair request is owed: a sample held ahead or dropped as the hold was
+taken would otherwise wait the delay at every loss, which cut 64 KB reliable throughput to
+a third on loopback (the `ack_holes` case). The writer sets that flag on its
 round trip probe and on every half history of samples pushed, so a full history always has
 an ack on the way and throughput stays window depth over ack round trip. Acking every
 sample cost a datagram per message, on Windows about 9 us of sendto and a quarter of a
