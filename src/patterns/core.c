@@ -18,6 +18,9 @@ typedef struct {
     uint8_t     hit;           /* the peer being checked still provides it */
 } i_RantPatAuth;
 
+/* @rant/meta's calling side: shut until the app first asks, due when it asked from a callback */
+enum { I_RANT_META_SHUT = 0, I_RANT_META_DUE, I_RANT_META_OPEN };
+
 typedef struct i_RantPatterns {
     RantNode              *n;
     struct RantFunction *funcs;     /* linked lists for the tick and event fanout */
@@ -25,6 +28,7 @@ typedef struct i_RantPatterns {
     /* the authorities sorted by (kind, hash), rebuilt lazily after a create or retire */
     i_RantPatAuth         *auth; uint16_t auth_n, auth_cap; uint8_t auth_dirty;
     struct RantFunction *meta;      /* the built in @rant/meta endpoint, both sides in one handle */
+    uint8_t                meta_calls;   /* I_RANT_META_*, see rant_node_meta_function */
     const RantSchema      *meta_rsp_schema;   /* RantMeta { info: map } */
     uint8_t               *meta_msg; uint32_t meta_msg_cap;   /* reply scratch, grown on demand */
 } i_RantPatterns;
@@ -400,15 +404,17 @@ static void i_rant_func_free_pending(RantFunction *fn, i_RantPending *p){
     i_rant_node_sys_alloc(fn->n, p, 0);
 }
 
-/* Sends every call queued before a provider matched, oldest first. Runs under the lock,
- * so the sends commit reentrantly, fine on a fresh lane with empty history. */
+/* Sends every queued call whose provider matched, oldest first: an undirected one once any
+ * did, a directed one once its own did. Runs under the lock, so the sends commit
+ * reentrantly, fine on a fresh lane with empty history. */
 static void i_rant_func_flush_queued(RantFunction *fn){
     if (fn->is_provider || !fn->pending) return;
     if (rant_topic_match_count(fn->req) == 0) return;     /* still no provider */
     for (;;){
         i_RantPending *pick = NULL, *p;
         uint8_t hdr[RANT__FN_PREFIX];
-        for (p = fn->pending; p; p = p->next) if (p->queued_req) pick = p;
+        for (p = fn->pending; p; p = p->next)
+            if (p->queued_req && (!p->dest || i_rant_topic_peer_matched(fn->req, p->dest))) pick = p;
         if (!pick) return;
         if (fn->is_task && !pick->dest)   /* task requests are always directed: resolve now */
             pick->dest = i_rant_topic_oldest_match(fn->req);
@@ -613,7 +619,8 @@ static void i_rant_func_drop_parked(RantFunction *fn){
 #define RANT__PAT_SUFFIX 4u     /* "@req", "@rsp", "@prg" and "@set" */
 
 /* Creates the channels for a function or task. mode 1 = a definition, 0 = a remote, 2 =
- * both sides in one handle (the @rant/meta shape). topts non NULL = the task shape. */
+ * both sides in one handle (the @rant/meta shape), advertised as a definition until its
+ * calling side opens. topts non NULL = the task shape. */
 static RantFunction *i_rant_function_open(RantNode *n, const char *name,
                     const RantSchema *req_schema, const RantSchema *rsp_schema,
                     RantRequestFn on_request, void *user, const RantFunctionOpts *opts, int mode,
@@ -622,8 +629,8 @@ static RantFunction *i_rant_function_open(RantNode *n, const char *name,
     char rn[RANT_TOPIC_NAME_MAX + 1]; size_t nl;
     RantTopicOpts topt; int acquired;
     int handles_req = (mode != 0), makes_calls = (mode != 1);
-    RantRole req_role = mode == 2 ? RANT_PUBSUB : (handles_req ? RANT_SUB_ONLY : RANT_PUB_ONLY);
-    RantRole rsp_role = mode == 2 ? RANT_PUBSUB : (handles_req ? RANT_PUB_ONLY : RANT_SUB_ONLY);
+    RantRole req_role = handles_req ? RANT_SUB_ONLY : RANT_PUB_ONLY;
+    RantRole rsp_role = handles_req ? RANT_PUB_ONLY : RANT_SUB_ONLY;
     i_RantSysMsgFn req_cb = handles_req ? i_rant_func_on_request : NULL;
     i_RantSysMsgFn rsp_cb = makes_calls ? i_rant_func_on_response : NULL;
     uint8_t req_kind = (uint8_t)(topts ? RANT_KIND_TASK_REQ : RANT_KIND_FUNC_REQ);
@@ -830,8 +837,8 @@ static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponse
     if (sync_entry) *sync_entry = p;
     if (id_out) *id_out = id;
     if (opts && opts->id_out) *opts->id_out = id;   /* set before the send */
-    if (rant_topic_match_count(fn->req) == 0){
-        /* no provider matched yet: the transport would drop an unmatched send, so queue
+    if (dest ? !i_rant_topic_peer_matched(fn->req, dest) : rant_topic_match_count(fn->req) == 0){
+        /* its provider not matched yet: the transport would drop an unmatched send, so queue
            the request and flush the instant the match forms. See spec/patterns.md */
         p->queued_req = (uint8_t*)i_rant_node_sys_alloc(fn->n, NULL, req.len ? req.len : 1u);
         if (!p->queued_req){
@@ -1247,12 +1254,30 @@ void i_rant_patterns_meta_open(RantNode *n){
                                    i_rant_meta_on_request, n, &fo, 2 /* both sides */, NULL, NULL);
 }
 
+/* Opens meta's calling side, both channels in one announce. Lock held, outside callbacks.
+ * A refusal leaves it due, so the next tick tries again. */
+static void i_rant_meta_open_calls(i_RantPatterns *pm){
+    RantFunction *meta = pm->meta; int ok;
+    i_rant_node_advertise_hold(pm->n);
+    ok = i_rant_topic_set_role_held(meta->rsp, RANT_PUBSUB) == RANT_OK
+      && i_rant_topic_set_role_held(meta->req, RANT_PUBSUB) == RANT_OK;
+    i_rant_node_advertise_release(pm->n);
+    pm->meta_calls = (uint8_t)(ok ? I_RANT_META_OPEN : I_RANT_META_DUE);
+}
+
+/* The calling side opens on the first ask, so nodes that never ask meta never match each
+ * other through it. A callback cannot change roles mid delivery, so an ask from one opens
+ * it at the next tick, and its call waits queued for the provider meanwhile. */
 RantFunction *rant_node_meta_function(RantNode *n){
     i_RantPatterns *pm; RantFunction *meta; int acquired;
     if (!n) return NULL;
     acquired = i_rant_node_sys_lock(n);
     pm = (i_RantPatterns*)*i_rant_node_sys_slot(n);
     meta = pm ? pm->meta : NULL;
+    if (meta && pm->meta_calls != I_RANT_META_OPEN){
+        if (acquired) i_rant_meta_open_calls(pm);
+        else pm->meta_calls = I_RANT_META_DUE;
+    }
     i_rant_node_sys_unlock(n, acquired);
     return meta;
 }
@@ -2020,6 +2045,7 @@ static void i_rant_func_reap_severed(RantFunction *fn, uint32_t peer){
 static uint64_t i_rant_patterns_tick(void *user, uint64_t now_us){
     i_RantPatterns *pm = (i_RantPatterns*)user;
     RantFunction *fn; uint64_t soonest = 0;
+    if (pm->meta_calls == I_RANT_META_DUE && pm->meta) i_rant_meta_open_calls(pm);
     for (fn = pm->funcs; fn; fn = fn->next){
         uint64_t s;
         i_rant_func_flush_queued(fn);     /* the backstop: the interest event is the fast path */

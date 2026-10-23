@@ -720,7 +720,8 @@ export class RantNode {
     }
 
     /* Asks another node to clear its clearable condition key, the occurrence raised at sinceUs. Nothing answers:
-     * its next status shows it gone, or still there when it refused. */
+     * its next status shows it gone, or still there when it refused. "role" while this node does not read
+     * status with onStatus. */
     clearPeerStatus(nodeId: number, key: string, sinceUs: number): SendStatus {
         const h = this.live();
         const r = scoped(this.n, (sc) => this.n.c.rant_node_clear_peer_status(h, nodeId, sc.cstr(key), BigInt(sinceUs)));

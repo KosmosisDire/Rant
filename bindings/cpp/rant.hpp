@@ -3234,7 +3234,7 @@ public:
     }
     /* Ask another node to clear its clearable condition key, the occurrence raised at
      * since_us. Nothing answers: its next StatusUpdate shows it gone, or still there when it
-     * refused. */
+     * refused. BadRole while this node does not read status with on_status. */
     SendStatus clear_peer_status(uint32_t node_id, std::string_view key, uint64_t since_us) {
         priv::Pass p = pass();
         if (!p) return SendStatus::State;

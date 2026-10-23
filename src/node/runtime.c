@@ -1778,7 +1778,8 @@ static void i_rant_node_status_open(RantNode *n){
     memset(&topt, 0, sizeof topt);
     topt.qos.reliability = RANT_RELIABLE;
     topt.qos.keep_last = 4;
-    n->clear_topic = i_rant_node_create_impl(n, "@rant/status/clear", RANT_PUBSUB, clear, &topt,
+    /* receive only until status is read, see i_rant_node_clear_follow */
+    n->clear_topic = i_rant_node_create_impl(n, "@rant/status/clear", RANT_SUB_ONLY, clear, &topt,
                                              RANT_KIND_TOPIC, 0, 1, 0, i_rant_node_status_on_clear, n, 1);
 }
 
@@ -3029,6 +3030,38 @@ void i_rant_node_set_sys_hooks(RantNode *n, i_RantSysEventFn on_event, i_RantSys
     i_rant_node_unlock(n, acquired);
 }
 
+static int i_rant_topic_set_role_one(RantTopic *topic, RantRole role){
+    int r;
+    if (topic->q && topic->q->busy) return RANT_ERR_STATE;   /* its own dispatched callback runs somewhere */
+    r = i_rant_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
+    if (r == 0){
+        topic->role = (uint8_t)role;
+        topic->came_up_us = i_rant_plat_now_us();
+        i_rant_node_interest_changed(topic->n);     /* a role flip may raise fresh candidates */
+    }
+    return r;
+}
+
+/* A node clears only conditions it read, so the clear sender is open exactly while status
+ * is read: the pairs it adds are already matched through @rant/status. spec/node.md */
+static int i_rant_node_clear_follow(RantNode *n){
+    RantRole want;
+    if (!n->status_topic || !n->clear_topic) return RANT_OK;
+    want = i_rant_role_subs(n->status_topic->role) ? RANT_PUBSUB : RANT_SUB_ONLY;
+    return n->clear_topic->role == (uint8_t)want ? RANT_OK : i_rant_topic_set_role_one(n->clear_topic, want);
+}
+
+int i_rant_topic_set_role_held(RantTopic *topic, RantRole role){
+    RantNode *n = topic->n; int r;
+    i_rant_node_callbacks_settle(n);
+    if (topic != n->status_topic) return i_rant_topic_set_role_one(topic, role);
+    i_rant_node_advertise_hold(n);           /* status and its clear sender in one announce */
+    r = i_rant_topic_set_role_one(topic, role);
+    if (r == 0) r = i_rant_node_clear_follow(n);
+    i_rant_node_advertise_release(n);
+    return r;
+}
+
 int rant_topic_set_role(RantTopic *topic, RantRole role){
     int r, acquired;
     if (!topic) return -1;
@@ -3038,17 +3071,7 @@ int rant_topic_set_role(RantTopic *topic, RantRole role){
         i_rant_node_unlock(topic->n, acquired);
         return RANT_ERR_STATE;
     }
-    i_rant_node_callbacks_settle(topic->n);
-    if (topic->q && topic->q->busy){    /* its own dispatched callback is running somewhere */
-        i_rant_node_unlock(topic->n, acquired);
-        return RANT_ERR_STATE;
-    }
-    r =i_rant_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
-    if (r == 0){
-        topic->role = (uint8_t)role;
-        topic->came_up_us = i_rant_plat_now_us();
-        i_rant_node_interest_changed(topic->n);     /* a role flip may raise fresh candidates */
-    }
+    r = i_rant_topic_set_role_held(topic, role);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }

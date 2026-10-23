@@ -348,6 +348,8 @@ RantTopic *i_rant_node_create_pattern_topic(RantNode *n, const char *name, RantR
 const char *i_rant_node_mesh_name(RantNode *n, const char *name, size_t room, char *buf);
 /* Re types a live pattern channel in place, the engine of rant_topic_refresh. Lock not held. */
 int  i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reliability);
+/* rant_topic_set_role with the node lock already held, from outside any callback. */
+int  i_rant_topic_set_role_held(RantTopic *topic, RantRole role);
 /* The reflect_from_mesh pick for one channel (which: 0 primary, 1 rsp, 2 prg). */
 int  i_rant_node_reflect_pick(RantNode *n, RantEntityKind kind, const char *name, int which, int writer,
                               const RantSchema **schema, uint8_t *reliable, uint64_t *generation);

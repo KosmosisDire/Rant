@@ -220,6 +220,7 @@ operator resetting a latched fault from an HMI.
 
 - `rant_node_clear_peer_status(n, peer, key, since_us)` asks `peer` to clear it. `since_us`
   is the one its last set reported, so a clear never lands on a later raise of the key.
+  It is `RANT_ERR_ROLE` while this node does not read status.
 - Nothing answers. The owner clears it, fires `RANT_STATUS_CLEARED` with `.peer` the asker
   and `.detail` the key, and publishes the smaller set. A clear of a condition that is
   missing, not clearable or raised again is dropped with a Debug line from Rant.
@@ -265,6 +266,9 @@ a small target such as an ESP32 can define them lower.
 ### Meta
 
 Every node also hosts the `@rant/meta` function, which answers a snapshot of its peers,
-topics and counters for tools like the explorer. `opts.disable_meta` strips it.
+topics and counters for tools like the explorer. `rant_node_meta_function(n)` returns the
+handle to call it. The first call of it opens this node's asking side, which matches every
+node on the mesh, so a node that never asks matches nobody through meta.
+`opts.disable_meta` strips it.
 `rant_topic_counts` reads the per topic message and byte counters directly. The reflection
 walks list the builtins like any entity, under their `@rant/` names.

@@ -292,9 +292,12 @@ coalesces a burst and keeps the calls safe mid receive. An update with the same 
 text and clearable marks nothing. A condition is identified by origin and key, and since
 the key and text are `string<48>` and `string<160>` slots the caps are wire constants.
 
-`@rant/status/clear` carries `RantClear { key: string<48>, since_us: u64 }`, PUBSUB on every
-node like meta, directed at the owner, reliable with `catch_up` 0 so a clear never replays
-onto a node that restarted. The owner's handler runs mid receive: an app condition that is
+`@rant/status/clear` carries `RantClear { key: string<48>, since_us: u64 }`, directed at the
+owner, reliable with `catch_up` 0 so a clear never replays onto a node that restarted. Every
+node receives on it. A node sends on it only while it reads `@rant/status`, since a clear
+names a `since_us` only a read set shows: a role change of the status topic sets the clear
+topic's role in the same announce. So two nodes that never read status never match through
+it, and a reader is already matched with every node through status. The owner's handler runs mid receive: an app condition that is
 clearable and whose `since_us` matches is removed and `RANT_STATUS_CLEARED` fires with the
 asker as `.peer` and the key as `.detail`. Anything else becomes a Debug note. There is no
 reply, since the next set is the answer, and the `since_us` match keeps two operators'

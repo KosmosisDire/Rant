@@ -126,6 +126,7 @@ rant_c_test(e2e entities)
 rant_c_test(e2e matchwait)
 rant_c_test(e2e timestamps)
 rant_c_test(e2e threads)
+rant_c_test(e2e mesh)
 
 # Fuzz targets. Every build replays each target's seeds and the inputs that once crashed it
 # as fuzz.<name>. RANT_FUZZ also builds the libFuzzer programs, with Clang or MSVC.

@@ -2495,7 +2495,7 @@ class Node:
     def clear_peer_status(self, node_id, key, since_us):
         """Ask another node to clear its clearable condition key, the occurrence raised at
                 since_us. Nothing answers: its next StatusUpdate shows it gone, or still there
-                when it refused."""
+                when it refused. BAD_ROLE while this node does not read status with on_status."""
         with self._gate.use(self._h) as h:
             return _send_status(self._lib.rant_node_clear_peer_status(h, node_id, key.encode("utf-8"), since_us))
 

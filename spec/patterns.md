@@ -147,10 +147,12 @@ A provider crash is the PEER_LOST reap. The per call timeout covers only the win
 the first response of any kind (RUNNING or progress, whichever lands first, since they
 ride different lanes).
 
-A call made before any provider matched is not handed to the transport, since an unmatched
+A call made before its provider matched is not handed to the transport, since an unmatched
 reliable send is dropped. The request bytes queue in the pending entry and flush the moment
-the match forms, oldest first, and the call times out normally if none ever does. A cancel
-of a queued call is local. Request and response channels have `catch_up` 0, since calls
+the match forms, oldest first, and the call times out normally if none ever does. An
+undirected call waits for any provider, a directed one for its own: sending it once another
+provider matched would hand it to a lane that does not reach its target. A cancel of a
+queued call is local. Request and response channels have `catch_up` 0, since calls
 carry no replay: their history is purely the repair window.
 
 Defer tokens live in a per handle registry. Every token verb validates membership first,
@@ -322,8 +324,13 @@ stall the task.
 ## The meta function
 
 `@rant/meta` rides this layer as one handle carrying both sides (mode 2 of the function
-constructor). Its request channel is reliable, so a caller's immediate in order ack from
-the provider samples the round trip. It has no backpressure wait: a caller polling every
+constructor). It advertises only the answering side until the app first takes the handle
+with `rant_node_meta_function`, then both channels widen to PUBSUB in one announce. So two
+nodes that never ask meta never match each other through it, and a node that asks matches
+every provider. A callback cannot change roles mid delivery, so an ask from one marks the
+calling side due and the next patterns tick opens it, while the call waits queued for its
+provider. Its request channel is reliable, so a caller's immediate in order ack from the
+provider samples the round trip. It has no backpressure wait: a caller polling every
 peer never blocks on one that died, and an ask the dead peer never acks only times out.
 See spec/node.md for the snapshot.
 

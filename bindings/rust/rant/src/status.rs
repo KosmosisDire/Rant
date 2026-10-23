@@ -80,7 +80,8 @@ impl Node {
 
     /// Asks another node to clear its clearable condition `key`, the occurrence raised at
     /// `since_us`. Nothing answers: its next [`StatusUpdate`] shows it gone, or still there
-    /// when it refused.
+    /// when it refused. [`SendError::BadRole`] while this node does not read status with
+    /// `on_status`.
     pub fn clear_peer_status(&self, node_id: u32, key: &str, since_us: u64) -> Result<(), SendError> {
         let k = c_text(key)?;
         let (_pass, raw) = self.inner.enter()?;

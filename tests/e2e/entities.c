@@ -566,6 +566,10 @@ static void status_checks(void){
       rant_topic_counts(rant_node_status_topic(A), &txm, NULL, NULL, NULL);
       CHECK(rc == RANT_OK && txm == 1, "status: one set for both raises, none for a repeat (%u)", (unsigned)txm); }
 
+    /* a node clears only what it read, so its clear sender opens with the status reader */
+    CHECK(rant_node_clear_peer_status(B, 1, "k", 0) == RANT_ERR_ROLE,
+          "status: a clear before reading status is refused");
+
     /* B late joins the status and A's log */
     rc = rant_topic_set_role(rant_node_status_topic(B), RANT_PUBSUB);
     rc |= rant_topic_set_role(rant_node_log_topic(B), RANT_PUBSUB);
@@ -621,6 +625,10 @@ static void status_checks(void){
       PUMP_UNTIL(A, B, 6000, st_count == RANT_STATUS_MAX);
       CHECK(ok && rc == RANT_ERR_TOO_BIG && st_count == RANT_STATUS_MAX,
                "status: a full set refuses one more (%d, n=%d)", rc, st_count); }
+
+    rc = rant_topic_set_role(rant_node_status_topic(B), RANT_PUB_ONLY);
+    CHECK(rc == RANT_OK && rant_node_clear_peer_status(B, idA, "k0", 0) == RANT_ERR_ROLE,
+          "status: a node that stops reading status stops clearing (%d)", rc);
 
 done:
     if (C) rant_node_close(C,0);

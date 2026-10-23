@@ -169,9 +169,11 @@ void test_on_event(const RantEvent *ev){
     }
 }
 
+/* A builtin by its name, or before its details come by the hash of one of its channels: a
+   peer that matches no builtin of ours shows meta as two unnamed channels. */
 int test_builtin(const RantEntityInfo *e){
     static const char *const primary[] = { "@rant/log", "@rant/status", "@rant/status/clear",
-                                           "@rant/meta@req" };
+                                           "@rant/meta@req", "@rant/meta@rsp" };
     size_t i;
     if (e->name.len) return e->name.len >= 6 && memcmp(e->name.data, "@rant/", 6) == 0;
     for (i = 0; i < sizeof primary / sizeof primary[0]; i++)

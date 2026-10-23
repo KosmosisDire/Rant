@@ -3238,7 +3238,8 @@ namespace Rant
 
         /// <summary>Ask another node to clear its clearable condition key, the occurrence
         /// raised at sinceUs. Nothing answers: its next RantStatusUpdate shows it gone, or
-        /// still there when it refused.</summary>
+        /// still there when it refused. BadRole while this node does not read status with
+        /// OnStatus.</summary>
         public SendStatus ClearPeerStatus(uint nodeId, string key, ulong sinceUs)
         {
             using (Pass p = Gate.Enter())
