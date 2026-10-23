@@ -105,10 +105,7 @@ void i_rant_discovery_make_uuid(uint8_t out[16], RantBytes stable, uint64_t seed
     for (i=0;i<stable.len;i++){ x = (x ^ stable.data[i]) * 1099511628211ull; }
     x ^= seed;
     for (k=0;k<2;k++){
-        uint64_t z = (x += 0x9E3779B97F4A7C15ull);
-        z = (z ^ (z>>30)) * 0xBF58476D1CE4E5B9ull;
-        z = (z ^ (z>>27)) * 0x94D049BB133111EBull;
-        z ^=  z>>31;
+        uint64_t z = i_rant_hash_mix64(x += 0x9E3779B97F4A7C15ull);
         memcpy(out + (size_t)k*8, &z, 8);
     }
     out[6] = (uint8_t)((out[6] & 0x0Fu) | 0x80u);  /* version 8 */
@@ -708,10 +705,16 @@ static int i_rant_discovery_slot_store(i_RantDiscoveryState *st, i_RantDiscovery
     return 1;
 }
 
-/* The admit hook's word on a blob at version. Without a hook every peer meets us. */
-static i_RantDiscoveryAdmit i_rant_discovery_verdict(i_RantDiscoveryState *st, const i_RantDiscoveryRecord *rec,
+/* The admit hook's word on a blob at version. Without a hook every peer meets us. The one
+ * writer of FILTER: a NO keeps what the hook folded, any other verdict holds no filter. */
+static i_RantDiscoveryAdmit i_rant_discovery_verdict(i_RantDiscoveryState *st, i_RantDiscoveryRecord *rec,
                                                      RantBytes blob, uint32_t version){
-    return st->cfg.admit ? st->cfg.admit(st->cfg.user, rec->local_id, blob, version) : I_RANT_ADMIT_YES;
+    i_RantDiscoveryAdmit verdict = I_RANT_ADMIT_YES;
+    memset(rec->filter, 0, sizeof rec->filter);
+    if (st->cfg.admit) verdict = st->cfg.admit(st->cfg.user, rec->local_id, blob, version, rec->filter);
+    if (verdict == I_RANT_ADMIT_NO) rec->flags |= I_RANT_REC_FILTER;
+    else rec->flags = (uint8_t)(rec->flags & ~I_RANT_REC_FILTER);
+    return verdict;
 }
 
 /* Judges a blob of record ri that arrived at version, with the datagram's flags: a match
@@ -1109,12 +1112,15 @@ uint16_t i_rant_discovery_pending(const i_RantDiscoveryState *st){
     return n;
 }
 
-void i_rant_discovery_refetch_unmatched(i_RantDiscoveryState *st){
+void i_rant_discovery_refetch_unmatched(i_RantDiscoveryState *st, i_RantDiscoveryMaybe maybe, void *ctx){
     uint16_t i;
     for (i = 0; i < st->records.cap; i++){
         i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
         if (!rec || rec->state != I_RANT_REC_ACTIVE || rec->slot != I_RANT_REC_NONE
             || rec->want != I_RANT_ADMIT_NO || (rec->flags & I_RANT_REC_TOO_BIG)) continue;
+        /* judged by assumption, or advertising past the blob judged: nothing says it cannot meet */
+        if (maybe && (rec->flags & I_RANT_REC_FILTER) && rec->adv_version <= rec->meta_version
+            && !maybe(ctx, rec->filter, sizeof rec->filter)) continue;
         rec->flags |= I_RANT_REC_REFETCH;
         i_rant_discovery_fetch_check(st, i, st->now_us);
     }

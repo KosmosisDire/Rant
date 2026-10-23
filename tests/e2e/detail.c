@@ -317,9 +317,57 @@ static void interest_external_checks(void){
     rant_node_close(P,1); rant_node_close(S,1);
 }
 
+/* A topic made after the open gather fetches only the peers whose filter it may meet. Among
+   unrelated publishers judged by assumption, none has a filter yet, so the first fetches all.
+   Their answers give them filters: then a name none takes fetches none, even right after a
+   variable whose rival key one filter holds, and a name one publishes fetches that one. */
+#define FL_CROWD 12
+static void filter_fetch_checks(void){
+    RantNode *crowd[FL_CROWD], *T; RantNodeOpts o; RantAddr seed; RantAllocator ta = rant_allocator_heap(0);
+    const i_RantDiscoveryState *ts; RantTopic *sub; char nm[16], tp[16];
+    int k, n = 0, first, second, third, gathered;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+40; o.disable_shm=1; o.max_topics=4;
+    o.discovery.announce_interval_us=500000;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    for (k=0;k<FL_CROWD;k++){
+        RantAllocator a = rant_allocator_heap(0);
+        sprintf(nm, "fl-crowd%d", k); sprintf(tp, "fl/c%d", k);
+        crowd[n] = rant_node_open(&a, nm, NULL, NULL, &o);
+        if (!crowd[n]) continue;
+        rant_node_create_topic(crowd[n], tp, RANT_PUB_ONLY, NULL, NULL);
+        rant_node_start(crowd[n]); n++;
+    }
+    test_sleep_ms(1500);                        /* their blobs are old by the time T hears them */
+    T = rant_node_open(&ta, "fl-new", NULL, NULL, &o);
+    CHECK(T != NULL && n == FL_CROWD, "filter: nodes open (%d)", n);
+    if (!T){ for (k=0;k<n;k++) rant_node_close(crowd[k],1); return; }
+    ts = i_rant_discovery_state(T->discovery);
+    PUMP_UNTIL(T, NULL, 8000, i_rant_discovery_peer_count(ts) == n && T->gather_done);
+    test_pump(T, NULL, 300);
+    gathered = T->gather_done && i_rant_discovery_peer_count(ts) == n;
+    CHECK(gathered && i_rant_discovery_slots_used(ts) == 0 && i_rant_discovery_pending(ts) == 0,
+          "filter: the crowd is known, none matched, the gather over (%u known)", i_rant_discovery_peer_count(ts));
+    (void)rant_node_create_variable_definition(T, "fl/c0", NULL, NULL);
+    first = i_rant_discovery_pending(ts);
+    PUMP_UNTIL(T, NULL, 4000, i_rant_discovery_pending(ts) == 0);
+    (void)rant_node_create_topic(T, "fl/none", RANT_SUB_ONLY, NULL, NULL);
+    second = i_rant_discovery_pending(ts);
+    sub = rant_node_create_topic(T, "fl/c5", RANT_SUB_ONLY, NULL, NULL);
+    third = i_rant_discovery_pending(ts);
+    PUMP_UNTIL(T, NULL, 4000, i_rant_topic_source_match_count(sub) == 1);
+    CHECK(first == n, "filter: the first topic after the gather fetches every peer judged by assumption (%d of %d)", first, n);
+    CHECK(second == 0, "filter: then a name no peer takes fetches none (%d)", second);
+    CHECK(third == 1 && i_rant_topic_source_match_count(sub) == 1,
+          "filter: a name one peer publishes fetches that one, which matches (%d fetched)", third);
+    rant_node_close(T, 1);
+    for (k=0;k<n;k++) rant_node_close(crowd[k], 1);
+}
+
 static const TestCase cases[] = {
     { "detail_live", detail_live_checks },
     { "interest_external", interest_external_checks },
+    { "filter_fetch", filter_fetch_checks },
 };
 
 TEST_MAIN(cases)

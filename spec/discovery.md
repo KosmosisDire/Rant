@@ -133,9 +133,10 @@ live one: a slot that meets nothing is given back, a loan that now meets us is t
 
 Each refused match and each loan left waiting bumps `seat_misses`, so a node that can grow
 does, at once to `slots_wanted`: every live record holding a slot or waiting for one. A
-caller whose own criteria grew calls `refetch_unmatched`, which fetches every live record
-judged no match until its blob is judged again. `pending` counts the records without a slot
-whose blob is being fetched, so one that never answers stops counting once its asks ran out.
+caller whose own criteria grew calls `refetch_unmatched`, which fetches the live records
+judged no match that may meet us now (The filter) until each blob is judged again. `pending`
+counts the records without a slot whose blob is being fetched, so one that never answers
+stops counting once its asks ran out.
 
 A match the peer may not know of is told by an ask (Owed work and copies), repeated until any
 datagram marked ONE comes from it: a new match, or a held one whose version skipped one, since
@@ -156,6 +157,25 @@ us and would be a first contact again.
 A blob past our bound, cut by the OS or bigger than `meta_cap`, leaves the header, which
 counts and makes the record. Its fetch stops until a newer version, or a migrate that grew
 the bound, which fetches that peer alone.
+
+## The filter
+
+A record judged no match keeps a filter of the keys its blob carries, so a topic of ours that
+comes up later fetches only the peers it may meet, not every peer heard.
+
+- The admit hook gets the record's filter, `RANT_DISCOVERY_FILTER_BYTES` (32, a power of two
+  from 8 to 64) zeroed, and on NO has folded the blob into it. The core marks the record
+  FILTER exactly then, and any other verdict clears the mark, so the filter always belongs
+  to the blob judged at the version held.
+- `refetch_unmatched(st, maybe, ctx)` fetches a live record judged no match unless its filter
+  is current and `maybe` says no. Current means FILTER is set and the peer advertises no
+  version past the one judged. A record judged by assumption has no filter, so it is fetched,
+  and its answer gives it one. NULL `maybe` fetches every such record.
+- The filter only saves sends. A false hit costs a fetch and its answer, judged no match
+  again. The node's filter is a Bloom filter with three bits per item (spec/interest.md, The
+  want set): about 1% false hits for a peer of 20 items, 20% for 75.
+- A node that opened among old peers judged them all by assumption, so its first topic after
+  the gather fetches all of them once. After that only candidates are fetched.
 
 ## Owed work and copies
 

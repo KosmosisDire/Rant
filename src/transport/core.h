@@ -290,8 +290,16 @@ void        i_rant_transport_peer_unresolved_fill(i_RantTransportState *st, uint
  * or a rival authority of the same kind where ours is not MULTI. Symmetric between two nodes
  * that agree on MULTI. spec/interest.md, The want set. */
 int         i_rant_transport_interest_meets(i_RantTransportState *st, RantBytes interest);
-/* Bumps each time our topics gained a pairing, so a peer judged before may meet us now. */
-uint32_t    i_rant_transport_want_gen(i_RantTransportState *st);
+/* Sets the filter bits of every pairing an interest's entries take, (name hash, side), so
+ * want_new_maybe can tell a peer judged no match from one a new topic may meet. bytes is a
+ * power of two. spec/interest.md, The filter. */
+void        i_rant_transport_interest_fold(RantBytes interest, uint8_t *filter, size_t bytes);
+/* 1 when our topics gained a pairing since want_new_clear, so a peer judged before may meet us now. */
+int         i_rant_transport_want_new_any(i_RantTransportState *st);
+/* 1 when a pairing gained since want_new_clear may be in a filter interest_fold wrote. Always
+ * 1 once the gained pairings outgrew memory. */
+int         i_rant_transport_want_new_maybe(i_RantTransportState *st, const uint8_t *filter, size_t bytes);
+void        i_rant_transport_want_new_clear(i_RantTransportState *st);
 
 /* Rematches peers locally. The caller re advertises. 0 ok, negative unknown. */
 int         i_rant_transport_set_role(i_RantTransportState *st, uint16_t topic_index, uint8_t role);

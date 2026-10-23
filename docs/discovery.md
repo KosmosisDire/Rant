@@ -32,7 +32,8 @@ other only a small record, and send each other nothing past discovery.
   publishes to the peer and receives from it.
 - A matched peer whose topics stop meeting ours gives its slot back. `RANT_PEER_INTEREST`
   fires with both counts 0, never `RANT_PEER_DOWN`, and the peer stays listed and ACTIVE.
-- A new topic of ours asks the unmatched peers again, so its first send reaches every
+- A new topic of ours asks again only the unmatched peers that may want it, which a 32 byte
+  filter per known peer tells (`RANT_DISCOVERY_FILTER_BYTES`). Its first send reaches every
   peer that wants it (docs/topics.md, The first send).
 - `opts.fetch_details` matches every peer, for observer tools.
 

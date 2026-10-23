@@ -62,8 +62,8 @@ program in this order.
 
 | Program | Cases |
 |---|---|
-| `unit.transport` | basics, want_set, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
-| `unit.discovery` | records, migrate, owed, judge, unmatched, first_contact, too_big, wire, change_age, discovery_core, node_core |
+| `unit.transport` | basics, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
+| `unit.discovery` | records, migrate, owed, judge, unmatched, filter, first_contact, too_big, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
@@ -71,7 +71,7 @@ program in this order.
 | `e2e.stream` | stream, scale, named, collision |
 | `e2e.node` | open_fail, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups |
 | `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema |
-| `e2e.detail` | detail_live, interest_external |
+| `e2e.detail` | detail_live, interest_external, filter_fetch |
 | `e2e.shm` | shm_node |
 | `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
 | `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate |
@@ -123,6 +123,10 @@ What each phase pins, grouped by layer.
   or an inactive entry, a variable we own meets a rival owner of its kind only, a function we
   serve a rival provider unless MULTI. A new topic or one back from parked grows the set, a
   parked or retired one does not and meets nothing. An entry cut short meets nothing.
+- Want filter: a peer's filter finds every pairing it takes on both sides, a name it lacks
+  hits about 1% of the time for 20 items, and the side counts. The keys two rebuilds gained
+  are both kept, a judge's rebuild between them included, until cleared, a topic back from
+  parked is new again, and out of memory every filter may meet a gained key until the clear.
 - Shared memory: a mock resolver whose success is controllable and a pump that drops SHM
   descriptors. A failed resolve does not ack so it repairs, a dropped descriptor resends,
   and an unresolvable descriptor is skipped after the retry cap as MSG_LOST. A sample
@@ -161,6 +165,11 @@ What each phase pins, grouped by layer.
   seat miss and a wanted slot. A record is pending while its fetch is in flight and no longer
   once the asks ran out. A grown want set fetches the records judged no match, not those
   waiting, and an answer ends the fetch. The uuid is found by id.
+- Filter: a grown want set fetches a record judged no match only when maybe says its filter
+  may meet us, and fetches anyway one judged by assumption or advertising past its judged
+  blob, without asking maybe. Each judge folds a fresh filter, the answers give filters to
+  the records that had none, a slot rejudged no match keeps its blob's filter, and no maybe
+  fetches every record judged no match.
 - First contact: without a blob it is judged by assumption when its blob changed before our
   last change by the margin, the margin alone before our opening, else fetched, and an age
   past our uptime never wraps. An observer, a core without a hook and one that refused a peer
@@ -247,6 +256,10 @@ What each phase pins, grouped by layer.
   the interest epoch is the observer cache key. A node sharing nothing with the publisher
   lends its next blob a slot for the paging and gives the slot back once the pages show it
   meets nothing.
+- Filter fetch: a node that opened among twelve unrelated publishers, all judged by
+  assumption, fetches all twelve at its first topic after the gather (a variable named like
+  one publisher's topic, whose rival key that filter holds). Then a name none takes fetches
+  none, and a name one publishes fetches that one alone, which matches.
 
 ### Threads and queues
 

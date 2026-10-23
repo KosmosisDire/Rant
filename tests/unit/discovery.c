@@ -792,14 +792,18 @@ static void owed_checks(void){
 }
 
 /* The judge cases' admit hook: a blob's first byte is its verdict, an empty blob meets
-   nothing, and jg_force overrides both while set. */
+   nothing, and jg_force overrides both while set. A NO folds jg_fold into the filter's first byte. */
 static uint32_t jg_asks, jg_seen_up, jg_seen_down;
 static int      jg_force = -1;
-static i_RantDiscoveryAdmit jg_admit(void *user, uint32_t peer, RantBytes meta, uint32_t version){
+static uint8_t  jg_fold;
+static i_RantDiscoveryAdmit jg_admit(void *user, uint32_t peer, RantBytes meta, uint32_t version, uint8_t *filter){
+    i_RantDiscoveryAdmit verdict;
     (void)user; (void)peer; (void)version;
     jg_asks++;
-    if (jg_force >= 0) return (i_RantDiscoveryAdmit)jg_force;
-    return meta.len ? (i_RantDiscoveryAdmit)meta.data[0] : I_RANT_ADMIT_NO;
+    if (jg_force >= 0) verdict = (i_RantDiscoveryAdmit)jg_force;
+    else verdict = meta.len ? (i_RantDiscoveryAdmit)meta.data[0] : I_RANT_ADMIT_NO;
+    if (verdict == I_RANT_ADMIT_NO) filter[0] |= jg_fold;
+    return verdict;
 }
 static void jg_seen(void *user, uint32_t peer, const RantAddr *addr, int up){
     (void)user; (void)peer; (void)addr;
@@ -1019,7 +1023,7 @@ static void unmatched_checks(void){
     t += 2000000u;
     jg_blob(st, 5, F_ONE, 1, NO, t);
     (void)dc_drain(st, t, &fl, &port);
-    i_rant_discovery_refetch_unmatched(st);
+    i_rant_discovery_refetch_unmatched(st, NULL, NULL);
     CHECK(i_rant_discovery_pending(st) == 2 && dc_drain(st, t, &fl, &port) == 2 && fl == (F_REQ|F_ONE|F_BLOB),
           "unmatched: a grown want set fetches the live records judged no match, not those waiting");
     jg_blob(st, 5, F_ONE, 1, NO, t);
@@ -1028,6 +1032,72 @@ static void unmatched_checks(void){
 
     u = i_rant_discovery_peer_uuid(st, id1);
     CHECK(u && u[0] == 1 && i_rant_discovery_peer_uuid(st, 0xFFFFu) == NULL, "unmatched: the uuid by id, NULL unknown");
+}
+
+/* The filter narrows the fetch of a grown want set: a record whose current blob was judged no
+   match is fetched when maybe says its filter may meet us, one judged by assumption or
+   advertising past its judged blob always, and every judge folds a fresh filter. */
+static int ft_asked;
+static int ft_maybe(void *ctx, const uint8_t *filter, size_t bytes){
+    (void)ctx;
+    ft_asked++;
+    return bytes == RANT_DISCOVERY_FILTER_BYTES && (filter[0] & 0x0Fu) != 0;
+}
+/* The peers a drain at now fetched, one bit per uid. */
+static unsigned ft_fetched(i_RantDiscoveryState *st, uint64_t now){
+    uint8_t out[RANT_DISCOVERY_WIRE_MAX]; RantAddr to; size_t n; unsigned mask = 0; int k = 0;
+    while (k++ < 64 && (n = i_rant_discovery_poll_targeted(st, now, out, sizeof out, &to)) != 0)
+        if (dc_sent(out, n) & RANT_DISCOVERY_FLAG_REQ) mask |= 1u << (to.port - 5000u);
+    return mask;
+}
+static void filter_checks(void){
+    static uint8_t mem[16384];
+    const uint8_t NO = I_RANT_ADMIT_NO, YES = I_RANT_ADMIT_YES, MAY = 0x0A, NOT = 0xA0;
+    const uint8_t F_ONE = RANT_DISCOVERY_FLAG_ONE;
+    uint8_t out[RANT_DISCOVERY_WIRE_MAX];
+    i_RantDiscoveryCoreConfig c; i_RantDiscoveryState *st;
+    uint64_t t0 = 10000000u, t = t0 + 1000000u; unsigned got; int k;
+    jg_config(&c, 2);
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    CHECK(st != NULL, "filter: init");
+    if (!st) return;
+    i_rant_discovery_update(st, t0, out, sizeof out);
+
+    jg_fold = MAY; jg_blob(st, 1, 0, 1, NO, t);
+    jg_fold = NOT; jg_blob(st, 2, 0, 1, NO, t);
+    jg_head(st, 3, 0, 1, 5000u, t);                 /* judged by assumption */
+    jg_blob(st, 4, 0, 1, NO, t);
+    jg_head(st, 4, 0, 2, 0, t);                     /* and now advertises past it */
+    for (k = 0; k < 4; k++) (void)ft_fetched(st, t + (uint64_t)k * 250000u);
+    t += 1000000u;
+    CHECK(i_rant_discovery_pending(st) == 0 && ft_fetched(st, t) == 0, "filter: quiet once the version fetch ran out");
+
+    ft_asked = 0;
+    i_rant_discovery_refetch_unmatched(st, ft_maybe, NULL);
+    got = ft_fetched(st, t);
+    CHECK(got == ((1u << 1) | (1u << 3) | (1u << 4)) && ft_asked == 2,
+          "filter: maybe narrows the fetch, the assumed record and the one past its judged blob go anyway (mask %x, %d asked)",
+          got, ft_asked);
+    jg_fold = NOT; jg_blob(st, 1, F_ONE, 1, NO, t); jg_blob(st, 3, F_ONE, 1, NO, t);
+    jg_fold = MAY; jg_blob(st, 4, F_ONE, 2, NO, t);
+    i_rant_discovery_refetch_unmatched(st, ft_maybe, NULL);
+    got = ft_fetched(st, t);
+    CHECK(got == (1u << 4), "filter: each judge folds a fresh filter, the old bits gone, the answers give filters (mask %x)", got);
+    jg_blob(st, 4, F_ONE, 2, NO, t);
+
+    jg_fold = NOT; jg_blob(st, 5, 0, 1, YES, t);
+    (void)ft_fetched(st, t);
+    jg_force = NO;
+    CHECK(i_rant_discovery_rejudge(st, jg_id(st, 5)) == 1, "filter: a slot rejudged no match is given back");
+    jg_force = -1;
+    i_rant_discovery_refetch_unmatched(st, ft_maybe, NULL);
+    got = ft_fetched(st, t);
+    CHECK(got == (1u << 4), "filter: a record given back holds the filter of its rejudged blob (mask %x)", got);
+    jg_blob(st, 4, F_ONE, 2, NO, t);
+    i_rant_discovery_refetch_unmatched(st, NULL, NULL);
+    got = ft_fetched(st, t);
+    CHECK(got == 0x3Eu, "filter: without maybe every record judged no match is fetched (mask %x)", got);
+    jg_fold = 0;
 }
 
 /* A first contact heard without a blob: assumed judged when its blob changed before ours by
@@ -1157,6 +1227,7 @@ static const TestCase cases[] = {
     { "owed",           owed_checks },
     { "judge",          judge_checks },
     { "unmatched",      unmatched_checks },
+    { "filter",         filter_checks },
     { "first_contact",  first_contact_checks },
     { "too_big",        too_big_checks },
     { "wire",           wire_checks },

@@ -210,8 +210,10 @@ i_RantTransportState *i_rant_transport_migrate(i_RantTransportState *old, void *
     nw->reader_epoch_counter = old->reader_epoch_counter;
     nw->frag = old->frag;
     nw->interest_truncated = old->interest_truncated;
-    nw->want = old->want; nw->want_n = old->want_n; nw->want_gen = old->want_gen;
+    nw->want = old->want; nw->want_n = old->want_n;
     nw->want_dirty = old->want_dirty; nw->want_failed = old->want_failed;
+    nw->want_new = old->want_new; nw->want_new_n = old->want_new_n; nw->want_new_cap = old->want_new_cap;
+    nw->want_new_all = old->want_new_all;
     memcpy(nw->peer_ids,     old->peer_ids,     (size_t)omp*sizeof(uint32_t));
     memcpy(nw->peer_used,    old->peer_used,    omp);
     memcpy(nw->peer_dormant, old->peer_dormant, omp);
@@ -706,6 +708,7 @@ void i_rant_transport_destroy(i_RantTransportState *st){
         }
     }
     if (st->want){ st->cfg.allocator(st->cfg.user, st->want, 0); st->want=NULL; st->want_n=0; }
+    if (st->want_new){ st->cfg.allocator(st->cfg.user, st->want_new, 0); st->want_new=NULL; st->want_new_n=st->want_new_cap=0; }
 }
 
 
@@ -927,14 +930,22 @@ static int i_rant_want_before(const i_RantWant *a, const i_RantWant *b){
     return a->rival_kind < b->rival_kind;
 }
 
-/* 1 when some key of fresh is not in old, both sorted */
-static int i_rant_want_added(const i_RantWant *fresh, uint32_t nf, const i_RantWant *old, uint32_t no){
+/* Appends each key of fresh that old lacks to want_new, both sorted. Out of memory, the
+ * list stops and every filter may hold one. */
+static void i_rant_want_note_added(i_RantTransportState *st, const i_RantWant *fresh, uint32_t nf,
+                                   const i_RantWant *old, uint32_t no){
     uint32_t i, j = 0;
-    for (i = 0; i < nf; i++){
+    for (i = 0; i < nf && !st->want_new_all; i++){
         while (j < no && i_rant_want_before(&old[j], &fresh[i])) j++;
-        if (j == no || i_rant_want_before(&fresh[i], &old[j])) return 1;
+        if (j < no && !i_rant_want_before(&fresh[i], &old[j])) continue;     /* held before */
+        if (st->want_new_n == st->want_new_cap){
+            uint32_t cap = st->want_new_cap ? st->want_new_cap * 2u : 8u;
+            i_RantWant *nb = (i_RantWant*)st->cfg.allocator(st->cfg.user, st->want_new, (size_t)cap * sizeof *nb);
+            if (!nb){ st->want_new_all = 1; return; }
+            st->want_new = nb; st->want_new_cap = cap;
+        }
+        st->want_new[st->want_new_n++] = fresh[i];
     }
-    return 0;
 }
 
 /* Rebuilds the set from the topics. Out of memory, every peer meets us until a rebuild works. */
@@ -944,7 +955,7 @@ static void i_rant_want_rebuild(i_RantTransportState *st){
     if (n){
         fresh = (i_RantWant*)st->cfg.allocator(st->cfg.user, NULL, (size_t)n * sizeof *fresh);
         if (!fresh){
-            if (!st->want_failed){ st->want_failed = 1; st->want_gen++; }
+            st->want_failed = 1; st->want_new_all = 1;
             return;                                   /* still dirty, so the next read retries */
         }
         n = 0;
@@ -956,7 +967,7 @@ static void i_rant_want_rebuild(i_RantTransportState *st){
                 fresh[j] = t;
             }
     }
-    if (i_rant_want_added(fresh, n, st->want, st->want_n)) st->want_gen++;
+    i_rant_want_note_added(st, fresh, n, st->want, st->want_n);
     if (st->want) st->cfg.allocator(st->cfg.user, st->want, 0);
     st->want = fresh; st->want_n = n;
     st->want_dirty = 0; st->want_failed = 0;
@@ -986,10 +997,52 @@ int i_rant_transport_interest_meets(i_RantTransportState *st, RantBytes interest
     return 0;
 }
 
-uint32_t i_rant_transport_want_gen(i_RantTransportState *st){
+/* The filter's three bits for an item, a name hash and the side the entry takes. bytes is
+ * a power of two, so a mask picks each bit from its own part of one mix. */
+static void i_rant_want_bits(uint32_t hash, int their_pub, size_t bytes, uint32_t bit[3]){
+    uint64_t x = i_rant_hash_mix64(((uint64_t)hash << 1) | (uint64_t)(their_pub != 0));
+    uint32_t mask = (uint32_t)(bytes * 8u - 1u);
+    bit[0] = (uint32_t)x & mask; bit[1] = (uint32_t)(x >> 21) & mask; bit[2] = (uint32_t)(x >> 42) & mask;
+}
+
+void i_rant_transport_interest_fold(RantBytes interest, uint8_t *filter, size_t bytes){
+    const uint8_t *d = interest.data;
+    i_RantInterestScan scan;
+    uint32_t bit[3]; uint16_t n; int side, k;
+    if (!d || interest.len < 2) return;
+    n = i_rant_le_r16(d);
+    if (!i_rant_interest_walk_len(d, interest.len, n)) return;     /* meets nothing, as interest_meets says */
+    i_rant_interest_scan_init(&scan, d, n);
+    while (i_rant_interest_scan_next(&scan))
+        for (side = 0; side < 2; side++){
+            if (!(side ? scan.their_pub : scan.their_sub)) continue;
+            i_rant_want_bits(scan.hash, side, bytes, bit);
+            for (k = 0; k < 3; k++) i_rant_bit_set(filter, bit[k]);
+        }
+}
+
+int i_rant_transport_want_new_any(i_RantTransportState *st){
     if (!st) return 0;
     if (st->want_dirty) i_rant_want_rebuild(st);
-    return st->want_gen;
+    return st->want_new_n != 0 || st->want_new_all;
+}
+
+int i_rant_transport_want_new_maybe(i_RantTransportState *st, const uint8_t *filter, size_t bytes){
+    uint32_t i, bit[3];
+    if (!st) return 0;
+    if (st->want_dirty) i_rant_want_rebuild(st);
+    if (st->want_new_all) return 1;
+    for (i = 0; i < st->want_new_n; i++){
+        i_rant_want_bits(st->want_new[i].hash, st->want_new[i].their_pub, bytes, bit);
+        if (i_rant_bit_get(filter, bit[0]) && i_rant_bit_get(filter, bit[1]) && i_rant_bit_get(filter, bit[2]))
+            return 1;
+    }
+    return 0;
+}
+
+void i_rant_transport_want_new_clear(i_RantTransportState *st){
+    if (!st) return;
+    st->want_new_n = 0; st->want_new_all = 0;
 }
 
 /* Re derives the peer's bits from cached verdicts plus the entry's current flags, then

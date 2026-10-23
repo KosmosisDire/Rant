@@ -212,7 +212,6 @@ struct RantNode {
     RantAllocator pool;
     uint8_t        alloc_dynamic;
     uint32_t       seat_misses;    /* discovery's count when the table last grew for them */
-    uint32_t       want_gen;       /* the transport's want set generation peers were judged by */
     uint16_t       max_peers;      /* the current peer table capacity, doubles on a dynamic grow */
     /* the accept bound: the largest peer announce blob we store. It self heals up, see
        spec/discovery.md. meta_grow_failed remembers a size that would not allocate */
@@ -1453,21 +1452,24 @@ static void i_rant_node_reflect_self(RantNode *n){
 
 static int i_rant_node_gather_done(RantNode *n, uint64_t now);       /* defined with the match wait */
 
+/* discovery's filter test of a peer judged no match, against the pairings our topics gained */
+static int i_rant_node_want_maybe(void *transport, const uint8_t *filter, size_t bytes){
+    return i_rant_transport_want_new_maybe((i_RantTransportState*)transport, filter, bytes);
+}
+
 /* Our own interest changed: re advertise, replay known peers' interest against the new
  * state, stale the converged memos and kick so the announce goes out now. Lock held. */
 static void i_rant_node_readvertise(RantNode *n){
-    uint32_t gen = i_rant_transport_want_gen(n->transport);
     i_rant_node_reflect_self(n);
     i_rant_node_core_build_meta(n->core);
     i_rant_discovery_advertise(n->discovery, i_rant_node_core_meta(n->core));
     i_rant_discovery_replay(n->discovery);
-    /* a topic gained a pairing: a peer judged without it may meet us now. Within the gather
-       our announce reaches them and the quiet window covers their asks */
-    if (gen != n->want_gen){
-        n->want_gen = gen;
-        if (i_rant_node_gather_done(n, i_rant_plat_now_us()))
-            i_rant_discovery_refetch_unmatched(i_rant_discovery_state(n->discovery));
-    }
+    /* a topic gained a pairing: a peer judged without it may meet us now, which its filter
+       tells. Within the gather our announce reaches them and their asks come back */
+    if (i_rant_transport_want_new_any(n->transport) && i_rant_node_gather_done(n, i_rant_plat_now_us()))
+        i_rant_discovery_refetch_unmatched(i_rant_discovery_state(n->discovery),
+                                           i_rant_node_want_maybe, n->transport);
+    i_rant_transport_want_new_clear(n->transport);
     n->match_epoch++;
     n->problems_dirty = 1;      /* our topics changed: a refusal may be gone, the announce may fit */
     i_rant_node_kick(n);

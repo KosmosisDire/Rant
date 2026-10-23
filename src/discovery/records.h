@@ -26,6 +26,7 @@ typedef enum {
 #define I_RANT_REC_TOO_BIG    0x01u /* its blob is past our bound: not fetched until a newer version or the bound grows */
 #define I_RANT_REC_REFETCH    0x02u /* fetched until its blob is judged: a slot opened for it, or the bound grew */
 #define I_RANT_REC_ASK_MISSED 0x04u /* the last ask went unanswered */
+#define I_RANT_REC_FILTER     0x08u /* filter holds the keys of the blob judged no match at meta_version */
 
 /* What a peer is, whether or not it holds a slot. */
 typedef struct {
@@ -48,6 +49,7 @@ typedef struct {
     uint8_t  ask_tries;              /* sends left of the ask owed */
     uint8_t  want;                   /* without a slot, the verdict that wanted one: I_RANT_ADMIT_* */
     uint8_t  flags;                  /* I_RANT_REC_* */
+    uint8_t  filter[RANT_DISCOVERY_FILTER_BYTES];   /* what the admit hook folded, see FILTER */
     uint8_t  name_len;
     char     name[RANT_NODE_NAME_MAX + 1];
 } i_RantDiscoveryRecord;

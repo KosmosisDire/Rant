@@ -136,6 +136,7 @@ A `NO` flag always wins. An embedded target with its own sockets and clock defin
 | `RANT_QUEUE_CAP` | 1 MB | default ring cap of a topic on a callback queue |
 | `RANT_DISCOVERY_META_MAX` | 64 | default per peer announce blob capacity |
 | `RANT_RECORDS_PER_PEER` | 4 | peers a static node can know per matched peer slot (docs/discovery.md) |
+| `RANT_DISCOVERY_FILTER_BYTES` | 32 | bytes per known peer that let a new topic ask only the peers it may meet |
 | `RANT_WIRE_VERSION` | 8 | the wire version: nodes on another one report each other, never pair |
 
 Shared memory tunables are in spec/shm.md.

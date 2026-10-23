@@ -266,9 +266,12 @@ struct i_RantTransportState {
     /* the want set, a hook allocation sorted by hash and rebuilt after a topic changed */
     i_RantWant  *want;
     uint32_t     want_n;
-    uint32_t     want_gen;     /* bumps when a rebuild added a key */
     uint8_t      want_dirty;
     uint8_t      want_failed;  /* the last rebuild ran out of memory, so every peer meets us */
+    uint8_t      want_new_all; /* keys were added that want_new lost to an out of memory */
+    /* the keys the rebuilds added since want_new_clear, a hook allocation kept for reuse */
+    i_RantWant  *want_new;
+    uint32_t     want_new_n, want_new_cap;
 };
 
 typedef enum { RANT_ORDER_OLD, RANT_ORDER_GAP, RANT_ORDER_ADOPTED, RANT_ORDER_INORDER } i_RantReaderOrder;

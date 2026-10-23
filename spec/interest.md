@@ -192,15 +192,34 @@ keys exist for the duplicate authority check, which reads the peer's entities an
 its slot. `@rant/meta` is MULTI and the other builtins are plain topics, so builtins pair
 only where a node really publishes to another's subscriber. The pairings are symmetric:
 two nodes that agree on MULTI judge their pair alike, which judging on arrival relies on.
-The set is rebuilt lazily after a define, retire, reuse or role change, and `want_gen` bumps
-when a rebuild added a key. Out of memory every peer meets us until a rebuild works.
+The set is rebuilt lazily after a define, retire, reuse or role change. Out of memory every
+peer meets us until a rebuild works.
+
+Each rebuild appends the keys it added to `want_new`, so a batch under the advertise hold or
+a rebuild a judge ran loses none, until the node takes them with `want_new_clear`. When that
+list cannot grow, or a rebuild fails, the gained keys are unknown and `want_new_maybe` says
+yes to every filter until the clear.
+
+The filter of a peer judged no match (spec/discovery.md, The filter) is a Bloom filter the
+transport writes and reads, since it owns the key:
+
+- `interest_fold(interest, filter, bytes)` sets three bits for each item an entry takes: its
+  name hash with the side, publish or subscribe, once per side it holds. Builtins fold like
+  any entry, so reading status or asking meta finds every peer that offers them.
+- The kind is left out. A rival key tests (hash, side) like any key, and the blob's judge
+  decides the kind.
+- An interest list an apply would refuse folds nothing, as it meets nothing.
+- `want_new_maybe(st, filter, bytes)` is 1 when all three bits of some key in `want_new` are
+  set.
 
 The node's admit hook answers YES for an observer, LOAN for an external interest not yet
 paged at the blob's version (the pages arrive through the slot, then `rejudge`), and else
-`interest_meets`. A topic that comes up after the post open gather and grew the set fetches
-every record judged no match (`refetch_unmatched`), so the first send waits for their
-verdicts. Within the gather our announce carries the blob to them, and a peer that meets
-it asks us.
+`interest_meets`, folding the filter on a no match. A blob with no interest list leaves its
+filter empty, which no key meets. A topic that comes up after the post open gather and gained
+keys fetches the records judged no match that its keys may meet (`refetch_unmatched` with
+`want_new_maybe`), so the first send waits for their verdicts. The node clears `want_new` at
+every advertise, inside the gather too: there our announce carries the blob to every peer,
+and one that meets it asks us.
 
 ## The match wait
 

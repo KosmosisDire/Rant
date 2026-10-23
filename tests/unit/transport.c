@@ -552,7 +552,7 @@ static int ws_meets(i_RantTransportState *st, const char *name, uint8_t role, ui
 static void want_set_checks(void){
     static uint8_t tmem[1<<17], amem[1<<14];
     static RantAllocator A;
-    i_RantTransportConfig tc; i_RantTransportState *st; i_RantTopicDef d; uint32_t g;
+    i_RantTransportConfig tc; i_RantTransportState *st; i_RantTopicDef d;
     uint8_t buf[256]; size_t n;
     A = rant_allocator_static(amem, sizeof amem);
     memset(&tc, 0, sizeof tc); tc.n_topics = 8; tc.max_peers = 2;
@@ -561,10 +561,10 @@ static void want_set_checks(void){
     CHECK(st != NULL, "want set: transport init");
     if (!st) return;
     CHECK(!ws_meets(st, "ws/t", RANT_SUB_ONLY, RANT_KIND_TOPIC), "want set: no topic of ours meets nothing");
-    g = i_rant_transport_want_gen(st);
+    i_rant_transport_want_new_clear(st);
 
     memset(&d, 0, sizeof d); d.name = "ws/t"; d.role = RANT_PUB_ONLY;
-    CHECK(i_rant_transport_topic_define(st, 0, &d) == 0 && i_rant_transport_want_gen(st) != g,
+    CHECK(i_rant_transport_topic_define(st, 0, &d) == 0 && i_rant_transport_want_new_any(st),
           "want set: a new topic grows it");
     CHECK(ws_meets(st, "ws/t", RANT_SUB_ONLY, RANT_KIND_TOPIC) && ws_meets(st, "ws/t", RANT_PUBSUB, RANT_KIND_TOPIC)
           && !ws_meets(st, "ws/t", RANT_PUB_ONLY, RANT_KIND_TOPIC) && !ws_meets(st, "ws/other", RANT_SUB_ONLY, RANT_KIND_TOPIC)
@@ -586,14 +586,14 @@ static void want_set_checks(void){
           && ws_meets(st, "ws/m@req", RANT_PUB_ONLY, RANT_KIND_FUNC_REQ),
           "want set: a function we serve meets a rival provider unless it is MULTI, a caller always");
 
-    g = i_rant_transport_want_gen(st);
-    CHECK(i_rant_transport_set_role(st, 0, RANT_INACTIVE) == 0 && i_rant_transport_want_gen(st) == g
+    i_rant_transport_want_new_clear(st);
+    CHECK(i_rant_transport_set_role(st, 0, RANT_INACTIVE) == 0 && !i_rant_transport_want_new_any(st)
           && !ws_meets(st, "ws/t", RANT_SUB_ONLY, RANT_KIND_TOPIC),
           "want set: a parked topic meets nothing and does not grow it");
-    CHECK(i_rant_transport_set_role(st, 0, RANT_PUB_ONLY) == 0 && i_rant_transport_want_gen(st) != g,
+    CHECK(i_rant_transport_set_role(st, 0, RANT_PUB_ONLY) == 0 && i_rant_transport_want_new_any(st),
           "want set: back from parked it grows again");
-    g = i_rant_transport_want_gen(st);
-    CHECK(i_rant_transport_topic_retire(st, 1) == 0 && i_rant_transport_want_gen(st) == g
+    i_rant_transport_want_new_clear(st);
+    CHECK(i_rant_transport_topic_retire(st, 1) == 0 && !i_rant_transport_want_new_any(st)
           && !ws_meets(st, "ws/v", RANT_SUB_ONLY, RANT_KIND_VARIABLE),
           "want set: a retired topic meets nothing and does not grow it");
 
@@ -603,9 +603,112 @@ static void want_set_checks(void){
           "want set: an entry cut short meets nothing, as an apply would refuse it");
 }
 
+/* The filter of a peer judged no match, and the pairings our topics gained since the node last
+   took them: a pairing the peer takes is always found, one it lacks only rarely, the gained ones
+   are kept across rebuilds until cleared, and out of memory every filter may meet us. */
+static int wf_fail;
+static void *wf_alloc(void *user, void *ptr, size_t size){
+    return wf_fail && size ? NULL : rant_allocator_alloc(user, ptr, size);
+}
+/* The filter of a peer with n topics wf/p00.. in role, or of one topic name when n is 0. */
+static void wf_filter(uint8_t *filter, const char *name, int n, uint8_t role){
+    static uint8_t pmem[1<<18], amem[1<<15], buf[2048];
+    static RantAllocator A;
+    static char names[24][16];
+    i_RantTopicDef d[24]; i_RantTransportConfig tc; i_RantTransportState *p; int k;
+    A = rant_allocator_static(amem, sizeof amem);
+    memset(d, 0, sizeof d);
+    for (k = 0; k < (n ? n : 1); k++){
+        if (n) sprintf(names[k], "wf/p%02d", k);
+        d[k].name = n ? names[k] : name; d[k].role = role;
+    }
+    memset(&tc, 0, sizeof tc); tc.topics = d; tc.n_topics = (uint16_t)(n ? n : 1); tc.max_peers = 1;
+    tc.allocator = rant_allocator_alloc; tc.user = &A;
+    p = i_rant_transport_init(pmem, sizeof pmem, &tc);
+    memset(filter, 0, RANT_DISCOVERY_FILTER_BYTES);
+    if (p) i_rant_transport_interest_fold(rant_bytes(buf, i_rant_transport_build_interest(p, buf, sizeof buf)),
+                                          filter, RANT_DISCOVERY_FILTER_BYTES);
+}
+/* 1 when a node that just made one topic name in role may meet a peer of this filter. */
+static int wf_maybe(const uint8_t *filter, const char *name, uint8_t role){
+    static uint8_t mem[1<<16], amem[1<<12];
+    static RantAllocator A;
+    i_RantTopicDef d; i_RantTransportConfig tc; i_RantTransportState *s;
+    A = rant_allocator_static(amem, sizeof amem);
+    memset(&d, 0, sizeof d); d.name = name; d.role = role;
+    memset(&tc, 0, sizeof tc); tc.topics = &d; tc.n_topics = 1; tc.max_peers = 1;
+    tc.allocator = rant_allocator_alloc; tc.user = &A;
+    s = i_rant_transport_init(mem, sizeof mem, &tc);
+    return s && i_rant_transport_want_new_maybe(s, filter, RANT_DISCOVERY_FILTER_BYTES);
+}
+static void want_filter_checks(void){
+    static uint8_t tmem[1<<17], amem[1<<14];
+    static RantAllocator A;
+    uint8_t pubs[RANT_DISCOVERY_FILTER_BYTES], subs[RANT_DISCOVERY_FILTER_BYTES], fa[RANT_DISCOVERY_FILTER_BYTES],
+            fb[RANT_DISCOVERY_FILTER_BYTES], fc[RANT_DISCOVERY_FILTER_BYTES], none[RANT_DISCOVERY_FILTER_BYTES];
+    i_RantTransportConfig tc; i_RantTransportState *st; i_RantTopicDef d;
+    char name[16]; int k, missed = 0, wrong = 0, hits = 0;
+    wf_filter(pubs, NULL, 20, RANT_PUB_ONLY);
+    wf_filter(subs, NULL, 20, RANT_SUB_ONLY);
+    for (k = 0; k < 20; k++){
+        sprintf(name, "wf/p%02d", k);
+        missed += !wf_maybe(pubs, name, RANT_SUB_ONLY) + !wf_maybe(subs, name, RANT_PUB_ONLY);
+        wrong  += wf_maybe(pubs, name, RANT_PUB_ONLY) + wf_maybe(subs, name, RANT_SUB_ONLY);
+    }
+    CHECK(missed == 0, "want filter: every pairing a peer takes is found, both sides (%d missed)", missed);
+    CHECK(wrong <= 1, "want filter: the side counts, a publisher's filter holds no subscriber (%d of 40)", wrong);
+    for (k = 0; k < 400; k++){
+        sprintf(name, "wf/q%03d", k);
+        hits += wf_maybe(pubs, name, RANT_SUB_ONLY) + wf_maybe(subs, name, RANT_PUB_ONLY);
+    }
+    CHECK(hits < 24, "want filter: a name a small peer lacks rarely hits (%d of 800, near 1%% expected)", hits);
+
+    wf_filter(fa, "wf/a", 0, RANT_SUB_ONLY);
+    wf_filter(fb, "wf/b", 0, RANT_SUB_ONLY);
+    wf_filter(fc, "wf/c", 0, RANT_SUB_ONLY);
+    memset(none, 0, sizeof none);
+    A = rant_allocator_static(amem, sizeof amem);
+    memset(&tc, 0, sizeof tc); tc.n_topics = 4; tc.max_peers = 2;
+    tc.allocator = wf_alloc; tc.user = &A;
+    st = i_rant_transport_init(tmem, sizeof tmem, &tc);
+    CHECK(st != NULL, "want filter: transport init");
+    if (!st) return;
+    memset(&d, 0, sizeof d); d.name = "wf/a"; d.role = RANT_PUB_ONLY;
+    (void)i_rant_transport_topic_define(st, 0, &d);
+    (void)ws_meets(st, "wf/zz", RANT_SUB_ONLY, RANT_KIND_TOPIC);     /* a judge's rebuild between the two */
+    d.name = "wf/b";
+    (void)i_rant_transport_topic_define(st, 1, &d);
+    CHECK(i_rant_transport_want_new_maybe(st, fa, sizeof fa) && i_rant_transport_want_new_maybe(st, fb, sizeof fb)
+          && !i_rant_transport_want_new_maybe(st, none, sizeof none),
+          "want filter: the pairings two rebuilds gained are both kept, an empty filter meets neither");
+    i_rant_transport_want_new_clear(st);
+    CHECK(!i_rant_transport_want_new_any(st) && !i_rant_transport_want_new_maybe(st, fa, sizeof fa),
+          "want filter: cleared, nothing is new");
+    CHECK(i_rant_transport_set_role(st, 0, RANT_INACTIVE) == 0 && !i_rant_transport_want_new_any(st),
+          "want filter: a parked topic gains nothing");
+    (void)i_rant_transport_set_role(st, 0, RANT_PUB_ONLY);
+    CHECK(i_rant_transport_want_new_maybe(st, fa, sizeof fa) && !i_rant_transport_want_new_maybe(st, fb, sizeof fb),
+          "want filter: a topic back from parked is new again, the other is not");
+    i_rant_transport_want_new_clear(st);
+    d.name = "wf/c";
+    (void)i_rant_transport_topic_define(st, 2, &d);
+    wf_fail = 1;
+    CHECK(i_rant_transport_want_new_any(st) && i_rant_transport_want_new_maybe(st, none, sizeof none),
+          "want filter: out of memory every filter may meet a new pairing");
+    wf_fail = 0;
+    i_rant_transport_want_new_clear(st);
+    CHECK(i_rant_transport_want_new_maybe(st, fc, sizeof fc) && !i_rant_transport_want_new_maybe(st, fa, sizeof fa),
+          "want filter: the rebuild that works again gains what the failed one held back");
+    i_rant_transport_want_new_clear(st);
+    CHECK(!i_rant_transport_want_new_any(st) && !i_rant_transport_want_new_maybe(st, none, sizeof none),
+          "want filter: once the node took those, nothing is new");
+    i_rant_transport_destroy(st);
+}
+
 static const TestCase cases[] = {
     { "basics", basics_checks },
     { "want_set", want_set_checks },
+    { "want_filter", want_filter_checks },
     { "rate", rate_checks },
     { "lapped", lapped_checks },
     { "rtt", rtt_checks },

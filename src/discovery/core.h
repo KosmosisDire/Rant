@@ -89,6 +89,19 @@ typedef struct {
 
 #define I_RANT_DISCOVERY_RECORDS_ANY 0xFFFFu   /* max_records bound only by the index range */
 
+/* A record's filter of the keys its blob carries, so a new topic of ours fetches only the
+ * peers it may meet. spec/discovery.md, The filter. */
+#ifndef RANT_DISCOVERY_FILTER_BYTES
+#define RANT_DISCOVERY_FILTER_BYTES 32
+#endif
+#if RANT_DISCOVERY_FILTER_BYTES < 8 || RANT_DISCOVERY_FILTER_BYTES > 64 \
+    || (RANT_DISCOVERY_FILTER_BYTES & (RANT_DISCOVERY_FILTER_BYTES - 1))
+#error "RANT_DISCOVERY_FILTER_BYTES must be a power of two from 8 to 64"
+#endif
+
+/* 1 when a record's filter may hold a key of ours its blob was not judged by. */
+typedef int (*i_RantDiscoveryMaybe)(void *ctx, const uint8_t *filter, size_t bytes);
+
 /* What the admit hook says of a peer's blob. A loan is for a blob that cannot be judged
  * alone: it takes only a free slot, never a match's, and rejudge settles it. */
 typedef enum {
@@ -117,9 +130,10 @@ typedef struct {
     void (*on_peer_up)(void *user, uint32_t peer, const RantAddr *addr, RantBytes meta);
     void (*on_peer_down)(void *user, uint32_t peer, i_RantDiscoveryDownReason reason);
     /* Optional. Whether a peer takes a slot, judged from its blob at version: on arrival
-     * without a slot, on a newer version with one, and from rejudge and replay_peers. NULL
-     * admits every peer at first contact, blob or not. */
-    i_RantDiscoveryAdmit (*admit)(void *user, uint32_t peer, RantBytes meta, uint32_t version);
+     * without a slot, on a newer version with one, and from rejudge and replay_peers. A NO has
+     * folded the blob's keys into filter, zeroed here. NULL admits every peer at first contact. */
+    i_RantDiscoveryAdmit (*admit)(void *user, uint32_t peer, RantBytes meta, uint32_t version,
+                                  uint8_t *filter);
     /* Optional. Every record, slotted or not: up at first contact and on a return, down at
      * the drop or when it goes while ACTIVE. Fires before the slot hooks. */
     void (*on_peer_seen)(void *user, uint32_t peer, const RantAddr *addr, int up);
@@ -224,8 +238,10 @@ uint16_t       i_rant_discovery_slots_wanted(const i_RantDiscoveryState *st);
  * they meet us. The match wait counts each as resolving. */
 uint16_t       i_rant_discovery_pending(const i_RantDiscoveryState *st);
 /* What admit judges by grew, so a record judged no match may meet us now: each live one is
- * fetched until its blob is judged again. One past our bound waits for the bound. */
-void           i_rant_discovery_refetch_unmatched(i_RantDiscoveryState *st);
+ * fetched until its blob is judged again, unless the filter of the blob it still advertises
+ * makes maybe say no. NULL maybe fetches them all. One past our bound waits for the bound. */
+void           i_rant_discovery_refetch_unmatched(i_RantDiscoveryState *st,
+                                      i_RantDiscoveryMaybe maybe, void *ctx);
 /* 1 when every live record was heard at or after since_us, 0 when one was not, -1 when
  * none is live. */
 int            i_rant_discovery_heard_since(const i_RantDiscoveryState *st, uint64_t since_us);

@@ -19,6 +19,13 @@ static inline uint32_t i_rant_hash_below(uint64_t h, uint32_t n){
     return (uint32_t)(((h >> 32) * (uint64_t)n) >> 32);
 }
 
+/* The splitmix64 finalizer: every input bit reaches every output bit. */
+static inline uint64_t i_rant_hash_mix64(uint64_t z){
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
 /* Over a C string. NULL gives 0. */
 static inline uint64_t i_rant_fnv1a64_str(const char *s){
     uint64_t h = 1469598103934665603ull;

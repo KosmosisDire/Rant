@@ -1844,15 +1844,19 @@ static void i_rant_node_core_peer_seen(void *user, uint32_t id, const RantAddr *
 
 /* discovery's admit hook: a slot for a peer whose interest meets ours, for every peer as an
  * observer. An external interest is paged in through a slot, so it holds one as a loan until
- * its pages at that version are in, and is judged again then. */
+ * its pages at that version are in, and is judged again then. No match folds the filter. */
 static i_RantDiscoveryAdmit i_rant_node_core_admit(void *user, uint32_t id, RantBytes meta,
-                            uint32_t version){
+                            uint32_t version, uint8_t *filter){
     i_RantNodeCore *c = (i_RantNodeCore*)user;
     RantBytes interest;
     if (c->fetch_details) return I_RANT_ADMIT_YES;
     interest = i_rant_node_core_interest_of(i_rant_node_core_peer_extra(c, id), meta, version);
-    if (interest.data)
-        return i_rant_transport_interest_meets(c->transport, interest) ? I_RANT_ADMIT_YES : I_RANT_ADMIT_NO;
+    if (interest.data){
+        if (i_rant_transport_interest_meets(c->transport, interest)) return I_RANT_ADMIT_YES;
+        i_rant_transport_interest_fold(interest, filter, RANT_DISCOVERY_FILTER_BYTES);
+        return I_RANT_ADMIT_NO;
+    }
+    /* no interest at all meets no topic of ours, so its empty filter is the right one */
     return i_rant_meta_interest_external(meta) ? I_RANT_ADMIT_LOAN : I_RANT_ADMIT_NO;
 }
 
