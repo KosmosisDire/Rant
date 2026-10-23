@@ -286,6 +286,13 @@ uint16_t    i_rant_transport_topic_unresolved(i_RantTransportState *st, uint16_t
 void        i_rant_transport_peer_unresolved_fill(i_RantTransportState *st, uint32_t peer_id,
                                 RantBytes interest, uint16_t *counts, uint16_t n);
 
+/* Whether a peer with this interest meets us: an entry on the other side of a topic of ours,
+ * or a rival authority of the same kind where ours is not MULTI. Symmetric between two nodes
+ * that agree on MULTI. spec/interest.md, The want set. */
+int         i_rant_transport_interest_meets(i_RantTransportState *st, RantBytes interest);
+/* Bumps each time our topics gained a pairing, so a peer judged before may meet us now. */
+uint32_t    i_rant_transport_want_gen(i_RantTransportState *st);
+
 /* Rematches peers locally. The caller re advertises. 0 ok, negative unknown. */
 int         i_rant_transport_set_role(i_RantTransportState *st, uint16_t topic_index, uint8_t role);
 
@@ -369,6 +376,8 @@ uint16_t    i_rant_transport_topic_hist_head(i_RantTransportState *st, uint16_t 
 const RantQos *i_rant_transport_topic_qos(i_RantTransportState *st, uint16_t topic_index);
 /* 0 = none or undefined. */
 uint8_t     i_rant_transport_topic_attrs(i_RantTransportState *st, uint16_t topic_index);
+/* 1 while the topic rides our announce in an active role, so a peer may still match it. */
+int         i_rant_transport_topic_matchable(i_RantTransportState *st, uint16_t topic_index);
 
 /* 1 if the next send would overwrite history not yet acked by every subscriber. */
 int         i_rant_transport_send_would_evict(i_RantTransportState *st, uint16_t topic_index);

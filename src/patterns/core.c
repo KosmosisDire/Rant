@@ -635,11 +635,10 @@ static RantFunction *i_rant_function_open(RantNode *n, const char *name,
     i_RantSysMsgFn rsp_cb = makes_calls ? i_rant_func_on_response : NULL;
     uint8_t req_kind = (uint8_t)(topts ? RANT_KIND_TASK_REQ : RANT_KIND_FUNC_REQ);
     uint8_t rsp_kind = (uint8_t)(topts ? RANT_KIND_TASK_RSP : RANT_KIND_FUNC_RSP);
-    uint8_t req_attrs = 0;
+    uint8_t req_attrs = (uint8_t)(handles_req && opts && opts->multi ? RANT_ATTR_MULTI : 0u);
     if (topts && handles_req)   /* only the definition declares the task facts */
-        req_attrs = (uint8_t)((topts->no_cancel ? 0u : RANT_ATTR_CANCELLABLE)
-                            | (topts->exclusive ? RANT_ATTR_EXCLUSIVE : 0u)
-                            | (topts->multi     ? RANT_ATTR_MULTI       : 0u));
+        req_attrs = (uint8_t)(req_attrs | (topts->no_cancel ? 0u : RANT_ATTR_CANCELLABLE)
+                                        | (topts->exclusive ? RANT_ATTR_EXCLUSIVE : 0u));
     if (!n || !name) return NULL;
     nl = strlen(name);
     if (nl == 0 || nl + 4 > RANT_TOPIC_NAME_MAX) return NULL;     /* room for the suffix */

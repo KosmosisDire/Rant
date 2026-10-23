@@ -74,7 +74,7 @@ These scale with real traffic and real matches, never with worst case tables.
 | reader reassembly and bitmap, two slots | per matched lane, on receive | grows to the largest message received |
 | per peer index and verdict maps | peer's first matched topic | that peer's advertised entry count |
 | announce blob | first build | actual overlay size |
-| discovery records | open, doubling as peers arrive up to `max_records` | records x sizeof(i_RantDiscoveryRecord) |
+| discovery records | open, doubling as peers arrive up to `max_records`. A static node's are in the arena | records x sizeof(i_RantDiscoveryRecord) |
 | per peer interest and detail buffers | on fetch | actual length, freed on GONE |
 
 A grown buffer never shrinks. Freeing returns the block to the reuse pool. The sparse
@@ -152,3 +152,4 @@ functional, so make them cheap rather than leaning on `disable_logs` and `disabl
 | RANT_SHM_CLASS_BASE | 64K | smallest SHM chunk |
 | RANT_SHM_CLASS_SHIFT | 2 | SHM class growth ratio |
 | RANT_SHM_N_CLASSES | 7 | number of SHM classes |
+| RANT_RECORDS_PER_PEER | 4 | records per slot a static node reserves at open |

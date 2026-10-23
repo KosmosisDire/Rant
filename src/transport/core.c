@@ -95,6 +95,7 @@ static i_RantTransportState *i_rant_transport_build(i_RantBump *b, const i_RantT
           st->bitmap_len=bitmap_len;
           st->topics=topic; st->reader_epoch_counter=1;
           st->next_deadline_us=RANT__NO_DEADLINE;
+          st->want_dirty=1;
           st->lanes=NULL; st->lane_cap=0u; st->lane_free=RANT__NIL;
           st->lane_index=lane_index;
           st->dest_head=dest_head; st->dest_tail=dest_tail; st->dest_queued=dest_queued; st->dest_queue=dest_queue;
@@ -209,6 +210,8 @@ i_RantTransportState *i_rant_transport_migrate(i_RantTransportState *old, void *
     nw->reader_epoch_counter = old->reader_epoch_counter;
     nw->frag = old->frag;
     nw->interest_truncated = old->interest_truncated;
+    nw->want = old->want; nw->want_n = old->want_n; nw->want_gen = old->want_gen;
+    nw->want_dirty = old->want_dirty; nw->want_failed = old->want_failed;
     memcpy(nw->peer_ids,     old->peer_ids,     (size_t)omp*sizeof(uint32_t));
     memcpy(nw->peer_used,    old->peer_used,    omp);
     memcpy(nw->peer_dormant, old->peer_dormant, omp);
@@ -702,6 +705,7 @@ void i_rant_transport_destroy(i_RantTransportState *st){
             }
         }
     }
+    if (st->want){ st->cfg.allocator(st->cfg.user, st->want, 0); st->want=NULL; st->want_n=0; }
 }
 
 
@@ -892,6 +896,100 @@ static int i_rant_interest_scan_next(i_RantInterestScan *s){
         return 1;
     }
     return 0;
+}
+
+/* The want set: each pairing by which an entry meets one of our topics, see spec/interest.md.
+   A rival key serves only the duplicate authority check, so a MULTI topic takes none. */
+
+static uint32_t i_rant_want_put(i_RantWant *out, uint32_t n, uint32_t hash, int their_pub, uint8_t rival_kind){
+    out[n].hash = hash; out[n].their_pub = (uint8_t)their_pub; out[n].rival_kind = rival_kind;
+    return n + 1u;
+}
+
+/* the keys of one topic into out[3], returning how many */
+static uint32_t i_rant_want_keys(const i_RantTopic *t, i_RantWant *out){
+    uint32_t n = 0, h = (uint32_t)t->identity;
+    int pubs = i_rant_role_pubs(t->role), subs = i_rant_role_subs(t->role);
+    int sole = !(t->attrs & RANT_ATTR_MULTI);
+    if (!i_rant_topic_announced(t)) return 0;
+    if (subs) n = i_rant_want_put(out, n, h, 1, 0);
+    if (pubs) n = i_rant_want_put(out, n, h, 0, 0);
+    if (sole && pubs && t->kind == RANT_KIND_VARIABLE) n = i_rant_want_put(out, n, h, 1, t->kind);
+    if (sole && subs && (t->kind == RANT_KIND_FUNC_REQ || t->kind == RANT_KIND_TASK_REQ))
+        n = i_rant_want_put(out, n, h, 0, t->kind);
+    return n;
+}
+
+/* a total order, hash first, so two sets compare by one merge */
+static int i_rant_want_before(const i_RantWant *a, const i_RantWant *b){
+    if (a->hash != b->hash) return a->hash < b->hash;
+    if (a->their_pub != b->their_pub) return a->their_pub < b->their_pub;
+    return a->rival_kind < b->rival_kind;
+}
+
+/* 1 when some key of fresh is not in old, both sorted */
+static int i_rant_want_added(const i_RantWant *fresh, uint32_t nf, const i_RantWant *old, uint32_t no){
+    uint32_t i, j = 0;
+    for (i = 0; i < nf; i++){
+        while (j < no && i_rant_want_before(&old[j], &fresh[i])) j++;
+        if (j == no || i_rant_want_before(&fresh[i], &old[j])) return 1;
+    }
+    return 0;
+}
+
+/* Rebuilds the set from the topics. Out of memory, every peer meets us until a rebuild works. */
+static void i_rant_want_rebuild(i_RantTransportState *st){
+    i_RantWant *fresh = NULL; uint32_t n = 0, c, gap, i, j;
+    for (c = 0; c < st->cfg.n_topics; c++){ i_RantWant k[3]; n += i_rant_want_keys(&st->topics[c], k); }
+    if (n){
+        fresh = (i_RantWant*)st->cfg.allocator(st->cfg.user, NULL, (size_t)n * sizeof *fresh);
+        if (!fresh){
+            if (!st->want_failed){ st->want_failed = 1; st->want_gen++; }
+            return;                                   /* still dirty, so the next read retries */
+        }
+        n = 0;
+        for (c = 0; c < st->cfg.n_topics; c++) n += i_rant_want_keys(&st->topics[c], fresh + n);
+        for (gap = n / 2u; gap > 0; gap /= 2u)      /* shell sort, no libc */
+            for (i = gap; i < n; i++){
+                i_RantWant t = fresh[i];
+                for (j = i; j >= gap && i_rant_want_before(&t, &fresh[j - gap]); j -= gap) fresh[j] = fresh[j - gap];
+                fresh[j] = t;
+            }
+    }
+    if (i_rant_want_added(fresh, n, st->want, st->want_n)) st->want_gen++;
+    if (st->want) st->cfg.allocator(st->cfg.user, st->want, 0);
+    st->want = fresh; st->want_n = n;
+    st->want_dirty = 0; st->want_failed = 0;
+}
+
+int i_rant_transport_interest_meets(i_RantTransportState *st, RantBytes interest){
+    const uint8_t *d = interest.data;
+    i_RantInterestScan scan;
+    uint16_t n;
+    if (!st || !d || interest.len < 2) return 0;
+    n = i_rant_le_r16(d);
+    if (!i_rant_interest_walk_len(d, interest.len, n)) return 0;    /* an apply would refuse it whole */
+    if (st->want_dirty) i_rant_want_rebuild(st);
+    if (st->want_failed) return 1;
+    i_rant_interest_scan_init(&scan, d, n);
+    while (i_rant_interest_scan_next(&scan)){
+        uint8_t kind = (uint8_t)((scan.flags & RANT__INT_KIND_MASK) >> RANT__INT_KIND_SHIFT);
+        uint32_t lo = 0, hi = st->want_n;
+        while (lo < hi){ uint32_t mid = (lo + hi) / 2u; if (st->want[mid].hash < scan.hash) lo = mid + 1; else hi = mid; }
+        for (; lo < st->want_n && st->want[lo].hash == scan.hash; lo++){
+            const i_RantWant *w = &st->want[lo];
+            if (!(w->their_pub ? scan.their_pub : scan.their_sub)) continue;
+            if (w->rival_kind && w->rival_kind != kind) continue;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+uint32_t i_rant_transport_want_gen(i_RantTransportState *st){
+    if (!st) return 0;
+    if (st->want_dirty) i_rant_want_rebuild(st);
+    return st->want_gen;
 }
 
 /* Re derives the peer's bits from cached verdicts plus the entry's current flags, then
@@ -1582,6 +1680,7 @@ int i_rant_transport_set_role(i_RantTransportState *st, uint16_t topic_index, ui
     if (!topic || topic->retired) return -1;   /* a retired slot only returns through reuse */
     if (topic->role == role) return 0;
     topic->role = role;
+    st->want_dirty = 1;
     for (p=0;p<st->cfg.max_peers;p++)
         if (st->peer_used[p]) i_rant_topic_rematch(st,(uint16_t)topic_index,p);
     /* the caller re advertises */
@@ -1639,6 +1738,7 @@ int i_rant_transport_topic_define(i_RantTransportState *st, uint16_t topic_index
     memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane] = '\0';
     topic->name_len = (uint8_t)lane;
     topic->history_head = 0; topic->next_seqno = 0; topic->have_first = 0;
+    st->want_dirty = 1;
     i_rant_transport_repend_dissolved(st);
     for (p=0;p<st->cfg.max_peers;p++)        /* match the new topic to known peers */
         if (st->peer_used[p]) i_rant_topic_rematch(st, topic_index, p);
@@ -1654,6 +1754,7 @@ int i_rant_transport_topic_retire(i_RantTransportState *st, uint16_t topic_index
     topic = i_rant_topic_at(st, topic_index, NULL);
     if (!topic || topic->name_len == 0 || topic->retired) return -1;
     topic->role = RANT_INACTIVE; topic->retired = 1;
+    st->want_dirty = 1;
     i_rant_topic_unlink(st, topic_index);
     for (p=0;p<st->cfg.max_peers;p++)          /* both sides unmatch, every lane releases */
         if (st->peer_used[p]) i_rant_topic_rematch(st, topic_index, p);
@@ -1787,6 +1888,7 @@ int i_rant_transport_topic_reuse(i_RantTransportState *st, uint16_t topic_index,
     topic->history_head = 0; topic->have_first = 0; topic->first_seqno = 0;
     memset(&topic->repair_stats, 0, sizeof topic->repair_stats);
     topic->retired = 0;
+    st->want_dirty = 1;
     if (binding_changed){
         topic->gen = (uint8_t)(topic->gen + 1u);   /* peers compare equality only */
         topic->rebind_version = rebind_version;
@@ -1856,6 +1958,11 @@ RantString i_rant_transport_topic_name(i_RantTransportState *st, uint16_t topic_
 const RantQos *i_rant_transport_topic_qos(i_RantTransportState *st, uint16_t topic_index){
     i_RantTopic *topic = i_rant_topic_at(st, topic_index, NULL);
     return topic ? &topic->qos : NULL;
+}
+
+int i_rant_transport_topic_matchable(i_RantTransportState *st, uint16_t topic_index){
+    const i_RantTopic *topic = st ? i_rant_topic_at(st, topic_index, NULL) : NULL;
+    return topic && i_rant_topic_announced(topic) && topic->role != RANT_INACTIVE;
 }
 
 uint8_t i_rant_transport_topic_attrs(i_RantTransportState *st, uint16_t topic_index){

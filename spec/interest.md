@@ -175,15 +175,45 @@ published. Gotchas: destroy must skip NULL history (retired slots freed theirs),
 untyped reuse over a typed retired slot must still clear the schema or the stale
 fingerprint is served to peers.
 
+## The want set
+
+Whether a peer takes a slot is judged from its interest list against the transport's want
+set: one key per pairing of each announced topic, sorted by the low 32 bits of the name.
+
+| our topic | an entry meets it when it |
+|---|---|
+| subscribes | publishes the name, of any kind |
+| publishes | subscribes the name, of any kind |
+| a VARIABLE we own, not MULTI | publishes the name as a VARIABLE too |
+| a FUNC_REQ or TASK_REQ we serve, not MULTI | subscribes the name with the same kind |
+
+The opposite side meets whatever its kind, so a kind mismatch is still reported. The rival
+keys exist for the duplicate authority check, which reads the peer's entities and so needs
+its slot. `@rant/meta` is MULTI and the other builtins are plain topics, so builtins pair
+only where a node really publishes to another's subscriber. The pairings are symmetric:
+two nodes that agree on MULTI judge their pair alike, which judging on arrival relies on.
+The set is rebuilt lazily after a define, retire, reuse or role change, and `want_gen` bumps
+when a rebuild added a key. Out of memory every peer meets us until a rebuild works.
+
+The node's admit hook answers YES for an observer, LOAN for an external interest not yet
+paged at the blob's version (the pages arrive through the slot, then `rejudge`), and else
+`interest_meets`. A topic that comes up after the post open gather and grew the set fetches
+every record judged no match (`refetch_unmatched`), so the first send waits for their
+verdicts. Within the gather our announce carries the blob to them, and a peer that meets
+it asks us.
+
 ## The match wait
 
 Matching a fresh topic to a present peer costs an announce and detail round trip after
 create. A send in that window would commit to zero subscribers. The node closes the
 window: discovery sends our blob at open and peers answer with theirs, create's replay re fires peer up so detail requests
 queue and the kick sends them, and a send that would reach zero subscribers WHILE a
-candidate is resolving blocks, bounded by `opts.match_wait_ms`. Resolving means a cached
-announce nominates this topic but its verdicts are in flight, or the post open gather
-has not settled. The gather latch is set opportunistically each poll pass so a later
+candidate is resolving blocks until matching converges, so it reaches every candidate
+that matches and not only the first, bounded by `opts.match_wait_ms`. Resolving means a
+held announce nominates this topic but its verdicts are in flight, a record without a slot
+is being fetched, or the post open gather has not settled. The gather settles on matches
+alone, never peers coming and going, and ends one match window after open at the latest,
+so a big mesh that never goes quiet cannot hold it. The gather latch is set opportunistically each poll pass so a later
 create's own replay cannot reset the quiet clock. A topic that retains history (reliable
 with `catch_up` above 0) is exempt. A topic nobody advertises interest in proceeds at
 once, and the converged state is memoized per topology epoch (bumped on PEER_UP, PEER_DOWN,

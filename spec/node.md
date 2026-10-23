@@ -32,17 +32,17 @@ that fails validation is dropped and surfaced, never handed to the app.
 
 ## Growth
 
-In dynamic mode a refused peer and an oversized peer blob are growth signals, not
-verdicts: the peer table or the accept bound grows at the next poll, between ticks, the
-peer is admitted on its next announce (a solicit asks for it), and the app never sees the
-refusal. Static mode surfaces both. A size that failed to allocate is remembered so the
+In dynamic mode a peer that found no slot and an oversized peer blob are growth signals,
+not verdicts: at the next poll, between ticks, the slots double until every peer that wants
+one fits, or the accept bound grows, discovery fetches the peers the growth made room for,
+and the app never sees the refusal. Static mode surfaces both. A size that failed to allocate is remembered so the
 retry surfaces instead of spinning. See spec/allocation.md for the grow itself.
 
 ## Settle
 
-`rant_node_settle` solicits, re sent four times a second, and returns once every active
-peer has been heard since the solicit, the topology has been quiet for one window (the
-announce interval capped at 300 ms), and one window has passed overall. With no peer heard
+`rant_node_settle` solicits, re sent four times a second, and returns once every live
+record has been heard since the solicit, no match has formed for one window (the announce
+interval capped at 300 ms), and one window has passed overall. With no peer heard
 at all only a full announce interval can rule out a slow one. The post open gather latch
 uses the same predicate anchored at open, so a first send's match wait knows the announce
 cache covers the peers that were already there.
@@ -360,7 +360,9 @@ the role, so the catch up replay parks rather than landing inline.
 list, directed requests so a call aimed at one peer never wakes the rest, keep_last 2
 rings, created with `.multi`. The request is an optional 4 byte section mask (NODE, PROC,
 TOPICS, PEERS, empty = all). The response is `RantMeta { info: map }` with node, proc,
-topics and peers sections. The snapshot builder is node owned: the buffer starts at 1 KB and doubles on
+topics and peers sections. The peers section lists the peers holding a slot, so a small
+node's answer stays small on a big mesh, and the node section counts them as
+`matched_peers` beside `peers`, every live record. The snapshot builder is node owned: the buffer starts at 1 KB and doubles on
 overflow up to 4 MB. The per topic `pending` count is one bulk walk per peer, not a walk per topic. No
 self inspection, since a node never matches itself. An ordinary remote must never
 advertise the provider side (it would auto answer NO_HANDLER and race the real provider).

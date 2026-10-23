@@ -353,11 +353,12 @@ static void domaingroup_checks(void){
     B  = rant_node_open(&ba, "dg-b", NULL, NULL, &o);
     CHECK(A && A2 && B, "domaingroup: three nodes on two domains open");
     if (A && A2 && B){
-        uint16_t c = 0;
+        unsigned c = 0; RantIter it; RantPeerInfo p;
         dg_sock[0] = (long long)i_rant_discovery_fd(A->discovery);
         dg_sock[1] = (long long)i_rant_discovery_fd(B->discovery);
         test_pump3(A, A2, B, 1500);                  /* several announce intervals each */
-        test_peers(A, &c);
+        memset(&it, 0, sizeof it);
+        while (rant_node_peers_next(A, &it, &p)) c++;
         CHECK(c == 1 && dg_own[0] > 0, "domaingroup: a domain still discovers itself (peers=%u own=%d)",
               (unsigned)c, dg_own[0]);
         CHECK(dg_foreign[0] == 0 && dg_foreign[1] == 0,

@@ -28,8 +28,8 @@ fixed size bootstrap instead and peers page the interest blob over unicast
 The accept bound (the largest peer blob stored, first sized from our own topic count)
 self heals. A bigger peer's announce, even one the OS truncated, fires
 `RANT_E_PEER_META_TOO_BIG` internally. The node grows the bound and its receive buffers
-at the next poll and solicits a re announce. Per peer blobs are hook allocated at their
-actual length and reused across occupants. The event carries the overlay when the
+at the next poll, and the grown bound fetches that peer's blob alone (Judging on arrival).
+Per peer blobs are hook allocated at their actual length and reused across occupants. The event carries the overlay when the
 datagram arrived whole and a NULL data pointer when the OS truncated it.
 
 Unicast discovery traffic leaves the DATA socket (`i_rant_discovery_set_tx_fd`). Group sends
@@ -105,9 +105,11 @@ while ACTIVE, each time before the slot hooks.
 Records are referenced by index, never by pointer, because a store on the hook moves when it
 doubles. Without a hook the store sits in the arena at `max_records` and never grows. With
 one, `max_peers` records are taken at init and the store doubles as it fills, up to
-`max_records`. The node leaves the bound open on a pool that grows and keeps one record per
-slot on a fixed pool. A grow moves the slots into the new arena and leaves the records where
-they are, so only a core with the hook migrates, and never to fewer slots.
+`max_records`. The node leaves the bound open on a pool that grows. On a fixed pool it passes
+no hook, so its records, `RANT_RECORDS_PER_PEER` (4) per slot, and its blobs sit in the arena
+from open and a crowd costs it nothing later. A grow moves the slots into the new arena and
+leaves the records where they are, so only a core with the hook migrates, and never to fewer
+slots.
 
 ## Judging on arrival
 
@@ -119,15 +121,21 @@ when first heard, blob or not.
 
 | verdict | without a slot | with one |
 |---|---|---|
-| NO | the record is kept, judged at that version | given back: the slot hooks see GONE, the app nothing |
+| NO | the record is kept, judged at that version | given back: the slot hooks see `RANT_DISCOVERY_GIVE_BACK`, the seen hook nothing |
 | YES | a free slot, else the oldest DROPPED peer's, else a live loan's. None: refused | kept |
-| LOAN | a free or DROPPED slot only. None: it waits, unreported | kept as a loan |
+| LOAN | a free or DROPPED slot only. None: it waits, unreported | kept, a match staying one |
 
 A refused match is noted under its id for the node's condition and refused again each time
 it is heard. When a slot opens (given back, a slotted peer gone or dropped, a migrate), as
 many records that wanted one as there are spare slots are fetched, and their answers take
 the slots. `rejudge` judges one slotted peer again by the blob it holds, `replay_peers` every
 live one: a slot that meets nothing is given back, a loan that now meets us is told.
+
+Each refused match and each loan left waiting bumps `seat_misses`, so a node that can grow
+does, at once to `slots_wanted`: every live record holding a slot or waiting for one. A
+caller whose own criteria grew calls `refetch_unmatched`, which fetches every live record
+judged no match until its blob is judged again. `pending` counts the records without a slot
+whose blob is being fetched, so one that never answers stops counting once its asks ran out.
 
 A match the peer may not know of is told by an ask (Owed work and copies), repeated until any
 datagram marked ONE comes from it: a new match, or a held one whose version skipped one, since

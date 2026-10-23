@@ -211,6 +211,14 @@ typedef struct {
     RantRepairStats repair_stats;
 } i_RantTopic;
 
+/* One way a peer's interest entry meets a topic of ours. A rival key takes the same side of
+ * an authority kind, so the entry must carry that kind too. */
+typedef struct {
+    uint32_t hash;           /* the low 32 identity bits the entry carries */
+    uint8_t  their_pub;      /* 1 = the entry publishes it, 0 = it subscribes */
+    uint8_t  rival_kind;     /* a rival key's i_RantTopicKind, never TOPIC. 0 = the other side */
+} i_RantWant;
+
 struct i_RantTransportState {
     i_RantTransportConfig      cfg;
     uint32_t      *peer_ids;  /* [max_peers] */
@@ -255,6 +263,12 @@ struct i_RantTransportState {
     uint64_t     next_deadline_us; /* the earliest armed timer, caps the poll wait */
     uint32_t     reader_epoch_counter;      /* starts at 1, 0 = none */
     uint8_t      interest_truncated;        /* our last inline interest did not fit the announce */
+    /* the want set, a hook allocation sorted by hash and rebuilt after a topic changed */
+    i_RantWant  *want;
+    uint32_t     want_n;
+    uint32_t     want_gen;     /* bumps when a rebuild added a key */
+    uint8_t      want_dirty;
+    uint8_t      want_failed;  /* the last rebuild ran out of memory, so every peer meets us */
 };
 
 typedef enum { RANT_ORDER_OLD, RANT_ORDER_GAP, RANT_ORDER_ADOPTED, RANT_ORDER_INORDER } i_RantReaderOrder;

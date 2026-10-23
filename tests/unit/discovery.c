@@ -37,6 +37,18 @@ static size_t dc_wire(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint
                       const char *name, uint32_t mver){
     return dc_enc(p, uid, (uint8_t)(flags | RANT_DISCOVERY_FLAG_BLOB), dom, port, name, mver);
 }
+/* the same carrying meta as its blob */
+static size_t dc_wire_meta(uint8_t *p, uint8_t uid, uint16_t dom, uint16_t port, const char *name,
+                           uint32_t mver, RantBytes meta){
+    static uint8_t uuid[16];
+    i_RantDiscoveryWire w;
+    memset(uuid, uid, 16);
+    memset(&w, 0, sizeof w);
+    w.flags = RANT_DISCOVERY_FLAG_BLOB; w.domain = dom; w.uuid = uuid;
+    w.version = mver; w.data_port = port; w.overlay = meta;
+    w.name = name ? rant_cstr(name) : rant_string(NULL, 0);
+    return i_rant_discovery_encode(&w, p, RANT_DISCOVERY_WIRE_MAX);
+}
 static size_t dc_mk(uint8_t *p, uint8_t uid, uint8_t flags, uint16_t dom, uint16_t port, uint32_t mver){
     return dc_wire(p, uid, flags, dom, port, NULL, mver);
 }
@@ -224,22 +236,23 @@ static void disc_core_checks(void){
 
 /* node core peer lifecycle, sans IO: drive the peer up, down and refused hooks directly
    over a transport with no sockets, clock or platform anywhere. */
-static uint32_t nc_up_n, nc_down_n, nc_refused_n, nc_up_id, nc_down_id;
+static uint32_t nc_up_n, nc_down_n, nc_refused_n, nc_up_id, nc_down_id, nc_interest_n, nc_matches;
 static void nc_event(const RantEvent *ev){
     if      (ev->kind==RANT_PEER_UP)       { nc_up_n++;   nc_up_id=ev->peer; }
     else if (ev->kind==RANT_PEER_DOWN)     { nc_down_n++; nc_down_id=ev->peer; }
+    else if (ev->kind==RANT_PEER_INTEREST) { nc_interest_n++; nc_matches=ev->publish_topics+ev->receive_topics; }
     else if (ev->kind==RANT_ERROR && ev->error==RANT_E_PEER_REFUSED){ nc_refused_n++; }
 }
 /* node core peer lifecycle, fully sans IO: a transport plus a real discovery core, the
    node core delegating its peer table to discovery. */
 static void node_core_checks(void){
-    static uint8_t tmem[1<<18], cmem[4096], dmem[8192], amem[1<<16];
-    uint8_t buf[256], out[RANT_DISCOVERY_WIRE_MAX];
-    uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3};
+    static uint8_t tmem[1<<18], omem[1<<16], cmem[4096], dmem[8192], amem[1<<16];
+    uint8_t buf[256], out[RANT_DISCOVERY_WIRE_MAX], other[64], host[16] = { 0 };
+    uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3}, sd[4]={10,0,0,4};
     i_RantTransportConfig tc; i_RantTransportState *tr; i_RantTopicDef ch[1];
     i_RantDiscoveryCoreConfig dcfg; i_RantDiscoveryState *st;
     i_RantNodeCoreConfig cc; i_RantNodeCore *nc;
-    RantAddr d; uint32_t id, idA, idB; size_t n;
+    RantAddr d; uint32_t id, idA, idB; size_t n; RantBytes mb, mo;
     /* STATIC allocator over a caller buffer: the embedded no-heap contract */
     static RantAllocator A; A = rant_allocator_static(amem, sizeof amem);
 
@@ -262,6 +275,7 @@ static void node_core_checks(void){
        per peer scratch via peer_user_bytes and wire its events into the node core */
     memset(&dcfg,0,sizeof dcfg); memset(dcfg.uuid,0xEE,16);
     dcfg.domain_id=99; dcfg.announce_interval_us=1000000; dcfg.peer_timeout_us=1000000; dcfg.max_peers=2;
+    dcfg.max_records=3;
     dcfg.peer_user_bytes=i_rant_node_core_peer_user_bytes();
     i_rant_node_core_discovery_hooks(nc, &dcfg);
     st = i_rant_discovery_init(dmem, sizeof dmem, &dcfg);
@@ -271,17 +285,16 @@ static void node_core_checks(void){
     i_rant_discovery_update(st, 1000, out, sizeof out);     /* start */
 
     /* build-meta still works (uses the transport, not any peer table) */
-    {   RantBytes mb;
-        i_rant_node_core_build_meta(nc);
-        mb = i_rant_node_core_meta(nc);
-        CHECK(mb.len>=5 && i_rant_meta_frag(mb)==1200,
-                 "node-core: builds overlay (frag=%u)", i_rant_meta_frag(mb)); }
+    i_rant_node_core_build_meta(nc);
+    mb = i_rant_node_core_meta(nc);
+    CHECK(mb.len>=5 && i_rant_meta_frag(mb)==1200,
+             "node-core: builds overlay (frag=%u)", i_rant_meta_frag(mb));
 
-    /* Two peers announce: two ups, discovery assigns the ids, resolve each way */
+    /* Two peers announce our own blob, which meets us: two ups, two slots, resolve each way */
     nc_up_n=nc_down_n=nc_refused_n=0;
-    n=dc_wire(buf,1,0,99,5001,"nc-self",1); dc_feed(st,sa,6730,buf,n,2000); idA=nc_up_id;
-    n=dc_wire(buf,2,0,99,5002,"nc-self",1); dc_feed(st,sb,6730,buf,n,2000); idB=nc_up_id;
-    CHECK(nc_up_n==2, "node-core: two peers up (ups=%u)", nc_up_n);
+    n=dc_wire_meta(buf,1,99,5001,"nc-self",1,mb); dc_feed(st,sa,6730,buf,n,2000); idA=nc_up_id;
+    n=dc_wire_meta(buf,2,99,5002,"nc-self",1,mb); dc_feed(st,sb,6730,buf,n,2000); idB=nc_up_id;
+    CHECK(nc_up_n==2 && i_rant_discovery_slots_used(st)==2, "node-core: two peers up (ups=%u)", nc_up_n);
     {   RantString pn = i_rant_node_core_peer_name(nc, idA);
         CHECK(pn.data && pn.len==7 && memcmp(pn.data,"nc-self",7)==0,
                  "node-core: peer name learned from announce (%.*s)", (int)pn.len, pn.data?pn.data:"?"); }
@@ -290,28 +303,49 @@ static void node_core_checks(void){
     CHECK(i_rant_node_core_id_for_addr(nc, sb, 5002, &id) && id==idB,
              "node-core: addr resolves to id (id=%u)", id);
 
+    /* A blob that stops meeting us gives the slot back: the app hears interest with no
+       matches and no peer down, the peer stays known. Meeting us again takes a slot again */
+    nc_up_n=nc_down_n=nc_interest_n=0; nc_matches=1;
+    n=dc_wire(buf,2,0,99,5002,"nc-self",2); dc_feed(st,sb,6730,buf,n,2000);
+    CHECK(nc_interest_n==1 && nc_matches==0 && nc_down_n==0 && i_rant_discovery_slots_used(st)==1
+          && i_rant_discovery_peer_count(st)==2 && i_rant_node_core_resolve(nc,idB,&d),
+          "node-core: a slot given back is interest with no matches, never a peer down");
+    n=dc_wire_meta(buf,2,99,5002,"nc-self",3,mb); dc_feed(st,sb,6730,buf,n,2000);
+    CHECK(nc_up_n==0 && i_rant_discovery_slots_used(st)==2 && i_rant_node_core_id_for_addr(nc, sb, 5002, &id) && id==idB,
+          "node-core: meeting us again takes a slot again, with no second peer up");
+
     /* a nameless announce falls back to "unknown-peer", never empty or NULL */
     {   RantString pn;
-        n=dc_wire(buf,1,0,99,5001,NULL,2);     dc_feed(st,sa,6730,buf,n,2001);
+        n=dc_wire_meta(buf,1,99,5001,NULL,2,mb); dc_feed(st,sa,6730,buf,n,2001);
         pn = i_rant_node_core_peer_name(nc, idA);
         CHECK(pn.data && pn.len==12 && memcmp(pn.data,"unknown-peer",12)==0,
                  "node-core: nameless announce -> unknown-peer (%.*s)", (int)pn.len, pn.data?pn.data:"(null)");
-        n=dc_wire(buf,1,0,99,5001,"nc-self",3); dc_feed(st,sa,6730,buf,n,2002); }
+        n=dc_wire_meta(buf,1,99,5001,"nc-self",3,mb); dc_feed(st,sa,6730,buf,n,2002); }
 
-    /* A third peer is REFUSED while the table is full of ACTIVE peers, the node forwards it */
-    nc_refused_n=0;
-    n=dc_wire(buf,3,0,99,5003,"three",1); dc_feed(st,sc,6730,buf,n,2003);
+    /* A peer whose interest names only another topic is up for the app but takes no slot.
+       One past the records is REFUSED, and the node forwards it */
+    {   i_RantTopicDef och[1]; i_RantTransportState *ot;
+        memset(och,0,sizeof och); och[0].name="nc/other";
+        tc.topics=och; ot = i_rant_transport_init(omem, sizeof omem, &tc);
+        mo = rant_bytes(other, ot ? i_rant_transport_meta_build(ot, other, sizeof other, 1200, 0, host, 0) : 0);
+        tc.topics=ch; }
+    nc_up_n=nc_refused_n=0;
+    n=dc_wire_meta(buf,3,99,5003,"three",1,mo); dc_feed(st,sc,6730,buf,n,2003);
+    CHECK(mo.len && nc_up_n==1 && nc_refused_n==0 && i_rant_discovery_slots_used(st)==2
+          && i_rant_discovery_peer_count(st)==3,
+          "node-core: a peer sharing nothing is up, with no slot");
+    n=dc_wire(buf,4,0,99,5004,"four",1); dc_feed(st,sd,6730,buf,n,2003);
     CHECK(nc_refused_n==1, "node-core: refused forwarded (refused=%u)", nc_refused_n);
 
-    /* Silence past the timeout DROPS both: a PEER_DOWN each, but the slots are kept (resolve) */
+    /* Silence past the timeout DROPS all three: a PEER_DOWN each, but the slots are kept (resolve) */
     nc_down_n=0;
     i_rant_discovery_update(st, 1003000, out, sizeof out);
-    CHECK(nc_down_n==2, "node-core: timeout drops both (downs=%u)", nc_down_n);
+    CHECK(nc_down_n==3, "node-core: timeout drops all three (downs=%u)", nc_down_n);
     CHECK(i_rant_node_core_resolve(nc,idA,&d)==1, "node-core: dropped peer kept (resolves)");
 
     /* The same uuid returns: RESUME re fires PEER_UP under the same id */
     nc_up_n=0;
-    n=dc_wire(buf,1,0,99,5001,"nc-self",4); dc_feed(st,sa,6730,buf,n,1100000);
+    n=dc_wire_meta(buf,1,99,5001,"nc-self",4,mb); dc_feed(st,sa,6730,buf,n,1100000);
     CHECK(nc_up_n==1 && nc_up_id==idA, "node-core: resume re-ups same id (ups=%u id=%u)", nc_up_n, nc_up_id);
 
     /* GONE (BYE) on the active peer: one PEER_DOWN, and it does not resolve any more */
@@ -882,7 +916,7 @@ static void judge_checks(void){
     t += 1000u;
     dc_down_n = 0;
     jg_blob(st, 3, 0, 2, NO, t);
-    CHECK(dc_down_n == 1 && dc_down_reason == (int)RANT_DISCOVERY_GONE && jg_seen_down == 0
+    CHECK(dc_down_n == 1 && dc_down_reason == (int)RANT_DISCOVERY_GIVE_BACK && jg_seen_down == 0
           && i_rant_discovery_slots_used(st) == 2 && i_rant_discovery_peer_count(st) == 5,
           "judge: a match whose blob stops meeting us gives its slot back, the app sees nothing");
     CHECK(dc_drain(st,t,&fl,&port) == 1 && fl == (F_REQ|F_ONE|F_BLOB) && port == 5005,
@@ -941,6 +975,59 @@ static void judge_checks(void){
     k = (int)jg_seen_up;
     jg_head(st, 1, 0, 1, 0, t);
     CHECK(jg_seen_up == (uint32_t)k + 1u && i_rant_discovery_peer_count(st) == 1, "judge: a return is seen again");
+}
+
+/* What the node reads while peers come and go without a slot: a held match stays one while
+   its new blob is paged, misses for room are counted for a node that can grow, pending counts
+   only fetches in flight, and a grown want set fetches every record without a slot. */
+static void unmatched_checks(void){
+    static uint8_t mem[16384];
+    const uint8_t F_REQ = RANT_DISCOVERY_FLAG_REQ, F_BLOB = RANT_DISCOVERY_FLAG_BLOB, F_ONE = RANT_DISCOVERY_FLAG_ONE;
+    const uint8_t NO = I_RANT_ADMIT_NO, YES = I_RANT_ADMIT_YES, LOAN = I_RANT_ADMIT_LOAN;
+    uint8_t out[RANT_DISCOVERY_WIRE_MAX];
+    i_RantDiscoveryCoreConfig c; i_RantDiscoveryState *st;
+    uint64_t t = 1000000u; int fl, k; uint16_t port; uint32_t misses, id1;
+    const uint8_t *u;
+    jg_config(&c, 1);
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    CHECK(st != NULL, "unmatched: init");
+    if (!st) return;
+    i_rant_discovery_update(st, t, out, sizeof out);
+    dc_refused_n = 0;
+
+    jg_blob(st, 1, F_ONE, 1, YES, t);
+    jg_blob(st, 1, F_ONE, 2, LOAN, t);
+    misses = i_rant_discovery_seat_misses(st);
+    jg_blob(st, 2, F_ONE, 1, YES, t);
+    id1 = jg_id(st, 1);
+    CHECK(i_rant_discovery_slots_used(st) == 1 && dc_refused_n == 1 && dc_up_id == id1,
+          "unmatched: a held match judged a loan at a newer version keeps its slot from a match");
+    jg_force = YES;
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(i_rant_discovery_rejudge(st, id1) == 0 && dc_drain(st, t, &fl, &port) == 0,
+          "unmatched: judged a match again it asks nothing, as it never stopped being one (%d sent before)", k);
+    jg_force = -1;
+    jg_blob(st, 3, F_ONE, 1, LOAN, t);
+    CHECK(i_rant_discovery_seat_misses(st) == misses + 2u && i_rant_discovery_slots_wanted(st) == 3,
+          "unmatched: a refused match and a waiting loan are each a miss, and want a slot each");
+
+    jg_head(st, 4, 0, 5, 0, t);
+    CHECK(i_rant_discovery_pending(st) == 1, "unmatched: a record whose blob is being fetched is pending");
+    for (k = 0; k < 4; k++) (void)dc_drain(st, t + (uint64_t)k * 250000u, &fl, &port);
+    CHECK(i_rant_discovery_pending(st) == 0, "unmatched: once its fetch ran out it is no longer pending");
+
+    t += 2000000u;
+    jg_blob(st, 5, F_ONE, 1, NO, t);
+    (void)dc_drain(st, t, &fl, &port);
+    i_rant_discovery_refetch_unmatched(st);
+    CHECK(i_rant_discovery_pending(st) == 2 && dc_drain(st, t, &fl, &port) == 2 && fl == (F_REQ|F_ONE|F_BLOB),
+          "unmatched: a grown want set fetches the live records judged no match, not those waiting");
+    jg_blob(st, 5, F_ONE, 1, NO, t);
+    CHECK(i_rant_discovery_pending(st) == 0 && dc_drain(st, t + 250000u, &fl, &port) == 0,
+          "unmatched: an answer ends that fetch, and one that never answered sends once");
+
+    u = i_rant_discovery_peer_uuid(st, id1);
+    CHECK(u && u[0] == 1 && i_rant_discovery_peer_uuid(st, 0xFFFFu) == NULL, "unmatched: the uuid by id, NULL unknown");
 }
 
 /* A first contact heard without a blob: assumed judged when its blob changed before ours by
@@ -1069,6 +1156,7 @@ static const TestCase cases[] = {
     { "migrate",        migrate_checks },
     { "owed",           owed_checks },
     { "judge",          judge_checks },
+    { "unmatched",      unmatched_checks },
     { "first_contact",  first_contact_checks },
     { "too_big",        too_big_checks },
     { "wire",           wire_checks },

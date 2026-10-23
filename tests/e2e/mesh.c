@@ -294,8 +294,15 @@ static void observer_fast_checks(void){
     ms_crowd_close();
 }
 
+/* Polls n alone until cond or ms passed. */
+#define MS_POLL_UNTIL(n, ms, cond) do { \
+        uint64_t ms_end_ = i_rant_plat_now_us() + (uint64_t)(ms) * 1000u; \
+        while (!(cond) && i_rant_plat_now_us() < ms_end_) rant_node_poll((n), 2); \
+    } while (0)
+
 /* A topic created on a node that already knows its subscribers matches every one at once,
-   even past the table it started with. */
+   even past the table it started with. The node polls in bursts, so every answer lands in
+   one tick and the table grows to fit them all. */
 static void grow_at_once_checks(void){
     uint16_t dom = (uint16_t)(TEST_DOMAIN + 7);
     RantNodeOpts o = ms_opts(dom, 2, 4, 3000000);
@@ -303,7 +310,6 @@ static void grow_at_once_checks(void){
     C = ms_heap("ms-grow", &o);
     CHECK(C != NULL, "grow at once: opens");
     if (!C) return;
-    rant_node_start(C);
     for (k = 0; k < 12; k++){
         RantNodeOpts so = ms_opts(dom, 0, 2, 3000000); char name[32];
         sprintf(name, "ms-grow-sub%d", k);
@@ -312,14 +318,16 @@ static void grow_at_once_checks(void){
         rant_node_create_topic(subs[n], "ms/grow", RANT_SUB_ONLY, NULL, NULL);
         rant_node_start(subs[n]); n++;
     }
-    MS_WAIT_UNTIL(15000, ms_active(C) == n);
+    MS_POLL_UNTIL(C, 15000, ms_active(C) == n);
     CHECK(ms_active(C) == n, "grow at once: all %d subscribers known (%d)", n, ms_active(C));
-    ms_wait(500);
-    t0 = i_rant_plat_now_us();
+    MS_POLL_UNTIL(C, 500, 0);
     pub = rant_node_create_topic(C, "ms/grow", RANT_PUB_ONLY, NULL, NULL);
-    MS_WAIT_UNTIL(5000, pub && rant_topic_match_count(pub) == n);
+    rant_node_poll(C, 0);                 /* the announce and the fetches leave */
+    ms_wait(300);                         /* every answer waits in the socket */
+    t0 = i_rant_plat_now_us();
+    MS_POLL_UNTIL(C, 5000, pub && rant_topic_match_count(pub) == n);
     if (pub && rant_topic_match_count(pub) == n) ms = (double)(i_rant_plat_now_us() - t0) / 1000.0;
-    CHECK(ms >= 0 && ms < 1000.0, "grow at once: all %d matched within 1 s (%.0f ms, %d matched)",
+    CHECK(ms >= 0 && ms < 200.0, "grow at once: all %d matched within 200 ms of the answers (%.0f ms, %d matched)",
           n, ms, pub ? rant_topic_match_count(pub) : 0);
     rant_node_close(C, 1);
     for (k = 0; k < n; k++) rant_node_close(subs[k], 1);

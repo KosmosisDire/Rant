@@ -65,10 +65,11 @@ i_RantDiscoveryDecode i_rant_discovery_decode(RantBytes datagram, i_RantDiscover
 /* One IPv4 subnet this host is on, network order bytes. */
 typedef struct { uint8_t ip[4], mask[4]; } i_RantDiscoverySubnet;
 
-/* Why a peer is going down. A DROP keeps transport state for a same uuid return. */
+/* Why a peer leaves its slot. A DROP keeps transport state for a same uuid return. */
 typedef enum {
     RANT_DISCOVERY_DROP = 0,    /* silent past peer_timeout_us, state kept */
-    RANT_DISCOVERY_GONE = 1     /* said BYE, silent past the gone timeout, or evicted: free state */
+    RANT_DISCOVERY_GONE = 1,    /* said BYE, silent past the gone timeout, or evicted: free state */
+    RANT_DISCOVERY_GIVE_BACK = 2   /* still here but holds no slot now: free state, the record stays */
 } i_RantDiscoveryDownReason;
 
 /* The public face of one peer. The pointers are into discovery state, valid until the
@@ -111,8 +112,8 @@ typedef struct {
     uint16_t meta_cap;      /* per peer overlay capacity, 0 = RANT_DISCOVERY_META_MAX */
     uint16_t peer_user_bytes;    /* scratch reserved per peer, 0 = none */
     /* The slot hooks, both optional, for peers holding a slot. up: admission, an address or
-     * blob change, or a resume, with the locator and the overlay we hold. down GONE also
-     * when a slot is given back while the record stays. */
+     * blob change, or a resume, with the locator and the overlay we hold. down: the reason
+     * it leaves the slot. */
     void (*on_peer_up)(void *user, uint32_t peer, const RantAddr *addr, RantBytes meta);
     void (*on_peer_down)(void *user, uint32_t peer, i_RantDiscoveryDownReason reason);
     /* Optional. Whether a peer takes a slot, judged from its blob at version: on arrival
@@ -215,9 +216,16 @@ int            i_rant_discovery_trouble_new(const i_RantDiscoveryState *st);
 uint16_t       i_rant_discovery_peer_count(const i_RantDiscoveryState *st);
 /* Slots holding a record, DROPPED holders included. */
 uint16_t       i_rant_discovery_slots_used(const i_RantDiscoveryState *st);
-/* Live records without a slot whose blob is still owed to us, so nothing yet says whether
+/* Bumps each time a record that wants a slot finds none, so a caller that can grow knows to. */
+uint32_t       i_rant_discovery_seat_misses(const i_RantDiscoveryState *st);
+/* Slots the live records want: those holding one and those waiting for one. */
+uint16_t       i_rant_discovery_slots_wanted(const i_RantDiscoveryState *st);
+/* Live records without a slot whose blob is being fetched, so nothing yet says whether
  * they meet us. The match wait counts each as resolving. */
 uint16_t       i_rant_discovery_pending(const i_RantDiscoveryState *st);
+/* What admit judges by grew, so a record judged no match may meet us now: each live one is
+ * fetched until its blob is judged again. One past our bound waits for the bound. */
+void           i_rant_discovery_refetch_unmatched(i_RantDiscoveryState *st);
 /* 1 when every live record was heard at or after since_us, 0 when one was not, -1 when
  * none is live. */
 int            i_rant_discovery_heard_since(const i_RantDiscoveryState *st, uint64_t since_us);
@@ -242,6 +250,8 @@ int            i_rant_discovery_addr_of_id(const i_RantDiscoveryState *st, uint3
                                       RantAddr *out);
 /* {NULL,0} for an unknown peer. */
 RantString       i_rant_discovery_peer_name(const i_RantDiscoveryState *st, uint32_t id);
+/* The peer's uuid, a view until the next poll, or NULL for an unknown peer. */
+const uint8_t   *i_rant_discovery_peer_uuid(const i_RantDiscoveryState *st, uint32_t id);
 /* Maps a source back to a slotted peer's id: its locator, else its data port on a recent path. */
 int            i_rant_discovery_id_for_addr(const i_RantDiscoveryState *st, const uint8_t *ip,
                                       uint8_t ip_len, uint16_t port, uint32_t *id);

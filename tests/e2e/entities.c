@@ -870,8 +870,8 @@ static void rc_cap_checks(void){
     rant_allocator_reset(&a);
 }
 
-/* A static node with room for one peer turns the next away and holds a peer_refused
- * condition naming its address, which ages out once that node goes quiet. */
+/* A static node with room for one peer turns away the next that meets it and holds a
+ * peer_refused condition naming its address, which ages out once that node goes quiet. */
 static void rc_refused_checks(void){
     static uint8_t mem[1u << 20];
     RantAllocator da = rant_allocator_static(mem, sizeof mem);
@@ -888,6 +888,9 @@ static void rc_refused_checks(void){
     F = rant_node_open(&fa, "rc-f", NULL, NULL, &o);
     CHECK(D && E && F, "rantcond: refusal nodes open");
     if (!(D && E && F)) goto done;
+    rant_node_create_topic(D, "rc/refused", RANT_PUB_ONLY, NULL, NULL);
+    rant_node_create_topic(E, "rc/refused", RANT_SUB_ONLY, NULL, NULL);
+    rant_node_create_topic(F, "rc/refused", RANT_SUB_ONLY, NULL, NULL);
     PUMP3_UNTIL(D, E, F, 6000, rc_kind(D, "peer_refused", NULL, 0, NULL) == 1);
     nd = rc_kind(D, "peer_refused", tx, sizeof tx, NULL);
     CHECK(nd == 1 && strstr(tx, "127.0.0.1:") && strstr(tx, "raise max_peers"),

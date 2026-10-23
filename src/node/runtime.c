@@ -33,6 +33,11 @@ typedef struct {
     uint8_t  kind;         /* 0 a delivered message, else the patterns layer's record kind */
     uint8_t  pad[2];
 } i_RantQRec;
+/* the records a static node reserves at open per slot, for peers that do not match it */
+#ifndef RANT_RECORDS_PER_PEER
+#define RANT_RECORDS_PER_PEER 4u
+#endif
+
 #define RANT__QWRAP 0xFFFFFFFFu
 #define RANT__QALIGN(x) (((uint32_t)(x) + 7u) & ~7u)
 
@@ -206,7 +211,8 @@ struct RantNode {
     /* the node's pool, copied from the caller's allocator at open and reset on close */
     RantAllocator pool;
     uint8_t        alloc_dynamic;
-    uint8_t        grow_pending;   /* a peer was refused for lack of slots, grow at the next poll */
+    uint32_t       seat_misses;    /* discovery's count when the table last grew for them */
+    uint32_t       want_gen;       /* the transport's want set generation peers were judged by */
     uint16_t       max_peers;      /* the current peer table capacity, doubles on a dynamic grow */
     /* the accept bound: the largest peer announce blob we store. It self heals up, see
        spec/discovery.md. meta_grow_failed remembers a size that would not allocate */
@@ -424,9 +430,10 @@ static void i_rant_node_emit(RantNode *n, RantEvent *e){
     if (e->kind == RANT_ERROR) n->problems_dirty = 1;     /* a cause of a Rant condition may have changed */
     if (e->kind == RANT_PEER_UP || e->kind == RANT_PEER_DOWN || e->kind == RANT_PEER_INTEREST){
         n->problems_dirty = 1;
-        n->settle_topology_us = i_rant_plat_now_us();     /* rant_node_settle's quiet window clock */
         n->match_epoch++;                                 /* stale the topics' converged memos */
     }
+    /* the quiet window clock follows matches, so peers that come and go never hold it */
+    if (e->kind == RANT_PEER_INTEREST) n->settle_topology_us = i_rant_plat_now_us();
     if (n->sys_on_event) n->sys_on_event(n->sys_user, e);
     if (!n->on_event) return;
     if (n->event_queue && n->event_q) i_rant_node_park_event(n, e);
@@ -782,13 +789,11 @@ static int i_rant_node_on_message(void *u, uint16_t topic_index, uint32_t from, 
  * swap it for the app's user_data before handing on. */
 static void i_rant_node_on_event(const RantEvent *ev){
     RantNode *n = (RantNode*)ev->user;
-    /* dynamic mode has no peer cap: a refusal means grow at the next poll, out of this
-       callback, and the peer's next announce is admitted. Static mode surfaces it */
-    if (n->alloc_dynamic && ev->kind == RANT_ERROR && ev->error == RANT_E_PEER_REFUSED){
-        n->grow_pending = 1; return;
-    }
-    /* a blob we cannot hold is a growth signal too: grow at the next poll, then solicit.
-       Sizes past the wire ceiling and a size that already failed surface */
+    /* dynamic mode has no peer cap: the poll grows the table for a refused peer, which a
+       slot then takes. Static mode surfaces it */
+    if (n->alloc_dynamic && ev->kind == RANT_ERROR && ev->error == RANT_E_PEER_REFUSED) return;
+    /* a blob we cannot hold is a growth signal too: grow at the next poll. Sizes past the
+       wire ceiling and a size that already failed surface */
     if (n->alloc_dynamic && ev->kind == RANT_ERROR && ev->error == RANT_E_PEER_META_TOO_BIG){
         uint64_t need = ev->too_big_bytes;
         if (need > n->meta_cap && need <= 65000u && (uint16_t)need != n->meta_grow_failed){
@@ -1133,12 +1138,19 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     dc.announce_interval_us = o.discovery.announce_interval_us;
     dc.peer_timeout_us = o.discovery.peer_timeout_us;
     dc.max_peers   = max_peers;
-    dc.max_records = alloc->page_realloc ? I_RANT_DISCOVERY_RECORDS_ANY : 0;   /* a fixed pool: one per slot */
     dc.observer    = o.fetch_details;
     dc.meta_cap = i_rant_meta_cap(max_topics);
     dc.peer_user_bytes = i_rant_node_core_peer_user_bytes();     /* the core's scratch */
-    dc.alloc = i_rant_node_alloc;     /* per peer blobs at their size. Set before sizing so
-                                                 measure and place agree. alloc_user is set below */
+    /* A growing pool takes records and per peer blobs as they come. A fixed one has them all
+       in the arena from open, so a crowd costs it nothing later. Set before sizing so measure
+       and place agree. alloc_user is set below */
+    if (alloc->page_realloc){
+        dc.max_records = I_RANT_DISCOVERY_RECORDS_ANY;
+        dc.alloc = i_rant_node_alloc;
+    } else {
+        uint32_t r = (uint32_t)max_peers * RANT_RECORDS_PER_PEER;
+        dc.max_records = (uint16_t)(r < I_RANT_DISCOVERY_RECORDS_ANY ? r : I_RANT_DISCOVERY_RECORDS_ANY);
+    }
     tc.topics    = NULL;            /* reserve mode: topics created at runtime */
     tc.n_topics  = max_topics;
     tc.max_peers   = max_peers;
@@ -1439,13 +1451,23 @@ static void i_rant_node_reflect_self(RantNode *n){
     i_rant_node_core_self_end(n->core);
 }
 
+static int i_rant_node_gather_done(RantNode *n, uint64_t now);       /* defined with the match wait */
+
 /* Our own interest changed: re advertise, replay known peers' interest against the new
  * state, stale the converged memos and kick so the announce goes out now. Lock held. */
 static void i_rant_node_readvertise(RantNode *n){
+    uint32_t gen = i_rant_transport_want_gen(n->transport);
     i_rant_node_reflect_self(n);
     i_rant_node_core_build_meta(n->core);
     i_rant_discovery_advertise(n->discovery, i_rant_node_core_meta(n->core));
     i_rant_discovery_replay(n->discovery);
+    /* a topic gained a pairing: a peer judged without it may meet us now. Within the gather
+       our announce reaches them and the quiet window covers their asks */
+    if (gen != n->want_gen){
+        n->want_gen = gen;
+        if (i_rant_node_gather_done(n, i_rant_plat_now_us()))
+            i_rant_discovery_refetch_unmatched(i_rant_discovery_state(n->discovery));
+    }
     n->match_epoch++;
     n->problems_dirty = 1;      /* our topics changed: a refusal may be gone, the announce may fit */
     i_rant_node_kick(n);
@@ -2360,8 +2382,6 @@ static int i_rant_node_wait_ms(RantNode *n, int timeout_ms){
     return timeout_ms;
 }
 
-static int i_rant_node_gather_done(RantNode *n, uint64_t now);       /* defined with the match wait */
-
 /* One poll tick under the node lock: deferred grows, the wait, discovery's tick, RX drain,
  * TX flush. The one poll body. outer = 1 lets the wait drop the lock. See spec/node.md. */
 static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
@@ -2373,24 +2393,23 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
 #endif
 
     i_rant_node_callbacks_settle(n);     /* never two threads inside the receive path */
-    /* a peer was refused last tick for lack of slots: grow now, between ticks */
-    if (n->grow_pending){
-        uint16_t want = n->max_peers < 0x8000u ? (uint16_t)(n->max_peers*2u) : 0xFFFFu;
-        n->grow_pending = 0;
-        if (want > n->max_peers) i_rant_node_grow(n, want, n->max_topics, 0);
+    /* peers found no slot last tick: grow now, between ticks, by doubling until every peer
+       that wants a slot has one, and the slots that came open take them */
+    if (n->alloc_dynamic && i_rant_discovery_seat_misses(i_rant_discovery_state(n->discovery)) != n->seat_misses){
+        const i_RantDiscoveryState *ds = i_rant_discovery_state(n->discovery);
+        uint32_t need = i_rant_discovery_slots_wanted(ds), want = n->max_peers;
+        n->seat_misses = i_rant_discovery_seat_misses(ds);
+        while (want < need && want < 0xFFFFu) want *= 2u;
+        if (want > 0xFFFFu) want = 0xFFFFu;
+        if (want > n->max_peers) i_rant_node_grow(n, (uint16_t)want, n->max_topics, 0);
     }
-    /* a peer's blob exceeded the accept bound last tick: raise it, then solicit so the
-       peer re sends into buffers that fit. A failed grow is remembered, see spec/node.md */
+    /* a peer's blob exceeded the accept bound last tick: raise it, and discovery fetches that
+       peer's blob again. A failed grow is remembered, see spec/node.md */
     if (n->meta_grow_need){
         uint16_t want = n->meta_grow_need;
         n->meta_grow_need = 0;
-        if (want > n->meta_cap){
-            if (i_rant_node_grow(n, n->max_peers, n->max_topics, want)){
-                n->meta_grow_failed = 0;
-                i_rant_discovery_solicit(i_rant_discovery_state(n->discovery));
-            } else
-                n->meta_grow_failed = want;
-        }
+        if (want > n->meta_cap)
+            n->meta_grow_failed = i_rant_node_grow(n, n->max_peers, n->max_topics, want) ? 0 : want;
     }
 
     /* the discovery tick runs after the wait off its revents, so a pass costs one syscall */
@@ -2565,19 +2584,20 @@ static void i_rant_node_wait_kick(RantNode *n, void *ctx, uint64_t now){
 
 static int i_rant_node_settled(RantNode *n, uint64_t start, uint64_t now);       /* with settle */
 
-/* Has the post open gather completed: the settle predicate anchored at open, latched
- * once true. */
-static int i_rant_node_gather_done(RantNode *n, uint64_t now){
-    if (n->gather_done) return 1;
-    if (!i_rant_node_settled(n, n->open_us, now)) return 0;
-    n->gather_done = 1;
-    return 1;
-}
-
 /* The match wait bridges our own coming up, never a peer's: it ends this long after the
  * topic's last create, role change or retype. A disabled wait keeps the default window. */
 static uint64_t i_rant_node_match_window_us(RantNode *n){
     return n->match_wait_us ? n->match_wait_us : (uint64_t)RANT_MATCH_WAIT_MS * 1000u;
+}
+
+/* Has the post open gather completed: the settle predicate anchored at open, or one match
+ * window since open on a mesh that never goes quiet. Latched once true. */
+static int i_rant_node_gather_done(RantNode *n, uint64_t now){
+    if (n->gather_done) return 1;
+    if (now - n->open_us < i_rant_node_match_window_us(n) && !i_rant_node_settled(n, n->open_us, now))
+        return 0;
+    n->gather_done = 1;
+    return 1;
 }
 
 /* Would a send now race a forming match: 1 while the gather is unsettled or verdicts are
@@ -2594,8 +2614,8 @@ static int i_rant_node_topic_unsettled(RantNode *n, RantTopic *h, uint64_t now){
     return 0;
 }
 
-/* The match wait's predicate: done once a subscriber matched, or once matching converged
- * with none. The match count is re read from the transport every call. */
+/* The match wait's predicate: done once matching converged, so the send reaches every
+ * candidate that matches and not only the first. The match count is re read every call. */
 typedef struct {
     RantTopic *h;
     uint16_t   index;
@@ -2607,7 +2627,6 @@ static int i_rant_node_match_wait_done(RantNode *n, void *ctx, uint64_t now, uin
     i_RantMatchWait *c = (i_RantMatchWait*)ctx;
     *deadline = c->deadline;
     c->matched = i_rant_transport_publisher_match_count(n->transport, c->index);
-    if (c->matched) return 1;
     return !i_rant_node_topic_unsettled(n, c->h, now);
 }
 
@@ -3005,16 +3024,13 @@ uint8_t    i_rant_topic_kind (const RantTopic *topic){ return topic ? topic->kin
 uint8_t    i_rant_topic_role (const RantTopic *topic){ return topic ? topic->role : (uint8_t)RANT_INACTIVE; }
 uint8_t    i_rant_topic_reliability(const RantTopic *topic){ return topic ? (uint8_t)topic->qos.reliability : 0; }
 int i_rant_node_peer_uuid(RantNode *n, uint32_t peer, uint8_t out[16]){
-    const i_RantDiscoveryState *st; uint16_t q, np; int acquired, found = 0;
-    i_RantDiscoveryPeerView v;
+    const uint8_t *u; int acquired;
     if (!n) return 0;
     acquired = i_rant_node_lock(n);
-    st = i_rant_discovery_state(n->discovery);
-    np = i_rant_discovery_max_peers(st);
-    for (q = 0; q < np; q++)
-        if (i_rant_discovery_peer_at(st, q, &v) && v.id == peer){ memcpy(out, v.uuid, 16); found = 1; break; }
+    u = i_rant_discovery_peer_uuid(i_rant_discovery_state(n->discovery), peer);
+    if (u) memcpy(out, u, 16);
     i_rant_node_unlock(n, acquired);
-    return found;
+    return u != NULL;
 }
 RantString i_rant_topic_name (const RantTopic *topic){
     return topic ? rant_string(topic->name, topic->name_len) : rant_string(NULL, 0);
@@ -3373,6 +3389,7 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
         rant_map_put_uint(w, "bp_waited_us", n->backpressure_total_us);
         rant_map_put_uint(w, "bp_waits", n->backpressure_wait_count);
         rant_map_put_uint(w, "peers", i_rant_discovery_peer_count(i_rant_discovery_state(n->discovery)));
+        rant_map_put_uint(w, "matched_peers", i_rant_discovery_slots_used(i_rant_discovery_state(n->discovery)));
         rant_map_put_uint(w, "max_peers", n->max_peers);
         /* app topics only: the @rant/ builtins are hidden, so neither the counts nor the
            topics array below surface them */
@@ -3613,19 +3630,13 @@ int rant_topic_ready(RantTopic *topic){
     return r;
 }
 
-/* Settled: the network answered and went quiet. Every active peer heard since the solicit,
- * the topology quiet for one window, one window passed overall. See spec/node.md. */
+/* Settled: the network answered and went quiet. Every live peer heard since the solicit,
+ * no match formed for one window, one window passed overall. See spec/node.md. */
 static int i_rant_node_settled(RantNode *n, uint64_t start, uint64_t now){
     uint64_t quiet = n->announce_us < 300000u ? n->announce_us : 300000u;
-    uint16_t i, count = 0;
-    const i_RantDiscoveryPeerView *peers = i_rant_discovery_peers(n->discovery, &count);
-    int any = 0;
-    for (i = 0; i < count; i++){
-        if (peers[i].liveness != RANT_PEER_ACTIVE) continue;     /* dropped: not expected to answer */
-        any = 1;
-        if (peers[i].last_heard_us < start) return 0;          /* not answered the solicit yet */
-    }
-    if (!any) return now - start >= n->announce_us;            /* alone, as far as we can know */
+    int heard = i_rant_discovery_heard_since(i_rant_discovery_state(n->discovery), start);
+    if (heard == 0) return 0;                                  /* one has not answered yet */
+    if (heard < 0) return now - start >= n->announce_us;       /* alone, as far as we can know */
     if (now - start < quiet) return 0;
     return n->settle_topology_us < start || now - n->settle_topology_us >= quiet;
 }

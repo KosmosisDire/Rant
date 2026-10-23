@@ -624,22 +624,22 @@ static void dup_authority_checks(void){
     { RantVariable *va = rant_node_create_variable_definition(A, "dupvar", NULL, NULL);
       RantFunction *fa = rant_node_create_function_definition(A, "dupfn", NULL, NULL, pf_empty_handler, NULL, NULL);
       CHECK(va && fa, "dup: first authorities created");
-      /* wait until B holds A's interest: the create-time sweep's precondition */
-      { uint32_t want = (uint32_t)i_rant_topic_id("dupvar"); int seen = 0;
+      /* B knows A but shares nothing with it, so it holds no slot or blob of A yet */
+      { RantIter it; RantPeerInfo p; int seen = 0;
         for (t=0;t<2000 && !seen;t++){
-            const i_RantDiscoveryPeerView *ps; uint16_t pc;
             test_pump(A,B,2);
-            ps = test_peers(B,&pc);
-            if (ps && pc){ i_RantInterestIter it; i_RantTopicEntry e; memset(&it,0,sizeof it);
-                while (i_rant_node_peer_interest_next(&ps[0], &it, &e))
-                    if (e.hash==want){ seen=1; break; } }
+            memset(&it,0,sizeof it);
+            while (rant_node_peers_next(B, &it, &p))
+                if (p.liveness == RANT_PEER_ACTIVE && p.name.len == 5 && !memcmp(p.name.data, "dup-a", 5)) seen = 1;
         }
-        CHECK(seen, "dup: B holds A's interest"); }
+        CHECK(seen, "dup: B knows A"); }
       CHECK(a_dups==0 && b_dups==0, "dup: quiet before the rival (a=%d b=%d)", a_dups, b_dups);
 
+      /* the rival key fetches A's blob again, and judging it reports the rival */
       { RantVariable *vb = rant_node_create_variable_definition(B, "dupvar", NULL, NULL);
         CHECK(vb!=NULL, "dup: rival owner creates (diagnostic, not a refusal)");
-        CHECK(b_dups==1, "dup: rival owner detected at create (%d)", b_dups); }
+        PUMP_UNTIL(A, B, 2000, b_dups >= 1);
+        CHECK(b_dups==1, "dup: rival owner detected once A is judged again (%d)", b_dups); }
       { RantFunction *fb = rant_node_create_function_definition(B, "dupfn", NULL, NULL, pf_empty_handler, NULL, NULL);
         CHECK(fb!=NULL, "dup: rival provider creates");
         CHECK(b_dups==2, "dup: rival provider detected at create (%d)", b_dups); }
@@ -981,18 +981,16 @@ static void varwait_checks(void){
                &(RantVariableOpts){ .initial = rant_bytes(b,4) });
       CHECK(vd != NULL, "varwait: definition created"); }
 
-    /* C must hold P's announce nominating vw before the accessor exists, since candidates
-       come from the cached blob. Verdicts are not yet fetched. */
-    { uint32_t want = (uint32_t)i_rant_topic_id("vw"); int seen = 0;
+    /* C knows P before the accessor exists, judged then as sharing nothing, so the
+       accessor's first write waits for P to be judged again */
+    { RantIter it; RantPeerInfo p; int seen = 0;
       for (t=0;t<2000 && !seen;t++){
-          const i_RantDiscoveryPeerView *ps; uint16_t pc;
           test_pump(P,C,2);
-          ps = test_peers(C,&pc);
-          if (ps && pc){ i_RantInterestIter it; i_RantTopicEntry e; memset(&it,0,sizeof it);
-              while (i_rant_node_peer_interest_next(&ps[0], &it, &e))
-                  if (e.hash==want){ seen=1; break; } }
+          memset(&it,0,sizeof it);
+          while (rant_node_peers_next(C, &it, &p))
+              if (p.liveness == RANT_PEER_ACTIVE && p.name.len == 8 && !memcmp(p.name.data, "vw-owner", 8)) seen = 1;
       }
-      CHECK(seen, "varwait: C holds P's interest"); }
+      CHECK(seen, "varwait: C knows P"); }
 
     /* From here P answers only from its service thread and C is driven solely by the wait
        inside the set call. Create the accessor and write immediately. */

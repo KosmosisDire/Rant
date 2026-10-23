@@ -20,8 +20,8 @@ static inline RantSchema *test_compile(RantAllocator *a, const char *text, i_Ran
     return i_rant_registry_compile(&r, text, err);
 }
 
-/* the discovery peer table behind a node, for raw announce checks. The public walk is
-   rant_node_peers_next */
+/* the slotted peers behind a node with the blobs they hold, for raw announce checks. Every
+   known peer is the public walk rant_node_peers_next */
 static inline const i_RantDiscoveryPeerView *test_peers(RantNode *n, uint16_t *count){
     return i_rant_discovery_peers(n->discovery, count);
 }

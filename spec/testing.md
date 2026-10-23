@@ -62,8 +62,8 @@ program in this order.
 
 | Program | Cases |
 |---|---|
-| `unit.transport` | basics, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
-| `unit.discovery` | records, migrate, owed, judge, first_contact, too_big, wire, change_age, discovery_core, node_core |
+| `unit.transport` | basics, want_set, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
+| `unit.discovery` | records, migrate, owed, judge, unmatched, first_contact, too_big, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
@@ -119,6 +119,10 @@ What each phase pins, grouped by layer.
 - Send result codes: the size check precedes the role check, so an oversize send on a pub
   topic is TOO_BIG even with no subscriber and a valid send on a sub only topic is ROLE.
   An init with no allocator refuses.
+- Want set: our publish meets a subscriber of any kind and never a publisher, another name
+  or an inactive entry, a variable we own meets a rival owner of its kind only, a function we
+  serve a rival provider unless MULTI. A new topic or one back from parked grows the set, a
+  parked or retired one does not and meets nothing. An entry cut short meets nothing.
 - Shared memory: a mock resolver whose success is controllable and a pump that drops SHM
   descriptors. A failed resolve does not ack so it repairs, a dropped descriptor resends,
   and an unresolvable descriptor is skipped after the retry cap as MSG_LOST. A sample
@@ -152,6 +156,11 @@ What each phase pins, grouped by layer.
   loan waits unrefused for a free slot, a match takes a live loan's, rejudge tells a loan
   that now matches and gives back a slot that meets nothing, as replay does for all. A drop
   is seen for every record and reaches the slot hooks for slotted ones.
+- Unmatched: a held match judged a loan at a newer version keeps its slot from a match and
+  is asked nothing when judged a match again. A refused match and a waiting loan each count a
+  seat miss and a wanted slot. A record is pending while its fetch is in flight and no longer
+  once the asks ran out. A grown want set fetches the records judged no match, not those
+  waiting, and an answer ends the fetch. The uuid is found by id.
 - First contact: without a blob it is judged by assumption when its blob changed before our
   last change by the margin, the margin alone before our opening, else fetched, and an age
   past our uptime never wraps. An observer, a core without a hook and one that refused a peer
@@ -169,8 +178,11 @@ What each phase pins, grouped by layer.
 ### Node core and runtime
 
 - The node core drives its peer table over a transport and a real discovery core with no
-  sockets, clock or platform. A nameless announce becomes "unknown-peer". A third peer is
-  refused while the table is full of active peers and the node forwards the event.
+  sockets, clock or platform. Peers whose blob meets ours take slots and map back from their
+  address. A blob that stops meeting us gives the slot back as PEER_INTEREST with no matches,
+  never PEER_DOWN, and meeting us again takes a slot with no second PEER_UP. A nameless
+  announce becomes "unknown-peer". A peer sharing nothing is up for the app with no slot, one
+  past the records is refused and the node forwards the event.
 - Domain groups: two domains on one host each discover themselves, and no announce of the
   other domain reaches either discovery socket. On Linux this fails without
   `IP_MULTICAST_ALL` off. Other programs' unicast seeds to the discovery port are not counted.
@@ -232,7 +244,9 @@ What each phase pins, grouped by layer.
   announce ships a sub MTU bootstrap and the subscriber pulls the blob by byte range
   paging. No datagram ever exceeds RANT_DGRAM_MAX, the match forms through the fetch, and
   steady state announces trigger no re fetch. Reflection reads the assembled interest and
-  the interest epoch is the observer cache key.
+  the interest epoch is the observer cache key. A node sharing nothing with the publisher
+  lends its next blob a slot for the paging and gives the slot back once the pages show it
+  meets nothing.
 
 ### Threads and queues
 
@@ -308,7 +322,7 @@ What each phase pins, grouped by layer.
   their cause. 20 refusals fold into one condition under the kind alone, and three left
   are listed one by one again, while the app keeps its room. Six kinds of three list 15
   and count 3 in more_problems. A static node with room for one peer holds peer_refused
-  naming the address and drops it once the turned away node goes quiet. In the discovery
+  naming the address of the next that meets it, and drops it once that node goes quiet. In the discovery
   core 20 sources on another wire keep the first 16 tracked, report 17 times in all, and
   age out together.
 - Handle gate: 20 callers, each with a req schema whose wire (1325 to 1350 bytes) fills
@@ -330,13 +344,15 @@ What each phase pins, grouped by layer.
   PEER_LOST, and task reflection. The raw tap is created before the normal remote handle
   because the demux binds a name to the oldest local topic.
 - Duplicate authority: detected off the announce interest and surfaced once per entity
-  and peer on both rivals. Accessors and callers never fire it.
+  and peer on both rivals, also when the rival was known without a slot before, since its
+  rival key fetches the peer again. Accessors and callers never fire it.
 - Retire: a second same name handle on one node is shadowed while the first lives.
   Retire parks the predecessor so a re created handle receives and writes.
 - Dropped peers: the entity walk refuses dropped peers unless `include_dropped` is set,
   or every observer would grow ghost entities after a restart.
 - Variable set match wait: a fresh accessor's first write rides the send path's match
-  wait, so NO_TOPIC means the owner is absent. Converged verdicts stay instant.
+  wait, also to an owner known before without a slot, so NO_TOPIC means the owner is
+  absent. Converged verdicts stay instant.
 - Churn soak: retire and create cycles reuse slots so nothing grows over sustained churn,
   across identical re creation, incompatible and compatible retypes, untyped subscribers,
   rival same name publishers, late joiners and transient peers. The plateau is judged

@@ -228,7 +228,9 @@ static void detail_live_checks(void){
 #define IX_TOPICS 300
 static int ix_recv;
 static uint32_t ix_epoch_pid, ix_epoch;
+static int ix_q_interest;
 static void ix_on_message(const RantMsg *msg){ (void)msg; ix_recv++; }
+static void ix_q_event(const RantEvent *ev){ if (ev->kind == RANT_PEER_INTEREST) ix_q_interest++; }
 static void interest_external_checks(void){
     RantAllocator pa = rant_allocator_heap(0);
     RantAllocator sa = rant_allocator_heap(0);
@@ -297,6 +299,20 @@ static void interest_external_checks(void){
             if (ps && ps[k].id==ix_epoch_pid) epoch_now = i_rant_node_peer_interest_epoch(&ps[k]);
         CHECK(ix_epoch_pid && epoch_now==ix_epoch,
                  "interest: epoch stable across steady state (%u -> %u)", ix_epoch, epoch_now);
+    }
+    {   /* a node sharing nothing with P judges P's next blob a loan, lends it a slot for the
+           paging, then judges the pages and gives the slot back, keeping P known */
+        RantAllocator qa = rant_allocator_heap(0);
+        RantNode *Q = rant_node_open(&qa, "ix-none", NULL, ix_q_event, &so);
+        const i_RantDiscoveryState *qs = Q ? i_rant_discovery_state(Q->discovery) : NULL;
+        ix_q_interest = 0;
+        if (Q) (void)rant_node_create_topic(Q, "ix/none", RANT_SUB_ONLY, NULL, NULL);
+        if (Q) PUMP3_UNTIL(P, S, Q, 8000, i_rant_discovery_peer_count(qs) == 2);
+        if (Q) (void)rant_node_create_topic(P, "ix/extra", RANT_PUB_ONLY, NULL, NULL);
+        if (Q) PUMP3_UNTIL(P, S, Q, 8000, ix_q_interest > 0 && i_rant_discovery_slots_used(qs) == 0);
+        CHECK(Q && ix_q_interest > 0 && i_rant_discovery_slots_used(qs) == 0 && i_rant_discovery_peer_count(qs) == 2,
+              "interest: a peer that pages in and meets nothing gives its slot back (%d interest events)", ix_q_interest);
+        if (Q) rant_node_close(Q,1);
     }
     rant_node_close(P,1); rant_node_close(S,1);
 }

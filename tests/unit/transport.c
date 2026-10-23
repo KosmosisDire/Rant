@@ -532,8 +532,80 @@ static void tap_framing_checks(void){
 #endif
 }
 
+/* The want set: which interest lists meet our topics, by the opposite side or a rival
+   authority of the same kind, and when the set grew. The peer lists come from a second core. */
+static size_t ws_interest(uint8_t *out, size_t cap, const char *name, uint8_t role, uint8_t kind){
+    static uint8_t pmem[1<<16], amem[1<<12];
+    static RantAllocator A;
+    i_RantTopicDef d; i_RantTransportConfig tc; i_RantTransportState *p;
+    A = rant_allocator_static(amem, sizeof amem);
+    memset(&d, 0, sizeof d); d.name = name; d.role = role; d.kind = kind;
+    memset(&tc, 0, sizeof tc); tc.topics = &d; tc.n_topics = 1; tc.max_peers = 1;
+    tc.allocator = rant_allocator_alloc; tc.user = &A;
+    p = i_rant_transport_init(pmem, sizeof pmem, &tc);
+    return p ? i_rant_transport_build_interest(p, out, cap) : 0;
+}
+static int ws_meets(i_RantTransportState *st, const char *name, uint8_t role, uint8_t kind){
+    uint8_t buf[256]; size_t n = ws_interest(buf, sizeof buf, name, role, kind);
+    return n && i_rant_transport_interest_meets(st, rant_bytes(buf, n));
+}
+static void want_set_checks(void){
+    static uint8_t tmem[1<<17], amem[1<<14];
+    static RantAllocator A;
+    i_RantTransportConfig tc; i_RantTransportState *st; i_RantTopicDef d; uint32_t g;
+    uint8_t buf[256]; size_t n;
+    A = rant_allocator_static(amem, sizeof amem);
+    memset(&tc, 0, sizeof tc); tc.n_topics = 8; tc.max_peers = 2;
+    tc.allocator = rant_allocator_alloc; tc.user = &A;
+    st = i_rant_transport_init(tmem, sizeof tmem, &tc);
+    CHECK(st != NULL, "want set: transport init");
+    if (!st) return;
+    CHECK(!ws_meets(st, "ws/t", RANT_SUB_ONLY, RANT_KIND_TOPIC), "want set: no topic of ours meets nothing");
+    g = i_rant_transport_want_gen(st);
+
+    memset(&d, 0, sizeof d); d.name = "ws/t"; d.role = RANT_PUB_ONLY;
+    CHECK(i_rant_transport_topic_define(st, 0, &d) == 0 && i_rant_transport_want_gen(st) != g,
+          "want set: a new topic grows it");
+    CHECK(ws_meets(st, "ws/t", RANT_SUB_ONLY, RANT_KIND_TOPIC) && ws_meets(st, "ws/t", RANT_PUBSUB, RANT_KIND_TOPIC)
+          && !ws_meets(st, "ws/t", RANT_PUB_ONLY, RANT_KIND_TOPIC) && !ws_meets(st, "ws/other", RANT_SUB_ONLY, RANT_KIND_TOPIC)
+          && !ws_meets(st, "ws/t", RANT_INACTIVE, RANT_KIND_TOPIC),
+          "want set: our publish meets a subscriber, never a publisher, another name or an inactive entry");
+    CHECK(ws_meets(st, "ws/t", RANT_SUB_ONLY, RANT_KIND_VARIABLE),
+          "want set: the opposite side meets whatever its kind, so the kind mismatch is reported");
+
+    memset(&d, 0, sizeof d); d.name = "ws/v"; d.role = RANT_PUB_ONLY; d.kind = RANT_KIND_VARIABLE;
+    (void)i_rant_transport_topic_define(st, 1, &d);
+    CHECK(ws_meets(st, "ws/v", RANT_PUB_ONLY, RANT_KIND_VARIABLE) && !ws_meets(st, "ws/v", RANT_PUB_ONLY, RANT_KIND_TOPIC),
+          "want set: a variable we own meets a rival owner of the same kind only");
+    memset(&d, 0, sizeof d); d.name = "ws/f@req"; d.role = RANT_SUB_ONLY; d.kind = RANT_KIND_FUNC_REQ;
+    (void)i_rant_transport_topic_define(st, 2, &d);
+    memset(&d, 0, sizeof d); d.name = "ws/m@req"; d.role = RANT_SUB_ONLY; d.kind = RANT_KIND_FUNC_REQ;
+    d.attrs = RANT_ATTR_MULTI;
+    (void)i_rant_transport_topic_define(st, 3, &d);
+    CHECK(ws_meets(st, "ws/f@req", RANT_SUB_ONLY, RANT_KIND_FUNC_REQ) && !ws_meets(st, "ws/m@req", RANT_SUB_ONLY, RANT_KIND_FUNC_REQ)
+          && ws_meets(st, "ws/m@req", RANT_PUB_ONLY, RANT_KIND_FUNC_REQ),
+          "want set: a function we serve meets a rival provider unless it is MULTI, a caller always");
+
+    g = i_rant_transport_want_gen(st);
+    CHECK(i_rant_transport_set_role(st, 0, RANT_INACTIVE) == 0 && i_rant_transport_want_gen(st) == g
+          && !ws_meets(st, "ws/t", RANT_SUB_ONLY, RANT_KIND_TOPIC),
+          "want set: a parked topic meets nothing and does not grow it");
+    CHECK(i_rant_transport_set_role(st, 0, RANT_PUB_ONLY) == 0 && i_rant_transport_want_gen(st) != g,
+          "want set: back from parked it grows again");
+    g = i_rant_transport_want_gen(st);
+    CHECK(i_rant_transport_topic_retire(st, 1) == 0 && i_rant_transport_want_gen(st) == g
+          && !ws_meets(st, "ws/v", RANT_SUB_ONLY, RANT_KIND_VARIABLE),
+          "want set: a retired topic meets nothing and does not grow it");
+
+    n = ws_interest(buf, sizeof buf, "ws/t", RANT_SUB_ONLY, RANT_KIND_TOPIC);
+    CHECK(n > 7 && i_rant_transport_interest_meets(st, rant_bytes(buf, n))
+          && !i_rant_transport_interest_meets(st, rant_bytes(buf, 6)),
+          "want set: an entry cut short meets nothing, as an apply would refuse it");
+}
+
 static const TestCase cases[] = {
     { "basics", basics_checks },
+    { "want_set", want_set_checks },
     { "rate", rate_checks },
     { "lapped", lapped_checks },
     { "rtt", rtt_checks },

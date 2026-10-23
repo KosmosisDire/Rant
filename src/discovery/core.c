@@ -33,6 +33,7 @@ struct i_RantDiscoveryState {
     uint8_t       want_solicit;   /* a group solicit is queued for the next update */
     uint8_t       distrust;       /* a peer was refused or forgotten for room: no first contact is assumed judged */
     uint8_t       slots_opened;   /* a slot came open: offer the open slots before returning */
+    uint32_t      seat_misses;    /* records that wanted a slot and found none */
     uint16_t      cap_peers;      /* slots */
     uint16_t      meta_cap;       /* per peer meta buffer capacity */
     uint8_t      *meta_pool;      /* cap_peers x meta_cap. NULL in hook mode */
@@ -335,12 +336,12 @@ static void i_rant_discovery_peer_gone(i_RantDiscoveryState *st, uint16_t ri){
     i_rant_records_remove(&st->records, ri);
 }
 
-/* A slotted record leaves its slot and keeps its record: the slot hooks see it GONE, the
- * app nothing. */
+/* A slotted record leaves its slot and keeps its record. The slot hooks see it go, the seen
+ * hook nothing. */
 static void i_rant_discovery_give_back(i_RantDiscoveryState *st, uint16_t ri){
     i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
     if (!rec || rec->slot == I_RANT_REC_NONE) return;
-    i_rant_discovery_fire_down(st, rec->local_id, RANT_DISCOVERY_GONE);
+    i_rant_discovery_fire_down(st, rec->local_id, RANT_DISCOVERY_GIVE_BACK);
     st->slots[rec->slot].rec = I_RANT_REC_NONE;
     rec->slot = I_RANT_REC_NONE;
 }
@@ -676,6 +677,7 @@ static void i_rant_discovery_regrown(i_RantDiscoveryState *st, uint16_t old_slot
 static void i_rant_discovery_refuse(i_RantDiscoveryState *st, i_RantDiscoveryRecord *rec){
     RantAddr addr;
     rec->want = I_RANT_ADMIT_YES;
+    st->seat_misses++;
     i_rant_discovery_addr_of(rec, &addr);
     (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_REFUSED, &addr, st->cap_peers, rec->local_id);
     i_rant_discovery_fire_error(st, RANT_E_PEER_REFUSED, rec->local_id, &addr, 0);
@@ -735,7 +737,7 @@ static void i_rant_discovery_judge(i_RantDiscoveryState *st, uint16_t ri, RantBy
         if (!i_rant_discovery_seat(st, ri, verdict)){
             rec->meta_version = version;
             if (verdict == I_RANT_ADMIT_YES) i_rant_discovery_refuse(st, rec);
-            else rec->want = I_RANT_ADMIT_LOAN;
+            else { rec->want = I_RANT_ADMIT_LOAN; st->seat_misses++; }
             return;
         }
         slot = i_rant_discovery_slot_of(st, rec);
@@ -746,7 +748,7 @@ static void i_rant_discovery_judge(i_RantDiscoveryState *st, uint16_t ri, RantBy
         }
     } else if (!i_rant_discovery_slot_store(st, slot, blob)) return;    /* the stale blob stays, the fetch retries */
     rec->meta_version = version;
-    slot->loan = (uint8_t)(verdict == I_RANT_ADMIT_LOAN);
+    if (verdict == I_RANT_ADMIT_YES) slot->loan = 0;     /* a held match judged a loan stays a match */
     *up = 1;
     /* ONE: the sender holds our blob or asks for it. ALL: an observer never assumes */
     if (verdict == I_RANT_ADMIT_YES && (!was_match || skipped)
@@ -768,8 +770,10 @@ static int i_rant_discovery_rejudge_at(i_RantDiscoveryState *st, uint16_t ri){
         st->slots_opened = 1;
         return 1;
     }
-    if (verdict == I_RANT_ADMIT_YES && slot->loan) i_rant_discovery_ask(st, ri, I_RANT_OWE_MATCH, st->now_us);
-    slot->loan = (uint8_t)(verdict == I_RANT_ADMIT_LOAN);
+    if (verdict == I_RANT_ADMIT_YES && slot->loan){
+        slot->loan = 0;
+        i_rant_discovery_ask(st, ri, I_RANT_OWE_MATCH, st->now_us);
+    }
     return 0;
 }
 
@@ -1084,14 +1088,36 @@ uint16_t i_rant_discovery_slots_used(const i_RantDiscoveryState *st){
     return n;
 }
 
+uint32_t i_rant_discovery_seat_misses(const i_RantDiscoveryState *st){ return st->seat_misses; }
+
+uint16_t i_rant_discovery_slots_wanted(const i_RantDiscoveryState *st){
+    uint16_t i, n = 0;
+    for (i = 0; i < st->records.cap; i++){
+        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+        if (rec && rec->state == I_RANT_REC_ACTIVE && (rec->slot != I_RANT_REC_NONE || rec->want != I_RANT_ADMIT_NO)) n++;
+    }
+    return n;
+}
+
 uint16_t i_rant_discovery_pending(const i_RantDiscoveryState *st){
     uint16_t i, n = 0;
     for (i = 0; i < st->records.cap; i++){
         const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
         if (rec && rec->state == I_RANT_REC_ACTIVE && rec->slot == I_RANT_REC_NONE
-            && i_rant_discovery_wants_blob(rec)) n++;
+            && (rec->owed & I_RANT_OWE_FETCH)) n++;
     }
     return n;
+}
+
+void i_rant_discovery_refetch_unmatched(i_RantDiscoveryState *st){
+    uint16_t i;
+    for (i = 0; i < st->records.cap; i++){
+        i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+        if (!rec || rec->state != I_RANT_REC_ACTIVE || rec->slot != I_RANT_REC_NONE
+            || rec->want != I_RANT_ADMIT_NO || (rec->flags & I_RANT_REC_TOO_BIG)) continue;
+        rec->flags |= I_RANT_REC_REFETCH;
+        i_rant_discovery_fetch_check(st, i, st->now_us);
+    }
 }
 
 int i_rant_discovery_heard_since(const i_RantDiscoveryState *st, uint64_t since_us){
@@ -1173,6 +1199,11 @@ RantString i_rant_discovery_peer_name(const i_RantDiscoveryState *st, uint32_t i
     const i_RantDiscoveryRecord *rec = i_rant_discovery_by_id(st, id);
     if (!rec) return rant_string(NULL, 0);                   /* unknown peer: .data NULL */
     return rant_string(rec->name, rec->name_len);            /* known: .data set, .len may be 0 */
+}
+
+const uint8_t *i_rant_discovery_peer_uuid(const i_RantDiscoveryState *st, uint32_t id){
+    const i_RantDiscoveryRecord *rec = i_rant_discovery_by_id(st, id);
+    return rec ? rec->uuid : NULL;
 }
 
 int i_rant_discovery_id_for_addr(const i_RantDiscoveryState *st, const uint8_t *ip, uint8_t ip_len,
