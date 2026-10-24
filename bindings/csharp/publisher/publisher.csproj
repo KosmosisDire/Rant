@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 1000 Hz publisher on the default interface/domain. References the packed Rant
+       package from dist/, as a package user would. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>rant_publisher</AssemblyName>
+    <RootNamespace>RantPublisher</RootNamespace>
+    <RantVersion>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../../VERSION').Trim())</RantVersion>
+    <!-- A repo local package folder that a fresh pack clears, so a re packed version is
+         taken instead of the global cache serving a stale one. -->
+    <RestorePackagesPath>$(MSBuildThisFileDirectory)../.packages</RestorePackagesPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Rant" Version="$(RantVersion)" />
+  </ItemGroup>
+
+</Project>
