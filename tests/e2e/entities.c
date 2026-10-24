@@ -1,5 +1,6 @@
 /* Entities over time: the reflection walk across dropped peers, a retire and reuse churn
- * soak, and the builtin log and meta topics. spec/testing.md says what each case pins. */
+ * soak, a re created subscriber, and the builtin log and meta topics. spec/testing.md says
+ * what each case pins. */
 #include "support/test.h"
 
 /* The dropped peer reflection gate: the entity walk must refuse dropped peers
@@ -894,9 +895,61 @@ done:
     rant_allocator_reset(&fa); rant_allocator_reset(&ea);
 }
 
+/* A fetch_details viewer re creates a retired subscriber after its publisher came back as
+ * a new node, as the transcoder does when a camera restarts. */
+static int rp_pump(RantNode *S, RantNode *P, RantTopic *pub, RantTopic *sub, int ms){
+    uint64_t end = i_rant_plat_now_us() + (uint64_t)ms * 1000u, next = 0;
+    uint8_t pb[4] = {1, 2, 3, 4}; RantMsg m; int got = 0;
+    while (i_rant_plat_now_us() < end){
+        if (i_rant_plat_now_us() >= next){
+            (void)rant_topic_send(pub, rant_bytes(pb, sizeof pb), NULL);
+            next = i_rant_plat_now_us() + 20000u;
+        }
+        rant_node_poll(P, 1); rant_node_poll(S, 1);
+        while (sub && rant_topic_take(sub, &m, 0) == 1) got++;
+    }
+    return got;
+}
+static void republish_checks(void){
+    RantAllocator sa = rant_allocator_heap(0), aa = rant_allocator_heap(0), ba = rant_allocator_heap(0);
+    RantNodeOpts so, po; RantNode *S, *A, *B = NULL; RantAddr seed;
+    RantTopic *sub, *pub; RantTopicOpts o; int got;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=TEST_DOMAIN+40;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    po.discovery.announce_interval_us = 100000;
+    so = po; so.fetch_details = 1;
+    memset(&o,0,sizeof o); o.pull = 1;
+    S = rant_node_open(&sa, "viewer", NULL, NULL, &so);
+    A = rant_node_open(&aa, "camera", NULL, NULL, &po);
+    CHECK(S && A, "republish: nodes open");
+    if (!(S && A)) goto done;
+    pub = rant_node_create_topic(A, "late", RANT_PUB_ONLY, NULL, NULL);
+    (void)rp_pump(S, A, pub, NULL, 500);
+    sub = rant_node_create_topic(S, "late", RANT_SUB_ONLY, NULL, &o);
+    got = rp_pump(S, A, pub, sub, 1000);
+    CHECK(got > 10, "republish: the subscriber gets the first camera (%d)", got);
+    CHECK(rant_topic_retire(sub) == RANT_OK, "republish: the subscriber retires");
+    rant_node_close(A, 1); A = NULL;
+    B = rant_node_open(&ba, "camera", NULL, NULL, &po);
+    CHECK(B != NULL, "republish: the camera opens again");
+    if (!B) goto done;
+    pub = rant_node_create_topic(B, "late", RANT_PUB_ONLY, NULL, NULL);
+    (void)rp_pump(S, B, pub, NULL, 500);    /* the viewer judges it while the slot is retired */
+    sub = rant_node_create_topic(S, "late", RANT_SUB_ONLY, NULL, &o);
+    got = rp_pump(S, B, pub, sub, 1000);
+    CHECK(got > 10, "republish: the re created subscriber gets the new camera (%d)", got);
+done:
+    if (B) rant_node_close(B, 1);
+    if (A) rant_node_close(A, 1);
+    if (S) rant_node_close(S, 1);
+    rant_allocator_reset(&sa); rant_allocator_reset(&aa); rant_allocator_reset(&ba);
+}
+
 static const TestCase cases[] = {
     { "reflect_dropped", reflect_dropped_checks },
     { "churn", churn_checks },
+    { "republish", republish_checks },
     { "log_and_meta", metalog_checks },
     { "status", status_checks },
     { "rant_conditions", rant_conditions_checks },

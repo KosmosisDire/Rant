@@ -76,7 +76,7 @@ program in this order.
 | `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
 | `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate |
 | `e2e.tasks` | task, task_matrix |
-| `e2e.entities` | reflect_dropped, churn, log_and_meta, status, rant_conditions, rant_refused, rant_cap |
+| `e2e.entities` | reflect_dropped, churn, republish, log_and_meta, status, rant_conditions, rant_refused, rant_cap |
 | `e2e.matchwait` | matchwait |
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
@@ -304,6 +304,8 @@ What each phase pins, grouped by layer.
   across identical re creation, incompatible and compatible retypes, untyped subscribers,
   rival same name publishers, late joiners and transient peers. The plateau is judged
   against a warmed baseline after the one time allocations.
+- Republish: a `fetch_details` viewer that judged a new publisher while its own slot was
+  retired still receives it once an identical subscriber reuses the slot.
 - Match wait window (Windows): a publisher that never receives a candidate's DETAIL_RESP
   waits out one window on its first send, then no send waits, and a subscriber that
   appears after the window never blocks a send.

@@ -77,11 +77,13 @@ one request datagram, not a lane.
 The gotcha that cache caused: a DISSOLVED verdict (details arrived, no local topic
 matched) is judged against the local topic set, which grows. A `fetch_details` observer
 dissolves every index the moment a peer appears, so a later subscribe created the topic
-but the cached non match made apply skip it forever. `i_rant_transport_topic_define` sends
-every dissolved verdict of every peer back to pending (name bound verdicts stay), and
-create's replay re requests them. Cleared indices are only re fetched if the hash matches
-a local topic. Re pending must not clear cached peer attrs: an observer never re asks a
-fetched index, and attrs are invalidated only by the peer's generation gate.
+but the cached non match made apply skip it forever. `i_rant_transport_topic_define` and
+every reuse, an identical one too, send every dissolved verdict of every peer back to
+pending (name bound verdicts stay), and create's replay re requests them. A retired slot
+is invisible to verdicts, so a publisher judged meanwhile dissolved against it. Cleared
+indices are only re fetched if the hash matches a local topic. Re pending must not clear
+cached peer attrs: an observer never re asks a fetched index, and attrs are invalidated
+only by the peer's generation gate.
 
 Retry is requester driven. Pending state re asks on the peer's announces and on a
 periodic sweep, so lost datagrams heal within an announce interval with no acks and

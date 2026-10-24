@@ -1589,6 +1589,19 @@ int i_rant_transport_set_role(i_RantTransportState *st, uint16_t topic_index, ui
 }
 
 
+/* A dissolved verdict is only as durable as the topic set it was judged against, and a
+ * define or a reuse grows that set: send them back to pending. Attrs stay. spec/interest.md */
+static void i_rant_transport_repend_dissolved(i_RantTransportState *st){
+    uint16_t p;
+    for (p=0;p<st->cfg.max_peers;p++){
+        uint8_t *as = st->peer_astate[p]; uint32_t a, alen = st->peer_index_len[p];
+        if (!st->peer_used[p] || !as) continue;
+        for (a=0;a<alen;a++)
+            if ((as[a] & RANT__AST_DETAILED) && !(as[a] & RANT__AST_NAME_OK))
+                as[a] = 0;
+    }
+}
+
 int i_rant_transport_topic_define(i_RantTransportState *st, uint16_t topic_index, const i_RantTopicDef *def){
     i_RantTopic *topic; RantQos q; uint16_t depth, p; size_t lane;
     if (!st || !def) return -1;
@@ -1626,15 +1639,7 @@ int i_rant_transport_topic_define(i_RantTransportState *st, uint16_t topic_index
     memcpy((char*)topic->name, def->name, lane); ((char*)topic->name)[lane] = '\0';
     topic->name_len = (uint8_t)lane;
     topic->history_head = 0; topic->next_seqno = 0; topic->have_first = 0;
-    /* a dissolved verdict is only as durable as the topic set it was judged against, and
-       that set just grew: send them back to pending. Attrs stay. See spec/interest.md */
-    for (p=0;p<st->cfg.max_peers;p++){
-        uint8_t *as = st->peer_astate[p]; uint32_t a, alen = st->peer_index_len[p];
-        if (!st->peer_used[p] || !as) continue;
-        for (a=0;a<alen;a++)
-            if ((as[a] & RANT__AST_DETAILED) && !(as[a] & RANT__AST_NAME_OK))
-                as[a] = 0;
-    }
+    i_rant_transport_repend_dissolved(st);
     for (p=0;p<st->cfg.max_peers;p++)        /* match the new topic to known peers */
         if (st->peer_used[p]) i_rant_topic_rematch(st, topic_index, p);
     return 0;
@@ -1801,15 +1806,10 @@ int i_rant_transport_topic_reuse(i_RantTransportState *st, uint16_t topic_index,
             i_rant_bit_clr(&st->peer_sub_bitmap[(size_t)p*st->bitmap_len], topic_index);
             i_rant_bit_clr(&st->peer_sub_reliable[(size_t)p*st->bitmap_len], topic_index);
             i_rant_bit_clr(&st->peer_sub_claim[(size_t)p*st->bitmap_len], topic_index);
-            /* dissolved verdicts re pend, as at define. Attrs stay. */
-            if (st->peer_astate[p]){
-                uint8_t *as = st->peer_astate[p];
-                for (a=0;a<st->peer_index_len[p];a++)
-                    if ((as[a] & RANT__AST_DETAILED) && !(as[a] & RANT__AST_NAME_OK))
-                        as[a] = 0;
-            }
         }
     }
+    /* the slot was invisible while retired, so even an identical reuse grows the set */
+    i_rant_transport_repend_dissolved(st);
     for (p=0;p<st->cfg.max_peers;p++)
         if (st->peer_used[p]) i_rant_topic_rematch(st, topic_index, p);
     return 0;
