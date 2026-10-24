@@ -6,6 +6,8 @@
 #include <string.h>
 
 #define RANT_DISCOVERY_BLOB_RESEND 1u          /* announces that carry the full blob after a change */
+#define RANT_DISCOVERY_OPEN_REPEATS 2u       /* group sends that repeat the opening, for multicast loss */
+#define RANT_DISCOVERY_OPEN_GAP_US 300000u     /* between them, all inside the first match window */
 #define RANT_DISCOVERY_ASK_TRIES 4u            /* sends of one ask, a later datagram starts a fetch over */
 #define RANT_DISCOVERY_ASK_RETRY_US 250000u    /* an unanswered ask goes again this soon */
 #define RANT_DISCOVERY_SWEEPS 4u               /* timeout sweeps per announce interval */
@@ -49,6 +51,8 @@ struct i_RantDiscoveryState {
     char            self_name[RANT_NODE_NAME_MAX + 1];
     uint8_t         self_name_len;
     uint16_t        self_blob_resend; /* announces remaining that carry the full blob */
+    uint8_t         open_repeats;     /* repeats of the opening still to send */
+    uint64_t        next_repeat_us;
     i_RantDiscoverySubnet local_nets[RANT_DISCOVERY_MAX_SUBNETS];
     uint8_t       n_local_nets;
     /* troubled sources, a live one never evicted, so the set stays stable on a big mesh */
@@ -1074,6 +1078,8 @@ size_t i_rant_discovery_update(i_RantDiscoveryState *st, uint64_t now, void *out
         st->next_sweep_us = now + sweep_us;
         st->want_solicit = 0;
         st->self_blob_resend = 0;
+        st->open_repeats = RANT_DISCOVERY_OPEN_REPEATS;
+        st->next_repeat_us = now + RANT_DISCOVERY_OPEN_GAP_US;
         return i_rant_discovery_build(st, ask ? i_rant_discovery_req_flags(st) : 0u, 1, (uint8_t *)out, cap);
     }
     if (now >= st->next_sweep_us){
@@ -1084,6 +1090,11 @@ size_t i_rant_discovery_update(i_RantDiscoveryState *st, uint64_t now, void *out
     if (st->want_solicit){   /* the group solicit: our blob, and peers answer with theirs */
         st->want_solicit = 0;
         return i_rant_discovery_build(st, i_rant_discovery_req_flags(st), 1, (uint8_t *)out, cap);
+    }
+    if (st->open_repeats && now >= st->next_repeat_us){   /* for a peer that lost the opening and was assumed */
+        st->open_repeats--;
+        st->next_repeat_us = now + RANT_DISCOVERY_OPEN_GAP_US;
+        return i_rant_discovery_build(st, 0, 1, (uint8_t *)out, cap);
     }
     if (now >= st->next_announce_us){
         int with_blob = st->self_blob_resend > 0;
@@ -1099,6 +1110,7 @@ uint64_t i_rant_discovery_next_due_us(const i_RantDiscoveryState *st){
     if (!st || !st->started || st->want_solicit) return 0;
     /* next_announce_us is 0 after an advertise: announce now */
     due = st->next_announce_us < st->next_sweep_us ? st->next_announce_us : st->next_sweep_us;
+    if (st->open_repeats && st->next_repeat_us < due) due = st->next_repeat_us;
     for (i = st->records.due_head; i != I_RANT_REC_NONE; i = st->records.recs[i].due_next)
         if (st->records.recs[i].due_us < due) due = st->records.recs[i].due_us;
     for (i = 0; i < st->n_loose; i++)

@@ -1396,6 +1396,24 @@ static void first_contact_checks(void){
     jg_head(st, 3, 0, 3, 5000u, t);
     CHECK(dc_refused_n == 0 && i_rant_discovery_pending(st) == 1,
           "first contact: once a peer was forgotten for room, every first contact is fetched");
+
+    /* the assumption's safety net: a peer that lost the opening to the group hears it again */
+    c.max_peers = 4; c.max_records = 8; c.announce_interval_us = 60000000u;
+    for (k = 0; k < 2; k++){
+        uint64_t at; int sent = 0, ok;
+        c.observer = (uint8_t)k;
+        st = i_rant_discovery_init(mem, sizeof mem, &c);
+        i_rant_discovery_update(st, t0, out, sizeof out);
+        ok = i_rant_discovery_next_due_us(st) == t0 + 300000u;
+        for (at = t0 + 1000u; at <= t0 + 2000000u; at += 1000u){
+            size_t n = i_rant_discovery_update(st, at, out, sizeof out);
+            if (!n) continue;
+            sent++;
+            if (dc_sent(out, n) != F_BLOB || at != t0 + (uint64_t)sent * 300000u) ok = 0;
+        }
+        CHECK(ok && sent == 2, "first contact: %s opening goes twice more 300 ms apart with our blob and no REQ (%d)",
+              k ? "an observer's" : "the", sent);
+    }
 }
 
 /* Peer n of a stream: a uuid, 10.1.x.y and data port 7000 + n % 1000 of its own, a one byte

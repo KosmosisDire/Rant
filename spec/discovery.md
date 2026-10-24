@@ -13,8 +13,8 @@ long ago that blob last changed. The blob is opaque here: the fragment size, the
 memory host id and the interest list (spec/interest.md).
 
 The blob is full state and idempotent, so it is simply re sent on change. It rides the
-opening datagram, the first announce after a change (`RANT_DISCOVERY_BLOB_RESEND`, 1) and
-every targeted send. Every announce carries the blob's version. A steady state announce
+opening datagram and its two repeats (Timing), the first announce after a change
+(`RANT_DISCOVERY_BLOB_RESEND`, 1) and every targeted send. Every announce carries the blob's version. A steady state announce
 without the blob but with a newer version makes the peer fetch the blob. So a connection forms from the announces the nodes already send, with no per
 topic handshake and no steady state metadata heartbeat. `on_peer_up` fires only on a
 change (admission, address, blob, revive), never per announce.
@@ -78,7 +78,11 @@ overlay capacity defaults to `RANT_DISCOVERY_META_MAX` (64) bytes and the name t
 
 ## Timing
 
-The opening sends the blob at once with no REQ, or REQ|ALL from an observer. The first
+The opening sends the blob at once with no REQ, or REQ|ALL from an observer. It goes twice
+more on the group 300 ms apart with no REQ (`RANT_DISCOVERY_OPEN_REPEATS`), inside the first
+match window. WiFi sends group frames once at the base rate and retries only unicast, and a
+peer judged by assumption (Judging on arrival) that lost the opening would otherwise learn of
+us only from an announce, which carries no blob, up to an interval later. The first
 steady announce is phased by a hash of the uuid within one interval, so nodes do not
 announce in lockstep. Peer timeout sweeps run four times per interval, so detection lags by
 at most a quarter interval. `i_rant_discovery_next_due_us` tells a driving loop when the
