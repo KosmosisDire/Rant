@@ -174,6 +174,7 @@ struct Ping {
     std::vector<uint8_t> payload;
     std::vector<uint32_t> rtt;
     std::vector<bool> seen;
+    std::vector<uint64_t> send_us;
     uint64_t opened_us = 0, matched_us = 0, start_us = 0, last_send_us = 0, done_us = 0, next_us = 0;
     double cpu_start = 0;
     int sent = 0, got = 0, late = 0;
@@ -186,6 +187,7 @@ struct Ping {
         pong = node.subscriber<rant::Bytes>("bench/pong", [this](const rant::MessageView& m) { heard(m); }, qos(a));
         rtt.reserve((size_t)a.count);
         seen.assign((size_t)a.count, false);
+        send_us.assign((size_t)a.count, 0);
         opened_us = now_us();
     }
 
@@ -193,13 +195,13 @@ struct Ping {
     {
         rant::Bytes d = m.data();
         if (d.size() < 16) return;
-        uint64_t sent_at;
-        std::memcpy(&sent_at, d.data() + 8, 8);
-        if (sent_at < start_us) { late++; return; }   /* an echo from before this run */
-        rtt.push_back((uint32_t)(now_us() - sent_at));
-        uint64_t seq;
+        uint64_t seq, sent_at;
         std::memcpy(&seq, d.data(), 8);
-        if (seq < seen.size()) seen[seq] = true;
+        std::memcpy(&sent_at, d.data() + 8, 8);
+        /* an echo of another run, which history repair hands a reader that matched early */
+        if (seq >= (uint64_t)sent || send_us[seq] != sent_at) { late++; return; }
+        rtt.push_back((uint32_t)(now_us() - sent_at));
+        seen[seq] = true;
         got++;
     }
 
@@ -208,6 +210,7 @@ struct Ping {
         uint64_t seq = (uint64_t)sent;
         std::memcpy(payload.data(), &seq, 8);
         std::memcpy(payload.data() + 8, &t, 8);
+        send_us[seq] = t;
         if (ping.send(rant::Bytes(payload)) != rant::SendStatus::Ok) return false;
         sent++;
         last_send_us = t;
