@@ -1782,6 +1782,11 @@ void i_rant_node_core_apply_interest_page(i_RantNodeCore *c, uint16_t domain, ui
     if (!i_rant_interest_resp_parse(resp, &total, &offset, &chunk)) return;
     if (total > i_rant_interest_max(0xFFFFu)) return;     /* an absurd total: never a real blob */
     resp_version = i_rant_detail_meta_version(resp);
+    {   /* pages write the buffer interest_of reads, so only the held version is taken */
+        uint32_t held = 0;
+        i_rant_discovery_peer_meta(c->discovery, peer, &held);
+        if (resp_version != held) return;
+    }
     if (ex->interest_buf && ex->interest_version == resp_version) return;   /* a dup page */
     if (ex->fetch_version != resp_version){           /* first page, or the version moved */
         ex->fetch_version = resp_version;

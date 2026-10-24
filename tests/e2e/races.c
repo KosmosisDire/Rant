@@ -130,6 +130,14 @@ static int rc_hold_announce(long long sock, const unsigned char *b, long len, co
     return 2;
 }
 
+/* the first page of an interest, delivered now and again later */
+static int rc_hold_page(long long sock, const unsigned char *b, long len, const struct sockaddr *from){
+    uint32_t total, offset; RantBytes chunk;
+    if (!rc_hold_from(sock, from) || len < 5 || memcmp(b, "uDTL", 4) || b[4] != RANT_INTEREST_RESP) return 0;
+    if (!i_rant_interest_resp_parse(rant_bytes(b, (size_t)len), &total, &offset, &chunk) || offset) return 0;
+    return 2;
+}
+
 /* an ACKNACK, delivered now and again later */
 static int rc_hold_ack(long long sock, const unsigned char *b, long len, const struct sockaddr *from){
     if (!rc_hold_from(sock, from) || len < WIRE_TAP_HEADER_NACK) return 0;
@@ -287,6 +295,54 @@ done:
     if (B) rant_node_close(B, 1);
 }
 
+/* A late copy of the first page of P's paged interest lands after B assembled a newer one,
+   then a detail answer applies the interest again. */
+#define RC_TOPICS 300
+static void old_interest_checks(void){
+    RantNodeOpts po = rc_opts(TEST_DOMAIN + 5, "P"), bo = rc_opts(TEST_DOMAIN + 5, "B");
+    RantNode *P, *B; RantTopic *gone = NULL, *keep = NULL, *s_gone, *s_keep, *s_new = NULL;
+    char name[16]; int i, first;
+    rc_reset();
+    po.max_topics = RC_TOPICS + 2; bo.max_topics = 4;
+    P = rc_open(po, "oi-p");
+    B = rc_open(bo, "oi-b");
+    for (i = 0; P && i < RC_TOPICS; i++){
+        RantTopic *t;
+        snprintf(name, sizeof name, "oi/%03d", i);
+        t = rc_topic(P, name, RANT_PUB_ONLY, 1, 4, 0);
+        if (!t) break;
+        if (i == 10) gone = t;
+        if (i == 200) keep = t;
+    }
+    s_gone = rc_topic(B, "oi/010", RANT_SUB_ONLY, 1, 4, 0);
+    s_keep = rc_topic(B, "oi/200", RANT_SUB_ONLY, 1, 4, 0);
+    CHECK(P && B && gone && keep && s_gone && s_keep, "old interest: nodes up with %d topics", i);
+    if (!(P && B && gone && keep && s_gone && s_keep)) goto done;
+    rc_hold_node = B; rc_hold_port = 0; wire_tap_hold_if = rc_hold_page;
+    PUMP_UNTIL(P, B, 16000, rc_pubs(s_gone) == 1 && rc_pubs(s_keep) == 1 && wire_tap_held());
+    wire_tap_hold_if = NULL;
+    CHECK(rc_pubs(s_gone) == 1 && wire_tap_held(),
+          "old interest: B matched oi/010 through the paged interest, a copy of its first page kept");
+    rant_topic_retire(gone);
+    PUMP_UNTIL(P, B, 8000, rc_pubs(s_gone) == 0);
+    CHECK(rc_pubs(s_gone) == 0 && rc_pubs(s_keep) == 1, "old interest: P retired oi/010 and B saw it go");
+    first = rc_nevents;
+    wire_tap_release();
+    { uint8_t pb[8] = { 1 }; rant_topic_send(keep, rant_bytes(pb, sizeof pb), NULL); }   /* traffic to B */
+    PUMP_UNTIL(P, B, 4000, !wire_tap_held());
+    s_new = rc_topic(B, "oi/250", RANT_SUB_ONLY, 1, 4, 0);     /* a detail answer applies the interest again */
+    PUMP_UNTIL(P, B, 4000, s_new && rc_pubs(s_new) == 1);
+    test_pump(P, B, 200);
+    CHECK(!wire_tap_held() && s_new && rc_pubs(s_new) == 1 && rc_pubs(s_gone) == 0,
+          "old interest: after the late page B matched oi/250 (%d) and counts no publisher on the retired oi/010 (%d)",
+          s_new ? rc_pubs(s_new) : -1, rc_pubs(s_gone));
+    if (rc_pubs(s_gone) != 0) (void)rc_events_of(first, "B", 1);
+done:
+    wire_tap_hold_clear();
+    if (P) rant_node_close(P, 1);
+    if (B) rant_node_close(B, 1);
+}
+
 /* B recreates its subscriber, so its reader has a new epoch, and a late copy of the old
    reader's ACKNACK lands at A. A replays from its join point, which the app never sees. */
 static void old_epoch_checks(void){
@@ -334,6 +390,7 @@ static const TestCase cases[] = {
     { "bye_ghost",       bye_ghost_checks },
     { "restart_evict",   restart_evict_checks },
     { "flap_duplicates", flap_duplicates_checks },
+    { "old_interest",    old_interest_checks },
     { "old_epoch",       old_epoch_checks },
 };
 

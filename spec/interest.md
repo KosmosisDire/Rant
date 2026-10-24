@@ -39,8 +39,12 @@ over the unicast `uDTL` channel as byte range pages (`INTEREST_REQ` = 3, `INTERE
 the blob into its detail buffer after 24 bytes of headroom and writes the page header
 just before the chunk. The requester keeps one cursor per peer (`interest_version` is the
 last assembled version and the dedup), pages are reply clocked, the detail rearm sweep is
-the loss backstop, and a version stamp change mid fetch restarts at 0. The assembled
-blob feeds the unchanged interest apply. A match wait treats a fetch in flight as still
+the loss backstop, and a version stamp change mid fetch restarts at 0. Only a page at the
+version of the blob discovery holds is taken. The pages land in the buffer that holds the
+assembled interest, so a page of another version, one read late or one that outran its
+announce, would write into an interest still being read. A page that outran its announce
+is asked again once the announce lands. The assembled blob feeds the unchanged interest
+apply. A match wait treats a fetch in flight as still
 resolving, so a permanent poisoning by an unresolvable peer is impossible.
 
 Rule: every consumer of a peer's interest reads through `interest_of` or

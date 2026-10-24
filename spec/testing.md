@@ -79,7 +79,7 @@ program in this order.
 | `e2e.entities` | reflect_dropped, churn, republish, log_and_meta, status, rant_conditions, rant_refused, rant_partial, rant_cap |
 | `e2e.matchwait` | matchwait |
 | `e2e.mesh` | builtins_quiet, seeded_segments, meta_from_callbacks, directed_first_call, static_bounded, static_meta_peers, observer_fast, grow_at_once, big_peer, slot_back, crowd_late_match, static_bulk, runtime_topic |
-| `e2e.races` | older_blob, bye_ghost, restart_evict, flap_duplicates, old_epoch |
+| `e2e.races` | older_blob, bye_ghost, restart_evict, flap_duplicates, old_interest, old_epoch |
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
 | `bench.memscale` | `rant_bench memscale`, a steady state send never allocates, with a bulk pool too |
@@ -485,9 +485,10 @@ What each phase pins, grouped by layer.
   one in the same pass is never judged. An answer read after its sender's group BYE leaves no
   ghost. A process restarted on the same data port keeps its slot past an announce copy its
   predecessor sent before its BYE, and when that copy lands after the successor's first
-  reliable samples, the app gets each one once. A late ACKNACK from a recreated subscriber's old
-  reader makes the writer replay from its join point, and the app still takes each sample
-  once.
+  reliable samples, the app gets each one once. A late first page of a paged interest, landing
+  after a newer one was assembled, never shows a retired publisher again. A late ACKNACK from
+  a recreated subscriber's old reader makes the writer replay from its join point, and the
+  app still takes each sample once.
 
 ### Benches
 
