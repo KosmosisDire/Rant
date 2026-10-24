@@ -1050,6 +1050,10 @@ static void judge_checks(void){
     nt = dc_drain(st, t + 250000u, &fl, &port);
     CHECK(k == 1 && nt == 0 && dc_down_reason == (int)RANT_DISCOVERY_GIVE_BACK,
           "judge: a match given back at its next version is asked no more (%d asks after)", nt);
+    dc_up_n = 0; asks = jg_asks; k = i_rant_discovery_slots_used(st);
+    jg_blob(st, 8, F_ONE, 1, YES, t);
+    CHECK(dc_up_n == 0 && jg_asks == asks && i_rant_discovery_slots_used(st) == k,
+          "judge: an older blob read late is never judged, so it takes no slot back");
 }
 
 /* What the node reads while peers come and go without a slot: a held match stays one while

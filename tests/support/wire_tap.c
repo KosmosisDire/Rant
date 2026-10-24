@@ -14,6 +14,46 @@
 WireTap wire_tap;
 void (*wire_tap_on_recv)(long long sock, const unsigned char *buf, long len,
                          const struct sockaddr *from);
+int (*wire_tap_hold_if)(long long sock, const unsigned char *buf, long len,
+                        const struct sockaddr *from);
+
+/* state 0 = empty, 1 = held, 2 = released and due on its socket's next recvfrom */
+static struct {
+    unsigned char buf[65536];
+    long len;
+    struct sockaddr_storage from;
+    int fromlen, state;
+    long long sock;
+} tap_hold;
+
+int  wire_tap_held(void){ return tap_hold.state != 0; }
+void wire_tap_release(void){ if (tap_hold.state == 1) tap_hold.state = 2; }
+void wire_tap_hold_clear(void){ tap_hold.state = 0; wire_tap_hold_if = NULL; }
+
+/* 1 when the datagram just received is kept back, 2 when a copy of it is kept */
+static int tap_hold_take(long long sock, const unsigned char *b, long r, const struct sockaddr *from, int fromlen){
+    int how;
+    if (tap_hold.state || !wire_tap_hold_if || r < 0 || r > (long)sizeof tap_hold.buf) return 0;
+    how = wire_tap_hold_if(sock, b, r, from);
+    if (how != 1 && how != 2) return 0;
+    memcpy(tap_hold.buf, b, (size_t)r); tap_hold.len = r;
+    if (from && fromlen > 0 && fromlen <= (int)sizeof tap_hold.from) memcpy(&tap_hold.from, from, (size_t)fromlen);
+    tap_hold.fromlen = fromlen; tap_hold.sock = sock; tap_hold.state = 1;
+    return how;
+}
+
+/* The released datagram's length, written as its socket would, or -1 when none is due here */
+static long tap_hold_give(long long sock, unsigned char *b, long cap, struct sockaddr *from, int *fromlen){
+    long n;
+    if (tap_hold.state != 2 || tap_hold.sock != sock) return -1;
+    n = tap_hold.len < cap ? tap_hold.len : cap;
+    memcpy(b, tap_hold.buf, (size_t)n);
+    if (from && fromlen && *fromlen >= tap_hold.fromlen){
+        memcpy(from, &tap_hold.from, (size_t)tap_hold.fromlen); *fromlen = tap_hold.fromlen;
+    }
+    tap_hold.state = 0;
+    return n;
+}
 
 long long wire_tap_read(const long long *field){ return test_atomic_load(field); }
 void wire_tap_write(long long *field, long long value){ test_atomic_store(field, value); }
@@ -189,15 +229,20 @@ int wire_tap_sendto(SOCKET s, const char *buf, int len, int flags, const struct 
 int wire_tap_recvfrom(SOCKET s, char *buf, int len, int flags, struct sockaddr *from, int *fromlen){
     long long a;
     int r, e;
+    long given;
     if (test_atomic_load(&wire_tap.isolate)){
         WSASetLastError(WSAEWOULDBLOCK);
         return -1;
     }
-    a = tap_now_ns();
-    r = recvfrom(s, buf, len, flags, from, fromlen);
-    e = WSAGetLastError();
-    if (r < 0) tap_error(e, &wire_tap.rx_would_block, &wire_tap.rx_reset, &wire_tap.rx_error);
-    tap_received((long long)s, (const unsigned char *)buf, r, from, tap_now_ns() - a);
+    given = tap_hold_give((long long)s, (unsigned char *)buf, len, from, fromlen);
+    if (given >= 0) return (int)given;
+    do {
+        a = tap_now_ns();
+        r = recvfrom(s, buf, len, flags, from, fromlen);
+        e = WSAGetLastError();
+        if (r < 0) tap_error(e, &wire_tap.rx_would_block, &wire_tap.rx_reset, &wire_tap.rx_error);
+        tap_received((long long)s, (const unsigned char *)buf, r, from, tap_now_ns() - a);
+    } while (tap_hold_take((long long)s, (const unsigned char *)buf, r, from, fromlen ? *fromlen : 0) == 1);
     WSASetLastError(e);
     return r;
 }
@@ -249,16 +294,22 @@ ssize_t wire_tap_recvfrom(int s, void *buf, size_t len, int flags, struct sockad
                           socklen_t *fromlen){
     long long a;
     ssize_t r;
-    int e;
+    int e, fl;
+    long given;
     if (test_atomic_load(&wire_tap.isolate)){
         errno = EAGAIN;
         return -1;
     }
-    a = tap_now_ns();
-    r = recvfrom(s, buf, len, flags, from, fromlen);
-    e = errno;
-    if (r < 0) tap_error(e, &wire_tap.rx_would_block, &wire_tap.rx_reset, &wire_tap.rx_error);
-    tap_received((long long)s, (const unsigned char *)buf, (long)r, from, tap_now_ns() - a);
+    fl = fromlen ? (int)*fromlen : 0;
+    given = tap_hold_give((long long)s, (unsigned char *)buf, (long)len, from, fromlen ? &fl : NULL);
+    if (given >= 0){ if (fromlen) *fromlen = (socklen_t)fl; return (ssize_t)given; }
+    do {
+        a = tap_now_ns();
+        r = recvfrom(s, buf, len, flags, from, fromlen);
+        e = errno;
+        if (r < 0) tap_error(e, &wire_tap.rx_would_block, &wire_tap.rx_reset, &wire_tap.rx_error);
+        tap_received((long long)s, (const unsigned char *)buf, (long)r, from, tap_now_ns() - a);
+    } while (tap_hold_take((long long)s, (const unsigned char *)buf, (long)r, from, fromlen ? (int)*fromlen : 0) == 1);
     errno = e;
     return r;
 }

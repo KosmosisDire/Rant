@@ -806,7 +806,8 @@ static void i_rant_discovery_judge(i_RantDiscoveryState *st, uint16_t ri, RantBy
     /* a held blob was a match, and the peer may have given us back on a version we missed */
     int was_match = slot && !slot->loan && rec->meta_version, skipped = version > rec->meta_version + 1u;
     i_RantDiscoveryAdmit verdict;
-    if (slot && version <= rec->meta_version) return;     /* a held blob is judged once per version */
+    /* an older blob arrived out of order, and a held one is judged once per version */
+    if (version < rec->meta_version || (slot && version == rec->meta_version)) return;
     i_rant_discovery_refetch_done(st, rec);
     rec->flags = (uint8_t)(rec->flags & ~I_RANT_REC_TOO_BIG);
     verdict = i_rant_discovery_verdict(st, rec, blob, version);

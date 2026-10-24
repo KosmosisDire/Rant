@@ -61,6 +61,14 @@ void      wire_tap_reset_counters(void);
 /* Sees every datagram a socket receives, NULL = off. Set it while no node runs */
 extern void (*wire_tap_on_recv)(long long sock, const unsigned char *buf, long len,
                                 const struct sockaddr *from);
+/* A late datagram: hold_if returns 1 to keep one back from its socket, 2 to deliver it and keep
+   a copy. Once released it comes before that socket's next one, from its own source. Single
+   threaded pumps only */
+extern int (*wire_tap_hold_if)(long long sock, const unsigned char *buf, long len,
+                               const struct sockaddr *from);
+int  wire_tap_held(void);
+void wire_tap_release(void);
+void wire_tap_hold_clear(void);
 
 #ifdef _WIN32
 int wire_tap_bind(SOCKET s, const struct sockaddr *addr, int len);

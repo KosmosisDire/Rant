@@ -10,7 +10,7 @@ makes a test or a measurement trustworthy.
   implementation into the program so a case reaches every internal, `harness.c` holds the
   case runner, the checks, the pumps and the node helpers, and `wire_tap.c` wraps the
   platform's `sendto`, `recvfrom`, `bind` and `setsockopt` to count datagrams by type,
-  inject faults and catch a socket bound outside loopback. `atomic.h` holds the loads, stores and adds for
+  inject faults, hand a datagram over late and catch a socket bound outside loopback. `atomic.h` holds the loads, stores and adds for
   state a service thread shares with the test.
 - `tests/interop/` holds one Tick program per language and the driver that runs a pair.
 - `tests/fuzz/` holds the libFuzzer targets, their replay driver and the inputs that once
@@ -79,6 +79,7 @@ program in this order.
 | `e2e.entities` | reflect_dropped, churn, republish, log_and_meta, status, rant_conditions, rant_refused, rant_partial, rant_cap |
 | `e2e.matchwait` | matchwait |
 | `e2e.mesh` | builtins_quiet, seeded_segments, meta_from_callbacks, directed_first_call, static_bounded, static_meta_peers, observer_fast, grow_at_once, big_peer, slot_back, crowd_late_match, static_bulk, runtime_topic |
+| `e2e.races` | older_blob, old_epoch |
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
 | `bench.memscale` | `rant_bench memscale`, a steady state send never allocates, with a bulk pool too |
@@ -167,7 +168,7 @@ What each phase pins, grouped by layer.
   loan waits unrefused for a free slot, a match takes a live loan's, rejudge tells a loan
   that now matches and gives back a slot that meets nothing, as replay does for all. A drop
   is seen for every record and reaches the slot hooks for slotted ones. A match given back
-  at its next version is asked no more.
+  at its next version is asked no more, and an older blob read late is never judged.
 - Unmatched: a held match judged a loan at a newer version keeps its slot from a match and
   is asked nothing when judged a match again. A refused match and a waiting loan each count a
   seat miss and a wanted slot. A record is pending while its fetch is in flight and no longer
@@ -478,6 +479,11 @@ What each phase pins, grouped by layer.
   leaves its main flat, a late subscriber still matches, and its meta answer reports the
   bulk. A runtime topic nobody wants sends at once, and a reliable one three peers want
   reaches all three with its first send, the later matches from history.
+- Races: a node reads its group socket before its unicast one, and the wire tap's hold hands
+  a datagram over late as WiFi or the bridge would. A unicast blob read after a newer group
+  one in the same pass is never judged. A late ACKNACK from a recreated subscriber's old
+  reader makes the writer replay from its join point, and the app still takes each sample
+  once.
 
 ### Benches
 

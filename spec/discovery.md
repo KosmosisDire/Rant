@@ -136,9 +136,10 @@ cannot grow. A forgotten peer has no record:
 
 The admit hook says of a blob whether its peer takes a slot: NO (nothing of ours to meet),
 YES (a match) or LOAN (a blob that cannot be judged alone, as an external interest whose
-pages come through a slot). A blob is judged as it arrives: always for a record without a
-slot, at a newer version for one with. Without a hook every peer is a match and takes a slot
-when first heard, blob or not.
+pages come through a slot). A blob is judged as it arrives: at the version judged or a newer
+one for a record without a slot, at a newer one for one with. An older blob arrived out of
+order, as a unicast read after the group datagrams of one pass, and is never judged. Without
+a hook every peer is a match and takes a slot when first heard, blob or not.
 
 | verdict | without a slot | with one |
 |---|---|---|
