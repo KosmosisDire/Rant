@@ -26,10 +26,29 @@ static void rc_on_message(const RantMsg *m){
     rc_msgs++;
 }
 
+/* counts the discovery datagrams but BYEs that rc_watch_node's data socket reads from rc_watch_uuid */
+static RantNode *rc_watch_node;
+static uint8_t rc_watch_uuid[16];
+static int rc_watched;
+static void rc_watch(long long sock, const unsigned char *b, long len, const struct sockaddr *from){
+    i_RantDiscoveryWire w;
+    (void)from;
+    if (!rc_watch_node || sock != (long long)rc_watch_node->fd || len < 4 || memcmp(b, "uDSC", 4)) return;
+    if (i_rant_discovery_decode(rant_bytes(b, (size_t)len), &w) != I_RANT_DISC_OK) return;
+    if (!(w.flags & RANT_DISCOVERY_FLAG_BYE) && memcmp(w.uuid, rc_watch_uuid, 16) == 0) rc_watched++;
+}
+
+static void rc_watch_from(RantNode *reader, RantNode *sender){
+    memcpy(rc_watch_uuid, i_rant_discovery_uuid(i_rant_discovery_state(sender->discovery)), 16);
+    rc_watch_node = reader; rc_watched = 0;
+}
+
 static void rc_reset(void){
     rc_nevents = 0; rc_msgs = 0;
     memset(rc_got, 0, sizeof rc_got);
     wire_tap_hold_clear();
+    rc_watch_node = NULL; rc_watched = 0;
+    wire_tap_on_recv = rc_watch;        /* set while no node runs */
 }
 
 /* the events of node who from first on, printed when print is set */
@@ -105,6 +124,12 @@ static int rc_hold_from(long long sock, const struct sockaddr *from){
     return !rc_hold_port || ntohs(((const struct sockaddr_in *)from)->sin_port) == rc_hold_port;
 }
 
+/* a discovery datagram, delivered now and again later */
+static int rc_hold_announce(long long sock, const unsigned char *b, long len, const struct sockaddr *from){
+    if (!rc_hold_from(sock, from) || len < 5 || memcmp(b, "uDSC", 4)) return 0;
+    return 2;
+}
+
 /* an ACKNACK, delivered now and again later */
 static int rc_hold_ack(long long sock, const unsigned char *b, long len, const struct sockaddr *from){
     if (!rc_hold_from(sock, from) || len < WIRE_TAP_HEADER_NACK) return 0;
@@ -143,6 +168,122 @@ static void older_blob_checks(void){
     if (k != 0 || events != 2) (void)rc_events_of(first, "B", 1);
 done:
     if (A) rant_node_close(A, 1);
+    if (B) rant_node_close(B, 1);
+}
+
+/* A answers an observer's opening by unicast and closes before the observer polls, which reads
+   the group BYE first and the answer after. */
+static void bye_ghost_checks(void){
+    RantNodeOpts ao = rc_opts(TEST_DOMAIN + 2, "A"), bo = rc_opts(TEST_DOMAIN + 2, "B");
+    RantNode *A, *B = NULL; i_RantDiscoveryPeerView v; int k, first;
+    rc_reset();
+    bo.fetch_details = 1;
+    A = rc_open(ao, "bg-a");
+    (void)rc_topic(A, "bg/data", RANT_PUB_ONLY, 0, 0, 0);
+    if (A) test_pump(A, NULL, 50);
+    B = rc_open(bo, "bg-b");
+    CHECK(A && B, "bye ghost: nodes up");
+    if (!(A && B)) goto done;
+    rc_watch_from(B, A);
+    first = rc_nevents;
+    rant_node_poll(B, 0);            /* B's opening asks every peer for its blob */
+    test_pump(A, NULL, 5);           /* A answers B by unicast */
+    rant_node_close(A, 1); A = NULL; /* and says BYE */
+    test_pump(B, NULL, 500);
+    k = rc_known(B, "bg-a", &v);
+    CHECK(rc_watched >= 1 && k == -1, "bye ghost: B read A's answer after its BYE (%d) and does not know A (%s)",
+          rc_watched, rc_slot_word(k));
+    if (k != -1) (void)rc_events_of(first, "B", 1);
+done:
+    if (A) rant_node_close(A, 1);
+    if (B) rant_node_close(B, 1);
+}
+
+/* A node restarts on the same data port. B reads the old process's BYE and the new one's
+   opening on the group, then an announce copy the old one sent by unicast before it closed. */
+static void restart_evict_checks(void){
+    RantNodeOpts o = rc_opts(TEST_DOMAIN + 3, "B");
+    RantNode *A1, *A2 = NULL, *B; RantTopic *sub; uint16_t port = 0; int first, k1, k2;
+    rc_reset();
+    B = rc_open(o, "re-b");
+    sub = rc_topic(B, "re/cam", RANT_SUB_ONLY, 0, 0, 0);
+    o.user_data = (void *)"A1";
+    A1 = rc_open(o, "re-old");
+    (void)rc_topic(A1, "re/cam", RANT_PUB_ONLY, 0, 0, 0);
+    CHECK(A1 && B && sub, "restart evict: nodes up");
+    if (!(A1 && B && sub)) goto done;
+    port = i_rant_plat_local_port(A1->fd);
+    PUMP_UNTIL(A1, B, 5000, rc_pubs(sub) == 1);
+    test_pump(A1, B, 800);
+    CHECK(rc_pubs(sub) == 1, "restart evict: B matched the old process (%d publishers)", rc_pubs(sub));
+    rc_watch_from(B, A1);
+    first = rc_nevents;
+    (void)rc_topic(A1, "re/extra", RANT_PUB_ONLY, 0, 0, 0);    /* an announce, copied to B by unicast */
+    test_pump(A1, NULL, 20);
+    rant_node_close(A1, 1); A1 = NULL;
+    o.user_data = (void *)"A2"; o.net.data_port = port;
+    A2 = rc_open(o, "re-new");
+    (void)rc_topic(A2, "re/cam", RANT_PUB_ONLY, 0, 0, 0);
+    CHECK(A2 && i_rant_plat_local_port(A2->fd) == port, "restart evict: the new process binds port %u", port);
+    if (!A2) goto done;
+    test_pump(A2, NULL, 5);                                     /* its opening */
+    rant_node_poll(B, 0);
+    k1 = rc_known(B, "re-old", NULL); k2 = rc_known(B, "re-new", NULL);
+    CHECK(rc_watched >= 1 && k2 == 1 && k1 == -1,
+          "restart evict: B read the old announce copy last (%d) and holds only the new process (new %s, old %s)",
+          rc_watched, rc_slot_word(k2), rc_slot_word(k1));
+    if (k2 != 1 || k1 != -1) (void)rc_events_of(first, "B", 1);
+done:
+    if (A1) rant_node_close(A1, 1);
+    if (A2) rant_node_close(A2, 1);
+    if (B) rant_node_close(B, 1);
+}
+
+/* As in restart_evict, but the old process's announce copy lands after B took the new one's
+   first reliable samples, inside their first match window. */
+static void flap_duplicates_checks(void){
+    RantNodeOpts o = rc_opts(TEST_DOMAIN + 4, "B");
+    RantNode *A1, *A2 = NULL, *B; RantTopic *sub, *pub = NULL; uint16_t port = 0;
+    int first, i, dups = 0, downs = 0; uint8_t pb[8];
+    rc_reset();
+    B = rc_open(o, "fd-b");
+    sub = rc_topic(B, "fd/flap", RANT_SUB_ONLY, 1, 16, 0);
+    o.user_data = (void *)"A1";
+    A1 = rc_open(o, "fd-old");
+    (void)rc_topic(A1, "fd/flap", RANT_PUB_ONLY, 1, 16, 0);
+    CHECK(A1 && B && sub, "flap duplicates: nodes up");
+    if (!(A1 && B && sub)) goto done;
+    port = i_rant_plat_local_port(A1->fd);
+    PUMP_UNTIL(A1, B, 5000, rc_pubs(sub) == 1);
+    test_pump(A1, B, 800);
+    rc_hold_node = B; rc_hold_port = port; wire_tap_hold_if = rc_hold_announce;
+    (void)rc_topic(A1, "fd/extra", RANT_PUB_ONLY, 0, 0, 0);
+    PUMP_UNTIL(A1, B, 1000, wire_tap_held());
+    wire_tap_hold_if = NULL;
+    CHECK(wire_tap_held(), "flap duplicates: a copy of the old process's announce is kept");
+    rant_node_close(A1, 1); A1 = NULL;
+    test_pump(B, NULL, 50);                                 /* B hears the BYE */
+    first = rc_nevents;
+    o.user_data = (void *)"A2"; o.net.data_port = port;
+    A2 = rc_open(o, "fd-new");
+    pub = rc_topic(A2, "fd/flap", RANT_PUB_ONLY, 1, 16, 0);
+    CHECK(A2 && pub && i_rant_plat_local_port(A2->fd) == port, "flap duplicates: the new process binds port %u", port);
+    if (!(A2 && pub)) goto done;
+    PUMP_UNTIL(A2, B, 2000, rc_pubs(sub) == 1 && rant_topic_match_count(pub) == 1);
+    for (i = 1; i <= 5; i++){ memset(pb, 0, sizeof pb); pb[0] = (uint8_t)i; rant_topic_send(pub, rant_bytes(pb, sizeof pb), NULL); }
+    PUMP_UNTIL(A2, B, 1000, rc_msgs >= 5);
+    wire_tap_release();
+    test_pump(A2, B, 1500);
+    for (i = 1; i <= 5; i++) if (rc_got[i] > 1) dups++;
+    for (i = first; i < rc_nevents; i++) downs += rc_events[i].kind == RANT_PEER_DOWN && !strcmp(rc_events[i].who, "B");
+    CHECK(!wire_tap_held() && downs == 0 && rc_msgs == 5 && dups == 0,
+          "flap duplicates: B keeps the new process past the late copy and its app gets each sample once (%d downs, %u deliveries)",
+          downs, rc_msgs);
+    if (downs || dups) (void)rc_events_of(first, "B", 1);
+done:
+    wire_tap_hold_clear();
+    if (A1) rant_node_close(A1, 1);
+    if (A2) rant_node_close(A2, 1);
     if (B) rant_node_close(B, 1);
 }
 
@@ -189,8 +330,11 @@ done:
 }
 
 static const TestCase cases[] = {
-    { "older_blob", older_blob_checks },
-    { "old_epoch",  old_epoch_checks },
+    { "older_blob",      older_blob_checks },
+    { "bye_ghost",       bye_ghost_checks },
+    { "restart_evict",   restart_evict_checks },
+    { "flap_duplicates", flap_duplicates_checks },
+    { "old_epoch",       old_epoch_checks },
 };
 
 TEST_MAIN(cases)

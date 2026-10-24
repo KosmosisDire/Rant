@@ -253,9 +253,17 @@ forgets the newcomer, or for a match the oldest unmatched record (Records and sl
 the timeout. One helper fires PEER_DOWN then frees the slot for BYE, both eviction sweeps,
 allocation eviction and GONE promotion.
 
+A uuid that said BYE is kept one announce interval in a ring of 16 (`RANT_DISCOVERY_LEFT`,
+known or not), and any other datagram from it is dropped. It was sent before the BYE and read
+after, as a unicast read after the group datagrams of one pass, or one WiFi or the bridge
+delivered late, and would bring the peer back as a first contact for the whole peer timeout.
+A new process always has a new uuid, so nothing live is dropped. More than 16 BYEs in one
+interval push the oldest out, which can let such a datagram through again.
+
 A new uuid announcing from an (ip, port) we already hold evicts the predecessor as GONE
-first: one socket is one process, so it is provably dead. A port of 0 is not an endpoint, so
-it never triggers the eviction. When a hook
+first: one socket is one process, so it is provably dead. A late datagram from a predecessor
+that said BYE is dropped by the ring above, so it never evicts its successor. A port of 0 is
+not an endpoint, so it never triggers the eviction. When a hook
 allocation for a bigger blob fails, the stale blob and version are kept and the
 advertised version stays ahead, so the fetch retries.
 

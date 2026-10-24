@@ -1054,6 +1054,16 @@ static void judge_checks(void){
     jg_blob(st, 8, F_ONE, 1, YES, t);
     CHECK(dc_up_n == 0 && jg_asks == asks && i_rant_discovery_slots_used(st) == k,
           "judge: an older blob read late is never judged, so it takes no slot back");
+
+    k = (int)jg_seen_up;
+    jg_head(st, 8, RANT_DISCOVERY_FLAG_BYE, 2, 0, t);
+    jg_head(st, 9, RANT_DISCOVERY_FLAG_BYE, 1, 0, t);        /* never heard before */
+    jg_blob(st, 8, F_ONE, 2, YES, t + 1000u);
+    jg_blob(st, 9, F_ONE, 1, YES, t + 1000u);
+    CHECK(jg_seen_up == (uint32_t)k && jg_id(st, 8) == 0 && jg_id(st, 9) == 0,
+          "judge: a datagram read after its sender's BYE brings no peer back, known or not");
+    jg_blob(st, 9, F_ONE, 1, YES, t + c.announce_interval_us);
+    CHECK(jg_id(st, 9) != 0, "judge: a BYE is remembered one announce interval");
 }
 
 /* What the node reads while peers come and go without a slot: a held match stays one while

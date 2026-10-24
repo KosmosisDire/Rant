@@ -13,6 +13,7 @@
 #define RANT_DISCOVERY_SWEEPS 4u               /* timeout sweeps per announce interval */
 #define RANT_DISCOVERY_JUDGE_MARGIN_US 250000u /* a peer's change this close to ours is not assumed judged */
 #define RANT_DISCOVERY_LOOSE 8u                /* replies owed to askers that have no record */
+#define RANT_DISCOVERY_LEFT 16u                /* uuids that said BYE, each kept one announce interval */
 
 /* What only a peer holding a slot needs. max_peers counts slots. */
 typedef struct {
@@ -64,6 +65,10 @@ struct i_RantDiscoveryState {
     uint64_t      forgot_us;      /* when a live peer was last forgotten for room, 0 = never */
     i_RantDiscoveryLoose loose[RANT_DISCOVERY_LOOSE];
     uint8_t       n_loose;
+    /* uuids that said BYE lately, a ring. A datagram from one was sent before it */
+    uint8_t       left[RANT_DISCOVERY_LEFT][16];
+    uint64_t      left_us[RANT_DISCOVERY_LEFT];   /* when each said it, 0 = empty */
+    uint8_t       left_next;
     i_RantDiscoveryRecords records;
     i_RantDiscoverySlot   *slots;   /* [cap_peers] */
 };
@@ -898,6 +903,26 @@ static void i_rant_discovery_loose_owe(i_RantDiscoveryState *st, const RantAddr 
     memcpy(l->ip, a->ip, 16); l->ip_len = a->ip_len; l->port = a->port; l->due_us = due_us;
 }
 
+/* Notes a uuid that said BYE. One already in the ring is noted again in its place. */
+static void i_rant_discovery_left_note(i_RantDiscoveryState *st, const uint8_t uuid[16], uint64_t now){
+    uint8_t i;
+    if (!now) now = 1u;
+    for (i = 0; i < RANT_DISCOVERY_LEFT; i++)
+        if (st->left_us[i] && memcmp(st->left[i], uuid, 16) == 0){ st->left_us[i] = now; return; }
+    memcpy(st->left[st->left_next], uuid, 16);
+    st->left_us[st->left_next] = now;
+    st->left_next = (uint8_t)((st->left_next + 1u) % RANT_DISCOVERY_LEFT);
+}
+
+/* 1 when uuid said BYE within the last announce interval. */
+static int i_rant_discovery_left_lately(const i_RantDiscoveryState *st, const uint8_t uuid[16], uint64_t now){
+    uint8_t i;
+    for (i = 0; i < RANT_DISCOVERY_LEFT; i++)
+        if (st->left_us[i] && now - st->left_us[i] < st->cfg.announce_interval_us
+            && memcmp(st->left[i], uuid, 16) == 0) return 1;
+    return 0;
+}
+
 /* A source that found no record is forgotten, and judged again each time its blob passes
  * by. A match among them is refused, and a solicit is answered from the loose queue. */
 static void i_rant_discovery_stranger(i_RantDiscoveryState *st, const i_RantDiscoveryWire *w,
@@ -938,10 +963,12 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     rec = i_rant_discovery_rec(st, ri);
 
     if (w.flags & RANT_DISCOVERY_FLAG_BYE){
+        i_rant_discovery_left_note(st, w.uuid, now);
         if (rec) i_rant_discovery_peer_gone(st, ri);     /* a BYE is GONE */
         if (st->slots_opened) i_rant_discovery_offer_slots(st, now);
         return;
     }
+    if (i_rant_discovery_left_lately(st, w.uuid, now)) return;    /* sent before its BYE, read after */
 
     /* The IP is a candidate from the source, the port the one every datagram names. See
        spec/discovery.md. */
