@@ -136,7 +136,8 @@ RANT_API int    rant_function_match_count(RantFunction *fn);
  * the node, it assumes no other thread is inside a call on the handle. */
 RANT_API int    rant_function_retire(RantFunction *fn);
 /* A reflect_from_mesh handle: re types every channel in place when the generation moved.
- * 1 re typed, 0 current, negative on error, RANT_ERR_ROLE without the flag. */
+ * 1 re typed, 0 current, negative on error, RANT_ERR_ROLE without the flag, RANT_ERR_STATE
+ * from a callback or while a channel's dispatch runs. */
 RANT_API int    rant_function_refresh(RantFunction *fn);
 /* The schemas a function or task handle uses now, NULL when untyped. A function has no
  * progress schema. A reflect_from_mesh handle reports what it adopted. */

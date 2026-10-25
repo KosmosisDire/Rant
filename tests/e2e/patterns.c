@@ -1214,6 +1214,92 @@ static void handle_gate_checks(void){
     rant_allocator_reset(&aa); rant_allocator_reset(&ba); rant_allocator_reset(&ma);
 }
 
+/* Refresh on a live channel: a reflect remote adopts its owner's type while the owner writes
+ * nonstop, so the retype frees lanes the remote's service thread receives on. Each round
+ * takes a new name, since a handle re types once per owner generation. */
+#define RL_ROUNDS 100
+static RantVariable *rl_remote;
+static long long rl_armed, rl_rc;
+static void rl_on_message(const RantMsg *m){
+    (void)m;
+    if (test_atomic_load(&rl_armed) != 1) return;
+    test_atomic_store(&rl_rc, rant_variable_refresh(rl_remote));
+    test_atomic_store(&rl_armed, 2);
+}
+/* 1 once n's mesh view holds the owner of the variable name */
+static int rl_known(RantNode *n, const char *name){
+    const RantSchema *ms = NULL; uint64_t gen = 0;
+    return i_rant_node_reflect_pick(n, RANT_ENTITY_VARIABLE, name, 0, 0, &ms, NULL, &gen) && gen != 0;
+}
+static void refresh_live_checks(void){
+#ifndef RANT_THREADS
+    test_skip("needs service threads");
+#else
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *A, *B; const RantSchema *s = NULL;
+    RantTopic *tick = NULL, *sub = NULL; RantVariable *own = NULL, *rem = NULL;
+    int k, adopted = 0, live = 0;
+    memset(&o, 0, sizeof o);
+    o.domain = TEST_DOMAIN+41; o.disable_shm = 1; o.discovery.max_peers = 4;
+    o.net.multicast_interface = "127.0.0.1";
+    A = rant_node_open(&aa, "rl-owner", NULL, NULL, &o);
+    B = rant_node_open(&ba, "rl-remote", rl_on_message, NULL, &o);
+    CHECK(A && B, "refresh_live: nodes open");
+    if (A && B){
+        s = rant_node_schema(A, "RlValue { y: f64 }");
+        tick = rant_node_create_topic(A, "rl/tick", RANT_PUB_ONLY, NULL, NULL);
+        sub = rant_node_create_topic(B, "rl/tick", RANT_SUB_ONLY, NULL, NULL);
+        rant_node_start(A); rant_node_start(B);
+    }
+    for (k = 0; s && k < RL_ROUNDS; k++){
+        char name[32]; double y = 0; int r = 0, saw = 0, typed;
+        uint64_t end = i_rant_plat_now_us() + 5000000u;
+        snprintf(name, sizeof name, "rl/v%d", k);
+        own = rant_node_create_variable_definition(A, name, s, NULL);
+        rem = rant_node_create_remote_variable(B, name, NULL, &(RantVariableOpts){ .reflect_from_mesh = 1 });
+        /* a remote made after the owner's details arrived is typed at create, with no retype */
+        while (own && rem && !rant_variable_schema(rem) && i_rant_plat_now_us() < end){
+            RantBytes v; int i;
+            for (i = 0; i < 20; i++){ y += 1; rant_variable_set(own, rant_bytes(&y, sizeof y)); }
+            if (rant_variable_get(rem, &v) == 1) saw = 1;
+            r = rant_variable_refresh(rem);
+        }
+        typed = rem && rant_variable_schema(rem);
+        if (rem) rant_variable_retire(rem);
+        if (own) rant_variable_retire(own);
+        if (!typed) break;
+        adopted++;
+        if (r == 1 && saw) live++;
+    }
+    CHECK(adopted == RL_ROUNDS, "refresh_live: every round took the owner's type (%d of %d)",
+             adopted, RL_ROUNDS);
+    CHECK(live > 0, "refresh_live: the retype ran while values arrived (%d rounds)", live);
+
+    /* from a callback the refresh is refused: the retype would free lanes in use there. The
+       remote comes first, so it is never typed at create */
+    own = rem = NULL;
+    if (s && tick && sub){
+        rem = rant_node_create_remote_variable(B, "rl/cb", NULL, &(RantVariableOpts){ .reflect_from_mesh = 1 });
+        own = rant_node_create_variable_definition(A, "rl/cb", s, NULL);
+    }
+    if (own && rem){
+        WAIT_UNTIL(5000, rant_topic_match_count(tick) > 0 && rl_known(B, "rl/cb"));
+        rl_remote = rem; test_atomic_store(&rl_armed, 1);
+        for (k = 0; k < 500 && test_atomic_load(&rl_armed) != 2; k++){
+            rant_topic_send(tick, rant_bytes("t", 1), NULL);
+            test_sleep_ms(10);
+        }
+        CHECK(test_atomic_load(&rl_armed) == 2 && test_atomic_load(&rl_rc) == RANT_ERR_STATE,
+                 "refresh_live: a refresh from a callback is refused (%lld)", test_atomic_load(&rl_rc));
+        CHECK(rant_variable_refresh(rem) == 1, "refresh_live: the same refresh outside it re types");
+    }
+    if (A) rant_node_close(A, 0);
+    if (B) rant_node_close(B, 0);
+    rl_remote = NULL; test_atomic_store(&rl_armed, 0);
+    rant_allocator_reset(&aa); rant_allocator_reset(&ba);
+#endif
+}
+
 static const TestCase cases[] = {
     { "patterns", patterns_checks },
     { "variable_wait", varwait_checks },
@@ -1224,6 +1310,7 @@ static const TestCase cases[] = {
     { "sync_capture", sync_capture_checks },
     { "one_announce", one_announce_checks },
     { "handle_gate", handle_gate_checks },
+    { "refresh_live", refresh_live_checks },
 };
 
 TEST_MAIN(cases)

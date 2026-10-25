@@ -74,7 +74,7 @@ program in this order.
 | `e2e.detail` | detail_live, interest_external, interest_bulk, filter_fetch |
 | `e2e.shm` | shm_node |
 | `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
-| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate |
+| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate, refresh_live |
 | `e2e.tasks` | task, task_matrix |
 | `e2e.entities` | reflect_dropped, churn, republish, log_and_meta, status, rant_conditions, rant_refused, rant_partial, rant_cap |
 | `e2e.matchwait` | matchwait |
@@ -405,6 +405,14 @@ What each phase pins, grouped by layer.
   Every call is answered and no handler runs before its rsp lane. Without the gate 19 of
   20 replies went to a missing lane. The provider's match wait is off, so the case needs
   no sleep past the window.
+- Refresh on a live channel: 100 rounds, each a reflect remote variable adopting its
+  owner's type by refresh while the owner writes nonstop, so the retype frees lanes the
+  remote's service thread receives on. Every round takes the type, and the retype follows
+  arriving values in half to nearly all of them, by timing. A remote made after the owner's
+  details arrived is typed at create and its refresh answers 0. While the retype ran
+  without the node lock, that thread read a freed lane mid delivery: 9 of 14 runs of 3000
+  rounds crashed or hung, and a TSan build reports it. A refresh from a callback is
+  refused with `RANT_ERR_STATE`.
 - Variables: a typed remote force and unforce pass the schema gate through the empty
   payload exemption, on_change dedups and replays, on_write fires on every write, a
   reentrant set inside on_write commits before the outer publish so the owner skips the

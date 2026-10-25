@@ -961,13 +961,14 @@ int rant_function_refresh(RantFunction *fn){
     i_rant_func_drain_defers(fn, "provider re-typed");
     while (fn->pending) i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0, 0);
     i_rant_func_drop_parked(fn);
-    i_rant_node_sys_unlock(n, acquired);
     i_rant_node_flush_tx(n);
+    /* held through the retypes, which free lanes the service thread reads under the lock */
     i_rant_node_advertise_hold(n);
     r = i_rant_topic_retype(fn->req, rq, RANT_RELIABLE);
     if (r == 0) r = i_rant_topic_retype(fn->rsp, rs, RANT_RELIABLE);
     if (r == 0 && fn->prg) r = i_rant_topic_retype(fn->prg, pg, i_rant_topic_reliability(fn->prg));
     i_rant_node_advertise_release(n);
+    i_rant_node_sys_unlock(n, acquired);
     if (r != 0) return r;
     fn->generation = gen;
     return 1;
@@ -1729,7 +1730,7 @@ const RantSchema *rant_variable_schema(const RantVariable *var){
 }
 
 int rant_variable_refresh(RantVariable *var){
-    RantNode *n; uint64_t gen = 0; int r;
+    RantNode *n; uint64_t gen = 0; int acquired, r;
     const RantSchema *ms = NULL;
     if (!var) return RANT_ERR_NO_TOPIC;
     if (!var->reflect) return RANT_ERR_ROLE;
@@ -1737,10 +1738,16 @@ int rant_variable_refresh(RantVariable *var){
     if (!i_rant_node_reflect_pick(n, RANT_ENTITY_VARIABLE, i_rant_pat_base_name(var->value), 0,
                                   var->is_owner, &ms, NULL, &gen)
         || gen == var->generation) return 0;
+    /* held through the retypes, which free lanes the service thread reads under the lock */
+    acquired = i_rant_node_sys_lock(n);
+    if (!acquired || i_rant_topic_busy(var->value)){
+        i_rant_node_sys_unlock(n, acquired); return RANT_ERR_STATE;
+    }
     i_rant_node_advertise_hold(n);
     r = i_rant_topic_retype(var->value, ms, RANT_RELIABLE);
     if (r == 0 && var->set) r = i_rant_topic_retype(var->set, ms, RANT_RELIABLE);
     i_rant_node_advertise_release(n);
+    i_rant_node_sys_unlock(n, acquired);
     if (r != 0) return r;
     var->generation = gen;
     return 1;

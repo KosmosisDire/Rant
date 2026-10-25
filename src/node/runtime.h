@@ -153,7 +153,7 @@ RANT_API RantTopic *rant_node_create_topic(RantNode *n, const char *name, RantRo
  * callback, for a pattern channel or a builtin, or during a dispatch. See docs/topics.md. */
 RANT_API int rant_topic_retire(RantTopic *topic);
 /* A reflect_from_mesh topic: re reads the mesh and re types the handle in place when the
- * provider moved. 1 re created, 0 current, negative on error. */
+ * provider moved. 1 re created, 0 current, negative on error, RANT_ERR_STATE from a callback. */
 RANT_API int rant_topic_refresh(RantTopic *topic);
 
 /* Callback queues: a handle created with opts.queue parks each callback as a record on its
@@ -349,7 +349,8 @@ RantTopic *i_rant_node_create_pattern_topic(RantNode *n, const char *name, RantR
  * after a leading '/'. NULL with RANT_E_BAD_NAME when it is empty, holds '@' or will not fit
  * with room bytes of channel suffix. buf holds RANT_TOPIC_NAME_MAX + 1. */
 const char *i_rant_node_mesh_name(RantNode *n, const char *name, size_t room, char *buf);
-/* Re types a live pattern channel in place, the engine of rant_topic_refresh. Lock not held. */
+/* Re types a live pattern channel in place, the engine of every refresh. Lock held, outside
+ * any callback. */
 int  i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reliability);
 /* rant_topic_set_role with the node lock already held, from outside any callback. */
 int  i_rant_topic_set_role_held(RantTopic *topic, RantRole role);
