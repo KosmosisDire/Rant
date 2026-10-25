@@ -33,6 +33,7 @@ extern "C" {
 #define RANT_DISCOVERY_FLAG_ALL  0x08u   /* an observer's solicit: every peer answers at once */
 #define RANT_DISCOVERY_FLAG_BLOB 0x10u   /* the overlay follows the name, maybe empty */
 #define RANT_DISCOVERY_FLAG_ONE  0x20u   /* a targeted send or a plain copy: a REQ is answered at once, no copies */
+#define RANT_DISCOVERY_FLAG_FULL 0x40u   /* a match the sender holds no slot for: hold none for it until it holds us */
 
 typedef struct {
     uint8_t        flags;

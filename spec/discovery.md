@@ -58,15 +58,16 @@ Every discovery datagram is, little endian:
 
 The flags are BYE 0x01, REQ 0x02 (a solicit: answer with your blob), UNI 0x04 (a copy by
 unicast: copy your announces back), ALL 0x08 (an observer's solicit: answer at once), BLOB
-0x10 (the blob follows the name, maybe empty) and ONE 0x20 (a targeted send or a plain copy,
-whose sender holds our blob: a REQ in it is answered at once, and it starts no copies). A steady state announce carries no blob. A
+0x10 (the blob follows the name, maybe empty), ONE 0x20 (a targeted send or a plain copy,
+whose sender holds our blob: a REQ in it is answered at once, and it starts no copies) and FULL
+0x40 (a match the sender holds no slot for, Telling a refused match). A steady state announce carries no blob. A
 datagram longer or shorter than its fields say is malformed, except one whose blob arrived
 short: the OS cut it to our buffer, and the stated length says how big the peer is.
 `i_rant_discovery_encode` and `i_rant_discovery_decode` are the one codec. The change age
 is the sender's clock read when it builds the datagram, so a stale clock reads young.
 Version history: v3 added the versioned blob, v4 and v5 relaying, which v6 removed. v8 moved
 the data port and name out of the blob into every datagram and added the change age and
-the flags UNI, ALL and ONE. Since
+the flags UNI, ALL, ONE and FULL. Since
 v5 the number versions everything that crosses the wire, discovery or not, and any change to it
 bumps the number. The first eight bytes (magic, version, flags, domain) keep their place in
 every version, so a datagram of this domain on another version is recognized from them
@@ -123,7 +124,8 @@ cannot grow. A forgotten peer has no record:
 - A match among them takes the record of a live peer that holds no slot and wants none, the
   oldest heard of those the group reaches, else of those heard by UNI. That peer is
   forgotten, the seen hook hearing it go, and the match goes the first contact path. With no
-  such record to take, the match is refused under no id.
+  such record to take, the match is refused under no id, and told FULL without ONE when it
+  asks or says it holds us.
 - A source heard by a UNI copy takes such a record too, but only one the group reaches. Only
   a record's UNI copies carry our changes to it, while a peer the group reaches still hears
   them and asks us when one meets it, so forgetting it loses nothing.
@@ -184,6 +186,23 @@ A blob past our bound, cut by the OS or bigger than `meta_cap`, leaves the heade
 counts and makes the record. Its fetch stops until a newer version, or a migrate that grew
 the bound, which fetches that peer alone.
 
+### Telling a refused match
+
+A refused match would otherwise hold a slot for us and count us matched, and a reliable
+writer there would wait on acks that never come. So a core that cannot grow marks FULL every
+targeted send to a match it holds no slot for and promised none, and owes such a peer a reply
+whenever a datagram marked ONE comes from it, since that says it holds us. A core with the
+hook grows at the next poll instead and never says FULL.
+
+- A peer told FULL gives back the slot it holds for the sender and takes none for it until a
+  datagram marked ONE without FULL comes from it. The sender's fetch for an opened slot is
+  one. Then the sender's blob is judged again, fetched first when that datagram lacks it.
+- Meanwhile its blobs are judged but take no slot, ask nothing and want no slot, and
+  `refetch_unmatched` skips it.
+- FULL with ONE comes from a record, which fetches the peer once a slot opens. FULL without
+  ONE comes from a core that kept no record of it and so cannot, so each datagram of that
+  core without ONE, its announce, asks it again once.
+
 ## The filter
 
 A record judged no match keeps a filter of the keys its blob carries, so a topic of ours that
@@ -210,9 +229,9 @@ match are asks, sent with REQ at once, then every 250 ms, four sends:
 
 | owed | sent as | when |
 |---|---|---|
-| reply | BLOB\|ONE | A solicit marked UNI, ONE or ALL: at once. A group solicit: within one ms per live peer, placed by a hash of both uuids, so a crowd's answers spread |
-| fetch | REQ\|ONE\|BLOB | While the peer advertises a version past the one judged, unless that one is too big to hold, and while a slot opened for it or the bound grew. A datagram after the last send starts over, with one send when the last ask went unanswered, as from a peer that refused us. The blob judged ends it, and so does one too big to hold, since a retry brings the same bytes |
-| match | REQ\|ONE\|BLOB | A match the peer may not know of (Judging on arrival). Any datagram marked ONE from the peer ends it: it holds our blob, or asks and our reply follows |
+| reply | BLOB\|ONE | A solicit marked UNI, ONE or ALL: at once. A group solicit: within one ms per live peer, placed by a hash of both uuids, so a crowd's answers spread. A datagram marked ONE from a match we hold no slot for: at once, marked FULL (Telling a refused match) |
+| fetch | REQ\|ONE\|BLOB | While the peer advertises a version past the one judged, unless that one is too big to hold, and while a slot opened for it or the bound grew. A datagram after the last send starts over, with one send when the last ask went unanswered. The blob judged ends it, and so does one too big to hold, since a retry brings the same bytes |
+| match | REQ\|ONE\|BLOB | A match the peer may not know of (Judging on arrival). Any datagram marked ONE from the peer ends it: it holds our blob, or asks and our reply follows. So does FULL |
 
 An ask carries our blob, so it settles a reply owed too. The records owed work sit on one
 due queue in the record store, oldest first, so a poll walks only them. Each send settles
@@ -220,7 +239,8 @@ its record or moves it to the tail with a later due time, and a peer that drops 
 nothing. Nothing goes out before the opening.
 
 A solicit from a peer with no record owes a reply from the loose queue: 8 entries in the
-core (`RANT_DISCOVERY_LOOSE`), each a locator and a due time, timed as a record's reply and
+core (`RANT_DISCOVERY_LOOSE`), each a locator, a due time and whether its blob met us, which
+marks the reply FULL in place of ONE, timed as a record's reply and
 sent by `poll_targeted` the same way. A second solicit from a queued locator keeps the
 earlier time, and a full queue drops the solicit, since the asker asks again in 250 ms.
 

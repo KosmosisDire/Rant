@@ -45,7 +45,8 @@ the slot of the oldest dropped peer. With none:
 
 - On `rant_allocator_dynamic` the table grows at once to fit every match.
 - On `rant_allocator_static` the match is refused with `RANT_E_PEER_REFUSED`, which means
-  raise `max_peers`, and admitted once a slot frees.
+  raise `max_peers`, and admitted once a slot frees. The refused peer is told, so it counts
+  no match with this node and its reliable sends never wait on it.
 
 A node on `rant_allocator_static` takes all its records at open, `RANT_RECORDS_PER_PEER`
 (4) per slot, so a crowd of unrelated peers costs it no memory later. Past them the oldest

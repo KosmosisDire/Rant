@@ -1123,7 +1123,8 @@ static void unmatched_checks(void){
    gives the slot to the next, and is fetched again only when heard, once. */
 static void offer_checks(void){
     static uint8_t mem[16384];
-    const uint8_t F_ONE = RANT_DISCOVERY_FLAG_ONE, NO = I_RANT_ADMIT_NO, YES = I_RANT_ADMIT_YES;
+    const uint8_t F_ONE = RANT_DISCOVERY_FLAG_ONE, F_BLOB = RANT_DISCOVERY_FLAG_BLOB, F_FULL = RANT_DISCOVERY_FLAG_FULL;
+    const uint8_t NO = I_RANT_ADMIT_NO, YES = I_RANT_ADMIT_YES;
     uint8_t out[RANT_DISCOVERY_WIRE_MAX];
     i_RantDiscoveryCoreConfig c; i_RantDiscoveryState *st;
     uint64_t t = 1000000u; int fl, k, n; uint16_t port; uint32_t refused;
@@ -1137,6 +1138,8 @@ static void offer_checks(void){
     jg_blob(st, 1, F_ONE, 1, YES, t);
     jg_blob(st, 2, F_ONE, 1, YES, t);
     jg_blob(st, 3, F_ONE, 1, YES, t);
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(k == 2 && fl == (F_ONE|F_BLOB|F_FULL), "offer: each refused match that holds us is told FULL (%d, flags %d)", k, fl);
     jg_blob(st, 1, F_ONE, 2, NO, t);
     for (k = 0, n = 0; k < 4; k++) n += dc_drain(st, t + (uint64_t)k * 250000u, &fl, &port) == 1 && port == 5002;
     CHECK(dc_refused_n == 2 && n == 4, "offer: a given back slot fetches the first waiting record four times (%d)", n);
@@ -1160,6 +1163,107 @@ static void offer_checks(void){
         k += dc_drain(st, t, &fl, &port);
     }
     CHECK(n && k == 0, "offer: heard again it is fetched once, and not after (%d sent after)", k);
+}
+
+/* FULL both ways. A core that cannot grow tells a match it holds no slot for, whenever that
+   peer asks or says it holds us, and fetches it without FULL once a slot opens. A peer told
+   FULL gives its slot back and takes none until a datagram marked ONE without FULL, and asks
+   again at each announce of a core that kept no record of it. A core that can grow never says it. */
+static void full_checks(void){
+    static uint8_t mem[16384];
+    const uint8_t F_REQ = RANT_DISCOVERY_FLAG_REQ, F_BLOB = RANT_DISCOVERY_FLAG_BLOB, F_ONE = RANT_DISCOVERY_FLAG_ONE,
+                  F_FULL = RANT_DISCOVERY_FLAG_FULL;
+    const uint8_t NO = I_RANT_ADMIT_NO, YES = I_RANT_ADMIT_YES;
+    RantAllocator ma = rant_allocator_heap(0);
+    uint8_t out[RANT_DISCOVERY_WIRE_MAX];
+    i_RantDiscoveryCoreConfig c; i_RantDiscoveryState *st;
+    uint64_t t = 1000000u; int fl, f1, k, k2; uint16_t port; uint32_t asks;
+
+    jg_config(&c, 1);
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    CHECK(st != NULL, "full: init");
+    if (!st) return;
+    i_rant_discovery_update(st, t, out, sizeof out);
+    dc_refused_n = 0;
+    jg_blob(st, 1, F_ONE, 1, YES, t);
+    jg_blob(st, 2, 0, 1, YES, t);
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(dc_refused_n == 1 && k == 0, "full: a match heard from the group with no slot is refused and told nothing yet");
+    jg_blob(st, 2, (uint8_t)(F_REQ|F_ONE), 1, YES, t);
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(k == 1 && port == 5002 && fl == (F_ONE|F_BLOB|F_FULL), "full: its ask is answered FULL (flags %d)", fl);
+    jg_head(st, 2, F_ONE, 1, 0, t);
+    k = dc_drain(st, t, &fl, &port);
+    jg_head(st, 2, 0, 1, 0, t);
+    k2 = dc_drain(st, t, &fl, &port);
+    CHECK(k == 1 && k2 == 0, "full: a plain copy from it, which says it holds us, is told FULL, its group announce nothing");
+    jg_blob(st, 1, F_ONE, 2, NO, t);
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(k == 1 && port == 5002 && fl == (F_REQ|F_ONE|F_BLOB), "full: once a slot opens its fetch carries no FULL (flags %d)", fl);
+
+    jg_config(&c, 1);
+    c.alloc = rant_allocator_alloc; c.alloc_user = &ma;
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    i_rant_discovery_update(st, t, out, sizeof out);
+    jg_blob(st, 1, F_ONE, 1, YES, t);
+    jg_blob(st, 2, (uint8_t)(F_REQ|F_ONE), 1, YES, t);
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(k == 1 && fl == (F_ONE|F_BLOB), "full: a core that can grow never says FULL, as it grows instead (flags %d)", fl);
+    i_rant_discovery_destroy(st);
+    rant_allocator_reset(&ma);
+
+    jg_config(&c, 2);
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    i_rant_discovery_update(st, t, out, sizeof out);
+    dc_up_n = dc_down_n = 0;
+    jg_blob(st, 9, 0, 1, YES, t);
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(i_rant_discovery_slots_used(st) == 1 && k == 1 && fl == (F_REQ|F_ONE|F_BLOB), "full: a match takes a slot and asks back");
+    jg_blob(st, 9, (uint8_t)(F_ONE|F_FULL), 1, YES, t);
+    CHECK(dc_down_n == 1 && dc_down_reason == (int)RANT_DISCOVERY_GIVE_BACK && i_rant_discovery_slots_used(st) == 0
+          && dc_drain(st, t + 250000u, &fl, &port) == 0,
+          "full: told FULL it gives the slot back and stops asking");
+    asks = jg_asks;
+    jg_blob(st, 9, 0, 1, YES, t);
+    jg_blob(st, 9, 0, 2, YES, t);
+    i_rant_discovery_refetch_unmatched(st, NULL, NULL);
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(jg_asks == asks + 2 && i_rant_discovery_slots_used(st) == 0 && dc_up_n == 1 && k == 0
+          && i_rant_discovery_slots_wanted(st) == 0,
+          "full: its blobs are judged but take no slot, ask nothing, want nothing, and a grown want set skips it");
+    jg_blob(st, 9, (uint8_t)(F_REQ|F_ONE), 2, YES, t);
+    k = dc_drain(st, t, &fl, &port);
+    CHECK(i_rant_discovery_slots_used(st) == 1 && dc_up_n == 2 && k == 1 && fl == (F_ONE|F_BLOB),
+          "full: its fetch without FULL says it holds us, so the slot comes back and the fetch is answered");
+    jg_blob(st, 8, 0, 1, YES, t);
+    (void)dc_drain(st, t, &fl, &port);
+    jg_blob(st, 8, (uint8_t)(F_ONE|F_FULL), 1, YES, t);
+    jg_head(st, 8, F_ONE, 1, 0, t + 1000u);
+    k = dc_drain(st, t + 1000u, &fl, &port);
+    jg_blob(st, 8, F_ONE, 1, YES, t + 1000u);
+    CHECK(k == 1 && port == 5008 && fl == (F_REQ|F_ONE|F_BLOB) && i_rant_discovery_slots_used(st) == 2,
+          "full: a plain copy without FULL fetches its blob again, and the answer takes the slot");
+
+    jg_config(&c, 2);
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    i_rant_discovery_update(st, t, out, sizeof out);
+    jg_blob(st, 7, 0, 1, YES, t);
+    (void)dc_drain(st, t, &fl, &port);
+    jg_blob(st, 7, F_FULL, 1, YES, t);
+    CHECK(i_rant_discovery_slots_used(st) == 0 && dc_drain(st, t, &fl, &port) == 0, "full: FULL without ONE gives the slot back too");
+    jg_head(st, 7, 0, 1, 0, t + 1000u);
+    k = dc_drain(st, t + 1000u, &fl, &port);
+    f1 = fl;
+    k2 = dc_drain(st, t + 251000u, &fl, &port);
+    CHECK(k == 1 && f1 == (F_REQ|F_ONE|F_BLOB) && k2 == 0,
+          "full: it kept no record of us, so its announce is asked again, once (%d then %d, flags %d)", k, k2, f1);
+    jg_head(st, 7, 0, 1, 0, t + 300000u);
+    k = dc_drain(st, t + 300000u, &fl, &port);
+    jg_blob(st, 7, (uint8_t)(F_ONE|F_FULL), 1, YES, t + 300000u);
+    jg_head(st, 7, 0, 1, 0, t + 600000u);
+    k2 = dc_drain(st, t + 600000u, &fl, &port);
+    CHECK(k == 1 && k2 == 0 && i_rant_discovery_slots_used(st) == 0,
+          "full: each announce asks once, and FULL with ONE, from a record of us, ends the asking");
 }
 
 /* The filter narrows the fetch of a grown want set: a record whose current blob was judged no
@@ -1270,6 +1374,10 @@ static void forgotten_checks(void){
     for (k = 0, found = 0; k < nt; k++) found |= tr[k].kind == RANT_E_PEER_REFUSED && !tr[k].peer && tr[k].addr.port == 5006;
     CHECK(!jg_id(st, 6) && dc_refused_n == refused + 2u && found,
           "forgotten: a match with no record to take is refused with no id");
+    jg_blob(st, 6, (uint8_t)(F_REQ|F_ONE), 1, YES, t + 3000u);
+    k = dc_drain(st, t + 3000u, &fl, &port);
+    CHECK(!jg_id(st, 6) && k == 1 && port == 5006 && fl == (RANT_DISCOVERY_FLAG_FULL|F_BLOB),
+          "forgotten: its ask is answered FULL without ONE, as no record of it is kept (flags %d)", fl);
 
     jg_config(&c, 2);
     c.max_records = 3;
@@ -1614,6 +1722,7 @@ static const TestCase cases[] = {
     { "judge",          judge_checks },
     { "unmatched",      unmatched_checks },
     { "offer",          offer_checks },
+    { "full",           full_checks },
     { "filter",         filter_checks },
     { "forgotten",      forgotten_checks },
     { "churn",          churn_checks },

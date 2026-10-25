@@ -29,8 +29,9 @@ typedef struct {
     struct { uint8_t ip[16]; uint8_t ip_len; uint64_t heard_us; } paths[4];
 } i_RantDiscoverySlot;
 
-/* A reply owed to an asker that has no record here, sent as a record's reply. */
-typedef struct { uint8_t ip[16]; uint8_t ip_len; uint16_t port; uint64_t due_us; } i_RantDiscoveryLoose;
+/* A reply owed to an asker that has no record here, sent as a record's reply. full: it met us,
+ * so the reply says FULL without ONE, as we keep no record of it. */
+typedef struct { uint8_t ip[16]; uint8_t ip_len; uint16_t port; uint8_t full; uint64_t due_us; } i_RantDiscoveryLoose;
 
 struct i_RantDiscoveryState {
     i_RantDiscoveryCoreConfig    cfg;
@@ -673,8 +674,8 @@ static uint64_t i_rant_discovery_reply_at(const i_RantDiscoveryState *st, const 
 }
 
 /* Owes record ri an ask: our blob with REQ|ONE, sent again until settled. One already owed
- * keeps its tries. After an ask that went unanswered, likely to a peer that refused us, the
- * next sends once. Nothing is owed to a silent peer. */
+ * keeps its tries. After an ask that went unanswered the next sends once. Nothing is owed to
+ * a silent peer. */
 static void i_rant_discovery_ask(i_RantDiscoveryState *st, uint16_t ri, uint8_t bits, uint64_t now){
     i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, ri);
     if (!rec || rec->state != I_RANT_REC_ACTIVE) return;
@@ -764,6 +765,13 @@ static void i_rant_discovery_refuse(i_RantDiscoveryState *st, i_RantDiscoveryRec
     i_rant_discovery_fire_error(st, RANT_E_PEER_REFUSED, rec->local_id, &addr, 0);
 }
 
+/* A match we hold no slot for and promised none, which our targeted sends mark FULL. A core
+ * with the hook grows at the next poll instead, so it never says so. */
+static int i_rant_discovery_full_for(const i_RantDiscoveryState *st, const i_RantDiscoveryRecord *rec){
+    return !st->cfg.alloc && rec->want == I_RANT_ADMIT_YES && rec->slot == I_RANT_REC_NONE
+        && !(rec->flags & I_RANT_REC_REFETCH);
+}
+
 /* A slot for record ri judged verdict. 0 when none can be had. */
 static int i_rant_discovery_seat(i_RantDiscoveryState *st, uint16_t ri, i_RantDiscoveryAdmit verdict){
     uint16_t s = i_rant_discovery_slot_take(st, verdict);
@@ -819,6 +827,10 @@ static void i_rant_discovery_judge(i_RantDiscoveryState *st, uint16_t ri, RantBy
     if (verdict == I_RANT_ADMIT_NO){
         rec->meta_version = version; rec->want = I_RANT_ADMIT_NO;
         if (slot){ i_rant_discovery_give_back(st, ri); st->slots_opened = 1; }
+        return;
+    }
+    if (!slot && (rec->flags & I_RANT_REC_FULL)){    /* it holds no slot for us, so none for it */
+        rec->meta_version = version; rec->want = I_RANT_ADMIT_NO;
         return;
     }
     if (!slot){
@@ -887,20 +899,22 @@ static i_RantDiscoveryAdmit i_rant_discovery_stranger_verdict(i_RantDiscoverySta
     return st->cfg.admit(st->cfg.user, 0, w->overlay, w->version, scratch);
 }
 
-/* Owes an asker with no record a reply. One already queued keeps the earlier time, and a
- * full queue drops it, since the asker asks again. */
-static void i_rant_discovery_loose_owe(i_RantDiscoveryState *st, const RantAddr *a, uint64_t due_us){
+/* Owes an asker with no record a reply, FULL when it met us. One already queued keeps the
+ * earlier time and takes the latest word, and a full queue drops it, since the asker asks again. */
+static void i_rant_discovery_loose_owe(i_RantDiscoveryState *st, const RantAddr *a, uint64_t due_us, int full){
     i_RantDiscoveryLoose *l;
     uint8_t i;
     for (i = 0; i < st->n_loose; i++){
         l = &st->loose[i];
         if (!i_rant_discovery_addr_is(a, l->ip, l->ip_len, l->port)) continue;
         if (due_us < l->due_us) l->due_us = due_us;
+        l->full = (uint8_t)full;
         return;
     }
     if (st->n_loose >= RANT_DISCOVERY_LOOSE) return;
     l = &st->loose[st->n_loose++];
     memcpy(l->ip, a->ip, 16); l->ip_len = a->ip_len; l->port = a->port; l->due_us = due_us;
+    l->full = (uint8_t)full;
 }
 
 /* Notes a uuid that said BYE. One already in the ring is noted again in its place. */
@@ -924,16 +938,18 @@ static int i_rant_discovery_left_lately(const i_RantDiscoveryState *st, const ui
 }
 
 /* A source that found no record is forgotten, and judged again each time its blob passes
- * by. A match among them is refused, and a solicit is answered from the loose queue. */
+ * by. A match among them is refused and, when it asks or holds us, told FULL. A solicit is
+ * answered from the loose queue. */
 static void i_rant_discovery_stranger(i_RantDiscoveryState *st, const i_RantDiscoveryWire *w,
                                       const RantAddr *addr, i_RantDiscoveryAdmit verdict, uint64_t now){
+    int match = verdict == I_RANT_ADMIT_YES;
     i_rant_discovery_forgot(st);
-    if (verdict == I_RANT_ADMIT_YES){
+    if (match){
         (void)i_rant_discovery_trouble_note(st, RANT_E_PEER_REFUSED, addr, st->cap_peers, 0);
         i_rant_discovery_fire_error(st, RANT_E_PEER_REFUSED, 0, addr, 0);
     }
-    if (w->flags & RANT_DISCOVERY_FLAG_REQ)
-        i_rant_discovery_loose_owe(st, addr, i_rant_discovery_reply_at(st, w->uuid, w->flags, now));
+    if ((w->flags & RANT_DISCOVERY_FLAG_REQ) || (match && (w->flags & RANT_DISCOVERY_FLAG_ONE)))
+        i_rant_discovery_loose_owe(st, addr, i_rant_discovery_reply_at(st, w->uuid, w->flags, now), match);
     if (st->slots_opened) i_rant_discovery_offer_slots(st, now);
 }
 
@@ -1007,6 +1023,21 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
         i_rant_records_settle(&st->records, ri, I_RANT_OWE_MATCH);
         rec->flags = (uint8_t)(rec->flags & ~I_RANT_REC_ASK_MISSED);
     }
+    if (w.flags & RANT_DISCOVERY_FLAG_FULL){   /* it holds no slot for us: ours goes back until it does */
+        i_rant_records_settle(&st->records, ri, I_RANT_OWE_MATCH);
+        rec->flags = (uint8_t)((rec->flags | I_RANT_REC_FULL) & ~(I_RANT_REC_REASK | I_RANT_REC_ASK_MISSED));
+        if (!(w.flags & RANT_DISCOVERY_FLAG_ONE)) rec->flags |= I_RANT_REC_REASK;   /* it kept no record of us */
+        rec->want = I_RANT_ADMIT_NO;
+        if (slot){ i_rant_discovery_give_back(st, ri); st->slots_opened = 1; slot = NULL; }
+    } else if (rec->flags & I_RANT_REC_FULL){
+        if (w.flags & RANT_DISCOVERY_FLAG_ONE){     /* it holds us now, so its blob is judged again */
+            rec->flags = (uint8_t)(rec->flags & ~(I_RANT_REC_FULL | I_RANT_REC_REASK));
+            if (!have_blob) rec->flags |= I_RANT_REC_REFETCH;
+        } else if ((rec->flags & I_RANT_REC_REASK) && !(rec->owed & I_RANT_OWE_ASK)){
+            i_rant_discovery_ask(st, ri, I_RANT_OWE_MATCH, now);
+            rec->ask_tries = 1u;
+        }
+    }
 
     /* Rank the candidate against the incumbent so a multi path locator never flaps. Only a
        slot keeps the freshness, as only its locator carries data. See spec/discovery.md. */
@@ -1039,7 +1070,7 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     if (too_big) i_rant_discovery_too_big(st, ri, &addr, too_big);
     if (have_blob) i_rant_discovery_judge(st, ri, w.overlay, w.version, w.flags, &up);
     else if (!st->cfg.admit){
-        if (!slot){
+        if (!slot && !(rec->flags & I_RANT_REC_FULL)){
             if (i_rant_discovery_seat(st, ri, I_RANT_ADMIT_YES)) up = 1;
             else i_rant_discovery_refuse(st, rec);
         }
@@ -1053,6 +1084,8 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     if (w.flags & RANT_DISCOVERY_FLAG_REQ)
         i_rant_records_owe(&st->records, ri, I_RANT_OWE_REPLY,
                            i_rant_discovery_reply_at(st, rec->uuid, w.flags, now));
+    else if ((w.flags & RANT_DISCOVERY_FLAG_ONE) && i_rant_discovery_full_for(st, rec))
+        i_rant_records_owe(&st->records, ri, I_RANT_OWE_REPLY, now);    /* it holds us, so it is told FULL */
 
     slot = i_rant_discovery_slot_of(st, rec);
     if (slot){
@@ -1184,11 +1217,14 @@ size_t i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, uint64_t now, vo
         memset(to, 0, sizeof *to);
         memcpy(to->ip, l.ip, 16); to->ip_len = l.ip_len; to->port = l.port;
         st->loose[i] = st->loose[--st->n_loose];
-        return i_rant_discovery_build(st, RANT_DISCOVERY_FLAG_ONE, 1, (uint8_t *)out, cap);
+        return i_rant_discovery_build(st, l.full ? RANT_DISCOVERY_FLAG_FULL : RANT_DISCOVERY_FLAG_ONE, 1,
+                                      (uint8_t *)out, cap);
     }
     for (i = st->records.due_head; i != I_RANT_REC_NONE; i = st->records.recs[i].due_next){
         i_RantDiscoveryRecord *rec = &st->records.recs[i];
         int ask = (rec->owed & I_RANT_OWE_ASK) != 0;
+        /* read before the last try of a fetch for a promised slot lets the promise go */
+        uint8_t full = i_rant_discovery_full_for(st, rec) ? RANT_DISCOVERY_FLAG_FULL : 0u;
         if (rec->due_us > now) continue;
         i_rant_discovery_addr_of(rec, to);
         i_rant_records_settle(&st->records, i, I_RANT_OWE_REPLY);   /* an ask carries our blob too */
@@ -1202,8 +1238,8 @@ size_t i_rant_discovery_poll_targeted(i_RantDiscoveryState *st, uint64_t now, vo
                 if (i_rant_discovery_waiting(rec)) i_rant_discovery_refetch_done(st, rec);  /* its promised slot goes to the next */
             }
         }
-        return i_rant_discovery_build(st, ask ? RANT_DISCOVERY_FLAG_REQ | RANT_DISCOVERY_FLAG_ONE
-                                              : RANT_DISCOVERY_FLAG_ONE, 1, (uint8_t *)out, cap);
+        return i_rant_discovery_build(st, (uint8_t)((ask ? RANT_DISCOVERY_FLAG_REQ | RANT_DISCOVERY_FLAG_ONE
+                                                         : RANT_DISCOVERY_FLAG_ONE) | full), 1, (uint8_t *)out, cap);
     }
     return 0;
 }
@@ -1290,7 +1326,7 @@ void i_rant_discovery_refetch_unmatched(i_RantDiscoveryState *st, i_RantDiscover
     for (i = 0; i < st->records.cap; i++){
         i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
         if (!rec || rec->state != I_RANT_REC_ACTIVE || rec->slot != I_RANT_REC_NONE
-            || rec->want != I_RANT_ADMIT_NO || (rec->flags & I_RANT_REC_TOO_BIG)) continue;
+            || rec->want != I_RANT_ADMIT_NO || (rec->flags & (I_RANT_REC_TOO_BIG | I_RANT_REC_FULL))) continue;
         /* judged by assumption, or advertising past the blob judged: nothing says it cannot meet */
         if (maybe && (rec->flags & I_RANT_REC_FILTER) && rec->adv_version <= rec->meta_version
             && !maybe(ctx, rec->filter, sizeof rec->filter)) continue;

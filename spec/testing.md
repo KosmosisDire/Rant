@@ -63,7 +63,7 @@ program in this order.
 | Program | Cases |
 |---|---|
 | `unit.transport` | basics, fresh_join, ack_coalesce, ack_holes, bulk, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
-| `unit.discovery` | records, migrate, owed, judge, unmatched, offer, filter, forgotten, churn, first_contact, too_big, bulk, wire, change_age, discovery_core, node_core |
+| `unit.discovery` | records, migrate, owed, judge, unmatched, offer, full, filter, forgotten, churn, first_contact, too_big, bulk, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
 | `unit.schema` | dsl, wire |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
@@ -78,7 +78,7 @@ program in this order.
 | `e2e.tasks` | task, task_matrix |
 | `e2e.entities` | reflect_dropped, churn, republish, log_and_meta, status, rant_conditions, rant_refused, rant_partial, rant_cap |
 | `e2e.matchwait` | matchwait |
-| `e2e.mesh` | builtins_quiet, seeded_segments, meta_from_callbacks, directed_first_call, static_bounded, static_meta_peers, observer_fast, grow_at_once, big_peer, slot_back, crowd_late_match, static_bulk, runtime_topic |
+| `e2e.mesh` | builtins_quiet, seeded_segments, meta_from_callbacks, directed_first_call, static_bounded, static_meta_peers, observer_fast, grow_at_once, big_peer, slot_back, full_told, crowd_late_match, static_bulk, runtime_topic |
 | `e2e.races` | older_blob, bye_ghost, restart_evict, flap_duplicates, old_interest, old_epoch |
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
@@ -175,10 +175,18 @@ What each phase pins, grouped by layer.
   seat miss and a wanted slot. A record is pending while its fetch is in flight and no longer
   once the asks ran out. A grown want set fetches the records judged no match, not those
   waiting, and an answer ends the fetch. The uuid is found by id.
-- Offer: a slot given back fetches the first waiting record four times. Once those went
-  unanswered the slot goes to the next, whose answer takes it, and the silent one heard
-  again is refused. A later slot opening passes over the one that never answered, which is
-  fetched once each time it is heard and not after.
+- Offer: each refused match that holds us is told FULL. A slot given back fetches the first
+  waiting record four times. Once those went unanswered the slot goes to the next, whose
+  answer takes it, and the silent one heard again is refused. A later slot opening passes
+  over the one that never answered, which is fetched once each time it is heard and not
+  after.
+- Full: a core that cannot grow tells a refused match nothing while it only hears it from the
+  group, answers its ask FULL and tells a plain copy from it FULL, and fetches it without
+  FULL once a slot opens. A core that can grow never says FULL. A peer told FULL gives its slot
+  back and stops asking, judges the sender's blobs without taking a slot, asking or wanting
+  one, and is skipped by a grown want set. A fetch without FULL takes the slot back and is
+  answered, a plain copy without FULL fetches the blob again first. FULL without ONE gives the
+  slot back too and asks once at each announce of the sender, until FULL with ONE.
 - Filter: a grown want set fetches a record judged no match only when maybe says its filter
   may meet us, and fetches anyway one judged by assumption or advertising past its judged
   blob, without asking maybe. Each judge folds a fresh filter, the answers give filters to
@@ -188,7 +196,8 @@ What each phase pins, grouped by layer.
   nothing without keeping it. A match takes the record of the oldest heard peer that
   neither holds nor wants a slot, seen down, then a free slot and an ask, or a refusal under
   its id when no slot is free. A match with no such record is refused under no id. A
-  forgotten peer's fetch is answered at once from the loose queue, group solicits spread,
+  forgotten peer's fetch is answered at once from the loose queue, a match's FULL without
+  ONE, group solicits spread,
   one reply per asker, and a full queue drops the rest. Partial holds while peers are
   forgotten and ages out three announce intervals after the last. A source heard by UNI
   copies takes the record of a peer the group reaches, though that one is younger than
@@ -474,8 +483,11 @@ What each phase pins, grouped by layer.
   which lists and counts as `matched_peers` only the observer that asked. An
   observer sees every peer within 100 ms. A new topic matches every known subscriber past
   the starting table. A peer too big for one announce never takes the slot a subscriber
-  needs, and a peer that stops sharing gives its slot back. A static node whose 8 records
-  hold 30 unrelated publishers matches a subscriber that opens last, turning nobody away.
+  needs, and a peer that stops sharing gives its slot back. A static node with one slot tells
+  the second reliable publisher with a backpressure wait that it is full: that one counts no
+  match, its sends never wait, and it takes the slot once the first leaves. A static node
+  whose 8 records hold 30 unrelated publishers matches a subscriber that opens last, turning
+  nobody away.
   A static node with a static bulk opens smaller than the same node without one, a crowd
   leaves its main flat, a late subscriber still matches, and its meta answer reports the
   bulk. A runtime topic nobody wants sends at once, and a reliable one three peers want

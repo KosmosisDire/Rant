@@ -406,6 +406,76 @@ static void slot_back_checks(void){
     rant_node_close(T, 1);
 }
 
+/* Counts what a pull subscriber holds by the first payload byte, the publisher's mark. */
+static void ms_take(RantTopic *s, int *x, int *y){
+    RantMsg m;
+    while (s && rant_topic_take(s, &m, 0) == 1){
+        if (m.data.len && m.data.data[0] == 'X') (*x)++;
+        else if (m.data.len && m.data.data[0] == 'Y') (*y)++;
+    }
+}
+/* The slowest of n sends of mark, 10 ms apart, in us. */
+static int ms_send_worst(RantTopic *p, char mark, int n){
+    uint8_t b[8]; int k, worst = 0;
+    memset(b, 0, sizeof b); b[0] = (uint8_t)mark;
+    for (k = 0; k < n; k++){
+        uint64_t t0 = i_rant_plat_now_us(); int us;
+        (void)rant_topic_send(p, rant_bytes(b, sizeof b), NULL);
+        us = (int)(i_rant_plat_now_us() - t0);
+        if (us > worst) worst = us;
+        test_sleep_ms(10);
+    }
+    return worst;
+}
+
+/* A static node with one slot tells the second publisher that matches it that it is full: that
+   publisher counts no match and its reliable sends never wait on acks that cannot come, and it
+   takes the slot once the first leaves. */
+static void full_told_checks(void){
+    static uint8_t abuf[1u << 20];
+    RantAllocator a = rant_allocator_static(abuf, sizeof abuf);
+    uint16_t dom = (uint16_t)(TEST_DOMAIN + 14);
+    RantNodeOpts ot = ms_opts(dom, 1, 4, 500000), ox = ms_opts(dom, 0, 4, 500000), oy = ms_opts(dom, 0, 4, 500000);
+    RantTopicOpts so, po;
+    RantNode *T, *X = NULL, *Y = NULL; RantTopic *sub, *px = NULL, *py = NULL;
+    int gx = 0, gy = 0, worst;
+    memset(&so, 0, sizeof so); so.qos.reliability = RANT_RELIABLE; so.pull = 1;
+    memset(&po, 0, sizeof po); po.qos.reliability = RANT_RELIABLE; po.qos.backpressure_wait_us = 50000;
+    T = rant_node_open(&a, "ms-full", NULL, NULL, &ot);
+    CHECK(T != NULL, "full told: opens");
+    if (!T) return;
+    sub = rant_node_create_topic(T, "ms/full", RANT_SUB_ONLY, NULL, &so);
+    rant_node_start(T);
+    X = ms_heap("ms-full-x", &ox);
+    if (X){ px = rant_node_create_topic(X, "ms/full", RANT_PUB_ONLY, NULL, &po); rant_node_start(X); }
+    MS_WAIT_UNTIL(6000, px && rant_topic_match_count(px) == 1);
+    Y = ms_heap("ms-full-y", &oy);
+    if (Y){ py = rant_node_create_topic(Y, "ms/full", RANT_PUB_ONLY, NULL, &po); rant_node_start(Y); }
+    ms_wait(2000);
+    CHECK(px && py && rant_topic_match_count(px) == 1 && rant_topic_match_count(py) == 0,
+          "full told: the first publisher holds the slot, the second counts no match (%d, %d)",
+          px ? rant_topic_match_count(px) : -1, py ? rant_topic_match_count(py) : -1);
+    if (!px || !py) goto done;
+    worst = ms_send_worst(py, 'Y', 40);
+    (void)ms_send_worst(px, 'X', 10);
+    ms_wait(500);
+    ms_take(sub, &gx, &gy);
+    CHECK(worst < 20000 && gx == 10 && gy == 0,
+          "full told: the second's sends never wait on the full node (slowest %d us), which gets only the first's (%d, %d)",
+          worst, gx, gy);
+    rant_node_close(X, 1); X = NULL;
+    MS_WAIT_UNTIL(6000, rant_topic_match_count(py) == 1);
+    (void)ms_send_worst(py, 'Y', 20);
+    gy = 0;
+    MS_WAIT_UNTIL(3000, (ms_take(sub, &gx, &gy), gy == 20));
+    CHECK(rant_topic_match_count(py) == 1 && gy == 20,
+          "full told: once the first leaves the second takes the slot and is delivered (%d of 20)", gy);
+done:
+    if (Y) rant_node_close(Y, 1);
+    if (X) rant_node_close(X, 1);
+    rant_node_close(T, 1);
+}
+
 /* A static node whose records are all taken by peers it shares nothing with still matches a
    subscriber that opens last, in the place of one of them, and turns nobody away. */
 static void crowd_late_match_checks(void){
@@ -577,6 +647,7 @@ static const TestCase cases[] = {
     { "grow_at_once",        grow_at_once_checks },
     { "big_peer",            big_peer_checks },
     { "slot_back",           slot_back_checks },
+    { "full_told",           full_told_checks },
     { "crowd_late_match",    crowd_late_match_checks },
     { "static_bulk",         static_bulk_checks },
     { "runtime_topic",       runtime_topic_checks },

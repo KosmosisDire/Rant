@@ -27,6 +27,8 @@ typedef enum {
 #define I_RANT_REC_REFETCH    0x02u /* fetched until its blob is judged: a slot opened for it, or the bound grew */
 #define I_RANT_REC_ASK_MISSED 0x04u /* the last ask went unanswered */
 #define I_RANT_REC_FILTER     0x08u /* filter holds the keys of the blob judged no match at meta_version */
+#define I_RANT_REC_FULL       0x10u /* it holds no slot for us, so it takes none here until a datagram marked ONE without FULL */
+#define I_RANT_REC_REASK      0x20u /* it said FULL with no record of us, so each announce of its asks it again */
 
 /* What a peer is, whether or not it holds a slot. */
 typedef struct {
