@@ -1189,6 +1189,12 @@ void i_rant_transport_apply_peer_interest(i_RantTransportState *st, uint32_t pee
 
     /* per lane values, applied after the rematch so the lanes exist and re derived on
        every announce, since a fresh match memsets the proxy */
+    if (amap){
+        for (c=0;c<st->cfg.n_topics;c++){   /* a topic left out of the rate section is unpaced */
+            i_RantWriterProxy *w = i_rant_writer_proxy_at(st, c, (uint32_t)peer_slot);
+            if (w && w->used) w->rate_interval_us = 0u;
+        }
+    }
     if (amap && sec.rate.data){
         /* their best effort delivery cap for a topic they subscribe paces our lane */
         const uint8_t *p = sec.rate.data, *end = p + sec.rate.len;

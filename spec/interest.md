@@ -290,7 +290,8 @@ highest announced one, where a run of undefined or retired slots collapses to on
 flagged with bit 7 whose hash field is the run length. Then the rate section
 `[u16 n][(u16 index)(u16 rate_hz)]*` and the generation section
 `[u16 n][(u16 index)(u8 gen)]*`. `i_rant_interest_max` bounds it at 5 bytes per slot plus
-both sections at every topic.
+both sections at every topic. The rate section is the whole set: applying an interest
+unpaces every lane to that peer first, so a topic it leaves out is sent unthrottled.
 
 Every uDTL datagram starts with `['u','D','T','L'][u8 kind][u8 ver 2][u16 domain]
 [u32 meta_version][u16 n]`. A DETAIL_REQ entry is `[u16 index][u64 schema_hash]`, the

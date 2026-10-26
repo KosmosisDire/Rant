@@ -96,7 +96,8 @@ What each phase pins, grouped by layer.
 
 - Rate throttle: a subscriber advertising `max_rate_hz` paces the writer's best effort
   lane, decimating to the newest sample each tick. The per peer seqno keeps loss honest:
-  a paced skip is not loss, a dropped sent sample is.
+  a paced skip is not loss, a dropped sent sample is. A reader made again at once with no
+  rate, so the writer never saw it unmatched, unpaces the lane.
 - Lapped reader and NACK merge: a six fragment reliable stream through a dropping pump.
   The writer merges a repair request into the one it still holds, so two ACKNACKs landing
   in one pass are both served. A reader the writer's floor passes while it is still

@@ -55,6 +55,19 @@ static void rate_checks(void){
     for (i=0;i<5;i++){ rate_send(); rate_pump(20000u); }
     CHECK(rate_recv>=1 && rate_lost>=1,
              "rate: a dropped SENT sample IS reported as loss (recv=%d lost=%d)", rate_recv, rate_lost);
+
+    /* the reader retired and made again at once with no rate, so the writer never saw it
+       unmatched: the interest no longer lists a rate and the lane must stop pacing */
+    {
+        i_RantTopicDef d = pair.r_def; d.qos.max_rate_hz = 0;
+        CHECK(i_rant_transport_topic_retire(rate_R, 0)==0 && i_rant_transport_topic_reuse(rate_R, 0, &d, 0, 0)==0,
+              "rate: the reader's slot is made again with no rate");
+        test_apply_verified(rate_W, 2u, rate_R);
+        rate_recv=0;
+        for (i=0;i<200;i++){ rate_send(); rate_pump(500u); }
+        for (i=0;i<3;i++) rate_pump(20000u);
+        CHECK(rate_recv>=150, "rate: a rate left out of the interest unpaces the lane (%d of 200 delivered)", rate_recv);
+    }
     test_pair_close(&pair);
 }
 
