@@ -1,6 +1,6 @@
 {
     "name": "rant-middleware",
-    "version": "0.0.34",
+    "version": "0.0.35",
     "description": "Rant for TypeScript, real Rant built to wasm, in a page or in Node.js, and its net objects and C side",
     "license": "SEE LICENSE IN LICENCE.md",
     "type": "module",

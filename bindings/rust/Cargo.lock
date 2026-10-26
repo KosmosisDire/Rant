@@ -151,14 +151,14 @@ dependencies = [
 
 [[package]]
 name = "rant-ffigen"
-version = "0.0.34"
+version = "0.0.35"
 dependencies = [
  "bindgen",
 ]
 
 [[package]]
 name = "rant-macros"
-version = "0.0.34"
+version = "0.0.35"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "rant-middleware"
-version = "0.0.34"
+version = "0.0.35"
 dependencies = [
  "cc",
  "rant-macros",
