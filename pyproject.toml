@@ -1,0 +1,51 @@
+# The Python package: the wrapper in bindings/python/rant plus the shared library the CMake target
+# rant_shared builds. scikit-build-core runs that CMake, so pip install . works from a
+# checkout and the release workflow builds one wheel per platform (spec/build.md).
+[build-system]
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "rant-middleware"
+dynamic = ["version"]
+description = "Rant: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages."
+readme = "bindings/python/README.md"
+requires-python = ">=3.8"
+keywords = ["networking", "pubsub", "udp", "discovery", "realtime", "middleware", "rant"]
+authors = [{ name = "Nathan George" }]
+
+[project.urls]
+Homepage = "https://github.com/KosmosisDire/Rant"
+
+[tool.scikit-build]
+metadata.version.provider = "scikit_build_core.metadata.regex"
+metadata.version.input = "VERSION"
+metadata.version.regex = "(?P<value>[0-9.]+)"
+wheel.packages = ["bindings/python/rant"]
+# ctypes needs no Python ABI, so the wheel is py3-none-<platform>: one per platform.
+wheel.py-api = "py3"
+cmake.build-type = "Release"
+sdist.exclude = [".github", "artifacts", "bin", "bindings/csharp", "release", "tests", "wheelhouse", "Logo.ai", "Logo.svg"]
+
+[tool.scikit-build.cmake.define]
+RANT_BUILD_TOOLS = "OFF"
+RANT_INSTALL = "OFF"
+
+# The release workflow runs cibuildwheel. One interpreter per platform is enough since the
+# wheel is py3-none. Linux builds inside manylinux, so the library needs glibc 2.28 or
+# newer, and that same library ships in the NuGet and Unity packages.
+[tool.cibuildwheel]
+build = "cp312-*"
+skip = "*-musllinux_*"
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64", "aarch64"]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.macos]
+archs = ["universal2"]
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
