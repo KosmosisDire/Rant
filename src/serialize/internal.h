@@ -10,43 +10,55 @@
 #include "../common/hash.h"
 #include <string.h>
 
-/* One field of the flat table. Offsets are message absolute for element 0 of every
- * enclosing array, except under a variable struct array, relative to its element. */
+/* One row of the flat table, one per type. A record is the message or one variable struct
+ * element: its fixed part, then a frame per framed member. See spec/schema.md. */
 typedef struct {
-    RantString name;        /* a view into the wire bytes */
-    RantString type_name; /* the field type's NAMED tag, or {NULL,0} */
-    RantString elem_name; /* an array element type's NAMED tag, or {NULL,0} */
-    uint32_t     offset;    /* element 0 under an array, 0 for variable kinds */
-    uint32_t     size;      /* 0 for variable kinds */
-    uint32_t     elem_size; /* ARR and VARR: bytes of one element, else 0 */
+    RantString name;        /* a view into the wire bytes, "" for an element */
+    RantString type_name;   /* the type's NAMED tag, or {NULL,0} */
+    uint32_t     offset;    /* from the start of the nearest enclosing element or the message */
+    uint32_t     size;      /* fixed bytes, a struct counts its fixed members, 0 if variable */
+    uint32_t     dmin;      /* a variable row's default body: a framed payload or a whole record */
     uint32_t     type_off;  /* wire offset of the type encoding, for the subset compare */
     uint32_t     type_len;
     uint16_t     count;     /* ARR element count, or ENUM variant count, else 0 */
     uint16_t     depth;     /* 0 = top level */
     uint16_t     parent;    /* flat index of the enclosing struct or array, 0xFFFF = root */
-    uint16_t     arr_parent;/* flat index of the nearest enclosing struct array, 0xFFFF = none */
-    uint16_t     arr_depth; /* the struct arrays around this field, one index each */
-    uint16_t     str_cap;   /* STR fields and STR elements, else 0 */
-    uint16_t     var_ord;   /* variable kinds: the ordinal of this field's tail frame */
+    uint16_t     next;      /* flat index just past this row's subtree */
+    uint16_t     arr_parent;/* flat index of the nearest enclosing array, 0xFFFF = none */
+    uint16_t     arr_depth; /* the arrays around this row, one index each */
+    uint16_t     str_cap;   /* STR, else 0 */
+    uint16_t     var_ord;   /* a framed row: its frame's ordinal in its record */
+    uint16_t     n_var;     /* a variable struct element: the frames of its record */
     uint8_t      kind;
-    uint8_t      elem;      /* ARR and VARR element kind, else 0 */
+    uint8_t      backing;   /* ENUM backing kind, else 0 */
+    uint8_t      var;       /* 1 when the type has no static size */
 } i_Field;
 
 struct RantSchema {
     RantBytes     wire;       /* the canonical bytes, a view into the block */
     uint64_t      hash;
     uint32_t      size;       /* the fixed section size */
+    uint32_t      msg_min;    /* the default message's length */
     RantString    name;       /* the root name, a view into the wire, "" if anonymous */
     uint16_t      nfields;
-    uint16_t      n_var;      /* variable fields */
+    uint16_t      n_var;      /* the frames of the message record */
     uint8_t       value_root; /* 1 = a bare or alias root, not a struct */
     i_Field       fields[1];   /* nfields entries in the block */
 };
 
 #define I_RANT_NO_PARENT 0xFFFFu
 
-static inline int i_rant_kind_var(uint8_t k){
-    return k == RANT_VSTR || k == RANT_VARR || k == RANT_MAP;
+/* A framed row rides a frame of its record: a variable type that is neither a struct, whose
+ * frames join its record, nor an array element, which its array's table locates. */
+static inline int i_rant_row_framed(const RantSchema *s, const i_Field *f){
+    if (!f->var || f->kind == RANT_STRUCT) return 0;
+    return f->parent == I_RANT_NO_PARENT || (s->fields[f->parent].kind != RANT_ARR
+                                             && s->fields[f->parent].kind != RANT_VARR);
+}
+/* The record a row's frame or fixed bytes belong to: its nearest array's element, or -1
+ * for the message. */
+static inline int i_rant_row_record(const i_Field *f){
+    return f->arr_parent == I_RANT_NO_PARENT ? -1 : (int)f->arr_parent + 1;
 }
 
 /* the bounds checked reader over possibly hostile wire bytes */
@@ -121,7 +133,6 @@ RantSchema *i_rant_schema_rebase(const RantSchema *sub, const RantSchema *pub,
 /* stdtypes.c: the name and the shape must both match the registry's. */
 RantStdType i_rant_std_recognize(i_RantRegistry *r, const RantSchema *s);
 RantStdType i_rant_std_recognize_field(i_RantRegistry *r, const RantSchema *s, uint16_t field);
-RantStdType i_rant_std_recognize_elem(i_RantRegistry *r, const RantSchema *s, uint16_t field);
 #endif
 
 /* message.c */

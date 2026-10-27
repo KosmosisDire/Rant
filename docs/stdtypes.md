@@ -260,15 +260,14 @@ RantUuid id; rant_uuid_new(&id);                /* a random (version 4) Uuid */
 A tool that renders a schema it has never seen (the explorer, a bridge, a logger) asks:
 
 ```c
-RantStdType t = rant_std_recognize_field(schema, field, alloc, user);
+RantStdType t = rant_std_recognize_field(node, schema, field);
 if (t == RANT_STD_COLOR) draw_swatch(...);
 ```
 
-`rant_std_recognize` looks at the schema's root, `rant_std_recognize_field` at one
-field's own type, and `rant_std_recognize_elem` at an array field's element type. All
-three verify the shape as well as the name, so a peer that advertises a differently
-shaped `Uuid` is reported as `RANT_STD_NONE` rather than memcpy'd into a `RantUuid`.
-Verifying the shape means compiling the canonical type, hence the allocator hook. The
+`rant_std_recognize` looks at the schema's root and `rant_std_recognize_field` at one
+row's type, an array's element row included (`rant_schema_field_index(s, "pts[0]")`).
+Both verify the shape as well as the name, so a peer that advertises a differently
+shaped `Uuid` is reported as `RANT_STD_NONE` rather than memcpy'd into a `RantUuid`. The
 answer is stable per schema, so cache it.
 
 ## Defining your own named types
@@ -317,40 +316,45 @@ standard `Color` or call the type something else.
 
 ## Composing them
 
-Named types nest and array like any other type:
+Any type nests and arrays like any other, up to 8 levels deep:
 
 ```
 Cloud { origin: Float3, points: Float3[], corners: Float3[4], stamp: Timestamp }
+Zones { areas: Polygon2D[], names: string[], ids: Uuid[], frames: Image[2], grid: f32[][] }
 ```
 
-Two rules bound this, both about keeping an array element's stride static:
+- An element may be any type but an empty struct: a struct with variable members, a
+  string, a map, another array, an enum.
+- A fixed element costs nothing extra. A variable one costs 4 bytes for its length.
+- `T[N]` always holds N elements, `T[]` grows and shrinks.
 
-- An array ELEMENT must be fixed all the way down. `Image[4]` is refused (Image has a
-  variable member), as is an array of arrays, which is why `Uuid[2]` is refused too, a
-  `Uuid` being itself a `u8[16]`. Wrap it in a struct if you need one.
-- Inside an element everything has a fixed size, so a struct array nests in another's
-  element only as a fixed one: `{ corners: Float2[4] }[]` works, `{ pts: Float2[] }[]`
-  is refused. The outermost array may be variable.
-
-Variable members may otherwise sit at any struct depth. Declaration nests, storage does
-not: a `string` declared three levels down still claims a flat frame in the message tail,
-in depth first declaration order, and its struct's size covers only the fixed part.
-
-Members of a struct array are addressed with an index in the path:
+Elements take an index in the path, one per level:
 
 ```c
-rant_set_f32(msg, cap, s, "corners[2].x", 1.5f);
-rant_set_f32(msg, cap, s, "shapes[1].corners[2].x", 0.5f);   /* one index per level */
-float z = rant_get_f32(msg, s, "points[0].z");
-uint32_t n = rant_get_array_count(msg, s, "points");
-rant_set_array_count(msg, cap, s, "points", 64);   /* grow a variable one first */
+RantDouble2 pts[4] = { { 0, 0 }, { 2, 0 }, { 2, 1 }, { 0, 1 } };
+rant_set_array_count(msg, cap, s, "areas", 2);          /* new elements take their default */
+rant_set_array(msg, cap, s, "areas[1].points", rant_bytes(pts, sizeof pts));
+rant_set_array_count(msg, cap, s, "names", 2);
+rant_set_string(msg, cap, s, "names[1]", rant_cstr("dock"));
+double y = rant_get_f64(msg, s, "areas[1].points[2].y");
+uint32_t n = rant_get_array_count(msg, s, "areas[1].points");
+RantBytes row = rant_get_array(msg, s, "grid[0]");      /* one inner f32[] */
 ```
 
+- Size an array before writing its elements. Filling them in order keeps each write cheap.
+- `rant_get_array` gives the packed elements only when the element is fixed.
+- A write that would pass `cap` returns 0 and leaves the message as it was.
+
 Reflection reaches the same values by flat index with `rant_get_value_at` and
-`rant_set_value_at`, taking one index per enclosing struct array, outermost first. The
-flat field table holds one element 0 template per array, `RantSchemaFieldInfo.arr_parent`
-points a member back at the nearest array it belongs to, and `arr_depth` says how many
-indices it takes.
+`rant_set_value_at`, one index per enclosing array, outermost first.
+
+- An array's next row in the field table is its element, named `""`.
+- `RantSchemaFieldInfo.arr_parent` points at the nearest enclosing array, and `arr_depth`
+  says how many indices a row takes.
+- For an array, `RantValue.count` is the live count, and `bytes` the packed elements when
+  the element is fixed.
+- `rant_set_value_at` on a variable array writes packed bytes, or with none sizes it to
+  `count`.
 
 ## Wire format
 

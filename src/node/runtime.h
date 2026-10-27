@@ -140,7 +140,6 @@ RANT_API void              rant_uuid_new(RantUuid *out);
  * both match the registry's. The result is stable per schema, so cache it. */
 RANT_API RantStdType rant_std_recognize(RantNode *n, const RantSchema *s);
 RANT_API RantStdType rant_std_recognize_field(RantNode *n, const RantSchema *s, uint16_t field);
-RANT_API RantStdType rant_std_recognize_elem(RantNode *n, const RantSchema *s, uint16_t field);
 #endif
 
 /* Creates a topic. name is the identity, schema is registered in this node, NULL means raw

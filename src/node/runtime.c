@@ -1849,9 +1849,9 @@ static void i_rant_node_status_open(RantNode *n){
         "RantClear { key: string<" I_RANT_STR(RANT_STATUS_KEY_MAX) ">, since_us: u64 }", NULL);
     if (!n->status_schema || !clear
         || !rant_schema_field_at(n->status_schema,
-                                 (uint16_t)rant_schema_field_index(n->status_schema, "conditions"), &fi))
+                                 (uint16_t)rant_schema_field_index(n->status_schema, "conditions[0]"), &fi))
         return;
-    n->status_elem = fi.elem_size;
+    n->status_elem = fi.size;
     memset(&topt, 0, sizeof topt);
     topt.qos.reliability = RANT_RELIABLE;
     topt.qos.keep_last = topt.qos.catch_up = 1;
@@ -3401,14 +3401,6 @@ RantStdType rant_std_recognize_field(RantNode *n, const RantSchema *s, uint16_t 
     if (!n || !s) return RANT_STD_NONE;
     acquired = i_rant_node_lock(n);
     t = i_rant_std_recognize_field(&n->registry, s, field);
-    i_rant_node_unlock(n, acquired);
-    return t;
-}
-RantStdType rant_std_recognize_elem(RantNode *n, const RantSchema *s, uint16_t field){
-    RantStdType t; int acquired;
-    if (!n || !s) return RANT_STD_NONE;
-    acquired = i_rant_node_lock(n);
-    t = i_rant_std_recognize_elem(&n->registry, s, field);
     i_rant_node_unlock(n, acquired);
     return t;
 }

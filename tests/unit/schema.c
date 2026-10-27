@@ -41,18 +41,21 @@ static void schema_dsl_checks(void){
     if (txt){
         RantSchemaFieldInfo fi;
         CHECK(rant_schema_size(txt) == 8+8+8+16+1+8, "schema-dsl: size %u", rant_schema_size(txt));
-        CHECK(rant_schema_field_count(txt) == 8, "schema-dsl: 8 flat fields (6 top + 2 nested)");
-        CHECK(rant_schema_field_index(txt, "tagCount") == 4
-              && rant_schema_field_index(txt, "velocity.dx") == 6
+        CHECK(rant_schema_field_count(txt) == 9, "schema-dsl: 9 rows (6 top, 1 element, 2 nested)");
+        CHECK(rant_schema_field_index(txt, "tagCount") == 5
+              && rant_schema_field_index(txt, "velocity.dx") == 7
               && rant_schema_field_index(txt, "dx") == -1,      /* nested needs its path */
                  "schema-dsl: index by name incl. dotted paths");
         CHECK(rant_schema_field_at(txt, 3, &fi) && fi.kind == RANT_ARR
-                 && fi.elem == RANT_U8 && fi.count == 16 && fi.offset == 24 && fi.size == 16,
+                 && fi.count == 16 && fi.offset == 24 && fi.size == 16,
                  "schema-dsl: array field info (off=%u size=%u count=%u)", fi.offset, fi.size, fi.count);
-        CHECK(rant_schema_field_at(txt, 5, &fi) && fi.kind == RANT_STRUCT && fi.size == 8
+        CHECK(rant_schema_field_at(txt, 4, &fi) && fi.kind == RANT_U8 && fi.name.len == 0
+                 && fi.depth == 1 && fi.arr_parent == 3 && fi.size == 1 && fi.offset == 0,
+                 "schema-dsl: the array's next row is its element (depth=%u)", fi.depth);
+        CHECK(rant_schema_field_at(txt, 6, &fi) && fi.kind == RANT_STRUCT && fi.size == 8
                  && fi.offset == 41 && fi.depth == 0,
                  "schema-dsl: struct field info (off=%u size=%u)", fi.offset, fi.size);
-        CHECK(rant_schema_field_at(txt, 7, &fi) && fi.kind == RANT_F32
+        CHECK(rant_schema_field_at(txt, 8, &fi) && fi.kind == RANT_F32
                  && fi.offset == 45 && fi.depth == 1,
                  "schema-dsl: nested member is flattened (off=%u depth=%u)", fi.offset, fi.depth);
     }
@@ -77,11 +80,11 @@ static void schema_dsl_checks(void){
                      "schema-dsl: short array write zero-fills the tail");
         }
         {   RantValue v;                              /* reflection access by flat index */
-            CHECK(rant_get_value(rant_bytes(m,sizeof m), txt, 7, &v)
+            CHECK(rant_get_value(rant_bytes(m,sizeof m), txt, 8, &v)
                      && v.kind == RANT_F32 && v.v.f == 7.5,
                      "schema-dsl: rant_get_value reads the nested member");
             v.v.u = 9;
-            CHECK(rant_set_value(m, sizeof m, txt, 4, &v)
+            CHECK(rant_set_value(m, sizeof m, txt, 5, &v)
                      && rant_get_uint(rant_bytes(m,sizeof m), txt, "tagCount") == 9,
                      "schema-dsl: rant_set_value writes by index");
         }
@@ -109,8 +112,10 @@ static void schema_dsl_checks(void){
                      && fi.str_cap == 12 && fi.offset == 4 && fi.size == 14,
                      "schema-dsl: string field info (off=%u size=%u cap=%u)",
                      fi.offset, fi.size, fi.str_cap);
-            CHECK(rant_schema_field_at(ts, 2, &fi) && fi.kind == RANT_ARR && fi.elem == RANT_STR
-                     && fi.count == 3 && fi.str_cap == 8 && fi.size == 30,
+            CHECK(rant_schema_field_at(ts, 2, &fi) && fi.kind == RANT_ARR
+                     && fi.count == 3 && fi.size == 30
+                     && rant_schema_field_at(ts, 3, &fi) && fi.kind == RANT_STR
+                     && fi.str_cap == 8 && fi.size == 10,
                      "schema-dsl: string array field info (size=%u cap=%u)", fi.size, fi.str_cap);
         }
         if (ts){
@@ -118,30 +123,30 @@ static void schema_dsl_checks(void){
             ok  = rant_schema_message_default(ts, m, sizeof m);
             ok &= rant_set_uint    (m, sizeof m, ts, "id", 7);
             ok &= rant_set_string(m, sizeof m, ts, "name", rant_string("robot-1", 7));
-            ok &= rant_set_string_at(m, sizeof m, ts, "labels", 0, rant_string("fast", 4));
-            ok &= rant_set_string_at(m, sizeof m, ts, "labels", 2, rant_string("red", 3));
+            ok &= rant_set_string(m, sizeof m, ts, "labels[0]", rant_string("fast", 4));
+            ok &= rant_set_string(m, sizeof m, ts, "labels[2]", rant_string("red", 3));
             ok &= rant_set_string(m, sizeof m, ts, "meta.note", rant_string("ok", 2));
             CHECK(ok, "schema-dsl: string setters accept (incl. nested + indexed)");
             v = rant_get_string(rant_bytes(m,sizeof m), ts, "name");
             CHECK(v.len == 7 && memcmp(v.data, "robot-1", 7) == 0,
                      "schema-dsl: string round-trips");
-            v = rant_get_string_at(rant_bytes(m,sizeof m), ts, "labels", 2);
+            v = rant_get_string(rant_bytes(m,sizeof m), ts, "labels[2]");
             CHECK(v.len == 3 && memcmp(v.data, "red", 3) == 0,
                      "schema-dsl: string array element round-trips");
-            v = rant_get_string_at(rant_bytes(m,sizeof m), ts, "labels", 1);
+            v = rant_get_string(rant_bytes(m,sizeof m), ts, "labels[1]");
             CHECK(v.len == 0 && v.data != NULL, "schema-dsl: unset string element is empty");
             v = rant_get_string(rant_bytes(m,sizeof m), ts, "meta.note");
             CHECK(v.len == 2 && memcmp(v.data, "ok", 2) == 0,
                      "schema-dsl: nested string round-trips");
-            {   RantValue dv;     /* reflection sees the live bytes + the cap */
+            {   RantValue dv;     /* reflection sees the live bytes */
                 CHECK(rant_get_value(rant_bytes(m,sizeof m), ts, 1, &dv)
-                         && dv.kind == RANT_STR && dv.str_cap == 12
+                         && dv.kind == RANT_STR
                          && dv.bytes.len == 7 && memcmp(dv.bytes.data, "robot-1", 7) == 0,
                          "schema-dsl: rant_get_value yields the live string");
             }
             CHECK(!rant_set_string(m, sizeof m, ts, "name", rant_string("a-name-too-long", 15))
                   && !rant_set_string(m, sizeof m, ts, "id", rant_string("x", 1))   /* not string */
-                  && !rant_set_string_at(m, sizeof m, ts, "labels", 3, rant_string("x", 1)),
+                  && !rant_set_string(m, sizeof m, ts, "labels[3]", rant_string("x", 1)),
                      "schema-dsl: bad string sets refused");
             {   /* a hostile length prefix reads back clamped to the cap */
                 RantSchemaFieldInfo fi;
@@ -173,13 +178,13 @@ static void schema_dsl_checks(void){
             CHECK(rant_schema_size(vs) == 5 && rant_schema_msg_min(vs) == 5 + 4*4,
                      "schema-var: fixed size %u, msg_min %u",
                      rant_schema_size(vs), rant_schema_msg_min(vs));
-            CHECK(rant_schema_field_at(vs, 5, &fi) && fi.kind == RANT_U8 && fi.offset == 4,
+            CHECK(rant_schema_field_at(vs, 7, &fi) && fi.kind == RANT_U8 && fi.offset == 4,
                      "schema-var: fixed fields pack around the variable ones (off=%u)", fi.offset);
             CHECK(rant_schema_field_at(vs, 1, &fi) && fi.kind == RANT_VSTR
                      && fi.offset == 0 && fi.size == 0,
                      "schema-var: variable field reports no static offset");
-            CHECK(rant_schema_field_at(vs, 3, &fi) && fi.kind == RANT_VARR
-                     && fi.elem == RANT_STR && fi.str_cap == 6 && fi.count == 0,
+            CHECK(rant_schema_field_at(vs, 4, &fi) && fi.kind == RANT_VARR && fi.count == 0
+                     && rant_schema_field_at(vs, 5, &fi) && fi.kind == RANT_STR && fi.str_cap == 6,
                      "schema-var: string<6>[] field info (cap=%u)", fi.str_cap);
         }
         if (vs){
@@ -198,7 +203,7 @@ static void schema_dsl_checks(void){
             ok &= rant_set_array(m, sizeof m, vs, "samples", rant_bytes(smp, 8));    /* 2 live f32 */
             ok &= rant_set_string(m, sizeof m, vs, "note", rant_string("hello, tail", 11));
             ok &= rant_set_array(m, sizeof m, vs, "labels", rant_bytes(slots, 16));
-            ok &= rant_set_string_at(m, sizeof m, vs, "labels", 1, rant_string("red", 3));
+            ok &= rant_set_string(m, sizeof m, vs, "labels[1]", rant_string("red", 3));
             CHECK(ok, "schema-var: variable setters accept (out of schema order)");
             CHECK(rant_get_uint(rant_bytes(m,sizeof m), vs, "id") == 7
                   && rant_get_uint(rant_bytes(m,sizeof m), vs, "tail") == 9,
@@ -209,15 +214,14 @@ static void schema_dsl_checks(void){
             a = rant_get_array(rant_bytes(m,sizeof m), vs, "samples");
             CHECK(a.len == 8 && memcmp(a.data, smp, 8) == 0,
                      "schema-var: variable array survives an earlier frame's resize");
-            v = rant_get_string_at(rant_bytes(m,sizeof m), vs, "labels", 1);
+            v = rant_get_string(rant_bytes(m,sizeof m), vs, "labels[1]");
             CHECK(v.len == 3 && memcmp(v.data, "red", 3) == 0,
                      "schema-var: variable string-array element round-trips");
-            CHECK(!rant_set_string_at(m, sizeof m, vs, "labels", 2, rant_string("x", 1)),
+            CHECK(!rant_set_string(m, sizeof m, vs, "labels[2]", rant_string("x", 1)),
                      "schema-var: index past the live count refused");
             {   RantValue dv;                        /* reflection sees the live extent */
                 CHECK(rant_get_value(rant_bytes(m,sizeof m), vs, 2, &dv)
-                         && dv.kind == RANT_VARR && dv.elem == RANT_F32
-                         && dv.count == 2 && dv.bytes.len == 8,
+                         && dv.kind == RANT_VARR && dv.count == 2 && dv.bytes.len == 8,
                          "schema-var: rant_get_value yields the live element count");
             }
 
@@ -321,12 +325,9 @@ static void schema_dsl_checks(void){
             "Reading { x: f64 } y",            /* trailing garbage */
             "Reading = { x: f64 }",            /* a struct is defined as Name { }, never Name = { } */
             "Reading { x: f64 }[2]",           /* a definition takes no array suffix */
-            "Reading { x: string[] }",   /* ragged: an array of unbounded strings is a map's job */
-            "Reading { x: string[4] }",        /* a fixed string array needs its <cap> */
             "Reading { x: string<0> }",        /* zero cap */
             "Reading { x: string<12 }",        /* missing '>' */
-            "Reading { v: { y: u8[] }[2] }",   /* variable field inside an array element */
-            "Reading { m: map[3] }",           /* a map has no element form */
+            "Reading { v: {}[2] }",            /* an empty element */
             "Reading { m: enum<u8> { A=300 } }",  /* value out of the backing range */
             "Reading { m: enum<f32> { A=0 } }",   /* non-integer backing */
             "Reading { m: enum<u8> A=0 }",        /* missing '{' */
@@ -342,8 +343,8 @@ static void schema_dsl_checks(void){
     }
     {   /* a shape rule the wire check enforces says which rule, never out of memory */
         static const struct { const char *text, *why; } rules[] = {
-            { "Reading { v: { y: u8[] }[2] }",   "a variable array cannot sit inside an array element" },
-            { "Reading { v: { s: string }[2] }", "a variable string or a map cannot sit inside an array element" },
+            { "Reading { v: {}[] }",               "an array element cannot be empty" },
+            { "Reading { v: u8[][][][][][][][] }", "arrays nest too deep" },
         };
         unsigned i, ok = 1;
         for (i = 0; i < sizeof rules / sizeof rules[0]; i++){
@@ -369,8 +370,8 @@ static void schema_dsl_checks(void){
             RantSchemaFieldInfo fi; int mi = rant_schema_field_index(es, "mode");
             uint8_t m[32]; RantString nm; int64_t vv; RantValue dv;
             CHECK(rant_schema_field_at(es, (uint16_t)mi, &fi) && fi.kind == RANT_ENUM
-                     && fi.elem == RANT_U8 && fi.count == 4 && fi.size == 1,
-                     "schema-enum: reflects as ENUM (backing=elem, options=count, size=1)");
+                     && fi.backing == RANT_U8 && fi.count == 4 && fi.size == 1,
+                     "schema-enum: reflects as ENUM (backing, options=count, size=1)");
             CHECK(rant_schema_size(es) == 4u + 1u + 1u, "schema-enum: fixed size %u", rant_schema_size(es));
             CHECK(rant_schema_enum_count(es, (uint16_t)mi) == 4
                      && rant_schema_enum_variant(es, (uint16_t)mi, 2, &vv, &nm)
@@ -403,8 +404,8 @@ static void schema_dsl_checks(void){
                      "schema-enum: an unknown/newer value stays readable, name empty");
             rant_set_uint(m, sizeof m, es, "mode", 2);
             CHECK(rant_get_value(rant_bytes(m,sizeof m), es, (uint16_t)mi, &dv)
-                     && dv.kind == RANT_ENUM && dv.elem == RANT_U8 && dv.count == 4 && dv.v.i == 2,
-                     "schema-enum: rant_get_value carries the number + backing/options");
+                     && dv.kind == RANT_ENUM && dv.v.i == 2,
+                     "schema-enum: rant_get_value carries the number");
 
             schema_print_roundtrip(&ma, es, "Robot (enum fields)");   /* prints, recompiles */
 
@@ -486,15 +487,16 @@ static void schema_v8_checks(void){
         uint8_t m[256]; RantBytes b; int xi;
         CHECK(s != NULL, "schema-v8: struct arrays compile");
         if (s){
-            CHECK(rant_schema_field_count(s) == 6,
+            CHECK(rant_schema_field_count(s) == 8,
                      "schema-v8: a struct array flattens its element once (%u fields)",
                      rant_schema_field_count(s));
             rant_schema_field_at(s, 0, &fi);
             rant_schema_field_at(s, 1, &fx);
-            CHECK(fi.kind == RANT_ARR && fi.elem == RANT_STRUCT && fi.count == 3
-                     && fi.elem_size == 12 && fi.size == 36 && fi.elem_name.len == 6,
-                     "schema-v8: Float3[3] reports element kind, stride and name");
-            CHECK(fx.depth == 1 && fx.arr_parent == 0 && fx.offset == 0,
+            CHECK(fi.kind == RANT_ARR && fi.count == 3 && fi.size == 36
+                     && fx.kind == RANT_STRUCT && fx.size == 12 && fx.type_name.len == 6,
+                     "schema-v8: Float3[3] and its element row report kind, stride and name");
+            rant_schema_field_at(s, 2, &fx);
+            CHECK(fx.depth == 2 && fx.arr_parent == 0 && fx.offset == 0,
                      "schema-v8: its members point back at the array (arr_parent=%u)", fx.arr_parent);
             CHECK(rant_schema_size(s) == 36, "schema-v8: the fixed array packs inline (%u)",
                      rant_schema_size(s));
@@ -524,7 +526,7 @@ static void schema_v8_checks(void){
                 ok = rant_set_value_at(m, sizeof m, s, (uint16_t)xi, &one, 1, &v)
                      && rant_get_value_at(b, s, (uint16_t)xi, &one, 1, &v) && v.v.f == 4.5
                      && !rant_get_value_at(b, s, (uint16_t)xi, NULL, 0, &v)
-                     && rant_array_count_at(b, s, 0) == 3;
+                     && rant_get_value(b, s, 0, &v) && v.count == 3;
                 CHECK(ok, "schema-v8: reflection get/set_value_at index an element");
             }
         }
@@ -653,12 +655,7 @@ static void schema_v8_checks(void){
 
     /* refusals: an array element's size must be static */
     {   static const char *bad[] = {
-            "A { p: { n: string }[4] }",        /* a variable member inside an element   */
-            "A { p: Image[2] }",                /* a standard type that has one          */
-            "A { p: f32[2][3] }",               /* an array of arrays                    */
-            "A { p: Uuid[2] }",                 /* a named alias that IS an array        */
-            "A { p: { q: { r: f32 }[] }[2] }",  /* a variable struct array in an element */
-            "A { m: enum<u8> { X }[2] }",       /* enum elements would hide the backing  */
+            "A { p: Empty[2] }",                /* an element with no bytes              */
             "Float3 { x: f32 }\nA { p: Float3 }",    /* a reserved name, a wrong shape   */
             "Transform { x: f32 }",             /* likewise as the last statement        */
             "A { x: f32 }\nA { x: f64 }",       /* a name defined twice with two shapes  */
@@ -712,9 +709,9 @@ static void schema_v8_checks(void){
         w[2] = (uint8_t)RANT_NAMED; w[3] = 0; w[4] = (uint8_t)RANT_BOOL;
         CHECK(i_rant_schema_parse(w, 5, rant_allocator_alloc, &sv_ma) == NULL,
                  "schema-v8: a NAMED with an empty name is refused");
-        w[2] = (uint8_t)RANT_ARR; w[3] = 2; w[4] = 0; w[5] = (uint8_t)RANT_VSTR;
-        CHECK(i_rant_schema_parse(w, 6, rant_allocator_alloc, &sv_ma) == NULL,
-                 "schema-v8: a variable array element is refused on the wire");
+        w[2] = (uint8_t)RANT_ARR; w[3] = 2; w[4] = 0; w[5] = (uint8_t)RANT_STRUCT; w[6] = 0;
+        CHECK(i_rant_schema_parse(w, 7, rant_allocator_alloc, &sv_ma) == NULL,
+                 "schema-v8: an empty array element is refused on the wire");
         w[5] = (uint8_t)RANT_NAMED; w[6] = 1; w[7] = 'A';
         s = i_rant_schema_parse(w, 8, rant_allocator_alloc, &sv_ma);
         CHECK(s == NULL, "schema-v8: a truncated NAMED element is refused");
@@ -833,9 +830,349 @@ static void schema_v8_checks(void){
     rant_allocator_reset(&sv_ma);
 }
 
+/* little endian writers for messages built by hand */
+static size_t put32(uint8_t *m, size_t at, uint32_t v){
+    m[at] = (uint8_t)v; m[at + 1] = (uint8_t)(v >> 8);
+    m[at + 2] = (uint8_t)(v >> 16); m[at + 3] = (uint8_t)(v >> 24);
+    return at + 4u;
+}
+static size_t putf(uint8_t *m, size_t at, float f){
+    uint32_t b; memcpy(&b, &f, 4);
+    return put32(m, at, b);
+}
+static float getf(RantBytes a, size_t i){                     /* element i of packed f32 */
+    float f; memcpy(&f, a.data + 4u * i, 4);
+    return f;
+}
+
+/* Any type as an array element: element rows, end tables, records inside elements, and a
+   hostile table or frame at any level refused whole. */
+static void schema_nested_checks(void){
+    RantAllocator ma = rant_allocator_heap(0);
+    sv_ma = rant_allocator_heap(0);
+    {   RantSchema *s = test_compile(&ma, "Path { id: u32, segments: { speed: f32, pts: Float2[] }[] }", NULL);
+        RantSchemaFieldInfo fi; uint8_t m[64]; size_t at = 0; RantBytes b; RantValue v;
+        uint32_t ix[2] = { 1, 0 };
+        CHECK(s != NULL, "nested: a variable struct element compiles");
+        if (s){
+            CHECK(rant_schema_field_count(s) == 8 && rant_schema_field_index(s, "segments[1]") == 2
+                     && rant_schema_field_index(s, "segments[1].pts[0].x") == 6
+                     && rant_schema_field_at(s, 2, &fi) && fi.kind == RANT_STRUCT && fi.size == 4
+                     && fi.depth == 1 && fi.arr_parent == 1 && fi.arr_depth == 1,
+                     "nested: the element row holds the record's fixed part (size=%u)", fi.size);
+            CHECK(rant_schema_msg_min(s) == 12, "nested: the default is an empty table (%u)",
+                     rant_schema_msg_min(s));
+            at = put32(m, at, 7);                                   /* id */
+            at = put32(m, at, 52);                                  /* the segments frame */
+            at = put32(m, at, 2); at = put32(m, at, 24); at = put32(m, at, 40);
+            at = putf(m, at, 1.5f); at = put32(m, at, 16);
+            at = putf(m, at, 1); at = putf(m, at, 2); at = putf(m, at, 3); at = putf(m, at, 4);
+            at = putf(m, at, 2.5f); at = put32(m, at, 8);
+            at = putf(m, at, 5); at = putf(m, at, 6);
+            b = rant_bytes(m, at);
+            CHECK(at == 60 && rant_schema_validate(s, b) && rant_schema_msg_len(s, m, at) == 60,
+                     "nested: the planned example validates (%u bytes)", (unsigned)at);
+            CHECK(rant_get_uint(b, s, "id") == 7 && rant_get_array_count(b, s, "segments") == 2
+                     && rant_get_f32(b, s, "segments[0].speed") == 1.5f
+                     && rant_get_f32(b, s, "segments[1].speed") == 2.5f
+                     && rant_get_array_count(b, s, "segments[0].pts") == 2
+                     && rant_get_array_count(b, s, "segments[1].pts") == 1
+                     && rant_get_f32(b, s, "segments[0].pts[1].y") == 4.0f
+                     && rant_get_f32(b, s, "segments[1].pts[0].x") == 5.0f
+                     && rant_get_array(b, s, "segments[0].pts").len == 16
+                     && rant_get_array(b, s, "segments").len == 0,
+                     "nested: every level reads by path");
+            CHECK(rant_get_f32(b, s, "segments[1].pts[1].x") == 0.0f
+                     && rant_get_f32(b, s, "segments[2].speed") == 0.0f
+                     && rant_get_value_at(b, s, 6, ix, 2, &v) && v.v.f == 5.0
+                     && !rant_get_value_at(b, s, 6, ix, 1, &v)
+                     && rant_get_value(b, s, 1, &v) && v.count == 2 && v.bytes.len == 0,
+                     "nested: reflection takes one index per array, past the end reads nothing");
+            CHECK(rant_set_f32(m, at, s, "segments[1].speed", 9.5f)
+                     && rant_get_f32(b, s, "segments[1].speed") == 9.5f
+                     && rant_get_f32(b, s, "segments[1].pts[0].x") == 5.0f,
+                     "nested: a fixed member of an element writes in place");
+            {   /* one bad length anywhere refuses the message, and reads stay in bounds */
+                static const struct { size_t at; uint32_t v; } bad[] = {
+                    { 4, 51 }, { 8, 3 }, { 12, 41 }, { 16, 39 }, { 16, 20 }, { 12, 25 },
+                    { 24, 12 }, { 24, 15 }, { 48, 4 } };
+                unsigned i, ok = 1;
+                for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
+                    uint8_t c[64];
+                    memcpy(c, m, at);
+                    put32(c, bad[i].at, bad[i].v);
+                    if (rant_schema_validate(s, rant_bytes(c, at))) ok = 0;
+                    (void)rant_get_f32(rant_bytes(c, at), s, "segments[1].pts[0].x");
+                    (void)rant_get_array_count(rant_bytes(c, at), s, "segments[1].pts");
+                }
+                CHECK(ok, "nested: a bad count, end or inner frame is refused at every level");
+            }
+        }
+    }
+    {   RantSchema *s = test_compile(&ma, "Names { names: string[], grid: f32[][] }", NULL);
+        RantSchemaFieldInfo fi; uint8_t m[64]; size_t at = 0; RantBytes b; RantValue v;
+        uint32_t one = 0;
+        CHECK(s != NULL, "nested: string[] and f32[][] compile");
+        if (s){
+            at = put32(m, at, 20);
+            at = put32(m, at, 2); at = put32(m, at, 3); at = put32(m, at, 8);
+            memcpy(m + at, "abchello", 8); at += 8;
+            at = put32(m, at, 20);
+            at = put32(m, at, 2); at = put32(m, at, 8); at = put32(m, at, 8);
+            at = putf(m, at, 1.0f); at = putf(m, at, 2.0f);
+            b = rant_bytes(m, at);
+            CHECK(rant_schema_field_count(s) == 5 && rant_schema_field_index(s, "grid[1]") == 3
+                     && rant_schema_field_at(s, 3, &fi) && fi.kind == RANT_VARR && fi.arr_depth == 1
+                     && rant_schema_field_at(s, 4, &fi) && fi.kind == RANT_F32 && fi.arr_depth == 2,
+                     "nested: an array of arrays has a row per level");
+            CHECK(rant_schema_validate(s, b) && rant_get_array_count(b, s, "names") == 2
+                     && rant_get_string(b, s, "names[0]").len == 3
+                     && memcmp(rant_get_string(b, s, "names[1]").data, "hello", 5) == 0
+                     && rant_get_array_count(b, s, "grid") == 2
+                     && rant_get_array_count(b, s, "grid[1]") == 0
+                     && rant_get_array(b, s, "grid[0]").len == 8
+                     && getf(rant_get_array(b, s, "grid[0]"), 1) == 2.0f
+                     && rant_get_value_at(b, s, 3, &one, 1, &v) && v.count == 2 && v.bytes.len == 8,
+                     "nested: ragged strings and arrays read by index");
+            put32(m, 12, 9);                                        /* names end past the bodies */
+            CHECK(!rant_schema_validate(s, b) && rant_get_string(b, s, "names[1]").data == NULL,
+                     "nested: a string end past its bodies is refused");
+            put32(m, 12, 8); put32(m, 32, 6);                       /* grid[0] holds 1.5 floats */
+            CHECK(!rant_schema_validate(s, b), "nested: an inner array of part elements is refused");
+        }
+    }
+    {   RantSchema *s = test_compile(&ma,
+            "D { fixed: string[2], recs: { s: string, n: u8 }[2], trip: f32[3][],"
+            "    modes: enum<u8> { A, B }[], id: Uuid[] }", NULL);
+        uint8_t m[256], fl[24], ids[32], modes[3] = { 1, 0, 1 }; RantBytes b; int i, ok;
+        RantSchemaFieldInfo fi;
+        CHECK(s != NULL, "nested: every other element kind compiles");
+        if (s){
+            for (i = 0; i < 6; i++) putf(fl, 4u * (size_t)i, (float)(i + 1));
+            for (i = 0; i < 32; i++) ids[i] = (uint8_t)i;
+            CHECK(rant_schema_msg_min(s) == 16 + 26 + 4 + 4 + 4,
+                     "nested: a fixed count of variable elements defaults to its count (%u)",
+                     rant_schema_msg_min(s));
+            ok = rant_schema_message_default(s, m, sizeof m);
+            b = rant_bytes(m, rant_schema_msg_min(s));
+            CHECK(ok && rant_schema_validate(s, b) && rant_get_array_count(b, s, "fixed") == 2
+                     && rant_get_string(b, s, "fixed[1]").len == 0
+                     && rant_get_array_count(b, s, "recs") == 2
+                     && rant_get_string(b, s, "recs[1].s").len == 0,
+                     "nested: the default message validates and reads empty");
+            ok  = rant_set_uint(m, sizeof m, s, "recs[1].n", 9);
+            ok &= rant_set_array(m, sizeof m, s, "trip", rant_bytes(fl, 24));
+            ok &= rant_set_array(m, sizeof m, s, "modes", rant_bytes(modes, 3));
+            ok &= rant_set_array(m, sizeof m, s, "id", rant_bytes(ids, 32));
+            b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+            CHECK(ok && rant_schema_validate(s, b) && rant_get_uint(b, s, "recs[1].n") == 9
+                     && rant_get_uint(b, s, "recs[0].n") == 0
+                     && rant_get_array_count(b, s, "trip") == 2
+                     && getf(rant_get_array(b, s, "trip[1]"), 2) == 6.0f
+                     && rant_get_enum(b, s, "modes[0]").len == 1 && rant_get_uint(b, s, "modes[1]") == 0
+                     && rant_get_array(b, s, "id[1]").len == 16 && rant_get_array(b, s, "id[1]").data[0] == 16,
+                     "nested: fixed elements of arrays, enums and aliases read by index");
+            CHECK(rant_schema_field_at(s, (uint16_t)rant_schema_field_index(s, "id[0]"), &fi)
+                     && fi.kind == RANT_ARR && fi.count == 16 && fi.type_name.len == 4,
+                     "nested: a named element row carries its name");
+        }
+    }
+    CHECK(sv_roundtrip("A { s: string[], g: f32[][], t: f32[3][], m: map[], e: enum<u8> { X, Y }[2],"
+                       "    u: Uuid[], i: Image[2], p: { q: { r: f32 }[] }[2] }"),
+             "nested: every element kind round-trips through print");
+    CHECK(sv("A { v: u8[][][][][][][] }") != NULL && sv("A { a: { b: { c: f32[] }[] }[4] }") != NULL,
+             "nested: arrays nest up to the depth cap");
+    CHECK(sv_sub("A { g: f32[][] }", "A { x: u8, g: f32[][] }") == 1
+             && sv_sub("A { g: f32[] }", "A { g: f32[][] }") == 0
+             && sv_sub("A { g: string[] }", "A { g: string<4>[] }") == 0,
+             "nested: a nested element compares exactly");
+    {   RantSchema *a = sv("A { g: f32[] }"), *w = sv("A { g: f32[][] }"); char why[128] = "";
+        CHECK(a && w && !rant_schema_subset_why(a, w, why, sizeof why)
+                 && strstr(why, "reader f32[], writer f32[][]") != NULL,
+                 "nested: the refusal spells each array level (%s)", why);
+        sv_free(a); sv_free(w);
+    }
+    {   i_RantSchemaErr ep = { NULL, NULL };
+        CHECK(test_compile(&ma, "A { a: string[65535][65535] }", &ep) == NULL && ep.why
+                 && strcmp(ep.why, "an array's default is too large") == 0,
+                 "nested: a default message past 4 GB is refused (%s)", ep.why ? ep.why : "null");
+    }
+    {   /* the reader's own fields over the writer's layout, through a nested record */
+        RantSchema *pub = sv("A { pad: u64, segs: { n: u8, s: string }[], t: string }");
+        RantSchema *sub = sv("A { t: string, segs: { n: u8, s: string }[] }");
+        RantSchema *rb = NULL; uint8_t m[64]; size_t at = 8; RantBytes b;
+        memset(m, 0, 8);
+        at = put32(m, at, 15);
+        at = put32(m, at, 1); at = put32(m, at, 7);
+        m[at++] = 3; at = put32(m, at, 2); memcpy(m + at, "hi", 2); at += 2;
+        at = put32(m, at, 2); memcpy(m + at, "tt", 2); at += 2;
+        b = rant_bytes(m, at);
+        if (pub && sub) rb = i_rant_schema_rebase(sub, pub, rant_allocator_alloc, &sv_ma);
+        CHECK(rb && rant_schema_validate(pub, b) && rant_schema_validate(rb, b)
+                 && rant_get_uint(b, rb, "segs[0].n") == 3
+                 && rant_get_string(b, rb, "segs[0].s").len == 2
+                 && memcmp(rant_get_string(b, rb, "t").data, "tt", 2) == 0,
+                 "nested: a rebased reader walks the writer's nested records");
+        sv_free(rb); sv_free(pub); sv_free(sub);
+    }
+    rant_allocator_reset(&sv_ma);
+    rant_allocator_reset(&ma);
+}
+
+/* the planned example, as hand built in the nested case: 2 segments of 2 and 1 points */
+static size_t path_example(uint8_t *m){
+    size_t at = 0;
+    at = put32(m, at, 7); at = put32(m, at, 52);
+    at = put32(m, at, 2); at = put32(m, at, 24); at = put32(m, at, 40);
+    at = putf(m, at, 1.5f); at = put32(m, at, 16);
+    at = putf(m, at, 1); at = putf(m, at, 2); at = putf(m, at, 3); at = putf(m, at, 4);
+    at = putf(m, at, 2.5f); at = put32(m, at, 8);
+    at = putf(m, at, 5); at = putf(m, at, 6);
+    return at;
+}
+
+/* Writes at any depth: a resize moves the rest of the message and every frame and end that
+   carries the value, counts grow with default elements and shrink, and a refusal leaves the
+   message as it was. */
+static void schema_write_checks(void){
+    RantAllocator ma = rant_allocator_heap(0);
+    {   RantSchema *s = test_compile(&ma, "Path { id: u32, segments: { speed: f32, pts: Float2[] }[] }", NULL);
+        uint8_t want[64], m[128], back[128], c[128]; float p0[4] = { 1, 2, 3, 4 }, p1[2] = { 5, 6 };
+        size_t wl = path_example(want); RantBytes b; RantValue v; int ok;
+        if (s){
+            ok  = rant_schema_message_default(s, m, sizeof m);
+            ok &= rant_set_uint(m, sizeof m, s, "id", 7);
+            ok &= rant_set_array_count(m, sizeof m, s, "segments", 2);
+            ok &= rant_set_f32(m, sizeof m, s, "segments[0].speed", 1.5f);
+            ok &= rant_set_f32(m, sizeof m, s, "segments[1].speed", 2.5f);
+            ok &= rant_set_array(m, sizeof m, s, "segments[0].pts", rant_bytes(p0, 16));
+            ok &= rant_set_array(m, sizeof m, s, "segments[1].pts", rant_bytes(p1, 8));
+            CHECK(ok && rant_schema_msg_len(s, m, sizeof m) == wl && memcmp(m, want, wl) == 0,
+                     "writes: the setters build the planned example byte for byte");
+            ok  = rant_schema_message_default(s, back, sizeof back);
+            ok &= rant_set_array_count(back, sizeof back, s, "segments", 2);
+            ok &= rant_set_array(back, sizeof back, s, "segments[1].pts", rant_bytes(p1, 8));
+            ok &= rant_set_array(back, sizeof back, s, "segments[0].pts", rant_bytes(p0, 16));
+            ok &= rant_set_f32(back, sizeof back, s, "segments[1].speed", 2.5f);
+            ok &= rant_set_f32(back, sizeof back, s, "segments[0].speed", 1.5f);
+            ok &= rant_set_uint(back, sizeof back, s, "id", 7);
+            CHECK(ok && memcmp(back, want, wl) == 0, "writes: any fill order gives the same bytes");
+            ok = rant_set_array_count(m, sizeof m, s, "segments", 1);
+            b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+            CHECK(ok && b.len == 40 && rant_schema_validate(s, b) && rant_get_array_count(b, s, "segments") == 1
+                     && rant_get_f32(b, s, "segments[0].pts[1].y") == 4.0f,
+                     "writes: a shrink keeps the first elements whole (%u bytes)", (unsigned)b.len);
+            ok = rant_set_array_count(m, sizeof m, s, "segments", 2);
+            b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+            CHECK(ok && b.len == 52 && rant_schema_validate(s, b)
+                     && rant_get_f32(b, s, "segments[1].speed") == 0.0f
+                     && rant_get_array_count(b, s, "segments[1].pts") == 0,
+                     "writes: a grow adds default elements (%u bytes)", (unsigned)b.len);
+            memcpy(c, m, sizeof c);
+            CHECK(!rant_set_array(m, b.len + 8, s, "segments[1].pts", rant_bytes(p0, 16))
+                     && !rant_set_array(m, sizeof m, s, "segments[1].pts", rant_bytes(p0, 12))
+                     && !rant_set_array_count(m, b.len + 3, s, "segments", 3)
+                     && memcmp(c, m, sizeof c) == 0,
+                     "writes: a refused nested write leaves the message as it was");
+            memset(&v, 0, sizeof v); v.kind = RANT_VARR; v.count = 3;
+            ok = rant_set_value_at(m, sizeof m, s, 1, NULL, 0, &v);
+            b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+            CHECK(ok && rant_get_array_count(b, s, "segments") == 3 && rant_schema_validate(s, b),
+                     "writes: set_value_at sizes a variable element array by its count");
+        }
+    }
+    {   RantSchema *s = test_compile(&ma, "Names { names: string[], tail: string }", NULL);
+        uint8_t m[128], want[64]; size_t at = 0; RantBytes b; int ok;
+        if (s){
+            at = put32(want, at, 21);
+            at = put32(want, at, 3); at = put32(want, at, 3); at = put32(want, at, 5); at = put32(want, at, 5);
+            memcpy(want + at, "abchi", 5); at += 5;
+            at = put32(want, at, 3); memcpy(want + at, "end", 3); at += 3;
+            ok  = rant_schema_message_default(s, m, sizeof m);
+            ok &= rant_set_string(m, sizeof m, s, "tail", rant_cstr("end"));
+            ok &= rant_set_array_count(m, sizeof m, s, "names", 3);
+            ok &= rant_set_string(m, sizeof m, s, "names[1]", rant_cstr("hello"));
+            ok &= rant_set_string(m, sizeof m, s, "names[0]", rant_cstr("abc"));
+            b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+            CHECK(ok && rant_schema_validate(s, b) && rant_get_string(b, s, "names[1]").len == 5
+                     && rant_get_string(b, s, "names[2]").len == 0 && rant_get_string(b, s, "tail").len == 3,
+                     "writes: string elements grow in place");
+            ok = rant_set_string(m, sizeof m, s, "names[1]", rant_cstr("hi"));
+            CHECK(ok && rant_schema_msg_len(s, m, sizeof m) == at && memcmp(m, want, at) == 0
+                     && !rant_set_string(m, sizeof m, s, "names[3]", rant_cstr("x")),
+                     "writes: a string element shrinks and every later end follows");
+        }
+    }
+    {   RantSchema *s = test_compile(&ma, "G { grid: f32[][], t: u8 }", NULL);
+        uint8_t m[128]; float row[3] = { 1, 2, 3 }; RantBytes b; int ok;
+        if (s){
+            ok  = rant_schema_message_default(s, m, sizeof m);
+            ok &= rant_set_uint(m, sizeof m, s, "t", 9);
+            ok &= rant_set_array_count(m, sizeof m, s, "grid", 2);
+            ok &= rant_set_array(m, sizeof m, s, "grid[1]", rant_bytes(row, 12));
+            ok &= rant_set_array_count(m, sizeof m, s, "grid[0]", 2);
+            ok &= rant_set_f32(m, sizeof m, s, "grid[0][1]", 7.0f);
+            b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+            CHECK(ok && rant_schema_validate(s, b) && getf(rant_get_array(b, s, "grid[0]"), 1) == 7.0f
+                     && getf(rant_get_array(b, s, "grid[1]"), 2) == 3.0f && rant_get_uint(b, s, "t") == 9,
+                     "writes: inner arrays size and fill on their own");
+        }
+    }
+    {   RantSchema *s = test_compile(&ma, "D { a: { b: { c: string }[] }[], t: string }", NULL);
+        uint8_t m[256]; RantBytes b; int ok, valid = 1;
+        if (s){
+            ok = rant_schema_message_default(s, m, sizeof m);
+#define STEP(call) do { ok &= (call); \
+                        valid &= rant_schema_validate(s, rant_bytes(m, rant_schema_msg_len(s, m, sizeof m))); } while (0)
+            STEP(rant_set_string(m, sizeof m, s, "t", rant_cstr("tail")));
+            STEP(rant_set_array_count(m, sizeof m, s, "a", 2));
+            STEP(rant_set_array_count(m, sizeof m, s, "a[1].b", 3));
+            STEP(rant_set_string(m, sizeof m, s, "a[1].b[2].c", rant_cstr("deep")));
+            STEP(rant_set_array_count(m, sizeof m, s, "a[0].b", 1));
+            STEP(rant_set_string(m, sizeof m, s, "a[0].b[0].c", rant_cstr("x")));
+            STEP(rant_set_string(m, sizeof m, s, "a[1].b[0].c", rant_cstr("first")));
+            b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+            CHECK(ok && valid && rant_get_string(b, s, "a[1].b[2].c").len == 4
+                     && rant_get_string(b, s, "a[1].b[0].c").len == 5 && rant_get_string(b, s, "a[0].b[0].c").len == 1
+                     && rant_get_string(b, s, "t").len == 4,
+                     "writes: three levels deep, every step leaves a valid message");
+            STEP(rant_set_array_count(m, sizeof m, s, "a[1].b", 1));
+            b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+            CHECK(ok && valid && rant_get_array_count(b, s, "a[1].b") == 1
+                     && rant_get_string(b, s, "a[1].b[0].c").len == 5 && rant_get_string(b, s, "t").len == 4,
+                     "writes: an inner shrink keeps its first element and everything after");
+#undef STEP
+        }
+    }
+    {   RantSchema *s = test_compile(&ma, "F { recs: { s: string, n: u8 }[2], ms: map[], t: string }", NULL);
+        uint8_t m[256], body[64]; uint32_t bl; RantBytes b; int ok;
+        RantMapWriter w = rant_map_begin(body, sizeof body);
+        rant_map_put_uint(&w, "k", 3);
+        bl = rant_map_finish(&w);
+        if (s){
+            ok  = rant_schema_message_default(s, m, sizeof m);
+            ok &= rant_set_string(m, sizeof m, s, "t", rant_cstr("tail"));
+            ok &= rant_set_string(m, sizeof m, s, "recs[1].s", rant_cstr("xyz"));
+            ok &= rant_set_uint(m, sizeof m, s, "recs[1].n", 5);
+            ok &= rant_set_string(m, sizeof m, s, "recs[0].s", rant_cstr("a"));
+            ok &= rant_set_array_count(m, sizeof m, s, "ms", 2);
+            ok &= rant_set_map(m, sizeof m, s, "ms[1]", rant_bytes(body, bl));
+            b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+            CHECK(ok && rant_schema_validate(s, b) && rant_get_string(b, s, "recs[1].s").len == 3
+                     && rant_get_uint(b, s, "recs[1].n") == 5 && rant_map_count(rant_get_map(b, s, "ms[1]")) == 1
+                     && rant_map_count(rant_get_map(b, s, "ms[0]")) == 0 && rant_get_string(b, s, "t").len == 4
+                     && !rant_set_array_count(m, sizeof m, s, "recs", 3),
+                     "writes: fixed count records and map elements write, a fixed count stays");
+        }
+    }
+    rant_allocator_reset(&ma);
+}
+
 static const TestCase cases[] = {
     { "dsl", schema_dsl_checks },
     { "wire", schema_v8_checks },
+    { "nested", schema_nested_checks },
+    { "writes", schema_write_checks },
 };
 
 TEST_MAIN(cases)

@@ -65,12 +65,12 @@ program in this order.
 | `unit.transport` | basics, fresh_join, ack_coalesce, ack_holes, bulk, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
 | `unit.discovery` | records, migrate, owed, judge, unmatched, offer, full, filter, forgotten, churn, first_contact, too_big, bulk, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
-| `unit.schema` | dsl, wire |
+| `unit.schema` | dsl, wire, nested, writes |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
 | `unit.tunnel` | hash, handshake, frame, json, batch |
 | `e2e.stream` | stream, scale, named, collision |
 | `e2e.node` | open_fail, bye_marks, bulk_pools, bulk_queued, bulk_shm, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups |
-| `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema |
+| `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema, nested |
 | `e2e.detail` | detail_live, interest_external, interest_bulk, filter_fetch |
 | `e2e.shm` | shm_node |
 | `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
@@ -289,12 +289,27 @@ What each phase pins, grouped by layer.
   position stays refused because the name may only ride the header.
 - Schema wire: named types and the narrow only matching they buy, alias roots, struct
   element arrays with indexed paths, variable members at any struct depth, and the
-  refusals that keep an array element's stride static. A text of several statements
-  compiles to its last, a repeated definition must match, and a definition taken by name
-  hashes like the plain struct. A registry keeps a definition for its later compiles,
-  rolls a failed text back and holds one handle per shape, and a node reserves its
-  builtin names and reports a refusal with the place in `detail`. Print hoists each named type as a leading definition,
-  dependencies first, and recompiles to the same wire.
+  refusals of an empty element and of arrays nested past the depth cap. A text of several
+  statements compiles to its last, a repeated definition must match, and a definition
+  taken by name hashes like the plain struct. A registry keeps a definition for its later
+  compiles, rolls a failed text back and holds one handle per shape, and a node reserves
+  its builtin names and reports a refusal with the place in `detail`. Print hoists each
+  named type as a leading definition, dependencies first, and recompiles to the same wire.
+- Nested: any type as an array element. Each array's next row is its element, a variable
+  element sits behind an end table, and a struct element is a record of its own. The
+  planned example message built by hand reads at every level by path and by index, a bad
+  count, end or inner frame at any level refuses it, and reads stay in bounds. Ragged
+  strings and arrays, fixed count arrays of variable elements and their defaults, enum and
+  alias elements, print, exact nested matching with its refusal text, the 4 GB default
+  bound and a rebase through a nested record.
+- Writes: the setters build the planned example byte for byte in any fill order, a count
+  shrinks and grows with default elements, string elements grow and shrink with every
+  later end following, inner arrays size on their own, three levels deep every step stays
+  valid, fixed count records and map elements write, and a refused nested write (past cap,
+  part elements, a fixed count) leaves the message as it was.
+- Nested end to end: a message of polygons and strings crosses loopback, the receiver
+  validates it, and a subset reader declaring its fields in another order reads every level
+  through the rebased schema.
 - Standard types: golden bytes and a golden hash every wrapper pins, and recognition that
   verifies the shape as well as the name. Change the golden pair only with a deliberate
   wire bump.
@@ -633,8 +648,10 @@ as `fuzz_<name>`. Fuzzing itself runs by hand, never in CI.
   refuses, so those three are not asked of it.
 - `message` reads a message of one of the `schemas.h` schemas, or a bare map body, through
   every getter, element and nested map. A valid map reads every entry, a valid message every
-  top level field, and a valid message copied field by field onto a default one still
-  validates with its integers intact.
+  row at every index under the live counts, and a valid message copied field by field onto
+  a default one still validates with its integers intact. Every row of a valid message is
+  written once at index 0 of its arrays: a write leaves it valid and a refused one leaves
+  it as it was.
 - `FUZZ_REQUIRE` states a property beyond not crashing. A failure aborts, which libFuzzer
   saves as a crash.
 - Once a crash is fixed, its input goes to `tests/fuzz/crashes/<name>/` under a name that
@@ -647,8 +664,9 @@ as `fuzz_<name>`. Fuzzing itself runs by hand, never in CI.
   libFuzzer's malloc limit flags a huge allocation.
 - Found so far, fixed with their inputs saved: a zero length fragment of an empty sample
   offset a NULL buffer, the same empty sample offset NULL again in delivery, a DATA header
-  claiming a sample longer than its fragments sized a 3 GB allocation, and a type name with
-  a run of single letters (`eL` to `EL` to `El`) did not print back to itself.
+  claiming a sample longer than its fragments sized a 3 GB allocation, a type name with
+  a run of single letters (`eL` to `EL` to `El`) did not print back to itself, and a
+  struct element whose body was shorter than its fixed part read past the message.
 - Accepted by design: a peer's wire may name a standard type with another shape, name a
   field twice or leave an option unnamed. Text refuses all three, but none breaks the layer
   below, so only a compiled schema owes the stricter properties.

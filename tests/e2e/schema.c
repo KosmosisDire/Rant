@@ -293,10 +293,11 @@ static void sr_root_case(RantAllocator *ma, const char *text, uint8_t kind,
     back = test_compile(ma, buf, NULL);
     CHECK(back && rant_schema_hash(back) == rant_schema_hash(s),
              "schema-root: '%s' print recompiles to the same wire (hash)", text);
-    CHECK(rant_schema_field_count(s) == 1 && rant_schema_field_at(s, 0, &fi)
+    CHECK(rant_schema_field_count(s) == (kind == RANT_ARR || kind == RANT_VARR ? 2 : 1)
+             && rant_schema_field_at(s, 0, &fi)
              && fi.kind == kind && fi.name.len == 0 && fi.name.data != NULL
              && fi.depth == 0 && fi.offset == 0,
-             "schema-root: '%s' is one anonymous field (kind=%u)", text, fi.kind);
+             "schema-root: '%s' is one anonymous field and its element (kind=%u)", text, fi.kind);
     CHECK(rant_schema_name(s).len == 0 && rant_schema_field_index(s, "") == 0,
              "schema-root: '%s' root is unnamed, the empty path resolves it", text);
     CHECK(rant_schema_size(s) == size && rant_schema_msg_min(s) == msg_min,
@@ -420,7 +421,7 @@ static void schema_root_checks(void){
         RantSchema *rt = i_rant_schema_parse(w.data, w.len, rant_allocator_alloc, &ma);
         RantSchema *alias; uint8_t named[6];
         CHECK(rt && rant_schema_hash(rt) == rant_schema_hash(sarr)
-                 && rant_schema_field_count(rt) == 1,
+                 && rant_schema_field_count(rt) == 2,
                  "schema-root: a bare root parses back from its wire");
         if (rt) i_rant_schema_free(rt, rant_allocator_alloc, &ma);
         named[0] = (uint8_t)RANT_SCHEMA_WIRE_VERSION;     /* [ver][namelen 1]['x'][BOOL] */
@@ -491,7 +492,7 @@ static void schema_root_checks(void){
         CHECK(strcmp(why, "root: reader struct 'Wrap', writer bool") == 0,
                  "schema-root: subset_why explains struct vs bare ('%s')", why);
         rb = i_rant_schema_rebase(sarr, sarr, rant_allocator_alloc, &ma);
-        CHECK(rb && rant_schema_field_count(rb) == 1 && rant_schema_msg_min(rb) == 4,
+        CHECK(rb && rant_schema_field_count(rb) == 2 && rant_schema_msg_min(rb) == 4,
                  "schema-root: rebase of a bare root stays valid");
         if (rb) i_rant_schema_free(rb, rant_allocator_alloc, &ma);
     }
@@ -677,9 +678,9 @@ static void stdtypes_checks(void){
                      && i_rant_std_recognize_field(&reg, good, (uint16_t)rant_schema_field_index(good, "id"))
                         == RANT_STD_UUID,
                      "stdtypes: a named field recognizes by name AND shape");
-            CHECK(i_rant_std_recognize_elem(&reg, good, (uint16_t)rant_schema_field_index(good, "pts"))
+            CHECK(i_rant_std_recognize_field(&reg, good, (uint16_t)rant_schema_field_index(good, "pts[0]"))
                         == RANT_STD_FLOAT3,
-                     "stdtypes: an array's ELEMENT recognizes");
+                     "stdtypes: an array's element row recognizes");
             CHECK(i_rant_std_recognize_field(&reg, good, (uint16_t)rant_schema_field_index(good, "plain"))
                         == RANT_STD_NONE
                      && i_rant_std_recognize(&reg, good) == RANT_STD_NONE,
@@ -916,6 +917,60 @@ done:
     if (b) rant_node_close(b, 0);
 }
 
+/* Nested variable data end to end: the receiver validates every level and a subset reader
+   in another order reads elements through the rebased schema. */
+static int sn_recv, sn_valid, sn_points; static double sn_y; static char sn_name[16];
+static void sn_on_message(const RantMsg *msg){
+    RantString nm;
+    if (!msg->schema) return;
+    sn_recv++;
+    sn_valid = rant_schema_validate(msg->schema, msg->data);
+    sn_points = (int)rant_get_array_count(msg->data, msg->schema, "areas[1].points");
+    sn_y = rant_get_f64(msg->data, msg->schema, "areas[1].points[2].y");
+    nm = rant_get_string(msg->data, msg->schema, "names[1]");
+    if (nm.data && nm.len < sizeof sn_name){ memcpy(sn_name, nm.data, nm.len); sn_name[nm.len] = '\0'; }
+}
+
+static void schema_nested_checks(void){
+    RantAllocator pa = rant_allocator_heap(0), sa = rant_allocator_heap(0);
+    RantNodeOpts po, so; RantNode *P, *S; RantTopicOpts co; RantAddr seed;
+    const RantSchema *ps, *ss; RantTopic *pub = NULL; int t;
+    static uint8_t m[1024];
+    memset(&co,0,sizeof co); co.qos.keep_last=4; co.qos.reliability=RANT_RELIABLE;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=TEST_DOMAIN+12; po.discovery.max_peers=4;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    so=po;
+    sn_recv = sn_valid = sn_points = 0; sn_y = 0; sn_name[0] = '\0';
+    P = rant_node_open(&pa, "sn-pub", NULL, NULL, &po);
+    S = rant_node_open(&sa, "sn-sub", sn_on_message, NULL, &so);
+    CHECK(P && S, "schema-nested: nodes open");
+    if (!(P && S)){ if (P) rant_node_close(P,0); if (S) rant_node_close(S,0); return; }
+    ps = rant_node_schema(P, "Zones { pad: u64, areas: Polygon2D[], names: string[], t: string }");
+    ss = rant_node_schema(S, "Zones { names: string[], areas: Polygon2D[] }");
+    if (ps) pub = rant_node_create_topic(P, "sn/zones", RANT_PUB_ONLY, ps, &co);
+    if (ss) rant_node_create_topic(S, "sn/zones", RANT_SUB_ONLY, ss, &co);
+    for (t=0;t<1200 && pub && rant_topic_match_count(pub)==0;t++){ rant_node_poll(P,2); rant_node_poll(S,2); }
+    CHECK(pub && rant_topic_match_count(pub)==1, "schema-nested: a subset reader in another order matches");
+    if (pub && rant_topic_match_count(pub)==1){
+        RantDouble2 pts[4] = { { 0, 0 }, { 2, 0 }, { 2, 1 }, { 0, 1 } };
+        int ok = rant_schema_message_default(ps, m, sizeof m);
+        ok &= rant_set_array_count(m, sizeof m, ps, "areas", 2);
+        ok &= rant_set_array(m, sizeof m, ps, "areas[1].points", rant_bytes(pts, sizeof pts));
+        ok &= rant_set_array_count(m, sizeof m, ps, "names", 2);
+        ok &= rant_set_string(m, sizeof m, ps, "names[1]", rant_cstr("dock"));
+        ok &= rant_set_string(m, sizeof m, ps, "t", rant_cstr("tail"));
+        CHECK(ok, "schema-nested: the nested message builds");
+        rant_topic_send(pub, rant_bytes(m, rant_schema_msg_len(ps, m, sizeof m)), NULL);
+        for (t=0;t<800 && sn_recv==0;t++){ rant_node_poll(P,1); rant_node_poll(S,2); }
+    }
+    CHECK(sn_recv==1 && sn_valid && sn_points==4 && sn_y==1.0 && strcmp(sn_name, "dock")==0,
+             "schema-nested: delivered and read at every level (recv=%d points=%d name=%s)",
+             sn_recv, sn_points, sn_name);
+    rant_node_close(P,1); rant_node_close(S,1);
+    rant_allocator_reset(&pa); rant_allocator_reset(&sa);
+}
+
 static const TestCase cases[] = {
     { "advert", schema_advert_checks },
     { "bind", schema_bind_checks },
@@ -923,6 +978,7 @@ static const TestCase cases[] = {
     { "root", schema_root_checks },
     { "stdtypes", stdtypes_checks },
     { "pattern_schema", pattern_schema_checks },
+    { "nested", schema_nested_checks },
 };
 
 TEST_MAIN(cases)

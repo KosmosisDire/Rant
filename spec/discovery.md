@@ -45,7 +45,7 @@ Every discovery datagram is, little endian:
 | bytes | field |
 |---|---|
 | 0 | the magic `uDSC` |
-| 4 | the wire version, `RANT_WIRE_VERSION` = 8 |
+| 4 | the wire version, `RANT_WIRE_VERSION` = 9 |
 | 5 | flags |
 | 6 | the u16 domain |
 | 8 | the sender's 16 byte uuid |

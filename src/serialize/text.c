@@ -702,11 +702,11 @@ static void i_rant_dsl_word_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantReg
     i_rant_schema_builder_put_raw(b, defs->arena.buf + toff, tlen);
 }
 
-/* One type plus the field it defines. The count follows the body in the text, so an array
- * suffix wraps what was just written. A type on its own passes name "". */
+/* One type plus the field it defines. The count follows the body in the text, so each
+ * array suffix wraps what was written before it. A type on its own passes name "". */
 static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegistry *defs,
                                   const char *name){
-    char tname[256]; const char *at; size_t head; uint16_t cnt; int variable; uint8_t kind;
+    char tname[256]; const char *at; size_t head; uint16_t cnt; int variable;
     i_rant_dsl_ws(d);
     at = d->p;
     i_rant_schema_builder_count(b);
@@ -723,11 +723,8 @@ static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRe
         i_rant_dsl_word_type(d, b, defs, tname, at);
     }
     if (d->err || b->err || head >= b->len) return;
-    kind = b->buf[head];
-    if (kind == RANT_MAP || kind == RANT_ENUM) return;   /* never an array element */
-    if (!i_rant_dsl_suffix(d, &cnt, &variable) || d->err) return;
-    if (kind == RANT_VSTR){ i_rant_dsl_fail(d, at, "string[] is ragged, give the string a cap"); return; }
-    i_rant_dsl_splice_array(b, head, cnt, variable);
+    while (i_rant_dsl_suffix(d, &cnt, &variable) && !d->err)
+        i_rant_dsl_splice_array(b, head, cnt, variable);
 }
 
 /* whether the field name written at b->buf[mine] already names an earlier field of the

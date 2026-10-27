@@ -52,13 +52,17 @@ void fuzz_read_map(RantBytes map){
     read_map(map, 0, &steps);
 }
 
-/* every element of field f, through the struct arrays around it */
-static void read_field(const RantSchema *s, RantBytes msg, uint16_t f, const uint16_t *chain,
-                       uint16_t depth, uint32_t *elems, uint16_t filled, long *steps){
+/* every element of field f, through the arrays around it. A valid message reads at
+ * every index under the live counts. */
+static void read_field(const RantSchema *s, RantBytes msg, int valid, uint16_t f,
+                       const uint16_t *chain, uint16_t depth, uint32_t *elems, uint16_t filled,
+                       long *steps){
     RantValue v;
     uint32_t i, count;
     if (filled == depth){
-        if (rant_get_value_at(msg, s, f, elems, depth, &v)){
+        int ok = rant_get_value_at(msg, s, f, elems, depth, &v);
+        if (valid) FUZZ_REQUIRE(ok);
+        if (ok){
             fuzz_touch(v.bytes.data, v.bytes.len);
             if (v.kind == RANT_MAP) read_map(v.bytes, 0, steps);
             if (v.kind == RANT_ENUM){
@@ -69,10 +73,10 @@ static void read_field(const RantSchema *s, RantBytes msg, uint16_t f, const uin
         (*steps)--;
         return;
     }
-    count = rant_array_count_at(msg, s, chain[depth - 1 - filled]);
+    count = rant_get_value_at(msg, s, chain[depth - 1 - filled], elems, filled, &v) ? v.count : 0;
     for (i = 0; i < count && i < 3 && *steps > 0; i++){
         elems[filled] = i;
-        read_field(s, msg, f, chain, depth, elems, (uint16_t)(filled + 1), steps);
+        read_field(s, msg, valid, f, chain, depth, elems, (uint16_t)(filled + 1), steps);
     }
 }
 
@@ -97,6 +101,6 @@ void fuzz_read_message(const RantSchema *s, RantBytes msg){
             p = pi.arr_parent;
         }
         if (depth != fi.arr_depth) continue;
-        read_field(s, msg, f, chain, depth, elems, 0, &steps);
+        read_field(s, msg, valid, f, chain, depth, elems, 0, &steps);
     }
 }

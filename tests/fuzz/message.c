@@ -52,6 +52,33 @@ static void copy_properties(const RantSchema *s, RantBytes msg){
     free(out);
 }
 
+/* Writes every row once, at index 0 of each array around it, onto a copy of a valid
+ * message. A write keeps it valid, and a refused one leaves it as it was. */
+static void write_properties(const RantSchema *s, RantBytes msg){
+    size_t cap = msg.len + 64u;
+    uint8_t *buf = (uint8_t *)calloc(1, cap), *was = (uint8_t *)malloc(cap);
+    uint16_t f, nf = rant_schema_field_count(s);
+    uint32_t zeros[RANT_SCHEMA_MAX_DEPTH];
+    FUZZ_REQUIRE(buf && was);
+    memset(zeros, 0, sizeof zeros);
+    if (msg.len) memcpy(buf, msg.data, msg.len);
+    for (f = 0; f < nf; f++){
+        RantSchemaFieldInfo fi; RantValue v; uint32_t len;
+        if (!rant_schema_field_at(s, f, &fi)
+            || !rant_get_value_at(rant_bytes(buf, cap), s, f, zeros, fi.arr_depth, &v)) continue;
+        if (fi.kind == RANT_STRUCT || fi.kind == RANT_ARR || fi.kind == RANT_STR) continue;
+        if (fi.kind == RANT_VSTR) v.bytes = rant_bytes("ab", 2);
+        if (fi.kind == RANT_MAP) v.bytes = rant_bytes(NULL, 0);
+        if (fi.kind == RANT_VARR){ v.count += 1u; v.bytes = rant_bytes(NULL, 0); }
+        memcpy(was, buf, cap);
+        if (rant_set_value_at(buf, cap, s, f, zeros, fi.arr_depth, &v)){
+            len = rant_schema_msg_len(s, buf, cap);
+            FUZZ_REQUIRE(len != 0 && rant_schema_validate(s, rant_bytes(buf, len)));
+        } else FUZZ_REQUIRE(memcmp(was, buf, cap) == 0);
+    }
+    free(buf); free(was);
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size){
     RantBytes body;
     size_t k;
@@ -64,7 +91,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size){
         return 0;
     }
     fuzz_read_message(g_schemas[k], body);
-    if (rant_schema_validate(g_schemas[k], body)) copy_properties(g_schemas[k], body);
+    if (rant_schema_validate(g_schemas[k], body)){
+        copy_properties(g_schemas[k], body);
+        write_properties(g_schemas[k], body);
+    }
     return 0;
 }
 
@@ -99,10 +129,13 @@ static uint32_t build_message(const RantSchema *s, uint8_t *buf, size_t cap){
         v.v.u = f + 1u;
         if (fi.kind == RANT_F32 || fi.kind == RANT_F64) v.v.f = 1.5 * f;
         if (fi.kind == RANT_STR || fi.kind == RANT_VSTR) v.bytes = rant_bytes("fuzz", 4);
-        if (fi.kind == RANT_VARR){
-            size_t ne = fi.elem_size ? sizeof elems / fi.elem_size : 0;
-            if (!ne) continue;
-            v.bytes = rant_bytes(elems, fi.elem_size * (ne < 3 ? ne : 3));
+        if (fi.kind == RANT_VARR){                 /* packed scalars, else two default elements */
+            RantSchemaFieldInfo ei;
+            size_t ne;
+            if (!rant_schema_field_at(s, (uint16_t)(f + 1u), &ei)) continue;
+            v.count = 2;
+            ne = ei.size && ei.kind != RANT_STRUCT ? sizeof elems / ei.size : 0;
+            if (ne) v.bytes = rant_bytes(elems, ei.size * (ne < 3 ? ne : 3));
         }
         if (fi.kind == RANT_MAP) v.bytes = rant_bytes(map, build_map(map, sizeof map));
         if (fi.kind == RANT_ARR || fi.kind == RANT_STRUCT) continue;

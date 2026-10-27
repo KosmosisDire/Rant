@@ -113,37 +113,32 @@ static char *i_rant_why_u(char *p, char *end, uint32_t v){
     while (n && p < end) *p++ = tmp[--n];
     return p;
 }
-/* a field's type in compact DSL form: "Float3[4]", "f32[8]", "string<33>", "map" */
-static char *i_rant_why_type(char *p, char *end, const i_Field *f){
-    uint8_t is_arr = (uint8_t)(f->kind == RANT_ARR || f->kind == RANT_VARR);
+/* a row's type in compact DSL form: "Float3[4]", "f32[8][]", "string<33>", "map" */
+static char *i_rant_why_type(char *p, char *end, const RantSchema *s, uint16_t i){
+    const i_Field *f = &s->fields[i];
     if (f->type_name.len) return i_rant_why_view(p, end, f->type_name);
-    if (f->kind == RANT_MAP)    return i_rant_why_str(p, end, "map");
-    if (f->kind == RANT_VSTR) return i_rant_why_str(p, end, "string");
-    if (f->kind == RANT_ENUM){                              /* the width is what matters */
-        p = i_rant_why_str(p, end, "enum<");
-        p = i_rant_why_str(p, end, i_rant_why_kind(f->elem));
-        return i_rant_why_str(p, end, ">");
-    }
-    if (is_arr && f->elem_name.len){
-        p = i_rant_why_view(p, end, f->elem_name);
-    } else {
-        uint8_t elem = is_arr ? f->elem : f->kind;
-        if (elem == RANT_STR){
+    switch (f->kind){
+        case RANT_MAP:  return i_rant_why_str(p, end, "map");
+        case RANT_VSTR: return i_rant_why_str(p, end, "string");
+        case RANT_ENUM:                                     /* the width is what matters */
+            p = i_rant_why_str(p, end, "enum<");
+            p = i_rant_why_str(p, end, i_rant_why_kind(f->backing));
+            return i_rant_why_str(p, end, ">");
+        case RANT_STR:
             p = i_rant_why_str(p, end, "string<");
             p = i_rant_why_u(p, end, f->str_cap);
-            p = i_rant_why_str(p, end, ">");
-        } else {
-            p = i_rant_why_str(p, end, i_rant_why_kind(elem));
-        }
+            return i_rant_why_str(p, end, ">");
+        case RANT_ARR:
+            p = i_rant_why_type(p, end, s, (uint16_t)(i + 1u));
+            p = i_rant_why_str(p, end, "[");
+            p = i_rant_why_u(p, end, f->count);
+            return i_rant_why_str(p, end, "]");
+        case RANT_VARR:
+            p = i_rant_why_type(p, end, s, (uint16_t)(i + 1u));
+            return i_rant_why_str(p, end, "[]");
+        default:
+            return i_rant_why_str(p, end, i_rant_why_kind(f->kind));
     }
-    if (f->kind == RANT_ARR){
-        p = i_rant_why_str(p, end, "[");
-        p = i_rant_why_u(p, end, f->count);
-        p = i_rant_why_str(p, end, "]");
-    } else if (f->kind == RANT_VARR){
-        p = i_rant_why_str(p, end, "[]");
-    }
-    return p;
 }
 static int i_rant_why_done(char *buf, char *p){     /* NUL terminate the reason and refuse */
     if (buf) *p = '\0';
@@ -156,7 +151,7 @@ static char *i_rant_why_root(char *p, char *end, const RantSchema *s){
             p = i_rant_why_view(p, end, s->name);
             p = i_rant_why_str(p, end, " = ");
         }
-        return i_rant_why_type(p, end, &s->fields[0]);
+        return i_rant_why_type(p, end, s, 0);
     }
     p = i_rant_why_str(p, end, "struct '");
     p = i_rant_why_view(p, end, s->name);
@@ -195,9 +190,10 @@ int rant_schema_subset_why(const RantSchema *sub, const RantSchema *pub,
         }
         if (!i_rant_field_cmp(sub, a, pub, b)){
             p = i_rant_why_str(p, end, "field '"); p = i_rant_why_view(p, end, a->name);
-            p = i_rant_why_str(p, end, "': reader "); p = i_rant_why_type(p, end, a);
+            p = i_rant_why_str(p, end, "': reader ");
+            p = i_rant_why_type(p, end, sub, (uint16_t)(a - sub->fields));
             p = i_rant_why_str(p, end, ", writer ");
-            return i_rant_why_done(buf, i_rant_why_type(p, end, b));
+            return i_rant_why_done(buf, i_rant_why_type(p, end, pub, (uint16_t)(b - pub->fields)));
         }
     }
     return 1;
@@ -205,13 +201,6 @@ int rant_schema_subset_why(const RantSchema *sub, const RantSchema *pub,
 
 int rant_schema_subset(const RantSchema *sub, const RantSchema *pub){
     return rant_schema_subset_why(sub, pub, NULL, 0);
-}
-
-/* the flat index just past a field's subtree */
-static uint16_t i_rant_subtree_end(const RantSchema *s, uint16_t i){
-    uint16_t d = s->fields[i].depth, k = (uint16_t)(i + 1u);
-    while (k < s->nfields && s->fields[k].depth > d) k++;
-    return k;
 }
 
 RantSchema *i_rant_schema_rebase(const RantSchema *sub, const RantSchema *pub,
@@ -222,7 +211,7 @@ RantSchema *i_rant_schema_rebase(const RantSchema *sub, const RantSchema *pub,
     if (!r) return NULL;
     while (i < r->nfields){                                   /* the writer's layout */
         const i_Field *p = i_rant_schema_find(pub, r->fields[i].name);
-        uint16_t re = i_rant_subtree_end(r, i), j, k;
+        uint16_t re = r->fields[i].next, j, k;
         if (!p || r->fields[i].depth != 0){ i_rant_schema_free(r, alloc, user); return NULL; }
         j = (uint16_t)(p - pub->fields);
         for (k = 0; (uint16_t)(i + k) < re; k++){             /* the subtrees match exactly */
@@ -237,5 +226,6 @@ RantSchema *i_rant_schema_rebase(const RantSchema *sub, const RantSchema *pub,
     }
     r->size = pub->size;                                      /* and the writer's bounds, so */
     r->n_var = pub->n_var;   /* validate and walk see pub's messages */
+    r->msg_min = pub->msg_min;
     return r;
 }

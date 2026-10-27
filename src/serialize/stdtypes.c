@@ -299,21 +299,6 @@ RantStdType i_rant_std_recognize_field(i_RantRegistry *r, const RantSchema *s, u
     return i_rant_std_check(r, name, inner);
 }
 
-RantStdType i_rant_std_recognize_elem(i_RantRegistry *r, const RantSchema *s, uint16_t field){
-    RantBytes type = rant_schema_field_type_wire(s, field), inner;
-    RantSchemaFieldInfo fi;
-    RantString name;
-    size_t head;
-    if (!rant_schema_field_at(s, field, &fi) || !type.data) return RANT_STD_NONE;
-    if (fi.kind == RANT_ARR)         head = 3u;      /* [ARR][u16 count] */
-    else if (fi.kind == RANT_VARR) head = 1u;        /* [VARR] */
-    else return RANT_STD_NONE;
-    if (head >= type.len) return RANT_STD_NONE;
-    if (!i_rant_std_peel(rant_bytes(type.data + head, type.len - head), &name, &inner))
-        return RANT_STD_NONE;
-    return i_rant_std_check(r, name, inner);
-}
-
 /* No math.h, so a consumer's build line never grows an -lm. Newton from the halved
  * exponent seed converges to full double precision within five steps. */
 static double i_rant_sqrt(double x){
