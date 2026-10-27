@@ -460,6 +460,7 @@ int rant_schema_field_at(const RantSchema *s, uint16_t i, RantSchemaFieldInfo *o
         out->str_cap = f->str_cap; out->arr_parent = f->arr_parent;
         out->arr_depth = f->arr_depth;
         out->offset = f->offset; out->size = f->size;
+        out->min_len = f->dmin ? f->dmin : f->size;   /* dmin is set where a default varies */
     }
     return 1;
 }

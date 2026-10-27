@@ -353,8 +353,9 @@ Reflection reaches the same values by flat index with `rant_get_value_at` and
   says how many indices a row takes.
 - For an array, `RantValue.count` is the live count, and `bytes` the packed elements when
   the element is fixed.
-- `rant_set_value_at` on a variable array writes packed bytes, or with none sizes it to
-  `count`.
+- `rant_set_value_at` sets values only: an array of fixed elements from its packed bytes.
+  `rant_set_array_count_at` sizes a variable array by flat index, as `rant_set_array_count`
+  does by path, and its elements are then set one at a time.
 
 ## Wire format
 

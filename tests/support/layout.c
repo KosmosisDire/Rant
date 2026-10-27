@@ -200,6 +200,7 @@ int main(int argc, char **argv){
     FIELD(RantSchemaFieldInfo, arr_depth)
     FIELD(RantSchemaFieldInfo, offset)
     FIELD(RantSchemaFieldInfo, size)
+    FIELD(RantSchemaFieldInfo, min_len)
     SIZE(RantSendOpts)
     FIELD(RantSendOpts, capture_us)
     SIZE(RantStatusOpts)

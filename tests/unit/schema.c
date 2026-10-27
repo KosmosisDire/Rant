@@ -862,6 +862,12 @@ static void schema_nested_checks(void){
                      "nested: the element row holds the record's fixed part (size=%u)", fi.size);
             CHECK(rant_schema_msg_min(s) == 12, "nested: the default is an empty table (%u)",
                      rant_schema_msg_min(s));
+            CHECK(rant_schema_field_at(s, 1, &fi) && fi.min_len == 4
+                     && rant_schema_field_at(s, 2, &fi) && fi.min_len == 8
+                     && rant_schema_field_at(s, 4, &fi) && fi.min_len == 0
+                     && rant_schema_field_at(s, 5, &fi) && fi.min_len == 8
+                     && rant_schema_field_at(s, 6, &fi) && fi.min_len == 4,
+                     "nested: min_len is a default value's length (%u)", fi.min_len);
             at = put32(m, at, 7);                                   /* id */
             at = put32(m, at, 52);                                  /* the segments frame */
             at = put32(m, at, 2); at = put32(m, at, 24); at = put32(m, at, 40);
@@ -1075,10 +1081,20 @@ static void schema_write_checks(void){
                      && memcmp(c, m, sizeof c) == 0,
                      "writes: a refused nested write leaves the message as it was");
             memset(&v, 0, sizeof v); v.kind = RANT_VARR; v.count = 3;
-            ok = rant_set_value_at(m, sizeof m, s, 1, NULL, 0, &v);
+            memcpy(c, m, sizeof c);
+            CHECK(!rant_set_value_at(m, sizeof m, s, 1, NULL, 0, &v) && memcmp(c, m, sizeof c) == 0,
+                     "writes: set_value_at sets values only, an array of records has no packed value");
+            ok = rant_set_array_count_at(m, sizeof m, s, 1, NULL, 0, 3);
             b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
             CHECK(ok && rant_get_array_count(b, s, "segments") == 3 && rant_schema_validate(s, b),
-                     "writes: set_value_at sizes a variable element array by its count");
+                     "writes: set_array_count_at sizes a variable array by flat index");
+            {   uint32_t at = 2;
+                ok = rant_set_array_count_at(m, sizeof m, s, 4, &at, 1, 2);
+                b = rant_bytes(m, rant_schema_msg_len(s, m, sizeof m));
+                CHECK(ok && rant_get_array_count(b, s, "segments[2].pts") == 2 && rant_schema_validate(s, b)
+                         && rant_get_array_count(b, s, "segments[1].pts") == 0,
+                         "writes: set_array_count_at takes one index per enclosing array");
+            }
         }
     }
     {   RantSchema *s = test_compile(&ma, "Names { names: string[], tail: string }", NULL);
@@ -1163,7 +1179,101 @@ static void schema_write_checks(void){
                      && rant_map_count(rant_get_map(b, s, "ms[0]")) == 0 && rant_get_string(b, s, "t").len == 4
                      && !rant_set_array_count(m, sizeof m, s, "recs", 3),
                      "writes: fixed count records and map elements write, a fixed count stays");
+            {   RantSchemaFieldInfo r, e;
+                CHECK(rant_schema_field_at(s, 0, &r) && r.min_len == 22 && rant_schema_field_at(s, 1, &e)
+                         && e.min_len == 5 && e.size == 1 && rant_schema_msg_min(s) == 38,
+                         "writes: min_len counts default bodies and their ends (%u, %u)", r.min_len, e.min_len);
+            }
         }
+    }
+    rant_allocator_reset(&ma);
+}
+
+/* Every accessor called on the wrong thing refuses or reads empty, and leaves the message as
+ * it was. The garbage loop proves nothing alone, it is there for the sanitizer builds. */
+static void schema_misuse_checks(void){
+    RantAllocator ma = rant_allocator_heap(0);
+    RantSchema *s = test_compile(&ma, "M { id: u32, segs: { speed: f32, pts: Float2[] }[], names: string[], "
+                                      "tags: string<4>[2], e: enum<u8> { A=0, B=1 } }", NULL);
+    uint8_t m[256], c[256]; RantBytes b; RantValue v; uint32_t ix[3] = { 0, 0, 0 }; size_t len; int ok;
+    int seg, pts, x, names;
+    CHECK(s != NULL, "misuse: the schema compiles");
+    if (!s){ rant_allocator_reset(&ma); return; }
+    ok  = rant_schema_message_default(s, m, sizeof m);
+    ok &= rant_set_array_count(m, sizeof m, s, "segs", 1);
+    ok &= rant_set_array_count(m, sizeof m, s, "names", 1);
+    len = rant_schema_msg_len(s, m, sizeof m);
+    b = rant_bytes(m, len);
+    memcpy(c, m, sizeof c);
+    memset(&v, 0, sizeof v);
+    seg = rant_schema_field_index(s, "segs");
+    pts = rant_schema_field_index(s, "segs[0].pts");
+    x = rant_schema_field_index(s, "segs[0].pts[0].x");
+    names = rant_schema_field_index(s, "names");
+    CHECK(ok && len != 0 && seg >= 0 && pts >= 0 && x >= 0 && names >= 0, "misuse: a message to misuse");
+
+    CHECK(rant_get_uint(b, NULL, "id") == 0 && rant_get_uint(b, s, NULL) == 0
+             && !rant_get_value_at(b, s, 0, NULL, 0, NULL) && !rant_get_value_at(rant_bytes(NULL, 0), s, 0, NULL, 0, &v)
+             && !rant_set_uint(NULL, sizeof m, s, "id", 1) && !rant_set_uint(m, sizeof m, NULL, "id", 1)
+             && !rant_set_uint(m, sizeof m, s, NULL, 1) && !rant_set_value_at(m, sizeof m, s, 0, NULL, 0, NULL)
+             && !rant_set_array_count_at(NULL, sizeof m, s, (uint16_t)names, NULL, 0, 1)
+             && rant_schema_msg_len(s, NULL, sizeof m) == 0
+             && !rant_set_string(m, sizeof m, s, "names[0]", rant_string(NULL, 3))
+             && !rant_set_enum(m, sizeof m, s, "e", NULL),
+             "misuse: a NULL schema, buffer, path, value or string is refused");
+    CHECK(!rant_set_f32(m, sizeof m, s, "id", 1.0f) && !rant_set_string(m, sizeof m, s, "id", rant_cstr("x"))
+             && !rant_set_array(m, sizeof m, s, "id", rant_bytes(ix, 4)) && !rant_set_array_count(m, sizeof m, s, "id", 2)
+             && !rant_set_array_count(m, sizeof m, s, "tags", 3) && !rant_set_map(m, sizeof m, s, "id", rant_bytes(NULL, 0))
+             && !rant_set_enum(m, sizeof m, s, "id", "A") && !rant_set_enum(m, sizeof m, s, "e", "C")
+             && !rant_set_array(m, sizeof m, s, "segs", rant_bytes(ix, 8)) && !rant_set_uint(m, sizeof m, s, "segs[0]", 1)
+             && !rant_set_array(m, sizeof m, s, "tags", rant_bytes(ix, 5))
+             && !rant_set_array_count_at(m, sizeof m, s, 0, NULL, 0, 2)
+             && rant_get_f32(b, s, "id") == 0.0f && rant_get_string(b, s, "id").len == 0
+             && rant_get_array(b, s, "segs").len == 0 && rant_get_array_count(b, s, "id") == 0,
+             "misuse: a call on the wrong kind is refused or reads empty");
+    CHECK(!rant_get_value_at(b, s, (uint16_t)x, ix, 1, &v) && !rant_get_value_at(b, s, (uint16_t)x, ix, 3, &v)
+             && !rant_get_value_at(b, s, (uint16_t)x, NULL, 2, &v) && !rant_get_value_at(b, s, (uint16_t)x, ix, 2, &v)
+             && !rant_get_value_at(b, s, 999, NULL, 0, &v) && !rant_set_value_at(m, sizeof m, s, 999, NULL, 0, &v)
+             && !rant_set_array_count_at(m, sizeof m, s, 999, NULL, 0, 1)
+             && !rant_set_array_count_at(m, sizeof m, s, (uint16_t)seg, ix, 1, 1),
+             "misuse: a wrong index count, a missing element or a row past the table is refused");
+    ix[0] = 5;
+    CHECK(!rant_set_array_count_at(m, sizeof m, s, (uint16_t)pts, ix, 1, 2) && !rant_set_f32(m, sizeof m, s, "segs[5].speed", 1.0f)
+             && rant_get_f32(b, s, "segs[5].speed") == 0.0f && !rant_set_string(m, sizeof m, s, "names[1]", rant_cstr("x")),
+             "misuse: an index past the live count is refused");
+    {   static const char *bad[] = { "", "nosuch", "segs[", "segs[]", "segs[x]", "segs[0", "segs[-1]",
+                                     "segs[99999999999]", "segs..speed", "segs[0].", ".id", "id[0]", "id.x",
+                                     "segs[0][0]", "names[0].x", "tags[0][1]" };
+        size_t i; int all = 1;
+        for (i = 0; i < sizeof bad / sizeof bad[0]; i++)
+            all &= rant_schema_field_index(s, bad[i]) < 0 && !rant_set_uint(m, sizeof m, s, bad[i], 1)
+                && rant_get_uint(b, s, bad[i]) == 0;
+        CHECK(all, "misuse: a malformed or unknown path finds nothing");
+    }
+    CHECK(!rant_set_uint(m, 2, s, "id", 1) && rant_schema_msg_len(s, m, 2) == 0
+             && rant_get_uint(rant_bytes(m, 2), s, "id") == 0
+             && !rant_set_array_count(m, len + 3, s, "names", 5)
+             && !rant_set_array_count_at(m, len + 3, s, (uint16_t)names, NULL, 0, 5)
+             && !rant_set_string(m, len, s, "names[0]", rant_cstr("toolong")),
+             "misuse: a buffer too short for the value is refused");
+    CHECK(memcmp(c, m, sizeof c) == 0, "misuse: every refused call left the message as it was");
+    {   uint8_t g[96]; uint32_t seed = 12345u, zero[2] = { 0, 0 }; uint16_t f, n = rant_schema_field_count(s);
+        RantSchemaFieldInfo fi; int k;
+        for (k = 0; k < 64; k++){
+            size_t i, glen = seed % sizeof g;
+            for (i = 0; i < sizeof g; i++){ seed = seed * 1103515245u + 12345u; g[i] = (uint8_t)(seed >> 16); }
+            for (f = 0; f < n; f++){
+                if (!rant_schema_field_at(s, f, &fi)) continue;
+                (void)rant_get_value_at(rant_bytes(g, glen), s, f, zero, fi.arr_depth, &v);
+                memset(&v, 0, sizeof v);
+                (void)rant_set_value_at(g, glen, s, f, zero, fi.arr_depth, &v);
+                (void)rant_set_array_count_at(g, glen, s, f, zero, fi.arr_depth, 3);
+            }
+            (void)rant_schema_validate(s, rant_bytes(g, glen));
+            (void)rant_get_string(rant_bytes(g, glen), s, "segs[0].pts");
+            (void)rant_set_string(g, glen, s, "names[0]", rant_cstr("abc"));
+        }
+        CHECK(1, "misuse: garbage bytes went through every read and write");
     }
     rant_allocator_reset(&ma);
 }
@@ -1173,6 +1283,7 @@ static const TestCase cases[] = {
     { "wire", schema_v8_checks },
     { "nested", schema_nested_checks },
     { "writes", schema_write_checks },
+    { "misuse", schema_misuse_checks },
 };
 
 TEST_MAIN(cases)

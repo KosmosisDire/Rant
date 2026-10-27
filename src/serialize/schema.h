@@ -57,6 +57,7 @@ typedef struct {
     uint16_t     arr_depth; /* the arrays around the row, the indices an access takes */
     uint32_t     offset;    /* from the start of the nearest enclosing element or the message */
     uint32_t     size;      /* fixed bytes, a struct counts its fixed members, 0 if variable */
+    uint32_t     min_len;   /* a default value's bytes, what one more element at least costs */
 } RantSchemaFieldInfo;
 
 RANT_API RantBytes       rant_schema_wire(const RantSchema *s);            /* the canonical bytes to advertise */
@@ -155,7 +156,7 @@ RANT_API int rant_set_enum(void *buf, size_t cap, const RantSchema *s, const cha
 /* One tagged value for reflection by flat index. */
 typedef struct {
     uint8_t  kind;        /* RantSchemaTypeKind */
-    uint32_t count;       /* ARR and VARR live elements, MAP entries, else 0 */
+    uint32_t count;       /* read: ARR and VARR live elements, MAP entries, else 0 */
     union { uint64_t u; int64_t i; double f; } v;   /* the scalar value, BOOL in u, ENUM in i */
     RantBytes bytes;      /* the live string, the map body, a struct's fixed bytes, or an
                              array's packed elements when its element is fixed */
@@ -163,11 +164,15 @@ typedef struct {
 RANT_API int rant_get_value(RantBytes msg, const RantSchema *s, uint16_t field, RantValue *out);
 RANT_API int rant_set_value(void *buf, size_t cap, const RantSchema *s, uint16_t field, const RantValue *val);
 /* The same under arrays: elems holds one index per enclosing array, outermost first, and
- * n_elems must equal the field's arr_depth. A VARR takes packed bytes, or with none its count. */
+ * n_elems must equal the field's arr_depth. An array of fixed elements is set from its packed
+ * elements, one of variable elements element by element once rant_set_array_count_at sized it. */
 RANT_API int rant_get_value_at(RantBytes msg, const RantSchema *s, uint16_t field,
                                const uint32_t *elems, uint16_t n_elems, RantValue *out);
 RANT_API int rant_set_value_at(void *buf, size_t cap, const RantSchema *s, uint16_t field,
                                const uint32_t *elems, uint16_t n_elems, const RantValue *val);
+/* rant_set_array_count by flat index, elems as rant_set_value_at takes them. */
+RANT_API int rant_set_array_count_at(void *buf, size_t cap, const RantSchema *s, uint16_t field,
+                                     const uint32_t *elems, uint16_t n_elems, uint32_t count);
 
 /* The map is a self describing tagged value tree, the escape from the schema. Its body
  * grammar is in spec/schema.md. The writer fills a caller buffer with no allocation. */

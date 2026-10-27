@@ -63,15 +63,16 @@ static void write_properties(const RantSchema *s, RantBytes msg){
     memset(zeros, 0, sizeof zeros);
     if (msg.len) memcpy(buf, msg.data, msg.len);
     for (f = 0; f < nf; f++){
-        RantSchemaFieldInfo fi; RantValue v; uint32_t len;
+        RantSchemaFieldInfo fi; RantValue v; uint32_t len; int ok;
         if (!rant_schema_field_at(s, f, &fi)
             || !rant_get_value_at(rant_bytes(buf, cap), s, f, zeros, fi.arr_depth, &v)) continue;
         if (fi.kind == RANT_STRUCT || fi.kind == RANT_ARR || fi.kind == RANT_STR) continue;
         if (fi.kind == RANT_VSTR) v.bytes = rant_bytes("ab", 2);
         if (fi.kind == RANT_MAP) v.bytes = rant_bytes(NULL, 0);
-        if (fi.kind == RANT_VARR){ v.count += 1u; v.bytes = rant_bytes(NULL, 0); }
         memcpy(was, buf, cap);
-        if (rant_set_value_at(buf, cap, s, f, zeros, fi.arr_depth, &v)){
+        ok = fi.kind == RANT_VARR ? rant_set_array_count_at(buf, cap, s, f, zeros, fi.arr_depth, v.count + 1u)
+                                  : rant_set_value_at(buf, cap, s, f, zeros, fi.arr_depth, &v);
+        if (ok){
             len = rant_schema_msg_len(s, buf, cap);
             FUZZ_REQUIRE(len != 0 && rant_schema_validate(s, rant_bytes(buf, len)));
         } else FUZZ_REQUIRE(memcmp(was, buf, cap) == 0);

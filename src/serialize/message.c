@@ -6,7 +6,7 @@ uint32_t rant_schema_msg_min(const RantSchema *s){ return s ? s->msg_min : 0; }
 uint32_t rant_schema_msg_len(const RantSchema *s, const void *buf, size_t cap){
     const uint8_t *p = (const uint8_t *)buf;
     uint64_t total; uint16_t i;
-    if (!s || !p) return 0;
+    if (!s || !p || cap < s->size) return 0;
     total = s->size;
     for (i = 0; i < s->n_var; i++){                     /* hop the frames, bounds checked */
         if (total + 4u > cap) return 0;
@@ -105,8 +105,7 @@ static int i_rant_resolve(const RantSchema *s, RantBytes msg, const i_Field *f,
     uint16_t chain[RANT_SCHEMA_MAX_DEPTH + 1u], k = 0, a;
     i_Span rg; int rec = -1;
     if (cr) cr->n = 0;
-    if (n_elems != f->arr_depth || (n_elems && !elems)) return 0;
-    if (!msg.data && msg.len) return 0;
+    if (n_elems != f->arr_depth || (n_elems && !elems) || !msg.data) return 0;
     for (a = f->arr_parent; a != I_RANT_NO_PARENT; a = s->fields[a].arr_parent){
         if (k > RANT_SCHEMA_MAX_DEPTH) return 0;
         chain[k++] = a;
@@ -612,8 +611,7 @@ int rant_set_value_at(void *buf, size_t cap, const RantSchema *s, uint16_t field
         case RANT_VSTR:
             if (val->bytes.len && !val->bytes.data) return 0;
             return i_rant_resize(s, (uint8_t *)buf, cap, &cr, sp, val->bytes.data, val->bytes.len);
-        case RANT_VARR:       /* packed elements, or with no bytes sized to the count */
-            if (!val->bytes.len) return i_rant_set_count(s, (uint8_t *)buf, cap, &cr, f, sp, val->count);
+        case RANT_VARR:       /* packed elements, refused when the element is variable */
             return i_rant_schema_check_elems(f, val->bytes)
                 && i_rant_resize(s, (uint8_t *)buf, cap, &cr, sp, val->bytes.data, val->bytes.len);
         case RANT_MAP:
@@ -628,4 +626,14 @@ int rant_set_value_at(void *buf, size_t cap, const RantSchema *s, uint16_t field
 
 int rant_set_value(void *buf, size_t cap, const RantSchema *s, uint16_t field, const RantValue *val){
     return rant_set_value_at(buf, cap, s, field, NULL, 0, val);
+}
+
+int rant_set_array_count_at(void *buf, size_t cap, const RantSchema *s, uint16_t field,
+                            const uint32_t *elems, uint16_t n_elems, uint32_t count){
+    const i_Field *f; i_Span sp; i_Carriers cr;
+    if (!buf || !s || field >= s->nfields) return 0;
+    f = &s->fields[field];
+    if (f->kind != RANT_VARR || !i_rant_resolve(s, rant_bytes(buf, cap), f, elems, n_elems, &sp, &cr))
+        return 0;
+    return i_rant_set_count(s, (uint8_t *)buf, cap, &cr, f, sp, count);
 }

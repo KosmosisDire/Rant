@@ -192,8 +192,7 @@ f677bd147b513fbc, `ExternalVideoStream` aae502077016ac13.
 
 ## Not done
 
-A standalone `dist/rant_serialize.h`. Eigen, GLM, numpy and Unity converters. C++ refuses
-struct array members and roots, which C, C#, Python and DSL text all take.
+A standalone `dist/rant_serialize.h`. Eigen, GLM, numpy and Unity converters.
 
 ## DSL grammar
 
@@ -246,8 +245,11 @@ An access walks from the message: at each array it locates the array in the curr
 record, steps to the indexed element by stride or end table, and goes on in that element.
 The name based accessors spell the indices in the path (`shapes[1].corners[2].x`), a name
 under an array without one takes element 0, and the index based ones take them as a list,
-outermost first. Internally a row also knows whether it is variable, its subtree's end, a
-struct element's frame count and fixed part, and a variable row's default body length. A
+outermost first. Internally a row also knows whether it is variable, its subtree's end and
+a struct element's frame count. `min_len` is a default value's length: a fixed row's size,
+a variable row's default payload, a struct element's default body, and a struct member's
+fixed part, since its framed members count on their own rows. Sizing an array to n more
+elements grows the message by at most n times the element's `min_len` plus 4. A
 row's type encoding is kept as a wire offset and length, so two rows have the same type
 exactly when the bytes agree.
 
