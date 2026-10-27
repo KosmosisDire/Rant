@@ -64,7 +64,7 @@ static int i_rant_lane_work(i_RantTransportState *st, const i_RantLane *l, uint6
     if (l->w.used && l->w.has_nack) return 1;
     if (l->w.used && l->w.skip_hb) return 1;   /* directed floor HB still owed */
     if (l->w.used && l->w.sent_upto < topic->next_seqno
-        && (l->w.rate_interval_us == 0 || now >= l->w.rate_next_us)) return 1;   /* throttled */
+        && !i_rant_writer_paced(topic, &l->w, now)) return 1;
     if (l->r.used && topic->qos.reliability==RANT_RELIABLE
         && l->r.ack_pending && now >= l->r.ack_due_us) return 1;
     return 0;

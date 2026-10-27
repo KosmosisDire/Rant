@@ -188,8 +188,11 @@ join seqno. A paced skip adds the skipped count to `wire_skip` so it leaves no g
 eviction leaves it alone so it does leave a gap, which is real loss. The rate rides a
 sparse section of the interest blob, `[u16 n][(u16 topic_index)(u16 rate_hz)]*`, applied
 after rematch onto each matched writer lane. The emit throttles at a sample boundary,
-holds until the tick, then decimates to the newest sample. The scheduler gates on
-`rate_next_us` and the HB sweep re wakes due throttled lanes.
+holds until the tick, then decimates to the newest sample. The tick is spent only when
+that sample goes out, so one that does not fit the datagram keeps it. The scheduler gates
+on `rate_next_us` only at a sample boundary too: a sample the lane started finishes in the
+next datagrams, before a faster publisher's next send can evict it. Otherwise only the
+first fragment of each sample would ever leave. The HB sweep re wakes due throttled lanes.
 
 Reliable and directed lanes keep the shared global line, since repair must map a NACK
 straight into history. A private line only pays off where there is no repair.

@@ -368,6 +368,8 @@ void   i_rant_lane_wake(i_RantTransportState *st, uint16_t topic_index, uint32_t
 void   i_rant_lane_enqueue(i_RantTransportState *st, uint32_t li);
 void   i_rant_sched_drop(i_RantTransportState *st, uint32_t rec);
 size_t i_rant_writer_emit(i_RantTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now);
+/* whether a rate capped lane waits for its tick, which it does only at a sample boundary */
+int    i_rant_writer_paced(i_RantTopic *topic, const i_RantWriterProxy *w, uint64_t now);
 void   i_rant_writer_nack(i_RantTransportState *st, int topic_index, int peer_slot, const uint8_t *p, uint64_t now);
 /* the per peer RTT estimator: fold one sample, and the retransmit bound it implies */
 void     i_rant_rtt_sample(i_RantTransportState *st, uint32_t peer_slot, uint64_t sample_us);

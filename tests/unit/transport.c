@@ -71,6 +71,29 @@ static void rate_checks(void){
     test_pair_close(&pair);
 }
 
+/* A paced lane finishes the sample it started: a keep_last 1 writer of two fragment samples
+   at 14 Hz against a 5 Hz reader, where the next send evicts a sample left half sent. */
+static void rate_frag_send(void){
+    static unsigned char p[2*RANT_FRAG_SIZE - 100];
+    i_rant_transport_send(rate_W, 0, rant_bytes(p, sizeof p), rate_clk);
+}
+static void rate_frag_checks(void){
+    TestPair pair; i_RantTransportConfig cb; int i;
+    RantQos q, rq; memset(&q,0,sizeof q); q.reliability=RANT_RELIABLE; q.keep_last=1;
+    rq = q; rq.reliability=RANT_BEST_EFFORT; rq.max_rate_hz = 5;
+    memset(&cb,0,sizeof cb); cb.on_message=rate_on_msg; cb.on_event=rate_on_event;
+    if (!test_pair_open(&pair, "ratefr", q, rq, &cb)){ CHECK(0, "rate frag: transport pair opens"); return; }
+    rate_W = pair.w; rate_R = pair.r;
+    rate_clk=1000000;
+    test_apply_verified(rate_R, 1u, rate_W);
+    test_apply_verified(rate_W, 2u, rate_R);
+    rate_recv=0; rate_lost=0; rate_drop=0;
+    for (i=0;i<42;i++){ rate_frag_send(); rate_pump(70000u); }    /* about 3 s */
+    CHECK(rate_recv>=12 && rate_recv<=16, "rate frag: a paced lane delivers whole samples (%d in 3 s at 5 Hz)", rate_recv);
+    CHECK(rate_lost==0, "rate frag: paced skips are not loss (lost=%d)", rate_lost);
+    test_pair_close(&pair);
+}
+
 /* Lapped reader and NACK merge on the transport core with a controlled clock: a six
    fragment reliable stream through a pump that can drop DATA (spec/testing.md). */
 static int lap_recv, lap_lost, lap_drop_all; static unsigned lap_drop_mask;
@@ -915,6 +938,7 @@ static const TestCase cases[] = {
     { "want_set", want_set_checks },
     { "want_filter", want_filter_checks },
     { "rate", rate_checks },
+    { "rate_frag", rate_frag_checks },
     { "lapped", lapped_checks },
     { "rtt", rtt_checks },
     { "ahead", ahead_checks },

@@ -422,6 +422,23 @@ void i_rant_writer_nack(i_RantTransportState *st, int topic_index, int peer_slot
 }
 
 
+/* A paced lane's tick, spent only once its sample goes out: the skip to it, then the next. */
+static void i_rant_writer_tick(i_RantTransportState *st, i_RantWriterProxy *w, uint64_t to, uint64_t now){
+    w->wire_skip += to - w->sent_upto;               /* a paced skip: no perceived loss */
+    w->sent_upto = to;
+    w->rate_next_us = now + w->rate_interval_us;
+    i_rant_transport_arm_deadline(st, w->rate_next_us);     /* the next tick fires on time */
+}
+
+
+int i_rant_writer_paced(i_RantTopic *topic, const i_RantWriterProxy *w, uint64_t now){
+    i_RantWriterSample *s;
+    if (!w->rate_interval_us || w->reader_reliable || topic->directed || now >= w->rate_next_us) return 0;
+    s = i_rant_sample_find(topic, w->sent_upto);
+    return !s || w->sent_upto == s->base;       /* a started sample finishes before its eviction */
+}
+
+
 /* One writer submessage if due and it fits cap, 0 if none. On no fit the state is
  * untouched, so the same submessage is produced next time. */
 size_t i_rant_writer_emit(i_RantTransportState *st, int topic_index, int peer_slot, uint8_t *out, size_t cap, uint64_t now){
@@ -519,15 +536,12 @@ size_t i_rant_writer_emit(i_RantTransportState *st, int topic_index, int peer_sl
         i_RantWriterSample *s=i_rant_sample_find(topic,seqno);
         /* Rate throttle at a sample boundary only: hold until the tick, then decimate to the
            newest sample. wire_skip absorbs the skipped ones. See spec/transport.md. */
-        if (per_lane && w->rate_interval_us && (!s || seqno == s->base)){
+        int tick = per_lane && w->rate_interval_us && (!s || seqno == s->base);
+        if (tick){
+            i_RantWriterSample *newest;
             if (now < w->rate_next_us){ i_rant_transport_arm_deadline(st, w->rate_next_us); return 0; }
-            { i_RantWriterSample *newest = i_rant_sample_find(topic, topic->next_seqno - 1);
-              if (newest && newest->base > seqno){
-                  w->wire_skip += newest->base - seqno;      /* a paced skip: no perceived loss */
-                  w->sent_upto = newest->base; seqno = w->sent_upto; s = newest;
-              } }
-            w->rate_next_us = now + w->rate_interval_us;
-            i_rant_transport_arm_deadline(st, w->rate_next_us);     /* the next tick fires on time */
+            newest = i_rant_sample_find(topic, topic->next_seqno - 1);
+            if (newest && newest->base > seqno){ seqno = newest->base; s = newest; }
         }
         if (s){
 #ifdef RANT_SHM
@@ -536,6 +550,7 @@ size_t i_rant_writer_emit(i_RantTransportState *st, int topic_index, int peer_sl
                 int ask = 0;
                 size_t n;
                 if (cap < RANT_SHM_DATA_BYTES) return 0;
+                if (tick) i_rant_writer_tick(st, w, seqno, now);
                 w->sent_upto = s->base + s->count;
                 if (reliable && w->reader_reliable){
                     ask = i_rant_writer_ask(topic, w, now);
@@ -554,6 +569,7 @@ size_t i_rant_writer_emit(i_RantTransportState *st, int topic_index, int peer_sl
             if (cap < (size_t)(s->count==1?RANT_HEADER_DATA_SINGLE:RANT_HEADER_DATA_MULTI)+(size_t)payload_len) return 0;
             int ask = 0;
             size_t n;
+            if (tick) i_rant_writer_tick(st, w, seqno, now);
             w->sent_upto++;
             topic->repair_stats.frags_sent++;                       /* new data */
             if (reliable && w->reader_reliable){
