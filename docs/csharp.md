@@ -87,10 +87,12 @@ A member's wire name is its own name in the wire spelling, snake_case: `FrameId`
 The type name is the class name. Attributes change the defaults, and on a record parameter
 one is written `[property: RantField("w")] double Omega`.
 
-- `[RantArray(n)]` fixes an array at n elements. A plain array is a variable one.
-- `[RantString(cap)]` caps a string at cap bytes. A plain string is unbounded. On a
-  `string[]` it alone gives a variable array of capped strings, with `[RantArray]` a fixed
-  one.
+- `[RantArray(n)]` fixes an array at n elements. A plain array or `List<T>` is a variable
+  one. An array of arrays takes a count per level, outermost first, and 0 leaves a level
+  variable: `[RantArray(2, 3)] float[][]` is `f32[3][2]`, `[RantArray(0, 3)] float[][]` is
+  `f32[3][]`.
+- `[RantString(cap)]` caps a string at cap bytes. A plain string is unbounded. On an array
+  of strings it caps each one.
 - `[RantField("name")]` gives a member another wire name.
 - `[RantSchema("Name")]` gives the type another wire name.
 - `[RantTypeName("Timestamp")]` spells a plain member's type as a standard type, and the
@@ -101,8 +103,9 @@ A struct member of another struct, or an array of structs (`Corner[]`,
 text defines the nested type once, as `Corner { x: f32, y: f32 }`, and each use is the
 name, so a C or Python peer spells `Corner` too. A name has one shape per node, so a
 nested type called `Twist` with fields of its own is refused, as the standard `Twist`
-already is. A struct array's elements are fixed types only, so a struct array inside one
-takes `[RantArray(n)]`: `Outline[]` whose `Outline` holds `[RantArray(4)] Float2[]` works.
+already is. An element may be any type and arrays nest to any depth: `List<List<float>>` is
+`f32[][]`, `string[]` is `string[]`, and a struct whose members hold arrays of their own
+works as an element too.
 
 A bare type as a handle's type is the whole schema: `Publisher<bool>`,
 `Subscriber<float[]>`, `VariableDefinition<string>`,
@@ -120,7 +123,10 @@ ends of a C# pair derive the same name, and another language must spell it.
 A `Dictionary<string, object>` encodes against any compiled schema by field name, the keys
 in any spelling, nested structs as nested dictionaries and a struct array as a list of
 them. A numeric array of another element type converts to the field's, as an `int[]` for an
-`f32[]` field. Without a C# type a message decodes the same way, the keys in wire spelling.
+`f32[]` field. Without a C# type a message decodes the same way, the keys in wire spelling:
+a scalar array as a typed array, a string array as `string[]`, an array of structs or maps
+as a `List<Dictionary<string, object>>` and any other array as a `List<object>` of its
+elements.
 
 Every typed handle also takes its schema as an optional argument: `schema:` on a topic or
 variable, `requestSchema:`, `responseSchema:` and `progressSchema:` on a function or task.

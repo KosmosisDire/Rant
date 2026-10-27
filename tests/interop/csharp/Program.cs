@@ -7,12 +7,19 @@ using System.Diagnostics;
 using Rant;
 using Rant.Types;
 
+struct Hop
+{
+    public string Name;
+    public Float2[] Pts;
+}
+
 struct Tick
 {
     public ulong Seq;
     [RantTypeName("Timestamp")] public long When;
     public double Value;
     public Transform At;
+    public Hop[] Hops;
 }
 
 static class Program
@@ -39,8 +46,10 @@ static class Program
                 {
                     double angle = t.Seq * 0.01;
                     var p = t.At.Pose.Position;
+                    bool hops = t.Hops.Length == 1 && t.Hops[0].Name == "h" + t.Seq && t.Hops[0].Pts.Length == 1
+                                && t.Hops[0].Pts[0].X == (float)(t.Seq % 1000) && t.Hops[0].Pts[0].Y == 0.5f;
                     if (m.PublisherName == from && t.When > 0 && Near(t.Value, Math.Sin(angle)) && Near(p.X, Math.Cos(angle))
-                        && Near(p.Y, Math.Sin(angle))) good++;
+                        && Near(p.Y, Math.Sin(angle)) && hops) good++;
                     else if (bad++ == 0) Console.WriteLine($"FAIL: tick {t.Seq} decoded wrong");
                 }, qos);
                 while (clock.Elapsed.TotalSeconds < seconds && bad == 0 && good < TickWant) node.Poll(2);
@@ -57,7 +66,8 @@ static class Program
                     var at = new Transform();
                     at.Pose.Position.X = Math.Cos(angle);
                     at.Pose.Position.Y = Math.Sin(angle);
-                    topic.Send(new Tick { Seq = seq, When = Timestamp.Now(), Value = Math.Sin(angle), At = at });
+                    var hop = new Hop { Name = "h" + seq, Pts = new[] { new Float2 { X = seq % 1000, Y = 0.5f } } };
+                    topic.Send(new Tick { Seq = seq, When = Timestamp.Now(), Value = Math.Sin(angle), At = at, Hops = new[] { hop } });
                     seq++;
                 }
                 node.Poll(2);

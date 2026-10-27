@@ -9,6 +9,9 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>rant_tick</AssemblyName>
     <RootNamespace>RantTick</RootNamespace>
+    <!-- the packages' path, as bindings/csharp/Rant.csproj builds it -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);RANT_UNSAFE</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

@@ -48,6 +48,26 @@ struct Shape
 }
 // a fixed struct array inside a struct array's element
 struct Outline { [RantArray(4)] public Rant.Types.Float2[] Corners; public byte N; }
+// any type as an element: records with arrays of their own, arrays of arrays, strings, maps
+struct Stretch { public float Speed; public List<Rant.Types.Float2> Pts; }
+struct Route { public uint Id; public Stretch[] Segments; public string Name; }
+enum Lane : byte { Left, Right }
+struct Layers
+{
+    public List<List<float>> Grid;
+    [RantArray(0, 3)] public float[][] Rows;
+    public string[] Names;
+    [RantArray(2)] public string[] Pair;
+    [RantArray(2)] public Stretch[] Legs;
+    [RantArray(2, 3)] public float[][] M;
+    public Rant.Types.Polygon2D[] Areas;
+    public Lane[] Lanes;
+    public List<string[]> Words;
+    [RantArray(0, 2), RantString(8)] public string[][] Tags;
+    public bool[] Flags;
+    public List<Dictionary<string, object>> Notes;
+}
+struct BadCounts { [RantArray(2, 3)] public float[] V { get; set; } }
 
 // properties and records reflect like fields, in the order written
 class PoseClass
@@ -899,6 +919,133 @@ static class Program
         Check("float[] for f64[]", back["d"] is double[] d && d.Length == 2 && d[0] == 0.5 && d[1] == 1.5);
         Check("int[] for f32[2]", back["g"] is float[] g && g.Length == 2 && g[0] == 7f && g[1] == 8f);
         Check("ushort[] for i16[]", back["h"] is short[] h && h.Length == 2 && h[1] == 2);
+        return ok;
+    }
+
+    // Any type as an array element, nested: records with arrays of their own, arrays of
+    // arrays, strings, enums and maps, typed and as dictionaries.
+    static bool NestedLeg()
+    {
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+        Rant.Types.Float2 F2(float x, float y) => new Rant.Types.Float2 { X = x, Y = y };
+        Rant.Types.Double2 D2(double x, double y) => new Rant.Types.Double2 { X = x, Y = y };
+
+        using var node = new RantNode("nest", Local(12, Threading.Manual));
+        {
+            var rs = node.Schema(typeof(Route));
+            var same = node.Schema("Stretch { speed: f32, pts: Float2[] }\n"
+                                 + "Route { id: u32, segments: Stretch[], name: string }");
+            Check("a record element spells as C++ does", rs.Hash == same.Hash);
+            var route = new Route
+            {
+                Id = 7, Name = "loop",
+                Segments = new[]
+                {
+                    new Stretch { Speed = 1.5f, Pts = new List<Rant.Types.Float2> { F2(1, 2), F2(3, 4) } },
+                    new Stretch { Speed = 2.5f, Pts = new List<Rant.Types.Float2> { F2(5, 6) } },
+                },
+            };
+            byte[] wire = rs.Encode(route);
+            var back = (Route)rs.Decode(wire);
+            Check("a record element with its own array round trips",
+                  back.Id == 7 && back.Name == "loop" && back.Segments.Length == 2
+                  && back.Segments[0].Pts.Count == 2 && back.Segments[0].Pts[1].Y == 4
+                  && back.Segments[1].Speed == 2.5f && back.Segments[1].Pts[0].X == 5);
+            var d = (Dictionary<string, object>)same.Decode(wire);
+            Check("it decodes as nested lists of dictionaries",
+                  d["segments"] is List<Dictionary<string, object>> sl && sl.Count == 2
+                  && sl[0]["pts"] is List<Dictionary<string, object>> pl && Convert.ToDouble(pl[1]["y"]) == 4);
+            using var other = new RantNode("nest-w", Local(12, Threading.Manual));   // a name has one shape per node
+            var wide = other.Schema("Stretch { speed: f32, pts: Float2[] }\n"
+                                 + "Route { tag: string, id: u32, extra: f64[], segments: Stretch[], name: string }");
+            var wd = (Dictionary<string, object>)wide.Decode(wide.Encode(new Dictionary<string, object>
+            {
+                { "tag", "first" }, { "id", 9 }, { "extra", new double[] { 1, 2, 3 } },
+                { "segments", new List<object>
+                    {
+                        new Dictionary<string, object> { { "speed", 4.0f } },
+                        new Dictionary<string, object> { { "pts", new List<object>
+                            { new Dictionary<string, object>(), new Dictionary<string, object> { { "x", 7 } } } } },
+                    } },
+                { "name", "wide" },
+            }));
+            Check("dictionaries fill arrays inside the elements of another layout",
+                  wd["tag"] as string == "first" && wd["segments"] is List<Dictionary<string, object>> ws
+                  && ws.Count == 2 && Convert.ToDouble(ws[0]["speed"]) == 4
+                  && ws[0]["pts"] is List<Dictionary<string, object>> p0 && p0.Count == 0
+                  && ws[1]["pts"] is List<Dictionary<string, object>> p1 && p1.Count == 2
+                  && Convert.ToDouble(p1[1]["x"]) == 7 && wd["name"] as string == "wide");
+        }
+        {
+            var ls = node.Schema(typeof(Layers));
+            var same = node.Schema("Stretch { speed: f32, pts: Float2[] }\n"
+                + "Layers { grid: f32[][], rows: f32[3][], names: string[], pair: string[2], legs: Stretch[2], "
+                + "m: f32[3][2], areas: Polygon2D[], lanes: enum<u8> { Left=0, Right=1 }[], words: string[][], "
+                + "tags: string<8>[2][], flags: bool[], notes: map[] }");
+            Check("every nesting spells as the DSL does", ls.Hash == same.Hash);
+            var layers = new Layers
+            {
+                Grid = new List<List<float>> { new List<float> { 1, 2 }, new List<float>(), new List<float> { 3 } },
+                Rows = new[] { new float[] { 1, 2, 3 }, new float[] { 4, 5, 6 } },
+                Names = new[] { "abc", "", "hello" },
+                Pair = new[] { "left", "right" },
+                Legs = new[] { new Stretch(), new Stretch { Speed = 3, Pts = new List<Rant.Types.Float2> { F2(8, 9) } } },
+                M = new[] { new float[] { 0, 2, 0 }, new float[] { 0, 0, 6 } },
+                Areas = new[] { new Rant.Types.Polygon2D(),
+                                new Rant.Types.Polygon2D { Points = new[] { D2(1, 1), D2(2, 1), D2(2, 2) } } },
+                Lanes = new[] { Lane.Right, Lane.Left },
+                Words = new List<string[]> { new[] { "a", "bc" }, new string[0], new[] { "def" } },
+                Tags = new[] { new[] { "t1" }, new[] { "t2", "t3" } },
+                Flags = new[] { true, false, true },
+                Notes = new List<Dictionary<string, object>> { new Dictionary<string, object> { { "k", 1 } },
+                                                               new Dictionary<string, object>() },
+            };
+            byte[] wire = ls.Encode(layers);
+            var back = (Layers)ls.Decode(wire);
+            Check("arrays of arrays, strings and records round trip",
+                  back.Grid.Count == 3 && back.Grid[0][1] == 2 && back.Grid[1].Count == 0 && back.Grid[2][0] == 3
+                  && back.Rows.Length == 2 && back.Rows[1][2] == 6
+                  && back.Names.Length == 3 && back.Names[1] == "" && back.Names[2] == "hello"
+                  && back.Pair[1] == "right" && back.Legs.Length == 2 && back.Legs[0].Pts.Count == 0
+                  && back.Legs[1].Pts.Count == 1 && back.Legs[1].Pts[0].Y == 9
+                  && back.M.Length == 2 && back.M[0].Length == 3 && back.M[0][1] == 2 && back.M[1][2] == 6
+                  && back.Areas.Length == 2 && back.Areas[0].Points.Length == 0
+                  && back.Areas[1].Points.Length == 3 && back.Areas[1].Points[2].Y == 2);
+            Check("enum, capped string, bool and map elements round trip",
+                  back.Lanes.Length == 2 && back.Lanes[0] == Lane.Right && back.Lanes[1] == Lane.Left
+                  && back.Words.Count == 3 && back.Words[0][1] == "bc" && back.Words[1].Length == 0
+                  && back.Words[2][0] == "def" && back.Tags.Length == 2 && back.Tags[0].Length == 2
+                  && back.Tags[0][0] == "t1" && back.Tags[0][1] == "" && back.Tags[1][1] == "t3"
+                  && back.Flags.Length == 3 && back.Flags[0] && !back.Flags[1]
+                  && back.Notes.Count == 2 && Convert.ToInt64(back.Notes[0]["k"]) == 1 && back.Notes[1].Count == 0);
+            var d = (Dictionary<string, object>)same.Decode(wire);
+            Check("with no type an array of arrays is a list of the inner arrays",
+                  d["grid"] is List<object> g && g.Count == 3 && g[0] is float[] g0 && g0[1] == 2
+                  && d["names"] is string[] nm && nm[2] == "hello"
+                  && d["words"] is List<object> w && w[0] is string[] w0 && w0[1] == "bc"
+                  && d["notes"] is List<Dictionary<string, object>> nt && nt.Count == 2);
+            var empty = (Layers)ls.Decode(ls.Encode(new Layers()));
+            Check("unset nested arrays decode empty and fixed ones at their count",
+                  empty.Grid.Count == 0 && empty.Words.Count == 0 && empty.Pair.Length == 2 && empty.Pair[0] == ""
+                  && empty.Legs.Length == 2 && empty.Legs[0].Pts.Count == 0 && empty.M.Length == 2
+                  && empty.M[1].Length == 3 && empty.Tags.Length == 0);
+            try
+            {
+                ls.Encode(new Layers { Tags = new[] { new[] { "far too long" } } });
+                Check("an over cap string deep in an array throws", false);
+            }
+            catch (SchemaException ex) { Check("an over cap string deep in an array throws: " + ex.Message, true); }
+        }
+        {
+            var ws = node.Schema(typeof(List<string[]>));
+            Check("a bare array of string arrays is a whole schema", ws.Hash == node.Schema("string[][]").Hash);
+            var wb = (List<string[]>)ws.Decode(ws.Encode(new List<string[]> { new[] { "x", "yz" }, new[] { "w" } }));
+            Check("and round trips", wb.Count == 2 && wb[0][1] == "yz" && wb[1][0] == "w");
+        }
+        try { node.Schema(typeof(BadCounts)); Check("more counts than array levels is refused", false); }
+        catch (SchemaException ex) { Check("more counts than array levels is refused: " + ex.Message, true); }
+        Console.WriteLine(ok ? "nested: PASS\n" : "nested: FAIL\n");
         return ok;
     }
 
@@ -1830,6 +1977,7 @@ static class Program
         ("round_trip", RoundTrip),
         ("value_roots", ValueRoots),
         ("array_convert", ArrayConvert),
+        ("nested", NestedLeg),
         ("std_types", StdTypes),
         ("pose", PoseLeg),
         ("value_roots_live", ValueRootsLive),

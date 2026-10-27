@@ -10,6 +10,9 @@
     <AssemblyName>Rant</AssemblyName>
     <RootNamespace>Rant</RootNamespace>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- RANT_UNSAFE: a decoded array of any number type is one copy out of the message -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);RANT_UNSAFE</DefineConstants>
 
     <PackageId>Rant</PackageId>
     <Authors>Nathan George</Authors>

@@ -177,7 +177,7 @@ namespace Rant
         F64,
         /// <summary>One byte, 0 or 1.</summary>
         Bool,
-        /// <summary>A fixed array of Count elements of kind Elem.</summary>
+        /// <summary>A fixed array of Count elements, its element the next row.</summary>
         Array,
         /// <summary>A struct, its members follow it in the table one level deeper.</summary>
         Struct,
@@ -435,17 +435,16 @@ namespace Rant
     {
         public RantStringView name;
         public RantStringView type_name;     // the field type's NAME, empty when anonymous
-        public RantStringView elem_name;     // an array ELEMENT type's name, empty when anonymous
         public byte kind;
-        public byte elem;
+        public byte backing;               // an enum's backing kind
         public ushort count;
         public ushort depth;
         public ushort str_cap;
-        public ushort arr_parent;          // flat index of the nearest enclosing struct ARRAY, 0xFFFF none
-        public ushort arr_depth;           // the struct arrays around the field, one index each
+        public ushort arr_parent;          // flat index of the nearest enclosing array, 0xFFFF none
+        public ushort arr_depth;           // the arrays around the row, one index each
         public uint offset;
         public uint size;
-        public uint elem_size;             // bytes of one array element, else 0
+        public uint min_len;               // a default value's bytes
     }
 
     [StructLayout(LayoutKind.Explicit)]
@@ -460,9 +459,7 @@ namespace Rant
     internal struct RantValue
     {
         public byte kind;
-        public byte elem;
-        public ushort count;
-        public ushort str_cap;
+        public uint count;
         public RantValueUnion v;
         public RantBytes bytes;
     }
@@ -772,15 +769,10 @@ namespace Rant
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_set_string(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, RantStringView v);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int rant_set_string_at(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field,
-            ushort index, RantStringView v);
-        [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_get_value(RantBytes msg, IntPtr s, ushort field, out RantValue outv);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_get_value_at(RantBytes msg, IntPtr s, ushort field, uint[] elems,
             ushort nElems, out RantValue outv);
-        [DllImport(LIB, CallingConvention = CC)]
-        internal static extern uint rant_array_count_at(RantBytes msg, IntPtr s, ushort field);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_set_array_count(IntPtr buf, UIntPtr cap, IntPtr s, byte[] field, uint count);
         [DllImport(LIB, CallingConvention = CC)]
@@ -1213,19 +1205,20 @@ namespace Rant
         public RantSchemaAttribute(string name) { Name = name; }
     }
 
-    /// <summary>A fixed length array field with this element count. Without it an array
-    /// field is a variable array whose length rides the message tail.</summary>
+    /// <summary>Fixed length arrays: the element count of each array level, outermost first.
+    /// 0 leaves a level variable, and so does every level past the list. Without it every
+    /// level is a variable array whose length rides the message.</summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantArrayAttribute : Attribute
     {
-        /// <summary>The element count. A shorter array is zero filled, a longer one is cut.</summary>
-        public int Count;
-        /// <summary>Fix the array at count elements.</summary>
-        public RantArrayAttribute(int count) { Count = count; }
+        /// <summary>The counts, outermost first. A shorter array is zero filled, a longer one is cut.</summary>
+        public int[] Counts;
+        /// <summary>Fix the array levels at these counts, outermost first.</summary>
+        public RantArrayAttribute(params int[] counts) { Counts = counts; }
     }
 
     /// <summary>A capped string field, the max UTF-8 byte length. Without it a string is
-    /// unbounded. On a string[] it makes a variable array, with [RantArray] a fixed one.</summary>
+    /// unbounded. On an array of strings it caps each string.</summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property)]
     public sealed class RantStringAttribute : Attribute
     {
@@ -1853,7 +1846,7 @@ namespace Rant
         }
 
         /// <summary>The flat depth first field table (<see href="https://github.com/KosmosisDire/Rant/blob/main/spec/schema.md">spec/schema.md</see>). A struct's members
-        /// follow it one level deeper, a struct array's element template likewise with
+        /// follow it one level deeper, an array's element is the next row, named "", with
         /// ArrayParent pointing back. A bare root is one field named "".</summary>
         public SchemaField[] Fields
         {
@@ -1876,12 +1869,11 @@ namespace Rant
                 fields[i] = new SchemaField
                 {
                     Index = i, Name = Codec.Str(info.name), TypeName = Codec.Str(info.type_name),
-                    ElemName = Codec.Str(info.elem_name), Kind = (FieldType)info.kind,
-                    Elem = (FieldType)info.elem, Count = info.count, Depth = info.depth,
-                    StrCap = info.str_cap,
+                    Kind = (FieldType)info.kind, Backing = (FieldType)info.backing,
+                    Count = info.count, Depth = info.depth, StrCap = info.str_cap,
                     ArrayParent = info.arr_parent == 0xFFFF ? -1 : info.arr_parent,
                     ArrayDepth = info.arr_depth,
-                    Offset = info.offset, Size = info.size, ElemSize = info.elem_size,
+                    Offset = info.offset, Size = info.size, MinLen = info.min_len,
                 };
             }
             return fields;
@@ -1914,8 +1906,7 @@ namespace Rant
         {
             using (Use(out IntPtr h))
             {
-                var d = Codec.DecodeDict(h, data);
-                return ClrType != null ? Codec.ToObject(ClrType, d) : Codec.RootOrFields(h, d);
+                return ClrType != null ? Codec.DecodeTo(ClrType, h, data) : Codec.RootOrFields(h, Codec.DecodeDict(h, data));
             }
         }
     }
@@ -1927,34 +1918,34 @@ namespace Rant
     {
         /// <summary>The row's position in the table.</summary>
         public int Index;
-        /// <summary>The field's own wire name, "" for a bare root.</summary>
+        /// <summary>The field's own wire name, "" for a bare root or an array's element.</summary>
         public string Name;
         /// <summary>The field type's name, "" when anonymous.</summary>
         public string TypeName;
-        /// <summary>An array element type's name, "" when anonymous.</summary>
-        public string ElemName;
         /// <summary>The field's kind.</summary>
         public FieldType Kind;
-        /// <summary>An array's element kind, or an enum's backing integer kind.</summary>
-        public FieldType Elem;
+        /// <summary>An enum's backing integer kind.</summary>
+        public FieldType Backing;
         /// <summary>A fixed array's element count, or an enum's option count.</summary>
         public int Count;
-        /// <summary>0 at the top level, n for a member of the struct n levels up.</summary>
+        /// <summary>0 at the top level, n for a row n types down.</summary>
         public int Depth;
-        /// <summary>A capped string's byte capacity, also for capped string elements.</summary>
+        /// <summary>A capped string's byte capacity.</summary>
         public int StrCap;
-        /// <summary>The nearest enclosing struct array's row, -1 for none. Such a row
-        /// describes element 0 of that array.</summary>
+        /// <summary>The nearest enclosing array's row, -1 for none. Such a row describes
+        /// element 0 of that array.</summary>
         public int ArrayParent;
-        /// <summary>How many struct arrays enclose the field, so how many indices reach one
-        /// copy of it: rows[1].cells[2].v takes two.</summary>
+        /// <summary>How many arrays enclose the field, so how many indices reach one copy of
+        /// it: rows[1].cells[2].v takes two.</summary>
         public int ArrayDepth;
-        /// <summary>The byte offset in the message, 0 for a variable kind.</summary>
+        /// <summary>The byte offset from the start of the nearest enclosing element or the
+        /// message, 0 for a variable kind.</summary>
         public uint Offset;
-        /// <summary>The byte size, 0 for a variable kind.</summary>
+        /// <summary>The fixed bytes. A struct counts its fixed members, any other variable
+        /// kind is 0.</summary>
         public uint Size;
-        /// <summary>An array's bytes per element, else 0.</summary>
-        public uint ElemSize;
+        /// <summary>A default value's bytes, what one more element at least costs.</summary>
+        public uint MinLen;
     }
 
     /// <summary>One option of an enum field.</summary>
@@ -1994,7 +1985,6 @@ namespace Rant
         // does. Null on a raw topic or an untyped publisher.
         private Schema _schema;
         private Type _clrType;
-        private Dictionary<string, object> _fields;
         private object _value;
         private bool _decoded;
 
@@ -2016,8 +2006,7 @@ namespace Rant
                 if (h == IntPtr.Zero) return;   // the node closed and freed the schema
                 try
                 {
-                    _fields = Codec.DecodeDict(h, Data);
-                    _value = _clrType != null ? Codec.ToObject(_clrType, _fields) : Codec.RootOrFields(h, _fields);
+                    _value = _clrType != null ? Codec.DecodeTo(_clrType, h, Data) : Codec.RootOrFields(h, Codec.DecodeDict(h, Data));
                 }
                 catch (Exception e) { Console.Error.WriteLine("rant decode: " + e); }
             }
@@ -4019,7 +4008,7 @@ namespace Rant
                 if (sp == IntPtr.Zero) return false;
                 try
                 {
-                    v = Codec.ToObject(t, Codec.DecodeDict(sp, data));
+                    v = Codec.DecodeTo(t, sp, data);
                     return true;
                 }
                 catch (Exception) { return false; }
@@ -5600,6 +5589,8 @@ namespace Rant
             { typeof(sbyte), I8 }, { typeof(short), I16 }, { typeof(int), I32 }, { typeof(long), I64 },
             { typeof(float), F32 }, { typeof(double), F64 }, { typeof(bool), BOOL },
         };
+        private static readonly Type[] KindType = { typeof(byte), typeof(ushort), typeof(uint), typeof(ulong),
+            typeof(sbyte), typeof(short), typeof(int), typeof(long), typeof(float), typeof(double), typeof(bool) };
 
         // --- allocators: managed realloc/free, works on plain .NET and Unity/IL2CPP ---
         private static readonly RantPageFn s_page = PageRealloc;
@@ -5721,25 +5712,32 @@ namespace Rant
 
         private static int Depth(Type t) { int d = 0; for (; t != null; t = t.BaseType) d++; return d; }
 
-        // reflection: message type to field plan to DSL
+        // reflection: message type to wire shape to DSL
+        // A member's wire type, one Shape per array level down to the element.
+        private sealed class Shape
+        {
+            public byte Kind;
+            public byte Backing;     // an enum's backing scalar kind
+            public int Count;        // a fixed array's element count
+            public int StrCap;       // a capped string's cap
+            public Shape Elem;       // an array's element
+            public Type Nested;      // a struct's type
+            public Type EnumType;    // an enum's C# type, its names and values by reflection
+            public string TypeName;  // a standard type's name, the whole spelling
+        }
         private sealed class FieldPlan
         {
+            public int Index;        // its place in the type's member list
             public Member Field;
             public string WireName;
-            public byte Kind;
-            public byte Elem;      // array element kind, or (enum) the backing scalar kind
-            public int Count;
-            public int StrCap;
-            public Type Nested;    // the struct type of a STRUCT field or of a struct array's element
-            public Type EnumType;  // enum fields: the C# enum type (names/values via reflection)
-            public string TypeName; // a STANDARD type's name: the whole spelling
+            public Shape Shape;
         }
-        private static bool IsStructArray(byte kind, byte elem) => (kind == ARR || kind == VARR) && elem == STRUCT;
         // Ctor null: create with no arguments and set every member. Else the constructor whose
         // parameters name the members, CtorArgs[i] the member parameter i takes, or -1.
         private sealed class TypeSpec
         {
             public string Name; public List<FieldPlan> Fields;
+            public Dictionary<string, FieldPlan> ByWire;
             public ConstructorInfo Ctor; public int[] CtorArgs;
         }
         private static readonly Dictionary<Type, TypeSpec> s_specs = new Dictionary<Type, TypeSpec>();
@@ -5796,36 +5794,56 @@ namespace Rant
             return sb.ToString();
         }
 
+        // The element type of a one dimensional array or a List, null for anything else.
+        private static Type ElementType(Type t)
+        {
+            if (t.IsArray) return t.GetArrayRank() == 1 ? t.GetElementType() : null;
+            return t.IsGenericType && t.GetGenericTypeDefinition() == typeof(List<>) ? t.GetGenericArguments()[0] : null;
+        }
+
+        // The wire shape of a C# type. counts fix array levels outermost first, 0 leaving one
+        // variable, and a strCap other than 0 caps the strings at the bottom.
+        private static Shape ShapeOf(Type t, int[] counts, int level, int strCap, string what)
+        {
+            byte k;
+            Type et = ElementType(t);
+            if (et != null)
+            {
+                int n = counts != null && level < counts.Length ? counts[level] : 0;
+                if (n < 0 || n > 65535) throw new SchemaException(what + " has an array count outside 1 to 65535");
+                return new Shape { Kind = n > 0 ? ARR : VARR, Count = n,
+                                   Elem = ShapeOf(et, counts, level + 1, strCap, what) };
+            }
+            if (counts != null && level < counts.Length)
+                throw new SchemaException(what + " has more [RantArray] counts than array levels");
+            if (t == typeof(string)) return strCap != 0 ? new Shape { Kind = STR, StrCap = strCap } : new Shape { Kind = VSTR };
+            if (IsMapType(t)) return new Shape { Kind = MAP };
+            if (t.IsEnum)
+            {
+                if (!ScalarKind.TryGetValue(Enum.GetUnderlyingType(t), out k) || k > I64)
+                    throw new SchemaException(what + " must have an integer backing type");
+                return new Shape { Kind = ENUM, Backing = k, EnumType = t };
+            }
+            if (ScalarKind.TryGetValue(t, out k)) return new Shape { Kind = k };
+            if (t.IsArray) throw new SchemaException(what + " is a multidimensional array, use an array of arrays");
+            if (StructLike(t)) return new Shape { Kind = STRUCT, Nested = t };
+            throw new SchemaException("unsupported type " + t + " for " + what + " (use scalars, strings, enums, "
+                + "a Dictionary<string, object> map, structs, or arrays and Lists of any of them)");
+        }
+
         // A bare type used directly as a handle's T is the whole schema, anonymous, so the same
-        // bare type in any language is the same bytes and hash. A plain array is the variable one.
+        // bare type in any language is the same bytes and hash. A plain array or List is a
+        // variable one.
         private static bool IsValueType(Type t)
             => ScalarKind.ContainsKey(t) || t.IsEnum || t == typeof(string) || t.IsArray
-               || IsMapType(t);
+               || ElementType(t) != null || IsMapType(t);
 
         // the one-field spec of a bare type: no root name, the field is anonymous
         private static TypeSpec ValueSpec(Type t)
         {
-            var plan = new FieldPlan { Field = null, WireName = "" };
-            byte k;
-            if (t == typeof(string)) plan.Kind = VSTR;
-            else if (t.IsArray)
-            {
-                Type et = t.GetElementType();
-                if (et != null && ScalarKind.TryGetValue(et, out k)) { plan.Kind = VARR; plan.Elem = k; }
-                else if (et != null && !IsMapType(et) && StructLike(et))
-                { plan.Kind = VARR; plan.Elem = STRUCT; plan.Nested = et; }
-                else throw new SchemaException("bare array schema " + t
-                    + " element must be a scalar or a struct (a capped-string array needs DSL text)");
-            }
-            else if (IsMapType(t)) plan.Kind = MAP;
-            else if (t.IsEnum)
-            {
-                if (!ScalarKind.TryGetValue(Enum.GetUnderlyingType(t), out k) || k > I64)
-                    throw new SchemaException("bare enum schema " + t + " must have an integer backing type");
-                plan.Kind = ENUM; plan.Elem = k; plan.EnumType = t;
-            }
-            else plan.Kind = ScalarKind[t];
-            return new TypeSpec { Name = null, Fields = new List<FieldPlan> { plan } };
+            var plan = new FieldPlan { Field = null, WireName = "", Shape = ShapeOf(t, null, 0, 0, "bare type " + t) };
+            return new TypeSpec { Name = null, Fields = new List<FieldPlan> { plan },
+                                  ByWire = new Dictionary<string, FieldPlan>() };
         }
 
         private static TypeSpec Spec(Type t)
@@ -5844,74 +5862,28 @@ namespace Rant
                 string name = attr != null && !string.IsNullOrEmpty(attr.Name) ? attr.Name
                             : IsNameless(t) ? "" : t.Name;   // "" = named by the handle
                 var plans = new List<FieldPlan>();
+                var byWire = new Dictionary<string, FieldPlan>();
                 foreach (var f in Members(t))
                 {
                     var fa = (RantFieldAttribute)Attribute.GetCustomAttribute(f.Info, typeof(RantFieldAttribute));
                     var arr = (RantArrayAttribute)Attribute.GetCustomAttribute(f.Info, typeof(RantArrayAttribute));
                     var str = (RantStringAttribute)Attribute.GetCustomAttribute(f.Info, typeof(RantStringAttribute));
+                    string what = f.Name + " on " + t.Name;
                     var plan = new FieldPlan { Field = f, WireName = FieldName(fa != null ? fa.Name : f.Name)
-                        ?? throw new SchemaException("no wire name can be made from " + f.Name + " on " + t.Name) };
-                    byte k;
-                    if (arr != null)   // [RantArray(N)]: a fixed array
-                    {
-                        Type et = f.Type.GetElementType();
-                        if (et == typeof(string))
-                        {
-                            if (str == null)
-                                throw new SchemaException("string array field " + f.Name
-                                    + " needs [RantString(cap)] for its element capacity");
-                            plan.Kind = ARR; plan.Elem = STR; plan.Count = arr.Count; plan.StrCap = str.Cap;
-                        }
-                        else if (et != null && ScalarKind.TryGetValue(et, out k))
-                        { plan.Kind = ARR; plan.Elem = k; plan.Count = arr.Count; }
-                        else if (et != null && !IsMapType(et) && StructLike(et))
-                        { plan.Kind = ARR; plan.Elem = STRUCT; plan.Count = arr.Count; plan.Nested = et; }
-                        else throw new SchemaException("array field " + f.Name
-                            + " element must be a scalar, a [RantString] string or a struct");
-                    }
-                    else if (f.Type.IsArray)   // T[] without [RantArray]: a variable array
-                    {
-                        Type et = f.Type.GetElementType();
-                        if (et == typeof(string))
-                        {
-                            if (str == null)
-                                throw new SchemaException("variable string array field " + f.Name
-                                    + " needs [RantString(cap)] for its element capacity");
-                            plan.Kind = VARR; plan.Elem = STR; plan.StrCap = str.Cap;
-                        }
-                        else if (et != null && ScalarKind.TryGetValue(et, out k))
-                        { plan.Kind = VARR; plan.Elem = k; }
-                        else if (et != null && !IsMapType(et) && StructLike(et))
-                        { plan.Kind = VARR; plan.Elem = STRUCT; plan.Nested = et; }
-                        else throw new SchemaException("variable array field " + f.Name
-                            + " element must be a scalar, a [RantString] string or a struct");
-                    }
-                    else if (f.Type == typeof(string))
-                    {
-                        if (str != null) { plan.Kind = STR; plan.StrCap = str.Cap; }   // capped
-                        else plan.Kind = VSTR;   // variable, unbounded
-                    }
-                    else if (IsMapType(f.Type)) { plan.Kind = MAP; }
-                    else if (f.Type.IsEnum)   // a named integer, backing from the enum
-                    {
-                        if (!ScalarKind.TryGetValue(Enum.GetUnderlyingType(f.Type), out k) || k > I64)
-                            throw new SchemaException("enum field " + f.Name + " must have an integer backing type");
-                        plan.Kind = ENUM; plan.Elem = k; plan.EnumType = f.Type;
-                    }
-                    else if (ScalarKind.TryGetValue(f.Type, out k)) { plan.Kind = k; }
-                    else if (StructLike(f.Type)) { plan.Kind = STRUCT; plan.Nested = f.Type; }
-                    else throw new SchemaException("unsupported field type " + f.Type + " on " + f.Name
-                        + " (use scalars, strings ([RantString] = capped, plain = variable), arrays "
-                        + "([RantArray] = fixed, plain = variable), a Dictionary<string,object> map, "
-                        + "or nested structs)");
+                        ?? throw new SchemaException("no wire name can be made from " + what) };
+                    if (arr != null && ElementType(f.Type) == null)
+                        throw new SchemaException("[RantArray] on " + what + ", which is not an array or a List");
+                    plan.Shape = ShapeOf(f.Type, arr != null ? arr.Counts : null, 0, str != null ? str.Cap : 0, what);
                     var tn = (RantTypeNameAttribute)Attribute.GetCustomAttribute(f.Info, typeof(RantTypeNameAttribute));
-                    if (tn != null) plan.TypeName = tn.Name;
+                    if (tn != null) plan.Shape.TypeName = tn.Name;
+                    plan.Index = plans.Count;
                     plans.Add(plan);
+                    byWire[plan.WireName] = plan;
                 }
                 // only [RantSchema] says empty on purpose, else no members is a mapping mistake
                 if (plans.Count == 0 && attr == null)
                     throw new SchemaException(t.Name + " has no public fields or auto properties to map");
-                cached = new TypeSpec { Name = name, Fields = plans };
+                cached = new TypeSpec { Name = name, Fields = plans, ByWire = byWire };
                 PlanConstruction(t, cached);
                 s_specs[t] = cached;
                 return cached;
@@ -5962,7 +5934,7 @@ namespace Rant
             {
                 var bare = new StringBuilder();
                 Hoist(spec, bare, new HashSet<Type>());
-                return bare.Append(TypeToken(spec.Fields[0])).Append('\n').ToString();
+                return bare.Append(TypeToken(spec.Fields[0].Shape)).Append('\n').ToString();
             }
             string name = spec.Name.Length != 0 ? spec.Name : namelessAs;
             if (name == null)
@@ -5978,16 +5950,20 @@ namespace Rant
         // the definitions of the types nested under spec, unless a field names its type itself
         private static void Hoist(TypeSpec spec, StringBuilder sb, HashSet<Type> done)
         {
-            foreach (var f in spec.Fields)
-            {
-                if (f.Nested == null || f.TypeName != null || !done.Add(f.Nested)) continue;
-                var inner = Spec(f.Nested);
-                if (inner.Name.Length == 0)
-                    throw new SchemaException(f.Nested + " under " + (f.Field != null ? f.Field.Name : "the root")
-                        + " has no wire name: a nested type is a struct or class, not a tuple");
-                Hoist(inner, sb, done);
-                Define(sb, inner.Name, inner);
-            }
+            foreach (var f in spec.Fields) HoistShape(f.Shape, f.Field, sb, done);
+        }
+
+        private static void HoistShape(Shape sh, Member at, StringBuilder sb, HashSet<Type> done)
+        {
+            if (sh.TypeName != null) return;
+            if (sh.Elem != null) { HoistShape(sh.Elem, at, sb, done); return; }
+            if (sh.Nested == null || !done.Add(sh.Nested)) return;
+            var inner = Spec(sh.Nested);
+            if (inner.Name.Length == 0)
+                throw new SchemaException(sh.Nested + " under " + (at != null ? at.Name : "the root")
+                    + " has no wire name: a nested type is a struct or class, not a tuple");
+            Hoist(inner, sb, done);
+            Define(sb, inner.Name, inner);
         }
 
         private static void Define(StringBuilder sb, string name, TypeSpec spec)
@@ -6001,27 +5977,25 @@ namespace Rant
             sb.Append("\n}\n");
         }
 
-        private static string FieldLine(FieldPlan f) => f.WireName + ": " + TypeToken(f);
+        private static string FieldLine(FieldPlan f) => f.WireName + ": " + TypeToken(f.Shape);
 
-        // one field's type in DSL form (the whole schema when the root is a bare type). A
-        // nested type is its name, the definition is hoisted above.
-        private static string TypeToken(FieldPlan f)
+        // One type in DSL form (the whole schema when the root is a bare type), an array as
+        // its element then its suffix. A nested type is its name, its definition is hoisted.
+        private static string TypeToken(Shape sh)
         {
-            if (f.TypeName != null) return f.TypeName;   // a standard type spells as its name
-            if (f.Kind == STRUCT) return Spec(f.Nested).Name;
-            if (f.Kind == ARR) return ElemToken(f) + "[" + f.Count + "]";
-            if (f.Kind == VARR) return ElemToken(f) + "[]";
-            if (f.Kind == STR) return "string<" + f.StrCap + ">";
-            if (f.Kind == VSTR) return "string";
-            if (f.Kind == MAP) return "map";
-            if (f.Kind == ENUM) return "enum<" + Token[f.Elem] + "> " + EnumBody(f.EnumType);
-            return Token[f.Kind];
+            if (sh.TypeName != null) return sh.TypeName;   // a standard type spells as its name
+            switch (sh.Kind)
+            {
+                case STRUCT: return Spec(sh.Nested).Name;
+                case ARR: return TypeToken(sh.Elem) + "[" + sh.Count + "]";
+                case VARR: return TypeToken(sh.Elem) + "[]";
+                case STR: return "string<" + sh.StrCap + ">";
+                case VSTR: return "string";
+                case MAP: return "map";
+                case ENUM: return "enum<" + Token[sh.Backing] + "> " + EnumBody(sh.EnumType);
+                default: return Token[sh.Kind];
+            }
         }
-
-        private static string ElemToken(FieldPlan f)
-            => f.Elem == STRUCT ? Spec(f.Nested).Name : ElemToken(f.Elem, f.StrCap);
-        private static string ElemToken(byte elem, int strCap)
-            => elem == STR ? "string<" + strCap + ">" : Token[elem];
 
         // `{ Name=value, ... }` from a C# enum's members in DECLARATION order (GetFields, not
         // Enum.GetNames which sorts by value), so the wire/hash matches the other languages.
@@ -6061,49 +6035,43 @@ namespace Rant
             return info.depth == 0 && (ulong)info.name.len == 0 && info.kind != STRUCT;
         }
 
-        // Encode: object to message bytes. One walk of the reflection spec resolves every value
-        // and pre serializes the variable payloads, so the tail is sized before pinning.
+        // Encode: object to message bytes. One walk of the flat table takes each row's value by
+        // name from a typed object or a Dictionary, so it serves any schema, a peer's too. It
+        // pre serializes the variable payloads, so the buffer is sized once before pinning.
         private sealed class SetOp
         {
             public byte[] Cpath;
             public string Path;      // for error text
-            public byte Kind, Elem;
-            public int Count, StrCap;
-            public object Value;     // fixed fields / fixed string[] : the raw value
-            public byte[] Prepared;  // variable fields: the pre-serialized payload bytes
+            public byte Kind, Backing;
+            public int StrCap;
+            public int Count = -1;   // a variable array sized to Count elements
+            public object Value;     // a fixed scalar or a capped string
+            public Array Prepared;   // a variable string or a map as byte[], or packed elements, the caller's own array where it fits
         }
 
-        // Encode a typed object by reflection, or a Dictionary by field name with the schema
-        // driving the walk, like the Python wrapper.
+        private sealed class Enc
+        {
+            public RantSchemaFieldInfo[] Infos;
+            public int[] Ends;
+            public List<SetOp> Ops = new List<SetOp>();
+            public long Grow;        // what the ops add to the default message at most
+        }
+
         internal static byte[] Encode(IntPtr s, object value)
         {
-            var ops = new List<SetOp>();
-            long varBytes = 0;
-            if (IsValueRoot(s) && RootIsStructArray(s))
-            {
-                Type et = value.GetType().GetElementType();
-                if (et != null && !IsMapType(et) && StructLike(et))
-                    Collect(s, Spec(value.GetType()), value, "", ops, ref varBytes);
-                else
-                    CollectFromDict(s, new Dictionary<string, object> { { "", value } }, ops, ref varBytes);
-            }
-            else if (IsValueRoot(s))
-                CollectRootValue(s, value, ops, ref varBytes);   // the bare root value
-            else if (value is System.Collections.IDictionary dict)
-                CollectFromDict(s, dict, ops, ref varBytes);
-            else
-                Collect(s, Spec(value.GetType()), value, "", ops, ref varBytes);
+            var e = new Enc { Infos = Infos(s) };
+            e.Ends = Ends(e.Infos);
+            if (IsValueRoot(s)) CollectRow(e, 0, value, "");
+            else CollectMembers(e, -1, value, "");
 
-            // msg_min is the fixed section plus one empty frame per variable field, and each
-            // variable frame then grows by exactly its payload length
-            long cap = (long)Native.rant_schema_msg_min(s) + varBytes;
+            long cap = (long)Native.rant_schema_msg_min(s) + e.Grow;
             byte[] buf = new byte[cap > 0 ? cap : 1];
             GCHandle gh = GCHandle.Alloc(buf, GCHandleType.Pinned);
             try
             {
                 IntPtr p = gh.AddrOfPinnedObject();
                 Native.rant_schema_message_default(s, p, (UIntPtr)buf.Length);
-                foreach (var op in ops) ExecuteOp(s, p, (UIntPtr)buf.Length, op);
+                foreach (var op in e.Ops) ExecuteOp(s, p, (UIntPtr)buf.Length, op);
                 uint n = Native.rant_schema_msg_len(s, p, (UIntPtr)buf.Length);
                 if (n == buf.Length) return buf;
                 byte[] outb = new byte[n];
@@ -6113,65 +6081,7 @@ namespace Rant
             finally { gh.Free(); }
         }
 
-        private static bool RootIsStructArray(IntPtr s)
-        {
-            RantSchemaFieldInfo info;
-            return Native.rant_schema_field_at(s, 0, out info) != 0 && IsStructArray(info.kind, info.elem);
-        }
-
-        // a bare type root: one op on the empty path, the schema's single anonymous field
-        private static void CollectRootValue(IntPtr s, object value, List<SetOp> ops, ref long varBytes)
-        {
-            RantSchemaFieldInfo info;
-            if (value == null || Native.rant_schema_field_at(s, 0, out info) == 0) return;
-            var op = new SetOp { Cpath = CStr(""), Path = "", Kind = info.kind, Elem = info.elem,
-                                 Count = info.count, StrCap = info.str_cap };
-            PrepareOp(op, value, ref varBytes);
-            ops.Add(op);
-        }
-
-        // a reflected object to ops, recursing the type spec with dotted paths for nested structs
-        private static void Collect(IntPtr s, TypeSpec spec, object obj, string prefix,
-                                    List<SetOp> ops, ref long varBytes)
-        {
-            foreach (var fp in spec.Fields)
-            {
-                object val = fp.Field != null ? fp.Field.Get(obj) : obj;   // no member: a bare root
-                if (val == null) continue;   // keep the zeroed default from message_default
-                string path = prefix + fp.WireName;
-                if (fp.Kind == STRUCT) { Collect(s, Spec(fp.Nested), val, path + ".", ops, ref varBytes); continue; }
-                if (IsStructArray(fp.Kind, fp.Elem))
-                {
-                    var items = val as System.Collections.IList;
-                    if (items == null)
-                        throw new SchemaException(path + " is an array of structs and expects an array or list, got " + val.GetType().Name);
-                    int count = SizeElems(s, path, items.Count, ops, ref varBytes);
-                    for (int i = 0; i < count; i++)
-                        if (items[i] != null) Collect(s, Spec(fp.Nested), items[i], path + "[" + i + "].", ops, ref varBytes);
-                    continue;
-                }
-                var op = new SetOp { Cpath = CStr(path), Path = path, Kind = fp.Kind, Elem = fp.Elem,
-                                     Count = fp.Count, StrCap = fp.StrCap };
-                PrepareOp(op, val, ref varBytes);
-                ops.Add(op);
-            }
-        }
-
-        // The element count a struct array at path takes, at most the compiled fixed count. A
-        // variable one gets a sizing op ahead of its members, since its frame must exist first.
-        private static int SizeElems(IntPtr s, string path, int given, List<SetOp> ops, ref long varBytes)
-        {
-            int fi = Native.rant_schema_field_index(s, CStr(path));
-            RantSchemaFieldInfo info;
-            if (fi < 0 || Native.rant_schema_field_at(s, (ushort)fi, out info) == 0)
-                throw new SchemaException("no field " + (path.Length != 0 ? path : "at the root") + " in the schema");
-            if (info.kind != VARR) return Math.Min(given, (int)info.count);
-            ops.Add(new SetOp { Cpath = CStr(path), Path = path, Kind = VARR, Elem = STRUCT, Count = given });
-            varBytes += (long)given * info.elem_size;
-            return given;
-        }
-
-        // the flat table read once, so a walk can look ahead at a struct array's members
+        // the flat table read once, so a walk can skip a row's subtree
         private static RantSchemaFieldInfo[] Infos(IntPtr s)
         {
             ushort n = Native.rant_schema_field_count(s);
@@ -6180,82 +6090,93 @@ namespace Rant
             return infos;
         }
 
-        // one past the last member of the struct array at flat index i: the table flattens its
-        // element once, as the run of deeper fields after it, nested arrays included
-        private static int MemberRun(RantSchemaFieldInfo[] infos, int i)
+        // one past each row's subtree: its element and members follow it, deeper
+        private static int[] Ends(RantSchemaFieldInfo[] infos)
         {
-            int j = i + 1;
-            while (j < infos.Length && infos[j].depth > infos[i].depth) j++;
-            return j;
-        }
-
-        // a Dictionary source to ops: walk the compiled schema's flat field table pulling values
-        // by name, nested structs from a nested dictionary of the same shape
-        private static void CollectFromDict(IntPtr s, System.Collections.IDictionary root,
-                                            List<SetOp> ops, ref long varBytes)
-        {
-            var infos = Infos(s);
-            CollectMembers(s, infos, 0, infos.Length, 0, "", root, ops, ref varBytes);
-        }
-
-        // The fields infos[from..to) as the members of one struct at depth baseDepth, valued
-        // from src by name. prefix is that struct's path: "" at the root, "pts[2]." in an
-        // element. A struct array's members come from a list of dictionaries, one per element.
-        private static void CollectMembers(IntPtr s, RantSchemaFieldInfo[] infos, int from, int to, int baseDepth,
-                                           string prefix, System.Collections.IDictionary src,
-                                           List<SetOp> ops, ref long varBytes)
-        {
-            var names = new List<string>();
-            var srcs = new List<System.Collections.IDictionary> { src };
-            for (int i = from; i < to; i++)
+            var ends = new int[infos.Length];
+            for (int i = 0; i < infos.Length; i++)
             {
-                var info = infos[i];
-                string name = Str(info.name);
-                int d = info.depth - baseDepth;
-                while (names.Count <= d) names.Add(null);
-                names[d] = name;
-                var parent = d < srcs.Count ? srcs[d] : null;
-                object val = parent != null ? DictGet(parent, name) : null;
-                if (IsStructArray(info.kind, info.elem))
-                {
-                    int end = MemberRun(infos, i);
-                    if (val != null)
-                    {
-                        string path = prefix + string.Join(".", names.GetRange(0, d + 1));
-                        var items = val as System.Collections.IList;
-                        if (items == null)
-                            throw new SchemaException(path + " is an array of structs and expects a list of dictionaries, got " + val.GetType().Name);
-                        int count = SizeElems(s, path, items.Count, ops, ref varBytes);
-                        for (int e = 0; e < count; e++)
-                            if (items[e] is System.Collections.IDictionary ed)
-                                CollectMembers(s, infos, i + 1, end, info.depth + 1, path + "[" + e + "].", ed, ops, ref varBytes);
-                    }
-                    i = end - 1;   // the element template was written through its array
-                    continue;
-                }
-                if (info.kind == STRUCT)
-                {
-                    while (srcs.Count <= d + 1) srcs.Add(null);
-                    srcs[d + 1] = val as System.Collections.IDictionary;
-                    continue;
-                }
-                if (val == null) continue;
-                string fpath = prefix + string.Join(".", names.GetRange(0, d + 1));
-                var op = new SetOp { Cpath = CStr(fpath), Path = fpath, Kind = info.kind, Elem = info.elem,
-                                     Count = info.count, StrCap = info.str_cap };
-                PrepareOp(op, val, ref varBytes);
-                ops.Add(op);
+                int j = i + 1;
+                while (j < infos.Length && infos[j].depth > infos[i].depth) j++;
+                ends[i] = j;
+            }
+            return ends;
+        }
+
+        // the members of the struct at row i, or of the root at -1, valued from src by name
+        private static void CollectMembers(Enc e, int i, object src, string prefix)
+        {
+            if (src == null) return;
+            int depth = i < 0 ? 0 : e.Infos[i].depth + 1;
+            for (int j = i + 1; j < e.Infos.Length && e.Infos[j].depth >= depth; j = e.Ends[j])
+            {
+                string name = Str(e.Infos[j].name);
+                CollectRow(e, j, MemberValue(src, name, prefix), prefix + name);
             }
         }
 
-        // Pre serialize a field's variable payload for sizing. Fixed fields keep the raw value.
-        private static void PrepareOp(SetOp op, object val, ref long varBytes)
+        // a member's value by wire name: a Dictionary key in any spelling, or a typed member
+        private static object MemberValue(object src, string wire, string prefix)
         {
-            if (op.Kind == VSTR) { op.Prepared = Encoding.UTF8.GetBytes(val as string ?? ""); varBytes += op.Prepared.Length; }
-            else if (op.Kind == VARR && op.Elem == STR) { op.Prepared = PackStringSlots(AsStringArray(val), op.StrCap); varBytes += op.Prepared.Length; }
-            else if (op.Kind == VARR) { op.Prepared = PackArray(op.Elem, val); varBytes += op.Prepared.Length; }
-            else if (op.Kind == MAP) { op.Prepared = EncodeMapBody(val); varBytes += op.Prepared.Length; }
+            if (src is System.Collections.IDictionary d) return DictGet(d, wire);
+            Type t = src.GetType();
+            if (IsValueType(t))
+                throw new SchemaException((prefix.Length != 0 ? prefix.TrimEnd('.') : "the root")
+                    + " is a struct and expects an object or a Dictionary, got " + t.Name);
+            FieldPlan fp;
+            return Spec(t).ByWire.TryGetValue(wire, out fp) ? fp.Field.Get(src) : null;
+        }
+
+        // The ops for row i valued val at path. A struct takes its members from val and an
+        // array its elements. A null keeps the default.
+        private static void CollectRow(Enc e, int i, object val, string path)
+        {
+            if (val == null) return;
+            var info = e.Infos[i];
+            if (info.kind == STRUCT) { CollectMembers(e, i, val, path + "."); return; }
+            if (info.kind == ARR || info.kind == VARR) { CollectArray(e, i, val, path); return; }
+            var op = new SetOp { Cpath = CStr(path), Path = path, Kind = info.kind, Backing = info.backing,
+                                 StrCap = info.str_cap };
+            if (info.kind == VSTR) op.Prepared = Encoding.UTF8.GetBytes(val as string ?? "");
+            else if (info.kind == MAP) op.Prepared = EncodeMapBody(val);
             else op.Value = val;
+            if (op.Prepared != null) e.Grow += Buffer.ByteLength(op.Prepared);
+            e.Ops.Add(op);
+        }
+
+        // An array of fixed scalars, enums or capped strings is one packed set. Any other
+        // element is set on its own through the element row, once a variable array is sized.
+        private static void CollectArray(Enc e, int i, object val, string path)
+        {
+            var info = e.Infos[i];
+            var el = e.Infos[i + 1];
+            bool fixedEl = el.size != 0 && el.min_len == el.size;
+            if (fixedEl && (el.kind <= BOOL || el.kind == ENUM || el.kind == STR))
+            {
+                Array b = el.kind == STR ? PackStringSlots(AsStringArray(val), el.str_cap, path)
+                        : PackArray(el.kind == ENUM ? el.backing : el.kind, val);
+                int len = Buffer.ByteLength(b);
+                if (info.kind == VARR) e.Grow += len;
+                else if (len > info.count * el.size)   // a fixed array keeps its first count
+                {
+                    var front = new byte[info.count * el.size];
+                    Buffer.BlockCopy(b, 0, front, 0, front.Length);
+                    b = front;
+                }
+                e.Ops.Add(new SetOp { Cpath = CStr(path), Path = path, Kind = info.kind, Prepared = b });
+                return;
+            }
+            var items = val as System.Collections.IList;
+            if (items == null)
+                throw new SchemaException((path.Length != 0 ? path : "the root") + " is an array and expects an array or a list, got " + val.GetType().Name);
+            int n = items.Count;
+            if (info.kind == ARR) n = Math.Min(n, info.count);
+            else
+            {
+                e.Ops.Add(new SetOp { Cpath = CStr(path), Path = path, Kind = VARR, Count = n });
+                e.Grow += (long)n * (fixedEl ? el.size : 4 + el.min_len);
+            }
+            for (int k = 0; k < n; k++) CollectRow(e, i + 1, items[k], path + "[" + k + "]");
         }
 
         private static string[] AsStringArray(object val)
@@ -6273,42 +6194,32 @@ namespace Rant
         private static void ExecuteOp(IntPtr s, IntPtr buf, UIntPtr cap, SetOp op)
         {
             byte[] cpath = op.Cpath;
-            if (op.Kind == STR)
+            bool ok = true;
+            if (op.Count >= 0) ok = Native.rant_set_array_count(buf, cap, s, cpath, (uint)op.Count) != 0;
+            else if (op.Kind == STR)
             {
-                if (!SetString(s, buf, cap, cpath, (string)op.Value))
+                if (!SetString(s, buf, cap, cpath, op.Value as string))
                     throw new SchemaException("string too long for " + op.Path + " (cap " + op.StrCap + ")");
             }
-            else if (op.Kind == VSTR) SetBytesString(s, buf, cap, cpath, op.Prepared);
-            else if (op.Kind == VARR && op.Elem == STRUCT)
-            {
-                if (Native.rant_set_array_count(buf, cap, s, cpath, (uint)op.Count) == 0)
-                    throw new SchemaException("cannot size " + op.Path + " to " + op.Count + " elements");
-            }
-            else if (op.Kind == ARR && op.Elem == STR)
-            {
-                var strs = AsStringArray(op.Value);
-                for (ushort i = 0; i < strs.Length && i < op.Count; i++)
-                    if (!SetStringAt(s, buf, cap, cpath, i, strs[i]))
-                        throw new SchemaException("string too long for " + op.Path + "[" + i + "] (cap " + op.StrCap + ")");
-            }
-            else if (op.Kind == ARR) SetArrayBytes(s, buf, cap, cpath, PackArray(op.Elem, op.Value));
-            else if (op.Kind == VARR) SetArrayBytes(s, buf, cap, cpath, op.Prepared);
+            else if (op.Kind == VSTR) ok = SetBytesString(s, buf, cap, cpath, (byte[])op.Prepared);
+            else if (op.Kind == ARR || op.Kind == VARR) ok = SetArrayBytes(s, buf, cap, cpath, op.Prepared);
             else if (op.Kind == MAP)
             {
-                if (!SetMapBytes(s, buf, cap, cpath, op.Prepared))
+                if (!SetMapBytes(s, buf, cap, cpath, (byte[])op.Prepared))
                     throw new SchemaException("invalid map for " + op.Path);
             }
             else if (op.Kind == F32) Native.rant_set_f32(buf, cap, s, cpath, Convert.ToSingle(op.Value));
             else if (op.Kind == F64) Native.rant_set_f64(buf, cap, s, cpath, Convert.ToDouble(op.Value));
-            else if (op.Kind == ENUM)   // the backing integer, signed or unsigned per Elem
+            else if (op.Kind == ENUM)   // the backing integer, signed or unsigned
             {
                 object raw = op.Value is Enum ? Convert.ChangeType(op.Value, Enum.GetUnderlyingType(op.Value.GetType())) : op.Value;
-                if (op.Elem >= I8 && op.Elem <= I64) Native.rant_set_int(buf, cap, s, cpath, Convert.ToInt64(raw));
+                if (op.Backing >= I8 && op.Backing <= I64) Native.rant_set_int(buf, cap, s, cpath, Convert.ToInt64(raw));
                 else Native.rant_set_uint(buf, cap, s, cpath, Convert.ToUInt64(raw));
             }
             else if (op.Kind >= I8 && op.Kind <= I64) Native.rant_set_int(buf, cap, s, cpath, Convert.ToInt64(op.Value));
-            else if (op.Kind == BOOL) Native.rant_set_uint(buf, cap, s, cpath, (bool)op.Value ? 1UL : 0UL);
+            else if (op.Kind == BOOL) Native.rant_set_uint(buf, cap, s, cpath, Convert.ToBoolean(op.Value) ? 1UL : 0UL);
             else Native.rant_set_uint(buf, cap, s, cpath, Convert.ToUInt64(op.Value));
+            if (!ok) throw new SchemaException("cannot set " + (op.Path.Length != 0 ? op.Path : "the root"));
         }
 
         private static bool SetString(IntPtr s, IntPtr buf, UIntPtr cap, byte[] cpath, string v)
@@ -6319,18 +6230,6 @@ namespace Rant
             {
                 var ds = new RantStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
                 return Native.rant_set_string(buf, cap, s, cpath, ds) != 0;
-            }
-            finally { gh.Free(); }
-        }
-
-        private static bool SetStringAt(IntPtr s, IntPtr buf, UIntPtr cap, byte[] cpath, ushort index, string v)
-        {
-            byte[] b = Encoding.UTF8.GetBytes(v ?? "");
-            GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
-            try
-            {
-                var ds = new RantStringView { data = gh.AddrOfPinnedObject(), len = (UIntPtr)b.Length };
-                return Native.rant_set_string_at(buf, cap, s, cpath, index, ds) != 0;
             }
             finally { gh.Free(); }
         }
@@ -6347,13 +6246,15 @@ namespace Rant
             finally { gh.Free(); }
         }
 
-        private static void SetArrayBytes(IntPtr s, IntPtr buf, UIntPtr cap, byte[] cpath, byte[] b)
+        // packed elements from any array of numbers, pinned where it lies
+        private static bool SetArrayBytes(IntPtr s, IntPtr buf, UIntPtr cap, byte[] cpath, Array b)
         {
+            int len = Buffer.ByteLength(b);
             GCHandle gh = GCHandle.Alloc(b, GCHandleType.Pinned);
             try
             {
-                var db = new RantBytes { data = b.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)b.Length };
-                Native.rant_set_array(buf, cap, s, cpath, db);
+                var db = new RantBytes { data = len > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero, len = (UIntPtr)len };
+                return Native.rant_set_array(buf, cap, s, cpath, db) != 0;
             }
             finally { gh.Free(); }
         }
@@ -6369,9 +6270,9 @@ namespace Rant
             finally { gh.Free(); }
         }
 
-        // A variable string array's frame: whole [u16 len][cap bytes] slots, the layout
-        // UnpackStringArray reads back, one per element. The live count is the element count.
-        private static byte[] PackStringSlots(string[] strings, int cap)
+        // Capped strings packed as whole [u16 len][cap bytes] slots, the layout
+        // UnpackStringArray reads back, one per element.
+        private static byte[] PackStringSlots(string[] strings, int cap, string path)
         {
             if (strings == null) return Array.Empty<byte>();
             int slot = 2 + cap;
@@ -6380,7 +6281,7 @@ namespace Rant
             {
                 byte[] sb = Encoding.UTF8.GetBytes(strings[i] ?? "");
                 if (sb.Length > cap)
-                    throw new SchemaException("string too long (cap " + cap + "): " + strings[i]);
+                    throw new SchemaException("string too long for " + path + "[" + i + "] (cap " + cap + ")");
                 outb[i * slot] = (byte)(sb.Length & 0xff);
                 outb[i * slot + 1] = (byte)(sb.Length >> 8);
                 Buffer.BlockCopy(sb, 0, outb, i * slot + 2, sb.Length);
@@ -6471,17 +6372,20 @@ namespace Rant
             WriteLE(m, bits, nbytes);
         }
 
-        private static byte[] PackArray(byte elem, object val)
+        // An array's packed elements. An array whose element type is the wire kind's goes as it
+        // is, to be pinned, and a List of it in one block copy. Anything else converts.
+        private static Array PackArray(byte elem, object val)
         {
             int esz = ScalarSize[elem];
             if ((elem == U8 || elem == I8) && val is byte[] u8) return u8;   // raw-blob fast path
-            // fast path: a primitive array whose element type is exactly the wire kind's type
-            if (val is Array a && a.GetType().GetElementType() is Type et && et != typeof(bool)
-                && ScalarKind.TryGetValue(et, out byte ek) && ek == elem)
+            Type et = val == null ? null : ElementType(val.GetType());
+            if (et != null && et != typeof(bool) && ScalarKind.TryGetValue(et, out byte ek) && ek == elem)
             {
-                byte[] outb = new byte[a.Length * esz];
-                Buffer.BlockCopy(a, 0, outb, 0, outb.Length);
-                return outb;
+                if (val is Array a) return a;
+                var c = (System.Collections.ICollection)val;
+                var copy = Array.CreateInstance(et, c.Count);
+                c.CopyTo(copy, 0);
+                return copy;
             }
             // general: any enumerable of numbers (dict-source lists, other element types),
             // each converted to the wire element kind, little-endian
@@ -6515,83 +6419,201 @@ namespace Rant
             Buffer.BlockCopy(b, 0, buf, off, b.Length);
         }
 
-        // decode: message bytes to a nested dict or a typed object
+        // Decode: message bytes to nested dictionaries by a walk of the flat table, then to a
+        // typed object when there is a type.
+        private sealed class Dec
+        {
+            public RantBytes Msg;
+            public IntPtr S;
+            public RantSchemaFieldInfo[] Infos;
+            public int[] Ends;
+        }
+
+        // the walk over data, pinned by gh
+        private static Dec Open(IntPtr s, byte[] data, GCHandle gh)
+        {
+            var dec = new Dec
+            {
+                Msg = new RantBytes { data = data.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero,
+                                      len = (UIntPtr)data.Length },
+                S = s, Infos = Infos(s),
+            };
+            dec.Ends = Ends(dec.Infos);
+            return dec;
+        }
+
         internal static Dictionary<string, object> DecodeDict(IntPtr s, byte[] data)
+        {
+            GCHandle gh = GCHandle.Alloc(data, GCHandleType.Pinned);
+            try { return DecodeMembers(Open(s, data, gh), -1, Array.Empty<uint>()); }
+            finally { gh.Free(); }
+        }
+
+        // Decode straight into the C# type t: each row into the member its name picks, arrays
+        // built as their own type, numbers by one copy. A row the type lacks is skipped.
+        internal static object DecodeTo(Type t, IntPtr s, byte[] data)
         {
             GCHandle gh = GCHandle.Alloc(data, GCHandleType.Pinned);
             try
             {
-                var mb = new RantBytes
-                {
-                    data = data.Length > 0 ? gh.AddrOfPinnedObject() : IntPtr.Zero,
-                    len = (UIntPtr)data.Length
-                };
-                var root = new Dictionary<string, object>();
-                var infos = Infos(s);
-                DecodeMembers(mb, s, infos, 0, infos.Length, 0, Array.Empty<uint>(), root);
-                return root;
+                var dec = Open(s, data, gh);
+                if (Spec(t).Name != null) return MembersTo(dec, t, -1, Array.Empty<uint>());
+                return IsValueRoot(s) ? RowTo(dec, t, 0, Array.Empty<uint>()) : null;
             }
             finally { gh.Free(); }
         }
 
-        // Reads infos[from..to) as the members of one struct at depth baseDepth into dest. A
-        // struct array becomes a list of dictionaries, one per live element, read through the
-        // element indexed getter: elems holds every enclosing array's index, outermost first.
-        private static void DecodeMembers(RantBytes mb, IntPtr s, RantSchemaFieldInfo[] infos, int from, int to,
-                                          int baseDepth, uint[] elems, Dictionary<string, object> dest)
+        // the members of the struct at row i, or of the root at -1, into a new t
+        private static object MembersTo(Dec dec, Type t, int i, uint[] elems)
         {
-            var dests = new List<Dictionary<string, object>> { dest };
-            for (int i = from; i < to; i++)
+            var spec = Spec(t);
+            var vals = new object[spec.Fields.Count];
+            int depth = i < 0 ? 0 : dec.Infos[i].depth + 1;
+            for (int j = i + 1; j < dec.Infos.Length && dec.Infos[j].depth >= depth; j = dec.Ends[j])
             {
-                var info = infos[i];
-                string name = Str(info.name);
-                int d = info.depth - baseDepth;
-                var parent = dests[d];
-                if (IsStructArray(info.kind, info.elem))
-                {
-                    int end = MemberRun(infos, i);
-                    var list = new List<Dictionary<string, object>>();
-                    uint count = Native.rant_array_count_at(mb, s, (ushort)i);
-                    for (uint e = 0; e < count; e++)
-                    {
-                        var ed = new Dictionary<string, object>();
-                        var inner = new uint[elems.Length + 1];
-                        Array.Copy(elems, inner, elems.Length);
-                        inner[elems.Length] = e;
-                        DecodeMembers(mb, s, infos, i + 1, end, info.depth + 1, inner, ed);
-                        list.Add(ed);
-                    }
-                    parent[name] = list;
-                    i = end - 1;
-                }
-                else if (info.kind == STRUCT)
-                {
-                    var child = new Dictionary<string, object>();
-                    parent[name] = child;
-                    while (dests.Count <= d + 1) dests.Add(null);
-                    dests[d + 1] = child;
-                }
-                else
-                {
-                    RantValue v;
-                    if (elems.Length == 0) Native.rant_get_value(mb, s, (ushort)i, out v);
-                    else Native.rant_get_value_at(mb, s, (ushort)i, elems, (ushort)elems.Length, out v);
-                    parent[name] = ValueToObj(v);
-                }
+                FieldPlan fp;
+                if (spec.ByWire.TryGetValue(Str(dec.Infos[j].name), out fp)) vals[fp.Index] = RowTo(dec, fp.Field.Type, j, elems);
             }
+            return Build(t, spec, vals);
+        }
+
+        // Row i as the C# type t. Anything this walk does not build itself goes through As.
+        private static object RowTo(Dec dec, Type t, int i, uint[] elems)
+        {
+            var info = dec.Infos[i];
+            Type et = ElementType(t);
+            if (info.kind == STRUCT && StructLike(t) && !IsValueType(t)) return MembersTo(dec, t, i, elems);
+            if ((info.kind != ARR && info.kind != VARR) || et == null) return As(t, DecodeRow(dec, i, elems));
+            RantValue v = Get(dec, i, elems);
+            var el = dec.Infos[i + 1];
+            if (Packs(el)) return As(t, Packed(el, v));
+            int n = (int)v.count;
+            var inner = new uint[elems.Length + 1];   // a callee copies before it goes deeper
+            Array.Copy(elems, inner, elems.Length);
+            if (t.IsArray)
+            {
+                var arr = Array.CreateInstance(et, n);
+                for (int k = 0; k < n; k++) { inner[elems.Length] = (uint)k; arr.SetValue(RowTo(dec, et, i + 1, inner), k); }
+                return arr;
+            }
+            var list = (System.Collections.IList)Activator.CreateInstance(t, n);
+            for (int k = 0; k < n; k++) { inner[elems.Length] = (uint)k; list.Add(RowTo(dec, et, i + 1, inner)); }
+            return list;
+        }
+
+        // the value at row i under elems
+        private static RantValue Get(Dec dec, int i, uint[] elems)
+        {
+            RantValue v;
+            if (elems.Length == 0) Native.rant_get_value(dec.Msg, dec.S, (ushort)i, out v);
+            else Native.rant_get_value_at(dec.Msg, dec.S, (ushort)i, elems, (ushort)elems.Length, out v);
+            return v;
+        }
+
+        // an array element that packs: a fixed scalar, enum or capped string
+        private static bool Packs(RantSchemaFieldInfo el)
+            => el.size != 0 && el.min_len == el.size && (el.kind <= BOOL || el.kind == ENUM || el.kind == STR);
+
+        // A packed array's elements: numbers as a typed array by one copy, bools as bool[],
+        // capped strings as string[].
+        private static object Packed(RantSchemaFieldInfo el, RantValue v)
+        {
+            if (el.kind == STR) return UnpackStringArray(RawOf(v.bytes), (int)v.count, el.str_cap);
+            byte k = el.kind == ENUM ? el.backing : el.kind;
+            if (k != BOOL) return Numbers(KindType[k], v.bytes, (int)v.count);
+            byte[] raw = RawOf(v.bytes);
+            var bools = new bool[raw.Length];
+            for (int i = 0; i < raw.Length; i++) bools[i] = raw[i] != 0;
+            return bools;
+        }
+
+        private static byte[] RawOf(RantBytes b)
+            => b.data != IntPtr.Zero && (ulong)b.len > 0 ? Bytes(b) : Array.Empty<byte>();
+
+        // n numbers of the C# type et out of the message in one copy. Without RANT_UNSAFE an
+        // unsigned array takes its signed twin's Marshal.Copy where the runtime's array cast allows.
+        private static Array Numbers(Type et, RantBytes b, int n)
+        {
+            Array arr = Array.CreateInstance(et, n);
+            int len = Buffer.ByteLength(arr);
+            if (len == 0) return arr;
+            if (b.data == IntPtr.Zero || (ulong)b.len < (ulong)len)
+                throw new SchemaException("an array lies past the message");
+#if RANT_UNSAFE
+            GCHandle gh = GCHandle.Alloc(arr, GCHandleType.Pinned);
+            try
+            {
+                unsafe { Buffer.MemoryCopy((void*)b.data, (void*)gh.AddrOfPinnedObject(), len, len); }
+            }
+            finally { gh.Free(); }
+#else
+            switch (arr)
+            {
+                case byte[] x: Marshal.Copy(b.data, x, 0, n); break;
+                case short[] x: Marshal.Copy(b.data, x, 0, n); break;
+                case int[] x: Marshal.Copy(b.data, x, 0, n); break;
+                case long[] x: Marshal.Copy(b.data, x, 0, n); break;
+                case float[] x: Marshal.Copy(b.data, x, 0, n); break;
+                case double[] x: Marshal.Copy(b.data, x, 0, n); break;
+                default:
+                    var raw = new byte[len];
+                    Marshal.Copy(b.data, raw, 0, len);
+                    Buffer.BlockCopy(raw, 0, arr, 0, len);
+                    break;
+            }
+#endif
+            return arr;
+        }
+
+        // the members of the struct at row i, or of the root at -1, by name
+        private static Dictionary<string, object> DecodeMembers(Dec dec, int i, uint[] elems)
+        {
+            var d = new Dictionary<string, object>();
+            int depth = i < 0 ? 0 : dec.Infos[i].depth + 1;
+            for (int j = i + 1; j < dec.Infos.Length && dec.Infos[j].depth >= depth; j = dec.Ends[j])
+                d[Str(dec.Infos[j].name)] = DecodeRow(dec, j, elems);
+            return d;
+        }
+
+        // Row i under the indices elems, one per enclosing array, outermost first. An array of
+        // fixed scalars is a typed array, of strings a string[], of structs or maps a list of
+        // dictionaries, and of anything else a list of the element values.
+        private static object DecodeRow(Dec dec, int i, uint[] elems)
+        {
+            var info = dec.Infos[i];
+            if (info.kind == STRUCT) return DecodeMembers(dec, i, elems);
+            RantValue v = Get(dec, i, elems);
+            if (info.kind != ARR && info.kind != VARR) return ValueToObj(v);
+            var el = dec.Infos[i + 1];
+            if (Packs(el)) return Packed(el, v);
+            int n = (int)v.count;
+            var inner = new uint[elems.Length + 1];   // a callee copies before it goes deeper
+            Array.Copy(elems, inner, elems.Length);
+            if (el.kind == STRUCT || el.kind == MAP)
+            {
+                var dl = new List<Dictionary<string, object>>(n);
+                for (int k = 0; k < n; k++)
+                {
+                    inner[elems.Length] = (uint)k;
+                    dl.Add((Dictionary<string, object>)DecodeRow(dec, i + 1, inner));
+                }
+                return dl;
+            }
+            if (el.kind == VSTR)
+            {
+                var sa = new string[n];
+                for (int k = 0; k < n; k++) { inner[elems.Length] = (uint)k; sa[k] = (string)DecodeRow(dec, i + 1, inner); }
+                return sa;
+            }
+            var list = new List<object>(n);
+            for (int k = 0; k < n; k++) { inner[elems.Length] = (uint)k; list.Add(DecodeRow(dec, i + 1, inner)); }
+            return list;
         }
 
         private static object ValueToObj(RantValue v)
         {
             if (v.kind == STR || v.kind == VSTR)
                 return Encoding.UTF8.GetString(Bytes(v.bytes));
-            if (v.kind == ARR || v.kind == VARR)
-            {
-                byte[] raw = v.bytes.data != IntPtr.Zero && (ulong)v.bytes.len > 0
-                    ? Bytes(v.bytes) : Array.Empty<byte>();
-                if (v.elem == STR) return UnpackStringArray(raw, v.count, v.str_cap);
-                return UnpackArray(v.elem, raw);
-            }
             if (v.kind == MAP)
             {
                 byte[] raw = v.bytes.data != IntPtr.Zero && (ulong)v.bytes.len > 0
@@ -6600,7 +6622,7 @@ namespace Rant
                 return DecodeMapBody(raw, ref off, raw.Length, 1);
             }
             if (v.kind == F32 || v.kind == F64) return v.v.f;
-            if (v.kind == ENUM) return v.v.i;   // the number. ToObject casts it to the enum type
+            if (v.kind == ENUM) return v.v.i;   // the number. As casts it to the enum type
             if (v.kind >= I8 && v.kind <= I64) return v.v.i;
             if (v.kind == BOOL) return v.v.u != 0;
             return v.v.u;
@@ -6686,40 +6708,6 @@ namespace Rant
             return strs;
         }
 
-        private static object UnpackArray(byte elem, byte[] raw)
-        {
-            if (elem == U8) return raw;
-            int esz = ScalarSize[elem];
-            int cnt = esz > 0 ? raw.Length / esz : 0;
-            Array arr;
-            switch (elem)
-            {
-                case I8: arr = new sbyte[cnt]; break;
-                case U16: arr = new ushort[cnt]; break;
-                case I16: arr = new short[cnt]; break;
-                case U32: arr = new uint[cnt]; break;
-                case I32: arr = new int[cnt]; break;
-                case U64: arr = new ulong[cnt]; break;
-                case I64: arr = new long[cnt]; break;
-                case F32: arr = new float[cnt]; break;
-                case F64: arr = new double[cnt]; break;
-                case BOOL: arr = new byte[cnt]; break;
-                default: return raw;
-            }
-            Buffer.BlockCopy(raw, 0, arr, 0, cnt * esz);
-            return arr;
-        }
-
-        // The bare value out of a decoded bare-type message, coerced to T (an enum member, a
-        // typed array, a string, a Dictionary, or a widened scalar).
-        internal static object RootValue(Type t, object val)
-        {
-            if (val == null) return null;
-            if (t.IsEnum) return Enum.ToObject(t, val);
-            if (t.IsArray || t == typeof(string) || IsMapType(t)) return val;
-            return Convert.ChangeType(val, t);
-        }
-
         // What a decoded bare-type message is worth without a CLR type: the value itself.
         internal static object RootOrFields(IntPtr s, Dictionary<string, object> fields)
         {
@@ -6734,23 +6722,21 @@ namespace Rant
             {
                 object rv;
                 dict.TryGetValue("", out rv);
-                var root = spec.Fields[0];
-                if (rv != null && IsStructArray(root.Kind, root.Elem)) return ToArray(root.Nested, rv);
-                return RootValue(t, rv);
+                return As(t, rv);
             }
             var vals = new object[spec.Fields.Count];
             for (int i = 0; i < vals.Length; i++)
             {
-                var fp = spec.Fields[i];
                 object val;
-                if (!dict.TryGetValue(fp.WireName, out val) || val == null) continue;
-                if (fp.Kind == STRUCT) vals[i] = ToObject(fp.Nested, (Dictionary<string, object>)val);
-                else if (IsStructArray(fp.Kind, fp.Elem)) vals[i] = ToArray(fp.Nested, val);
-                else if (fp.Kind == ARR || fp.Kind == VARR || fp.Kind == STR || fp.Kind == VSTR
-                         || fp.Kind == MAP) vals[i] = val;   // already string / typed array / dict
-                else if (fp.Kind == ENUM) vals[i] = Enum.ToObject(fp.Field.Type, val);
-                else vals[i] = Convert.ChangeType(val, fp.Field.Type);
+                if (dict.TryGetValue(spec.Fields[i].WireName, out val)) vals[i] = As(spec.Fields[i].Field.Type, val);
             }
+            return Build(t, spec, vals);
+        }
+
+        // A t from its member values in plan order: created and set, or through the constructor
+        // whose parameters name the members.
+        private static object Build(Type t, TypeSpec spec, object[] vals)
+        {
             object obj;
             if (spec.Ctor == null) obj = Activator.CreateInstance(t);
             else
@@ -6771,16 +6757,32 @@ namespace Rant
             return obj;
         }
 
-        // a decoded struct array, one dictionary per element, as a typed array of the element type
-        private static Array ToArray(Type elemType, object val)
+        // A decoded value as the C# type t: a struct from its Dictionary, an array or a List
+        // element by element, an enum from its number, a scalar converted.
+        private static object As(Type t, object val)
         {
-            var items = val as System.Collections.IList;
-            if (items == null)
-                throw new SchemaException("expected a list of elements for " + elemType + "[], got " + val.GetType().Name);
-            var arr = Array.CreateInstance(elemType, items.Count);
-            for (int i = 0; i < items.Count; i++)
-                arr.SetValue(items[i] is Dictionary<string, object> d ? ToObject(elemType, d) : items[i], i);
-            return arr;
+            if (val == null || t.IsInstanceOfType(val)) return val;
+            if (t.IsEnum) return Enum.ToObject(t, val);
+            Type et = ElementType(t);
+            if (et != null)
+            {
+                if (!t.IsArray && val is Array same && same.GetType().GetElementType() == et)
+                    return Activator.CreateInstance(t, val);   // a List<T> takes the array in one block copy
+                var items = val as System.Collections.IList;
+                if (items == null)
+                    throw new SchemaException("expected a list of elements for " + t + ", got " + val.GetType().Name);
+                if (t.IsArray)
+                {
+                    var arr = Array.CreateInstance(et, items.Count);
+                    for (int i = 0; i < items.Count; i++) arr.SetValue(As(et, items[i]), i);
+                    return arr;
+                }
+                var list = (System.Collections.IList)Activator.CreateInstance(t, items.Count);
+                for (int i = 0; i < items.Count; i++) list.Add(As(et, items[i]));
+                return list;
+            }
+            if (val is Dictionary<string, object> d && !IsMapType(t)) return ToObject(t, d);
+            return Convert.ChangeType(val, t);
         }
     }
 }
