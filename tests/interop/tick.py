@@ -15,11 +15,18 @@ TICK_WANT = 20
 
 
 @dataclass
+class Hop:
+    name: str = ""
+    pts: list[rant.types.Float2] = field(default_factory=list)
+
+
+@dataclass
 class Tick:
     seq: rant.u64 = 0
     when: rant.types.Timestamp = 0
     value: rant.f64 = 0.0
     at: rant.types.Transform = field(default_factory=rant.types.Transform)
+    hops: list[Hop] = field(default_factory=list)
 
 
 def near(a, b):
@@ -37,8 +44,10 @@ def main(argv):
     def on_tick(t, m):
         angle = t.seq * 0.01
         p = t.at.pose.position
+        hops_ok = (len(t.hops) == 1 and t.hops[0].name == "h%d" % t.seq and len(t.hops[0].pts) == 1
+                   and t.hops[0].pts[0].x == t.seq % 1000 and t.hops[0].pts[0].y == 0.5)
         if m.publisher_name == sender and t.when > 0 and near(t.value, math.sin(angle)) \
-                and near(p.x, math.cos(angle)) and near(p.y, math.sin(angle)):
+                and near(p.x, math.cos(angle)) and near(p.y, math.sin(angle)) and hops_ok:
             good[0] += 1
         else:
             if bad[0] == 0:
@@ -61,7 +70,8 @@ def main(argv):
                 angle = seq * 0.01
                 topic.send(Tick(seq=seq, when=rant.types.now(), value=math.sin(angle),
                                 at=rant.types.Transform(rant.types.Pose(rant.types.Double3(
-                                    math.cos(angle), math.sin(angle), 0.0)))))
+                                    math.cos(angle), math.sin(angle), 0.0))),
+                                hops=[Hop("h%d" % seq, [rant.types.Float2(seq % 1000, 0.5)])]))
                 seq += 1
             node.poll(0.002)
         return 0

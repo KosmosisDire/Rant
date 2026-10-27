@@ -1,6 +1,7 @@
 """The Rant Python wrapper: ctypes over the shared library the CMake target rant_shared
 builds. docs/python.md explains how to use it."""
 
+import array as _array
 import atexit as _atexit
 import dataclasses as _dataclasses
 import enum as _pyenum
@@ -159,7 +160,7 @@ _F32, _F64, _BOOL, _ARR, _STRUCT, _STR = 8, 9, 10, 11, 12, 13
 _VSTR, _VARR, _MAP = 14, 15, 16    # the variable kinds (ride the message tail)
 _ENUM = 17                          # named integer (wire = its backing scalar)
 _NAMED = 18                         # a name on another type (unwrapped by the reflection API)
-_NO_PARENT = 0xFFFF                 # Field.arr_parent when the field is not in a struct array
+_COUNT = -1                         # an encode op that sizes a variable array
 _SIGNED = frozenset((_I8, _I16, _I32, _I64))
 _FLOATK = frozenset((_F32, _F64))
 _FMT = {_U8: "B", _U16: "H", _U32: "I", _U64: "Q", _I8: "b", _I16: "h",
@@ -168,6 +169,10 @@ _SCALAR_SIZE = {_U8: 1, _U16: 2, _U32: 4, _U64: 8, _I8: 1, _I16: 2, _I32: 4,
                 _I64: 8, _F32: 4, _F64: 8, _BOOL: 1}
 _TOKEN = {_U8: "u8", _U16: "u16", _U32: "u32", _U64: "u64", _I8: "i8", _I16: "i16",
           _I32: "i32", _I64: "i64", _F32: "f32", _F64: "f64", _BOOL: "bool"}
+# the array.array typecode of each numeric kind a decode fills, chosen by item size
+_ARRAY_CODE = {k: next(c for c in codes if _array.array(c).itemsize == _SCALAR_SIZE[k])
+               for k, codes in ((_I8, "b"), (_U16, "H"), (_I16, "h"), (_U32, "IL"), (_I32, "il"),
+                                (_U64, "Q"), (_I64, "q"), (_F32, "f"), (_F64, "d"))}
 
 
 class Error(Exception):
@@ -347,9 +352,16 @@ class _String:
 
 
 class _Array:
+    """A fixed array marker: rant.f32[3]. Subscript it again for an array of arrays, read as
+        the DSL reads: rant.f32[3][2] is two arrays of three."""
     def __init__(self, elem, count):
-        self.elem = elem     # a _Type, a _String, or a schema class for a struct array
+        self.elem = elem     # any field type: a marker, a class or a list[...] alias
         self.count = count
+
+    def __getitem__(self, count):
+        if not isinstance(count, int) or count <= 0:
+            raise TypeError("array size must be a positive int, e.g. rant.f32[3][2]")
+        return _Array(self, count)
 
     def __repr__(self):
         return "%r[%d]" % (self.elem, self.count)
@@ -437,21 +449,21 @@ def _std(name):
 
 class _FieldSpec:
     __slots__ = ("name", "wire", "kind", "elem", "count", "str_cap", "token", "nested", "enum_cls",
-                 "type_name", "elem_name")
+                 "backing", "type_name")
 
-    def __init__(self, name, kind, elem=0, count=0, str_cap=0, token=None, nested=None,
-                 enum_cls=None, type_name=None, elem_name=None):
+    def __init__(self, name, kind, elem=None, count=0, str_cap=0, token=None, nested=None,
+                 enum_cls=None, backing=0, type_name=None):
         self.type_name = type_name   # a standard type's NAME: the whole spelling
-        self.elem_name = elem_name   # a struct element's standard NAME, else anonymous
         self.name = name             # the Python attribute
         self.wire = name             # its wire spelling, set by _build_spec
         self.kind = kind
-        self.elem = elem
+        self.elem = elem             # an array's element, a _FieldSpec of its own
         self.count = count
         self.str_cap = str_cap
         self.token = token
         self.nested = nested       # a _Spec for STRUCT fields
         self.enum_cls = enum_cls   # the enum.Enum class for ENUM fields (decode target)
+        self.backing = backing     # an ENUM field's backing kind
 
 
 class _Spec:
@@ -490,50 +502,50 @@ def _spec_of(cls):
         return spec
 
 
-_DSL_FIELD = _re.compile(r"^(u8|u16|u32|u64|i8|i16|i32|i64|f32|f64|bool|string<(\d+)>)(\[(\d*)\])?$")
+_DSL_TYPE = _re.compile(r"^(u8|u16|u32|u64|i8|i16|i32|i64|f32|f64|bool|string<(\d+)>|string|map"
+                        r"|[A-Za-z_][A-Za-z0-9_]*)((?:\[\d*\])*)$")
 _KIND_OF = {token: kind for kind, token in _TOKEN.items()}
 
 
-def _marker_from_dsl(text):
-    """The field marker for one DSL field type: a scalar, bool, string<N>, or one of those
-        in a fixed [N] or variable [] array."""
-    m = _DSL_FIELD.match(text.replace(" ", ""))
+def _marker_from_dsl(base, text):
+    """The marker for DSL text over the Python type base: a scalar, bool, string<N>, string,
+    map or a struct's name, then [N] and [] suffixes, the innermost first. A struct's name
+    takes its class from base, under one list per suffix."""
+    m = _DSL_TYPE.match(text.replace(" ", ""))
     if not m:
-        raise SchemaError("rant schema: %r is not a DSL field type (u8..f64, bool, "
-                          "string<N>, a struct's name, or one of those followed by [N] "
-                          "or [])" % text)
-    base = _String(int(m.group(2))) if m.group(2) else _Type(_KIND_OF[m.group(1)], m.group(1))
-    if m.group(3) is None:
-        return base
-    return _Array(base, int(m.group(4))) if m.group(4) else list[base]
-
-
-_DSL_NAMED = _re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\[(\d*)\])?$")
-
-
-def _struct_marker(base, text):
-    """The marker for DSL text naming a struct, alone or as an array: `Float2[4]` over a
-    list[Float2] is a fixed array of 4. None when the text names no struct."""
-    m = _DSL_NAMED.match(text.replace(" ", ""))
-    if not m or _DSL_FIELD.match(text.replace(" ", "")):
-        return None
-    origin = getattr(base, "__origin__", None)
-    args = getattr(base, "__args__", ())
-    cls = args[0] if origin in (list, tuple) and args else base
-    if not (isinstance(cls, type) and getattr(cls, "__annotations__", None)
-            and not issubclass(cls, _pyenum.Enum)):
-        raise SchemaError("rant schema: %r names a struct, so the Python type must be that "
-                          "class or a list of it (got %r)" % (text, base))
-    if _wire_name(m.group(1), True) != _wire_name(_spec_of(cls).name, True):
-        raise SchemaError("rant schema: %r names %s but the Python type holds %s"
-                          % (text, m.group(1), cls.__name__))
-    if m.group(2) is None:
-        if cls is not base:
-            raise SchemaError("rant schema: %r is one struct but the Python type is a list" % text)
-        return cls
-    if cls is base:
-        raise SchemaError("rant schema: %r is an array, so the Python type must be a list" % text)
-    return _Array(cls, int(m.group(3))) if m.group(3) else list[cls]
+        raise SchemaError("rant schema: %r is not a DSL field type (u8..f64, bool, string<N>, "
+                          "string, map or a struct's name, then any [N] or [])" % text)
+    word, cap = m.group(1), m.group(2)
+    counts = [int(n) if n else 0 for n in _re.findall(r"\[(\d*)\]", m.group(3))]
+    inner, lists = base, 0
+    while (lists < len(counts) and getattr(inner, "__origin__", None) in (list, tuple)
+           and getattr(inner, "__args__", ())):
+        inner, lists = inner.__args__[0], lists + 1
+    if cap:
+        marker = _String(int(cap))
+    elif word in _KIND_OF:
+        marker = _Type(_KIND_OF[word], word)
+        if isinstance(inner, type) and issubclass(inner, _pyenum.Enum):
+            marker = _Enum(inner, marker)          # an enum pinned to a width
+    elif word == "string":
+        marker = str
+    elif word == "map":
+        marker = dict
+    else:
+        if not (isinstance(inner, type) and getattr(inner, "__annotations__", None)
+                and not issubclass(inner, _pyenum.Enum)):
+            raise SchemaError("rant schema: %r names a struct, so the Python type must be that "
+                              "class or lists of it (got %r)" % (text, base))
+        if _wire_name(word, True) != _wire_name(_spec_of(inner).name, True):
+            raise SchemaError("rant schema: %r names %s but the Python type holds %s"
+                              % (text, word, inner.__name__))
+        if lists != len(counts):
+            raise SchemaError("rant schema: %r has %d array levels but the Python type has %d lists"
+                              % (text, len(counts), lists))
+        marker = inner
+    for n in counts:
+        marker = _Array(marker, n) if n else list[marker]
+    return marker
 
 
 def _resolve(ann, g):
@@ -543,36 +555,8 @@ def _resolve(ann, g):
         # Annotated[T, "dsl"]: T is for the type checker, the DSL text is the wire type
         base = ann.__origin__
         dsl_text = next((m for m in ann.__metadata__ if isinstance(m, str)), None)
-        if dsl_text is None:
-            return base
-        marker = _struct_marker(base, dsl_text) or _marker_from_dsl(dsl_text)
-        if isinstance(base, type) and issubclass(base, _pyenum.Enum) and isinstance(marker, _Type):
-            return _Enum(base, marker)
-        return marker
+        return base if dsl_text is None else _marker_from_dsl(base, dsl_text)
     return ann
-
-
-def _var_array_spec(name, elem):
-    """A VARR field spec from a list[...] element annotation (rant.<t>, rant.string(N),
-    int/float/bool, or a schema class for an array of structs). elem is the message tail's
-    live element count, so no count here."""
-    if isinstance(elem, _String):
-        return _FieldSpec(name, _VARR, elem=_STR, str_cap=elem.cap)
-    if isinstance(elem, _Type):
-        return _FieldSpec(name, _VARR, elem=elem.kind, token=elem.token)
-    if elem is int:
-        return _FieldSpec(name, _VARR, elem=_I64, token="i64")
-    if elem is float:
-        return _FieldSpec(name, _VARR, elem=_F64, token="f64")
-    if elem is bool:
-        return _FieldSpec(name, _VARR, elem=_BOOL, token="bool")
-    if (isinstance(elem, type) and not issubclass(elem, _pyenum.Enum)
-            and getattr(elem, "__annotations__", None)):
-        return _FieldSpec(name, _VARR, elem=_STRUCT, nested=_spec_of(elem),
-                          elem_name=getattr(elem, "__rant_std__", None))
-    raise SchemaError("rant schema: variable array %r element must be rant.<t>, "
-                      "rant.string(N), int/float/bool, or a schema class (got %r)"
-                      % (name, elem))
 
 
 def _field_spec(name, ann, g):
@@ -585,17 +569,15 @@ def _field_spec(name, ann, g):
         return _FieldSpec(name, ann.kind, token=ann.token)
     if isinstance(ann, _String):
         return _FieldSpec(name, _STR, str_cap=ann.cap)
-    if isinstance(ann, _Array):
-        if isinstance(ann.elem, type):          # a fixed array of structs
-            return _FieldSpec(name, _ARR, elem=_STRUCT, count=ann.count, nested=_spec_of(ann.elem),
-                              elem_name=getattr(ann.elem, "__rant_std__", None))
-        if isinstance(ann.elem, _String):
-            return _FieldSpec(name, _ARR, elem=_STR, count=ann.count, str_cap=ann.elem.cap)
-        return _FieldSpec(name, _ARR, elem=ann.elem.kind, count=ann.count, token=ann.elem.token)
+    if isinstance(ann, _Array):                 # a fixed array of any element
+        return _FieldSpec(name, _ARR, elem=_field_spec(name, ann.elem, g), count=ann.count)
     origin = getattr(ann, "__origin__", None)   # list[...] / dict[...] generic aliases
-    if origin is list or origin is tuple:
+    if origin is list or origin is tuple:       # a variable array of any element
         args = getattr(ann, "__args__", ())
-        return _var_array_spec(name, args[0] if args else None)
+        if not args:
+            raise SchemaError("rant schema: field %r is a list with no element type, such as "
+                              "list[float]" % name)
+        return _FieldSpec(name, _VARR, elem=_field_spec(name, args[0], g))
     if ann is dict or origin is dict:
         return _FieldSpec(name, _MAP)           # self-describing tagged map
     if ann is str:
@@ -607,15 +589,15 @@ def _field_spec(name, ann, g):
     if ann is bool:
         return _FieldSpec(name, _BOOL, token="bool")
     if isinstance(ann, _Enum):                                  # rant.enum(cls[, backing])
-        return _FieldSpec(name, _ENUM, elem=ann.kind, enum_cls=ann.cls)
+        return _FieldSpec(name, _ENUM, backing=ann.kind, enum_cls=ann.cls)
     if isinstance(ann, type) and issubclass(ann, _pyenum.Enum):   # a bare enum
-        return _FieldSpec(name, _ENUM, elem=_infer_enum_backing(ann), enum_cls=ann)
+        return _FieldSpec(name, _ENUM, backing=_infer_enum_backing(ann), enum_cls=ann)
     if isinstance(ann, type):                                    # a nested schema class,
         return _FieldSpec(name, _STRUCT, nested=_spec_of(ann),    # or a standard composite
                           type_name=getattr(ann, "__rant_std__", None))
     raise SchemaError("rant schema: field %r has unsupported type %r (use rant.u8..f64, "
-                      "rant.string(N), rant.<t>[N], str, list[rant.<t>], dict, a nested "
-                      "schema class, or int/float/bool)" % (name, ann))
+                      "rant.string(N), int/float/bool, str, dict, an enum, a nested schema "
+                      "class, or rant.<t>[N] and list[...] of any of these)" % (name, ann))
 
 
 def _build_spec(cls):
@@ -646,10 +628,6 @@ def _value_spec(ann):
     return None
 
 
-def _elem_token(elem, str_cap):
-    return "string<%d>" % str_cap if elem == _STR else _TOKEN[elem]
-
-
 def _spec_text(spec):
     """The schema DSL text a spec compiles to, the members in their wire spelling. Every
     nested class is a definition of its own first, dependencies before their users and
@@ -660,9 +638,9 @@ def _spec_text(spec):
         if f.kind == _STRUCT:
             return f.nested.name
         if f.kind == _ARR:
-            return "%s[%d]" % (elem_text(f), f.count)
+            return "%s[%d]" % (type_text(f.elem), f.count)
         if f.kind == _VARR:
-            return "%s[]" % elem_text(f)
+            return "%s[]" % type_text(f.elem)
         if f.kind == _STR:
             return "string<%d>" % f.str_cap
         if f.kind == _VSTR:
@@ -671,12 +649,8 @@ def _spec_text(spec):
             return "map"
         if f.kind == _ENUM:
             opts = ", ".join("%s=%d" % (m.name, int(m.value)) for m in f.enum_cls)
-            return "enum<%s> { %s }" % (_TOKEN[f.elem], opts)
+            return "enum<%s> { %s }" % (_TOKEN[f.backing], opts)
         return f.token
-    def elem_text(f):
-        if f.elem != _STRUCT:
-            return _elem_token(f.elem, f.str_cap)
-        return f.elem_name or f.nested.name
     def line(f):
         return "%s: %s" % (f.wire, type_text(f))
     def define(s):
@@ -684,8 +658,10 @@ def _spec_text(spec):
     defs, seen = [], {spec.cls}
     def hoist(s):
         for f in s.fields:
+            while f.elem is not None and not f.type_name:
+                f = f.elem                    # an array's definitions are its element's
             n = f.nested
-            if n is None or f.type_name or f.elem_name or n.cls in seen:
+            if n is None or f.type_name or n.cls in seen:
                 continue
             seen.add(n.cls)
             hoist(n)
@@ -697,8 +673,7 @@ def _spec_text(spec):
 
 
 def _fields_of(lib, s):
-    """The flat depth first table read once, so a walker can look ahead at a struct array's
-    element template."""
+    """The flat depth first table read once, so a walk can skip a row's subtree."""
     out = []
     for i in range(lib.rant_schema_field_count(s)):
         info = _c.RantSchemaFieldInfo()
@@ -707,18 +682,16 @@ def _fields_of(lib, s):
     return out
 
 
-def _is_struct_array(info):
-    """A fixed or variable array of structs. Its members are the element 0 template."""
-    return info.elem == _STRUCT and info.kind in (_ARR, _VARR)
-
-
-def _member_run(infos, i):
-    """One past the last member of the struct array at flat index i: the table flattens its
-    element once, as the contiguous run of deeper fields after it, nested arrays included."""
-    j = i + 1
-    while j < len(infos) and infos[j].depth > infos[i].depth:
-        j += 1
-    return j
+def _ends(infos):
+    """One past each row's subtree: an array's element and a struct's members follow it,
+    deeper."""
+    ends = []
+    for i, info in enumerate(infos):
+        j = i + 1
+        while j < len(infos) and infos[j].depth > info.depth:
+            j += 1
+        ends.append(j)
+    return ends
 
 
 def _elems(idx):
@@ -729,15 +702,13 @@ def _elems(idx):
 def _is_value_root(lib, s, infos=None):
     """True when the schema is a BARE TYPE: a root of one anonymous field, so its message is
     a single value (encode/decode take and give that value, not a dict). A named alias root
-    such as Matrix3x3 counts too. A struct array root carries its element template, so the
-    run under it does not count."""
+    such as Matrix3x3 counts too."""
     if infos is None:
         infos = _fields_of(lib, s)
     if not infos:
         return False
     root = infos[0]
-    return (root.depth == 0 and root.name.len == 0 and root.kind != _STRUCT
-            and _member_run(infos, 0) == len(infos))
+    return root.depth == 0 and root.name.len == 0 and root.kind != _STRUCT
 
 
 def _schema_dsl(lib, s):
@@ -971,19 +942,18 @@ class Schema:
 
     @_dataclasses.dataclass
     class Field:
-        name: str
+        name: str            # "" for a bare root or an array's element, the row after the array
         kind: "Schema.FieldType"
-        elem: "Schema.FieldType"
+        backing: "Schema.FieldType"   # an ENUM's backing kind
         count: int
         depth: int
         offset: int
         size: int
-        str_cap: int = 0     # string capacity (STRING fields and STRING-element arrays)
+        str_cap: int = 0     # a STRING's capacity
         type_name: str = ""  # the field type's NAME ("Transform"), "" when anonymous
-        elem_name: str = ""  # an array ELEMENT type's name, "" when anonymous
-        elem_size: int = 0   # bytes of one array element, else 0
-        arr_parent: int = 0xFFFF   # flat index of the nearest enclosing struct ARRAY, 0xFFFF for none
-        arr_depth: int = 0         # the struct arrays around the field, one index each
+        arr_parent: int = 0xFFFF   # flat index of the nearest enclosing array, 0xFFFF for none
+        arr_depth: int = 0         # the arrays around the field, one index each
+        min_len: int = 0           # a default value's bytes, what one more element at least costs
 
     __slots__ = ("_s", "_spec", "_vroot", "_gate")
 
@@ -1061,10 +1031,10 @@ class Schema:
             for i in range(lib.rant_schema_field_count(sp)):
                 if lib.rant_schema_field_at(sp, i, _c.byref(info)):
                     out.append(Schema.Field(_dstr(info.name), Schema.FieldType(info.kind),
-                                            Schema.FieldType(info.elem), info.count, info.depth,
+                                            Schema.FieldType(info.backing), info.count, info.depth,
                                             info.offset, info.size, info.str_cap,
-                                            _dstr(info.type_name), _dstr(info.elem_name),
-                                            info.elem_size, info.arr_parent, info.arr_depth))
+                                            _dstr(info.type_name), info.arr_parent, info.arr_depth,
+                                            info.min_len))
         return out
 
     def enum_variants(self, field):
@@ -1081,6 +1051,11 @@ class Schema:
 
     def encode(self, value):
         """Encode a mapping or an object (attributes by field name) to message bytes."""
+        buf, n = self._encode_buf(value)
+        return _c.string_at(_c.ctypes.addressof(buf), n) if n else b""
+
+    def _encode_buf(self, value):
+        # the encoded message where it was built, (buffer, length), for a send to view
         with self._use() as sp:
             return _encode(_c.load(), sp, value)
 
@@ -1170,14 +1145,21 @@ def _buffer_view(val):
 
 
 def _pack_array(elem_kind, val):
-    """The wire bytes of a numeric array field. A buffer of the field's own element type is
-        copied at once and any other is converted element by element."""
-    if isinstance(val, (bytes, bytearray)):
-        return bytes(val)
+    """The wire bytes of a numeric array field. A contiguous buffer of the field's own element
+        type is used where it lies and any other is converted element by element."""
+    if isinstance(val, bytes):
+        return val
+    if isinstance(val, bytearray):
+        return memoryview(val)
     view = _buffer_view(val)
     if view is not None:
         mv, kind, big = view
         if kind == _ELEM_BUF_KIND[elem_kind] and mv.itemsize == _SCALAR_SIZE[elem_kind] and not big:
+            if mv.c_contiguous:
+                try:
+                    return mv.cast("B")
+                except (TypeError, ValueError):
+                    pass
             return mv.tobytes()
         letter = ("<>"[big]) + _BUF_LETTER[kind][mv.itemsize]
         val = [x for (x,) in _struct.iter_unpack(letter, mv.tobytes())]
@@ -1195,17 +1177,25 @@ def _str_view(val, keep):
 
 def _bytes_view(b, keep):
     keep.append(b)    # keep the buffer alive across the setter call
+    if isinstance(b, memoryview):
+        if b.readonly or not len(b):
+            b = b.tobytes()
+            keep.append(b)
+        else:
+            at = (_c.ctypes.c_ubyte * len(b)).from_buffer(b)   # the caller's own memory
+            keep.append(at)
+            return _c.RantBytes(_c.ctypes.addressof(at), len(b))
     return _c.RantBytes(_c.cast(_c.c_char_p(b), _c.c_void_p) if b else None, len(b))
 
 
-def _pack_string_slots(strings, cap):
-    """A variable string array's frame: whole [u16 len][cap bytes] slots (the same
-    layout _unpack_string_array reads back), one per element, live count = element count."""
+def _pack_string_slots(strings, cap, where):
+    """Capped strings as whole [u16 len][cap bytes] slots, the layout _unpack_string_array
+    reads back, one per element."""
     out = bytearray()
-    for item in strings:
+    for i, item in enumerate(strings):
         sb = item.encode("utf-8") if isinstance(item, str) else bytes(item)
         if len(sb) > cap:
-            raise SchemaError("string too long (cap %d): %r" % (cap, item))
+            raise SchemaError("string too long for %s[%d] (cap %d)" % (where, i, cap))
         out += _struct.pack("<H", len(sb)) + sb + b"\x00" * (cap - len(sb))
     return bytes(out)
 
@@ -1220,73 +1210,70 @@ def _enum_number(lib, s, field, val, where):
     return n.value
 
 
-def _py_value(lib, s, field, info, val, keep, where):
-    """A RantValue carrying val for the field at flat index field, the inverse of
-    _value_to_py. An array element is fixed all the way down, so no variable kind here."""
-    out = _c.RantValue(info.kind, info.elem, info.count, info.str_cap)
-    kind = info.kind
-    if kind == _STR:
-        out.bytes = _bytes_view(val.encode("utf-8") if isinstance(val, str) else bytes(val), keep)
-    elif kind == _ARR:
-        out.bytes = _bytes_view(_pack_string_slots(val, info.str_cap) if info.elem == _STR
-                                else _pack_array(info.elem, val), keep)
-    elif kind in _FLOATK:
-        out.v.f = float(val)
-    elif kind == _ENUM:
-        out.v.i = _enum_number(lib, s, field, val, where)
-    elif kind in _SIGNED:
-        out.v.i = int(val)
-    elif kind == _BOOL:
-        out.v.u = 1 if val else 0
-    elif kind in _FMT:
-        out.v.u = int(val)
-    else:
-        raise SchemaError("%s: an array element cannot hold a %s"
-                          % (where, Schema.FieldType(kind).name))
-    return out
+class _EncodeWalk:
+    """The setter calls a value makes against a flat table, in table order, and the bytes
+    they add to the default message at most."""
+    __slots__ = ("lib", "s", "infos", "ends", "ops", "grow")
 
+    def __init__(self, lib, s, infos):
+        self.lib, self.s, self.infos, self.ends = lib, s, infos, _ends(infos)
+        self.ops, self.grow = [], 0
 
-def _write_elems(lib, s, buf, size, infos, i, path, items, keep, outer=()):
-    """Every member of every element of the struct array at flat index i, through the
-    element indexed setter, outer holding the enclosing arrays' indices. A variable array's
-    frame is sized first, and a struct array inside an element recurses."""
-    info = infos[i]
-    end, base = _member_run(infos, i), info.depth
-    where = path.decode("utf-8")
-    count = len(items) if info.kind == _VARR else min(len(items), info.count)
-    if info.kind == _VARR and not lib.rant_set_array_count(buf, size, s, path, count):
-        raise SchemaError("cannot size %s to %d elements" % (where, count))
-    for e in range(count):
-        idx = outer + (e,)
-        srcs, names = {base + 1: items[e]}, []
-        j = i + 1
-        while j < end:
-            m = infos[j]
-            name = _dstr(m.name)
-            d = m.depth - base - 1
-            while len(names) <= d:
-                names.append(None)
-            names[d] = name
-            parent = srcs.get(m.depth)
-            val = None if parent is None else _get(parent, name)
-            spot = "%s[%d].%s" % (where, e, ".".join(names[:d + 1]))
-            if _is_struct_array(m):
-                if val is not None:
-                    if not isinstance(val, (list, tuple)):
-                        raise SchemaError("%s is an array of structs and expects a list, got %s"
-                                          % (spot, type(val).__name__))
-                    _write_elems(lib, s, buf, size, infos, j, spot.encode("utf-8"), val, keep, idx)
-                j = _member_run(infos, j)
-                continue
-            j += 1
-            if m.kind == _STRUCT:
-                srcs[m.depth + 1] = val   # None keeps the whole subtree at its zeroed default
-                continue
-            if val is None:
-                continue                  # null member: keep the zeroed default
-            mv = _py_value(lib, s, j - 1, m, val, keep, spot)
-            if not lib.rant_set_value_at(buf, size, s, j - 1, _elems(idx), len(idx), _c.byref(mv)):
-                raise SchemaError("value does not fit %s" % spot)
+    def members(self, i, src, prefix):
+        """The members of the struct at row i, or of the root at -1, valued from src by name."""
+        if src is None:
+            return
+        infos, j = self.infos, i + 1
+        depth = 0 if i < 0 else infos[i].depth + 1
+        while j < len(infos) and infos[j].depth >= depth:
+            name = _dstr(infos[j].name)
+            self.row(j, _get(src, name), prefix + name)
+            j = self.ends[j]
+
+    def row(self, i, val, path):
+        """The ops for row i valued val at path. None keeps the default."""
+        if val is None:
+            return
+        info = self.infos[i]
+        if info.kind == _STRUCT:
+            return self.members(i, val, path + ".")
+        if info.kind in (_ARR, _VARR):
+            return self.array(i, val, path)
+        if info.kind == _VSTR:
+            val = val.encode("utf-8") if isinstance(val, str) else bytes(val)
+            self.grow += len(val)
+        elif info.kind == _MAP:
+            val = _encode_map_body(val)
+            self.grow += len(val)
+        self.ops.append((info.kind, path.encode("utf-8"), val, i))
+
+    def array(self, i, val, path):
+        """An array of fixed scalars, enums or capped strings is one packed set. Any other
+        element is set on its own through the element row, once a variable array is sized."""
+        info, el = self.infos[i], self.infos[i + 1]
+        fixed = el.size != 0 and el.min_len == el.size
+        if fixed and (el.kind <= _BOOL or el.kind in (_ENUM, _STR)):
+            if el.kind == _STR:
+                b = _pack_string_slots(val, el.str_cap, path)
+            elif el.kind == _ENUM:
+                b = _pack_array(el.backing, [_enum_number(self.lib, self.s, i + 1, x, path) for x in val])
+            else:
+                b = _pack_array(el.kind, val)
+            if info.kind == _VARR:
+                self.grow += len(b)
+            else:
+                b = b[:info.count * el.size]        # a fixed array keeps its first count
+            self.ops.append((_ARR, path.encode("utf-8"), b, i))
+            return
+        if not isinstance(val, (list, tuple)):
+            raise SchemaError("%s is an array and expects a list, got %s"
+                              % (path or "the root", type(val).__name__))
+        n = len(val) if info.kind == _VARR else min(len(val), info.count)
+        if info.kind == _VARR:
+            self.ops.append((_COUNT, path.encode("utf-8"), n, i))
+            self.grow += n * (el.size if fixed else 4 + el.min_len)
+        for k in range(n):
+            self.row(i + 1, val[k], "%s[%d]" % (path, k))
 
 
 # The map body, the self describing tagged value tree of a map field, built and parsed
@@ -1339,105 +1326,57 @@ def _encode_map_body(d):
 
 
 def _encode(lib, s, src):
-    # One walk of the flattened field table: resolve each value, and pre-serialize the
-    # variable-field payloads so the tail can be sized before the buffer is allocated.
+    # One walk of the flat table takes each row's value by wire name and pre serializes the
+    # variable payloads, so the buffer is sized once: msg_min plus what the ops add. Returns
+    # the buffer and the message's length in it.
     infos = _fields_of(lib, s)
+    walk = _EncodeWalk(lib, s, infos)
     if _is_value_root(lib, s, infos):
-        src = {"": src}              # a bare type: the value IS the one anonymous field
-    names, srcs, ops = [], [src], []
-    var_bytes = 0
-    for i, info in enumerate(infos):
-        if info.arr_parent != _NO_PARENT:
-            continue                     # an element template member: its array writes it
-        name = _dstr(info.name)
-        d = info.depth
-        while len(names) <= d:
-            names.append(None)
-        names[d] = name
-        parent = srcs[d]
-        val = None if parent is None else _get(parent, name)
-        if info.kind == _STRUCT:
-            while len(srcs) <= d + 1:
-                srcs.append(None)
-            srcs[d + 1] = val            # None keeps the whole subtree at its zeroed default
-            continue
-        if val is None:
-            continue                     # null field: keep the zeroed default
-        path = ".".join(names[:d + 1]).encode("utf-8")
-        kind, elem, cap = info.kind, info.elem, info.str_cap
-        if _is_struct_array(info):
-            if not isinstance(val, (list, tuple)):
-                raise SchemaError("%s is an array of structs and expects a list, got %s"
-                                  % (path.decode("utf-8"), type(val).__name__))
-            if kind == _VARR:
-                var_bytes += len(val) * info.elem_size
-            ops.append((i, path, val))
-        elif kind == _VSTR:
-            payload = val.encode("utf-8") if isinstance(val, str) else bytes(val)
-            var_bytes += len(payload)
-            ops.append((i, path, payload))
-        elif kind == _VARR:
-            payload = _pack_string_slots(val, cap) if elem == _STR else _pack_array(elem, val)
-            var_bytes += len(payload)
-            ops.append((i, path, payload))
-        elif kind == _MAP:
-            payload = _encode_map_body(val)
-            var_bytes += len(payload)
-            ops.append((i, path, payload))
-        else:
-            ops.append((i, path, val))
-
-    # msg_min is the fixed section plus one empty frame per variable field, and each
-    # variable frame then grows by exactly its payload length
-    size = lib.rant_schema_msg_min(s) + var_bytes
+        walk.row(0, src, "")         # a bare type: the value IS the one anonymous field
+    else:
+        walk.members(-1, src, "")
+    size = lib.rant_schema_msg_min(s) + walk.grow
     buf = (_c.c_ubyte * (size or 1))()
     lib.rant_schema_message_default(s, buf, size)
     keep = []
-    for i, path, val in ops:
-        info = infos[i]
-        kind, elem, count, cap = info.kind, info.elem, info.count, info.str_cap
-        if _is_struct_array(info):
-            _write_elems(lib, s, buf, size, infos, i, path, val, keep)
+    for kind, path, val, i in walk.ops:
+        where = path.decode("utf-8") or "the root"
+        if kind == _COUNT:
+            ok = lib.rant_set_array_count(buf, size, s, path, val)
+        elif kind == _ARR:
+            ok = lib.rant_set_array(buf, size, s, path, _bytes_view(val, keep))
         elif kind == _STR:
             if not lib.rant_set_string(buf, size, s, path, _str_view(val, keep)):
-                raise SchemaError("string too long for %s (cap %d)" % (path.decode("utf-8"), cap))
+                raise SchemaError("string too long for %s (cap %d)" % (where, infos[i].str_cap))
+            ok = True
         elif kind == _VSTR:
-            lib.rant_set_string(buf, size, s, path, _str_view(val, keep))
-        elif kind == _ARR and elem == _STR:
-            for j, item in enumerate(val):
-                if j >= count:
-                    break
-                if not lib.rant_set_string_at(buf, size, s, path, j, _str_view(item, keep)):
-                    raise SchemaError("string too long for %s[%d] (cap %d)"
-                                      % (path.decode("utf-8"), j, cap))
-        elif kind == _ARR:
-            lib.rant_set_array(buf, size, s, path, _bytes_view(_pack_array(elem, val), keep))
-        elif kind == _VARR:
-            lib.rant_set_array(buf, size, s, path, _bytes_view(val, keep))
+            ok = lib.rant_set_string(buf, size, s, path, _str_view(val, keep))
         elif kind == _MAP:
             if not lib.rant_set_map(buf, size, s, path, _bytes_view(val, keep)):
-                raise SchemaError("invalid map for %s" % path.decode("utf-8"))
+                raise SchemaError("invalid map for %s" % where)
+            ok = True
         elif kind == _F32:
-            lib.rant_set_f32(buf, size, s, path, float(val))
+            ok = lib.rant_set_f32(buf, size, s, path, float(val))
         elif kind == _F64:
-            lib.rant_set_f64(buf, size, s, path, float(val))
+            ok = lib.rant_set_f64(buf, size, s, path, float(val))
         elif kind == _ENUM:
             if isinstance(val, str):                       # by option name
                 if not lib.rant_set_enum(buf, size, s, path, val.encode("utf-8")):
-                    raise SchemaError("unknown enum option %r for %s" % (val, path.decode("utf-8")))
+                    raise SchemaError("unknown enum option %r for %s" % (val, where))
+                ok = True
             else:                                          # by number (an int or an enum member)
                 n = int(val.value if isinstance(val, _pyenum.Enum) else val)
-                if elem in _SIGNED:
-                    lib.rant_set_int(buf, size, s, path, n)
-                else:
-                    lib.rant_set_uint(buf, size, s, path, n)
+                setter = lib.rant_set_int if infos[i].backing in _SIGNED else lib.rant_set_uint
+                ok = setter(buf, size, s, path, n)
         elif kind in _SIGNED:
-            lib.rant_set_int(buf, size, s, path, int(val))
+            ok = lib.rant_set_int(buf, size, s, path, int(val))
         elif kind == _BOOL:
-            lib.rant_set_uint(buf, size, s, path, 1 if val else 0)
+            ok = lib.rant_set_uint(buf, size, s, path, 1 if val else 0)
         else:
-            lib.rant_set_uint(buf, size, s, path, int(val))
-    return bytes(buf)[:lib.rant_schema_msg_len(s, buf, size)]
+            ok = lib.rant_set_uint(buf, size, s, path, int(val))
+        if not ok:
+            raise SchemaError("cannot set %s" % where)
+    return buf, lib.rant_schema_msg_len(s, buf, size)
 
 
 # string array slots are [u16 len][cap bytes] each. Clamp len like the C reader so a
@@ -1522,14 +1461,6 @@ def _value_to_py(val):
     if k == _STR or k == _VSTR:
         return (_c.string_at(val.bytes.data, val.bytes.len).decode("utf-8", "replace")
                 if val.bytes.data and val.bytes.len else "")
-    if k == _ARR or k == _VARR:
-        raw = _c.string_at(val.bytes.data, val.bytes.len) if val.bytes.data and val.bytes.len else b""
-        if val.elem == _STR:
-            return _unpack_string_array(raw, val.count, val.str_cap)
-        if val.elem in (_U8, _I8):
-            return raw
-        esz = _SCALAR_SIZE[val.elem]
-        return list(_struct.unpack("<%d%s" % (len(raw) // esz, _FMT[val.elem]), raw)) if raw else []
     if k == _MAP:
         raw = _c.string_at(val.bytes.data, val.bytes.len) if val.bytes.data and val.bytes.len else b""
         return _decode_map_body(raw, 0, len(raw))[0]
@@ -1544,69 +1475,62 @@ def _value_to_py(val):
     return val.v.u
 
 
-def _decode_elem(lib, s, mb, infos, i, end, idx):
-    """One element of the struct array at flat index i, read through the element indexed
-    getter, idx holding every enclosing array's index. A nested struct array recurses."""
-    top = {}
-    dests = {infos[i].depth + 1: top}
-    j = i + 1
-    while j < end:
-        m = infos[j]
-        name = _dstr(m.name)
-        parent = dests[m.depth]
-        if _is_struct_array(m):
-            parent[name] = _decode_array(lib, s, mb, infos, j, idx)
-            j = _member_run(infos, j)
-            continue
-        if m.kind == _STRUCT:
-            child = {}
-            parent[name] = child
-            dests[m.depth + 1] = child
-        else:
-            val = _c.RantValue()
-            lib.rant_get_value_at(mb, s, j, _elems(idx), len(idx), _c.byref(val))
-            parent[name] = _value_to_py(val)
-        j += 1
-    return top
-
-
-def _decode_array(lib, s, mb, infos, i, outer=()):
-    """A struct array as a list of dicts, one per live element."""
-    end = _member_run(infos, i)
-    return [_decode_elem(lib, s, mb, infos, i, end, outer + (e,))
-            for e in range(lib.rant_array_count_at(mb, s, i))]
-
-
 def _decode(lib, s, msg):
-    mb = _c.RantBytes(_c.cast(_c.c_char_p(msg), _c.c_void_p) if msg else None, len(msg))
+    # msg is the message's bytes, or a RantBytes view of it valid for the call
+    mb = msg if isinstance(msg, _c.RantBytes) else \
+        _c.RantBytes(_c.cast(_c.c_char_p(msg), _c.c_void_p) if msg else None, len(msg))
     infos = _fields_of(lib, s)
-    if _is_value_root(lib, s, infos):  # a bare type: hand back the value, not a one-key dict
-        if _is_struct_array(infos[0]):
-            return _decode_array(lib, s, mb, infos, 0)
+    ends = _ends(infos)
+
+    def row(i, idx):
+        # row i under idx, one index per enclosing array, outermost first
+        info = infos[i]
+        if info.kind == _STRUCT:
+            return members(i, idx)
         val = _c.RantValue()
-        lib.rant_get_value(mb, s, 0, _c.byref(val))
-        return _value_to_py(val)
-    root = {}
-    dests = [root]
-    for i, info in enumerate(infos):
-        if info.arr_parent != _NO_PARENT:
-            continue                 # an element template member: its array reads it
-        name = _dstr(info.name)
-        d = info.depth
-        parent = dests[d]
-        if _is_struct_array(info):
-            parent[name] = _decode_array(lib, s, mb, infos, i)
-        elif info.kind == _STRUCT:
-            child = {}
-            parent[name] = child
-            while len(dests) <= d + 1:
-                dests.append(None)
-            dests[d + 1] = child
+        if idx:
+            lib.rant_get_value_at(mb, s, i, _elems(idx), len(idx), _c.byref(val))
         else:
-            val = _c.RantValue()
             lib.rant_get_value(mb, s, i, _c.byref(val))
-            parent[name] = _value_to_py(val)
-    return root
+        if info.kind not in (_ARR, _VARR):
+            return _value_to_py(val)
+        el = infos[i + 1]
+        if el.size and el.min_len == el.size and (el.kind <= _BOOL or el.kind in (_ENUM, _STR)):
+            n = val.bytes.len if val.bytes.data else 0
+            if el.kind in _ARRAY_CODE:
+                return _numbers(el.kind, val.bytes.data, n)
+            raw = _c.string_at(val.bytes.data, n) if n else b""
+            if el.kind == _STR:
+                return _unpack_string_array(raw, val.count, el.str_cap)
+            if el.kind == _U8:
+                return raw
+            ek = el.backing if el.kind == _ENUM else el.kind
+            vals = list(_struct.unpack("<%d%s" % (len(raw) // _SCALAR_SIZE[ek], _FMT[ek]), raw)) if raw else []
+            return [bool(x) for x in vals] if ek == _BOOL else vals
+        return [row(i + 1, idx + (k,)) for k in range(val.count)]
+
+    def members(i, idx):
+        # the members of the struct at row i, or of the root at -1, by name
+        out, j = {}, i + 1
+        depth = 0 if i < 0 else infos[i].depth + 1
+        while j < len(infos) and infos[j].depth >= depth:
+            out[_dstr(infos[j].name)] = row(j, idx)
+            j = ends[j]
+        return out
+
+    if _is_value_root(lib, s, infos):  # a bare type: hand back the value, not a one-key dict
+        return row(0, ())
+    return members(-1, ())
+
+
+def _numbers(kind, addr, n):
+    """A numeric array's n packed little endian bytes at addr as an array.array, one copy."""
+    out = _array.array(_ARRAY_CODE[kind])
+    if n:
+        out.frombytes((_c.ctypes.c_char * n).from_address(addr))
+        if _sys.byteorder == "big":
+            out.byteswap()
+    return out
 
 
 def _instantiate(cls, kwargs):
@@ -1620,13 +1544,17 @@ def _instantiate(cls, kwargs):
 
 
 def _typed(f, v):
-    """v with the spec field f's typing applied: a nested instance, a list of them for an
-        array of structs, or an enum member."""
+    """v with the spec field f's typing applied: a nested instance or an enum member, and an
+        array's elements likewise."""
     if v is None:
         return v
+    if f.elem is not None:
+        e = f.elem
+        if isinstance(v, list) and (e.elem is not None or e.nested is not None or e.enum_cls is not None):
+            return [_typed(e, x) for x in v]
+        return v
     if f.nested is not None:
-        return (_to_obj(f.nested, v) if f.kind == _STRUCT
-                else [_to_obj(f.nested, x) for x in v])
+        return _to_obj(f.nested, v)
     if f.kind == _ENUM and f.enum_cls is not None:
         try:
             return f.enum_cls(v)                # map the number to the enum member
@@ -1677,19 +1605,25 @@ def _us(seconds):
 
 
 def _c_view(payload):
-    """(RantBytes, keepalive buffer) over a bytes payload. Hold the buffer across the call."""
+    """(RantBytes, keepalive) over a payload where it lies: bytes, or an encoded (buffer,
+        length). Hold the keepalive across the call."""
     b = _c.RantBytes()
-    buf = None
+    if isinstance(payload, tuple):
+        buf, n = payload
+        if n:
+            b.data = _c.ctypes.addressof(buf)
+            b.len = n
+        return b, buf
     if payload:
-        buf = (_c.c_ubyte * len(payload)).from_buffer_copy(payload)
-        b.data = _c.cast(buf, _c.c_void_p)
+        b.data = _c.cast(_c.c_char_p(payload), _c.c_void_p)
         b.len = len(payload)
-    return b, buf
+    return b, payload
 
 
 def _payload_bytes(sch, value):
-    """Encode a payload: bytes and str pass through, None = empty, anything else goes through
-        the schema. A bare string schema encodes a str as a framed value, not loose text."""
+    """Encode a payload for _c_view: bytes and str pass through, None = empty, anything else
+        goes through the schema. A bare string schema encodes a str as a framed value, not
+        loose text."""
     if value is None:
         return b""
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -1699,14 +1633,17 @@ def _payload_bytes(sch, value):
     if sch is None:
         raise TypeError("no schema on this handle: pass bytes or str, or create it with a "
                         "schema to send objects")
-    return sch.encode(value)
+    return sch._encode_buf(value)
 
 
 def _decode_payload(wire_schema, local, data):
-    """Decode payload bytes: the wire schema wins, else the local Schema, else the raw bytes
-        pass through. Returns (value, ok). A typed local schema yields its class instance."""
+    """Decode a payload, bytes or a RantBytes view valid for the call: the wire schema wins,
+        else the local Schema, else the raw bytes pass through, copied out of a view. Returns
+        (value, ok). A typed local schema yields its class instance."""
     sp = wire_schema or (local._s if local is not None else None)
     if not sp:
+        if isinstance(data, _c.RantBytes):
+            data = _c.string_at(data.data, data.len) if data.data and data.len else b""
         return data, True
     try:
         d = _decode(_c.load(), sp, data)
@@ -2961,11 +2898,10 @@ def _progress_cb(on_progress, prg_schema, node, name):
 
     def deliver(prg_ptr):
         p = prg_ptr.contents
-        data = _c.string_at(p.data.data, p.data.len) if p.data.data and p.data.len else b""
-        if not data:
+        if not (p.data.data and p.data.len):
             val = None       # the RUNNING ack
         else:
-            val, ok = _decode_payload(p.schema, prg_schema, data)
+            val, ok = _decode_payload(p.schema, prg_schema, p.data)
             if not ok:
                 node._report_decode(name, "a progress update did not decode into its type")
                 return
@@ -2974,7 +2910,7 @@ def _progress_cb(on_progress, prg_schema, node, name):
         else:
             info = Progress()
             info.value = val
-            info.data = data
+            info.data = _c.string_at(p.data.data, p.data.len) if p.data.data and p.data.len else b""
             info.call_id = p.call_id
             info.provider = p.provider
             info.written_us = p.written_us
@@ -4018,8 +3954,7 @@ def _on_var_update(upd_ptr, user):
 
 
 def _var_update(box, u):
-    data = _c.string_at(u.value.data, u.value.len) if u.value.data and u.value.len else b""
-    val, ok = _decode_payload(u.schema, box.schema, data)
+    val, ok = _decode_payload(u.schema, box.schema, u.value)
     if not ok:
         box.node._report_decode(box.name, "a variable update did not decode into its type")
         return
@@ -4029,7 +3964,7 @@ def _var_update(box, u):
         upd = VariableUpdate()
         upd.name = _c.string_at(u.name.data, u.name.len).decode("utf-8", "replace") \
                    if u.name.data and u.name.len else ""
-        upd.data = data
+        upd.data = _c.string_at(u.value.data, u.value.len) if u.value.data and u.value.len else b""
         upd.value = val
         upd.forced = u.forced != 0
         upd.write_seq = u.write_seq

@@ -1,6 +1,7 @@
 """The Python binding test: two nodes on one host over reliable typed pub sub, the
 patterns and the standard types. `test.py` runs every leg, `test.py name` one, `--list`
 lists them. Exit 0 = pass (spec/testing.md)."""
+import array
 import ctypes
 import enum as _enum
 import inspect
@@ -12,7 +13,7 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 # Import the package from the source checkout, which finds the library in dist/native.
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -323,8 +324,8 @@ def video_types():
     return ok
 
 
-# A struct array: list[Code] declares it, the DSL spells it inline, and the flat table
-# carries the element once as a template the codec strides over.
+# A struct array: list[Code] declares it, and the flat table has the element as the row
+# after the array, its members after that.
 @dataclass
 class Code:
     type:  Annotated[str, "string<16>"] = ""
@@ -346,8 +347,8 @@ class Detections:
 
 
 def struct_arrays():
-    """Arrays of structs: declared, encoded and decoded through the element indexed
-    accessors, with the element template read from the flat table."""
+    """Arrays of structs: declared, encoded and decoded through the element rows of the
+    flat table."""
     ok = True
 
     def check(name, cond):
@@ -376,8 +377,9 @@ def struct_arrays():
                        "f: f32[2], g: enum<u8> { OFF=0, ON=1 } }[], n: u8 }")
     rows = [{"a": 1, "b": -2, "c": 0.5, "d": True, "e": "hi", "f": [1.0, 2.0], "g": 1},
             {"a": 255, "b": -32768, "c": -1.5, "d": False, "e": "", "f": [0.0, 0.0], "g": 0}]
+    want = [dict(r, f=array.array("f", r["f"])) for r in rows]   # a numeric array decodes as array.array
     check("every fixed kind inside an element",
-          text.decode(text.encode({"rows": rows, "n": 3})) == {"rows": rows, "n": 3})
+          text.decode(text.encode({"rows": rows, "n": 3})) == {"rows": want, "n": 3})
     check("an enum element member takes its option name",
           text.decode(text.encode({"rows": [dict(rows[0], g="OFF")]}))["rows"][0]["g"] == 0)
 
@@ -423,8 +425,9 @@ def struct_arrays():
     check("nested struct arrays from dicts read back per level",
           got["rows"][0]["cells"][0]["v"] == 1 and got["rows"][0]["cells"][2]["v"] == 0
           and got["rows"][1]["cells"][2]["v"] == 9 and got["rows"][0]["n"] == 4)
-    check("the field table counts the enclosing arrays",
-          [f.arr_depth for f in grid.fields] == [0, 1, 2, 1])
+    check("the field table counts the enclosing arrays, an element row after each array",
+          [(f.name, f.arr_depth) for f in grid.fields]
+          == [("rows", 0), ("", 1), ("cells", 1), ("", 2), ("v", 2), ("n", 1)])
     bare = node.schema(list[Code])
     check("a struct array is a bare root too",
           bare.decode(bare.encode([Code("A", 1.0)]))[0].type == "A")
@@ -443,6 +446,124 @@ def struct_arrays():
         check("a non-list for a struct array raises", True)
     node.close()
     print("struct arrays: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
+# Any type as an element: records with arrays of their own, arrays of arrays, strings,
+# enums and maps. The same shapes as the C++ and C# tests, so the hashes agree.
+@dataclass
+class Stretch:
+    speed: rant.f32 = 0.0
+    pts:   list[rant.types.Float2] = field(default_factory=list)
+
+
+@dataclass
+class Route:
+    id:       rant.u32 = 0
+    segments: list[Stretch] = field(default_factory=list)
+    name:     str = ""
+
+
+class Lane(_enum.IntEnum):
+    Left = 0
+    Right = 1
+
+
+@dataclass
+class Layers:
+    grid:  list[list[rant.f32]] = field(default_factory=list)
+    rows:  Annotated[list[list[float]], "f32[3][]"] = field(default_factory=list)
+    names: list[str] = field(default_factory=list)
+    pair:  Annotated[list[str], "string[2]"] = field(default_factory=list)
+    legs:  Annotated[list[Stretch], "Stretch[2]"] = field(default_factory=list)
+    m:     Annotated[list[list[float]], "f32[3][2]"] = field(default_factory=list)
+    areas: list[rant.types.Polygon2D] = field(default_factory=list)
+    lanes: list[Lane] = field(default_factory=list)
+    words: list[list[str]] = field(default_factory=list)
+    tags:  Annotated[list[list[str]], "string<8>[2][]"] = field(default_factory=list)
+    flags: list[bool] = field(default_factory=list)
+    notes: list[dict] = field(default_factory=list)
+
+
+def nested():
+    """Any type as an array element, nested, typed and as dicts."""
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    def open_node(name):
+        return rant.Node(name, on_event=lambda e: None, domain=DOMAIN + 18,
+                         multicast_interface=IFACE, threading=rant.Threading.MANUAL)
+
+    F2, D2 = rant.types.Float2, rant.types.Double2
+    node, other = open_node("nest"), open_node("nest-w")   # a name has one shape per node
+    rs = node.schema(Route)
+    same = node.schema("Stretch { speed: f32, pts: Float2[] }\n"
+                       "Route { id: u32, segments: Stretch[], name: string }")
+    check("a record element spells as C++ and C# do", rs.hash == same.hash)
+    wire = rs.encode(Route(7, [Stretch(1.5, [F2(1, 2), F2(3, 4)]), Stretch(2.5, [F2(5, 6)])], "loop"))
+    back = rs.decode(wire)
+    check("a record element with its own array round trips",
+          back.id == 7 and back.name == "loop" and len(back.segments) == 2
+          and isinstance(back.segments[0], Stretch) and back.segments[0].pts[1].y == 4
+          and back.segments[1].speed == 2.5 and back.segments[1].pts[0].x == 5)
+    check("it decodes as nested lists of dicts", same.decode(wire)["segments"][0]["pts"][1]["y"] == 4)
+    wide = other.schema("Stretch { speed: f32, pts: Float2[] }\n"
+                        "Route { tag: string, id: u32, extra: f64[], segments: Stretch[], name: string }")
+    wd = wide.decode(wide.encode({"tag": "first", "id": 9, "extra": [1.0, 2.0, 3.0],
+                                  "segments": [{"speed": 4.0}, {"pts": [{}, {"x": 7}]}],
+                                  "name": "wide"}))
+    check("dicts fill arrays inside the elements of another layout",
+          wd["tag"] == "first" and wd["segments"][0]["speed"] == 4.0 and wd["segments"][0]["pts"] == []
+          and len(wd["segments"][1]["pts"]) == 2 and wd["segments"][1]["pts"][1]["x"] == 7.0
+          and wd["name"] == "wide")
+
+    ls = node.schema(Layers)
+    same = node.schema("Stretch { speed: f32, pts: Float2[] }\n"
+                       "Layers { grid: f32[][], rows: f32[3][], names: string[], pair: string[2], "
+                       "legs: Stretch[2], m: f32[3][2], areas: Polygon2D[], "
+                       "lanes: enum<u8> { Left=0, Right=1 }[], words: string[][], "
+                       "tags: string<8>[2][], flags: bool[], notes: map[] }")
+    check("every nesting spells as the DSL does", ls.hash == same.hash)
+    src = Layers(grid=[[1.0, 2.0], [], [3.0]], rows=[[1, 2, 3], [4, 5, 6]], names=["abc", "", "hello"],
+                 pair=["left", "right"], legs=[Stretch(), Stretch(3.0, [F2(8, 9)])],
+                 m=[[0, 2, 0], [0, 0, 6]],
+                 areas=[rant.types.Polygon2D(), rant.types.Polygon2D([D2(1, 1), D2(2, 1), D2(2, 2)])],
+                 lanes=[Lane.Right, Lane.Left], words=[["a", "bc"], [], ["def"]],
+                 tags=[["t1"], ["t2", "t3"]], flags=[True, False, True], notes=[{"k": 1}, {}])
+    back = ls.decode(ls.encode(src))
+    check("arrays of arrays, strings and records round trip",
+          [list(g) for g in back.grid] == [[1.0, 2.0], [], [3.0]] and isinstance(back.grid[0], array.array)
+          and [list(r) for r in back.rows] == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+          and back.names == ["abc", "", "hello"] and back.pair == ["left", "right"]
+          and back.legs[0].pts == [] and back.legs[1].pts[0].y == 9.0
+          and [list(r) for r in back.m] == [[0.0, 2.0, 0.0], [0.0, 0.0, 6.0]]
+          and back.areas[0].points == [] and back.areas[1].points[2].y == 2.0)
+    check("enum, capped string, bool and map elements round trip",
+          back.lanes == [Lane.Right, Lane.Left] and isinstance(back.lanes[0], Lane)
+          and back.words == [["a", "bc"], [], ["def"]] and back.tags == [["t1", ""], ["t2", "t3"]]
+          and back.flags == [True, False, True] and back.notes == [{"k": 1}, {}])
+    empty = ls.decode(ls.encode(Layers()))
+    check("unset nested arrays decode empty and fixed ones at their count",
+          empty.grid == [] and empty.words == [] and empty.pair == ["", ""] and len(empty.legs) == 2
+          and empty.legs[0].pts == [] and [list(r) for r in empty.m] == [[0.0] * 3] * 2 and empty.tags == [])
+    try:
+        ls.encode(Layers(tags=[["far too long"]]))
+        check("an over cap string deep in an array raises", False)
+    except rant.SchemaError as e:
+        check("an over cap string deep in an array raises: %s" % e, True)
+    check("a fixed array subscripts again for an array of arrays",
+          rant.dsl(cast(Any, rant.f32)[3][2]) == "f32[3][2]\n"
+          and rant.dsl(list[cast(Any, rant.string(8))[2]]) == "string<8>[2][]\n")
+    ws = node.schema(list[list[str]])
+    check("a bare array of string arrays is a whole schema", ws.hash == node.schema("string[][]").hash)
+    check("and round trips", ws.decode(ws.encode([["x", "yz"], ["w"]])) == [["x", "yz"], ["w"]])
+    other.close()
+    node.close()
+    print("nested: " + ("PASS\n" if ok else "FAIL\n"))
     return ok
 
 
@@ -533,8 +654,8 @@ def value_roots():
                          (T.Uri, "rtsp://host/stream")):
         for sch in (node.schema(alias), node.schema(alias.name)):
             out = sch.decode(sch.encode(value))
-            check("round-trip %s root -> %r" % (sch.name, out),
-                  (bytes(out) if isinstance(value, bytes) else out) == value)
+            got = bytes(out) if isinstance(value, bytes) else list(out) if isinstance(value, list) else out
+            check("round-trip %s root -> %r" % (sch.name, out), got == value)
     # text DSL and the bare type agree, and a named bare root is an error
     check("text `bool` == plain bool", node.schema("bool").hash == HASH_BOOL)
     try:
@@ -1794,6 +1915,7 @@ LEGS = [
     ("value_roots", value_roots),
     ("std_types", std_types),
     ("struct_arrays", struct_arrays),
+    ("nested", nested),
     ("pose", pose_leg),
     ("lifecycle", lifecycle),
     ("handles", handles),

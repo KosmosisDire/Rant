@@ -174,17 +174,16 @@ class Schema:
     class Field:
         name: str
         kind: Schema.FieldType
-        elem: Schema.FieldType
+        backing: Schema.FieldType
         count: int
         depth: int
         offset: int
         size: int
         str_cap: int
         type_name: str
-        elem_name: str
-        elem_size: int
         arr_parent: int
         arr_depth: int
+        min_len: int
 
     def __init__(self, node: Node, source: type[Any] | str | Any) -> None: ...
     @property

@@ -216,17 +216,16 @@ class RantSchemaFieldInfo(Structure):
     _fields_ = [
         ("name", RantStringView),
         ("type_name", RantStringView),     # the field type's NAME, empty when anonymous
-        ("elem_name", RantStringView),     # an array ELEMENT type's name, empty when anonymous
         ("kind", c_uint8),
-        ("elem", c_uint8),
+        ("backing", c_uint8),            # an enum's backing kind
         ("count", c_uint16),
         ("depth", c_uint16),
         ("str_cap", c_uint16),
-        ("arr_parent", c_uint16),        # flat index of the nearest enclosing struct ARRAY, 0xFFFF none
-        ("arr_depth", c_uint16),         # the struct arrays around the field, one index each
+        ("arr_parent", c_uint16),        # flat index of the nearest enclosing array, 0xFFFF none
+        ("arr_depth", c_uint16),         # the arrays around the row, one index each
         ("offset", c_uint32),
         ("size", c_uint32),
-        ("elem_size", c_uint32),         # bytes of one array element, else 0
+        ("min_len", c_uint32),           # a default value's bytes
     ]
 
 
@@ -237,9 +236,7 @@ class _RantValueV(Union):
 class RantValue(Structure):
     _fields_ = [
         ("kind", c_uint8),
-        ("elem", c_uint8),
-        ("count", c_uint16),
-        ("str_cap", c_uint16),
+        ("count", c_uint32),
         ("v", _RantValueV),
         ("bytes", RantBytes),
     ]
@@ -550,8 +547,6 @@ def bind(lib):
     F("rant_set_f32", [c_void_p, c_size_t, c_void_p, c_char_p, c_float], c_int)
     F("rant_set_array", [c_void_p, c_size_t, c_void_p, c_char_p, RantBytes], c_int)
     F("rant_set_string", [c_void_p, c_size_t, c_void_p, c_char_p, RantStringView], c_int)
-    F("rant_set_string_at", [c_void_p, c_size_t, c_void_p, c_char_p, c_uint16,
-                             RantStringView], c_int)
     F("rant_get_uint", [RantBytes, c_void_p, c_char_p], c_uint64)
     F("rant_get_int", [RantBytes, c_void_p, c_char_p], c_int64)
     F("rant_get_f64", [RantBytes, c_void_p, c_char_p], c_double)
@@ -563,7 +558,6 @@ def bind(lib):
                             POINTER(RantValue)], c_int)
     F("rant_set_value_at", [c_void_p, c_size_t, c_void_p, c_uint16, POINTER(c_uint32), c_uint16,
                             POINTER(RantValue)], c_int)
-    F("rant_array_count_at", [RantBytes, c_void_p, c_uint16], c_uint32)
     F("rant_set_array_count", [c_void_p, c_size_t, c_void_p, c_char_p, c_uint32], c_int)
     F("rant_enum_value_of", [c_void_p, c_uint16, c_char_p, POINTER(c_int64)], c_int)
     F("rant_schema_msg_min", [c_void_p], c_uint32)

@@ -74,8 +74,10 @@ Any class with annotated fields is a schema, no decorator needed, and `@dataclas
 gives a constructor. Field types are `rant.u8` to `rant.f64`,
 `rant.string(cap)` for a capped string, `rant.<scalar>[n]` or `rant.string(cap)[n]` for a
 fixed array, a nested annotated class, plain `int`, `float` and `bool`, `str` for an
-unbounded string, `list[...]` for a variable array, `dict` for a map, and an `IntEnum` or
-`rant.enum(cls, backing)` for a named integer. A member's wire name is its own name in
+unbounded string, `list[...]` of any field type for a variable array, `dict` for a map, and
+an `IntEnum` or `rant.enum(cls, backing)` for a named integer. Arrays nest to any depth and
+read as the DSL does: `rant.f32[3][2]` is two arrays of three, `list[list[str]]` is
+`string[][]`. A member's wire name is its own name in
 the wire spelling, snake_case (docs/stdtypes.md): `frame_id` stays `frame_id`, the same
 field a C# `FrameId` names, and it decodes back into `frame_id`. A decoded dictionary carries
 the wire names and a dictionary source may spell its keys any way. `__rant_name__` on the
@@ -83,18 +85,21 @@ class overrides the wire type name. `rant.dsl(source)` gives the DSL text of a c
 `Schema` or DSL text, with no library load, for display or for pasting into a C node.
 
 A numeric array field takes a list, bytes or any buffer such as `array.array` or a NumPy array,
-copied at once when its element type matches the field and converted otherwise.
+read in place when its element type matches the field and converted otherwise. It decodes
+as an `array.array` of its element type, a `u8` array as `bytes`, filled by one copy from the
+message, and NumPy takes either without another: `np.asarray(msg.pts)`. Call `tolist()` for a
+list.
 
 A nested class, alone or as `list[Cls]` for an array of structs, takes its class name on
 the wire: the reflected text defines it once above its first use, as
 `Code { type: string<16>, angle: f32 }`, and each use is the name, so `codes: list[Code]`
 is `codes: Code[]` and a C# or C peer spells `Code` too. A name has one shape per node, so
 a class called `Twist` with fields of its own is refused. A standard type spells by its
-name alone (`list[rant.types.Float3]` is `Float3[]`). An element is fixed all the way down, so a `str`, a `list` or a `dict` inside
-one is refused at compile, and so is an array of them. A struct array inside one must be
-fixed, `Annotated[list[Float2], "Float2[4]"]`, and nests to any depth. `encode` takes a list of instances
-or of dicts and `decode` gives one back, typed when the schema came from a class. DSL text
-also declares the fixed form, `{ x: f32, y: f32 }[3]`, which zero fills to its count.
+name alone (`list[rant.types.Float3]` is `Float3[]`). An element may be any type, so a
+class whose members hold strings and lists of their own works as one too. `encode` takes a
+list of instances or of dicts and `decode` gives one back, typed when the schema came from a
+class. DSL text also declares the fixed form, `{ x: f32, y: f32 }[3]`, which zero fills to its
+count.
 
 A bare type is a schema of its own: `node.publisher("EStop", bool)` sends plain booleans,
 and so do the scalars, `rant.string(N)`, arrays, `list[rant.f32]`, `str`, `dict`, an enum
@@ -112,7 +117,8 @@ enum width are spelled
 wire: `Annotated[str, "string<16>"]`, `Annotated[bytes, "u8[4]"]`,
 `Annotated[list[float], "f32[]"]`, `Annotated[Mode, "u8"]`. The text may name a struct
 over a list of that class, so `Annotated[list[Float2], "Float2[4]"]` is a fixed array of
-four `Float2`, which a plain `list[Float2]` cannot say. In a value position the same
+four `Float2`, which a plain `list[Float2]` cannot say. Suffixes stack innermost first, one
+list each: `Annotated[list[list[float]], "f32[3][]"]`, `Annotated[list[str], "string[2]"]`. In a value position the same
 DSL text does it: `node.schema("u8[4]")`.
 
 `node.schema(text)`, `node.schema(cls)` and `node.schema(bare_type)` compile explicitly,
