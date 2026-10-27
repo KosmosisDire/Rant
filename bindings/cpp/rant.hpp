@@ -579,8 +579,8 @@ public:
     uint64_t hash() const { return schema_ ? detail::rant_schema_hash(schema_) : 0; }
     /* The rows of the flat depth first field table. */
     uint16_t field_count() const { return schema_ ? detail::rant_schema_field_count(schema_) : 0; }
-    /* Flat index of a field by name, nested members by dotted path ("velocity.dx") and struct
-     * array members by index ("corners[2].x"). -1 if unknown. */
+    /* Flat index of a field by name, nested members by dotted path ("velocity.dx") and array
+     * elements by index ("corners[2].x", "names[1]"). -1 if unknown. */
     int field_index(std::string_view path) const {
         return detail::rant_schema_field_index(schema_, std::string(path).c_str());
     }
@@ -606,32 +606,31 @@ public:
         return out;
     }
 
-    /* One row of the flat field table. A struct's members follow it one level deeper. */
+    /* One row of the flat field table. A struct's members follow it one level deeper, and
+     * an array's element follows it as a row named "". */
     struct Field {
         std::string_view name;
-        std::string_view type_name;  /* the field type's NAME, empty when anonymous */
-        std::string_view elem_name;  /* an array ELEMENT type's name, empty when anonymous */
+        std::string_view type_name;  /* the type's name, empty when anonymous */
         FieldType kind;          /* the field's type (a named type reports what it wraps) */
-        FieldType elem;          /* array element type (Array), or enum backing type (Enum) */
-        uint16_t  count, depth;  /* array/enum option count */
-        uint16_t  str_cap;       /* string capacity (String fields and String-element arrays) */
-        uint16_t  arr_parent;    /* flat index of the nearest enclosing struct ARRAY, 0xFFFF for none */
-        uint16_t  arr_depth;     /* the struct arrays around the field, one index each */
-        uint32_t  offset, size;
-        uint32_t  elem_size;     /* bytes of one array element, else 0 */
+        FieldType backing;       /* an Enum's backing type */
+        uint16_t  count, depth;  /* a fixed array's count or an enum's option count */
+        uint16_t  str_cap;       /* a String's capacity */
+        uint16_t  arr_parent;    /* flat index of the nearest enclosing array, 0xFFFF for none */
+        uint16_t  arr_depth;     /* the arrays around the row, one index each */
+        uint32_t  offset, size;  /* from the nearest enclosing element, size 0 when variable */
+        uint32_t  min_len;       /* a default value's bytes, what one more element at least costs */
     };
     /* Row i of the field table, false past the end. */
     bool field_at(uint16_t i, Field& out) const {
         detail::RantSchemaFieldInfo f;
         if (!schema_ || !detail::rant_schema_field_at(schema_, i, &f)) return false;
-        out.name      = { f.name.data, f.name.len };
+        out.name      = { f.name.data ? f.name.data : "", f.name.len };
         out.type_name = { f.type_name.data ? f.type_name.data : "", f.type_name.len };
-        out.elem_name = { f.elem_name.data ? f.elem_name.data : "", f.elem_name.len };
-        out.kind   = static_cast<FieldType>(f.kind);
-        out.elem   = static_cast<FieldType>(f.elem);
+        out.kind    = static_cast<FieldType>(f.kind);
+        out.backing = static_cast<FieldType>(f.backing);
         out.count  = f.count; out.depth = f.depth;
         out.str_cap = f.str_cap; out.arr_parent = f.arr_parent; out.arr_depth = f.arr_depth;
-        out.offset = f.offset; out.size = f.size; out.elem_size = f.elem_size;
+        out.offset = f.offset; out.size = f.size; out.min_len = f.min_len;
         return true;
     }
 
@@ -848,30 +847,24 @@ public:
     MessageBuilder& set_f64  (const char* field, double   v) { ok_ &= detail::rant_set_f64    (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
     MessageBuilder& set_f32  (const char* field, float    v) { ok_ &= detail::rant_set_f32    (buf_.data(), buf_.size(), schema_, field, v) != 0; return *this; }
     MessageBuilder& set_bool (const char* field, bool     v) { ok_ &= detail::rant_set_uint (buf_.data(), buf_.size(), schema_, field, v ? 1u : 0u) != 0; return *this; }
-    /* a capped OR variable string (rant_set_string handles both) */
+    /* a capped or variable string, an element too by path such as "names[2]" */
     MessageBuilder& set_string(const char* field, std::string_view v) {
         grow_for(v.size());
         ok_ &= detail::rant_set_string(buf_.data(), buf_.size(), schema_, field, detail::rant_string(v.data(), v.size())) != 0;
         return *this;
     }
-    /* Size a variable array to count elements, zero filled, so a struct array's members can
-     * then be set by path such as "pts[2].x". */
+    /* Size a variable array to count elements, each at its default, so their members can
+     * then be set by path such as "pts[2].x" or "names[1]". */
     MessageBuilder& set_array_count(const char* field, uint32_t count) {
         int i = detail::rant_schema_field_index(schema_, field);
-        detail::RantSchemaFieldInfo fi;
-        if (i < 0 || !detail::rant_schema_field_at(schema_, (uint16_t)i, &fi)) { ok_ = false; return *this; }
-        grow_for((size_t)count * fi.elem_size);
+        detail::RantSchemaFieldInfo el;
+        if (i < 0 || !detail::rant_schema_field_at(schema_, (uint16_t)(i + 1), &el)) { ok_ = false; return *this; }
+        grow_for((size_t)count * (4u + el.min_len));
         ok_ &= detail::rant_set_array_count(buf_.data(), buf_.size(), schema_, field, count) != 0;
         return *this;
     }
-    /* One element of a string array. Size a variable one first with set_array_count. */
-    MessageBuilder& set_string_at(const char* field, uint16_t index, std::string_view v) {
-        grow_for(v.size() + 2);
-        ok_ &= detail::rant_set_string_at(buf_.data(), buf_.size(), schema_, field, index, detail::rant_string(v.data(), v.size())) != 0;
-        return *this;
-    }
-    /* a fixed or variable array as raw element bytes. A string array takes whole
-       [u16 len][cap] slots */
+    /* an array of fixed elements as packed bytes. A capped string element takes a whole
+       [u16 len][cap] slot */
     MessageBuilder& set_array(const char* field, Bytes elems) {
         grow_for(elems.size());
         ok_ &= detail::rant_set_array(buf_.data(), buf_.size(), schema_, field, detail::rant_bytes(elems.data(), elems.size())) != 0;
@@ -929,12 +922,13 @@ public:
     double   get_f64  (const char* field) const { return detail::rant_get_f64    (d_, s_, field); }
     float    get_f32  (const char* field) const { return detail::rant_get_f32    (d_, s_, field); }
     bool     get_bool (const char* field) const { return detail::rant_get_uint (d_, s_, field) != 0; }
+    /* an array's packed elements when its element is fixed, else empty */
     Bytes    get_array(const char* field) const { auto a = detail::rant_get_array(d_, s_, field); return { a.data, a.len }; }
     /* an array's live element count, a fixed one's count, 0 when the field is no array */
     uint32_t get_array_count(const char* field) const { return detail::rant_get_array_count(d_, s_, field); }
-    /* a capped or variable string, an empty view on a mismatch */
+    /* a capped or variable string, an element too by path such as "names[2]", an empty
+       view on a mismatch */
     std::string_view get_string(const char* field) const { auto s = detail::rant_get_string(d_, s_, field); return { s.data, s.len }; }
-    std::string_view get_string_at(const char* field, uint16_t index) const { auto s = detail::rant_get_string_at(d_, s_, field, index); return { s.data, s.len }; }
     /* a `map` field, as a reader over its body (valid while the view is) */
     MapReader get_map(const char* field) const { auto b = detail::rant_get_map(d_, s_, field); return MapReader(Bytes{ b.data, b.len }); }
     /* an enum field's current option name, {} when the stored number has no option */
@@ -1361,11 +1355,6 @@ template <class U> struct is_rant_string : std::false_type {};
 template <uint16_t N> struct is_rant_string<String<N>> : std::true_type {
     static constexpr uint16_t cap = N;
 };
-template <class U> struct is_std_array : std::false_type {};
-template <class E, size_t N> struct is_std_array<std::array<E, N>> : std::true_type {
-    using elem = E;
-    static constexpr size_t count = N;
-};
 template <class U, class = void> struct is_reflected : std::false_type {};
 template <class U> struct is_reflected<U, std::void_t<typename reflect<U>::is_rant_schema>>
     : std::true_type {};
@@ -1373,10 +1362,9 @@ template <class U> struct is_reflected<U, std::void_t<typename reflect<U>::is_ra
 template <class U, class = void> struct is_reg_enum : std::false_type {};
 template <class U> struct is_reg_enum<U, std::void_t<typename reflect_enum<U>::is_rant_enum>>
     : std::true_type {};
-/* std::string: the unbounded string type, a tail frame. Legal as a member and a bare root. */
+/* std::string: the unbounded string type. Legal as a member, an element and a bare root. */
 template <class U> struct is_var_string : std::is_same<U, std::string> {};
-/* std::vector<E>: the variable array E[], a tail frame. Legal as a member and a bare root.
- * E must be a wire scalar, and vector<bool> is bit packed so it is refused. */
+/* std::vector<E>: the variable array E[] of any element but bool, which is bit packed. */
 template <class U> struct is_std_vector : std::false_type {};
 template <class E> struct is_std_vector<std::vector<E>> : std::true_type {
     using elem = E;
@@ -1413,122 +1401,60 @@ inline bool host_le() {
     return *reinterpret_cast<const uint8_t*>(&probe) == 1;
 }
 
-/* one leaf field of the flattened struct: where it lives in the struct, where on the
- * wire, and how to copy it. Arrays are one leaf with count > 1 (per-element strides). */
+/* one fixed leaf of a flattened type: where it lives in its host, where on the wire, and
+ * how to copy it. Arrays are one leaf with count > 1 (per element strides). */
 struct Leaf {
     uint32_t    struct_off = 0, wire_off = 0;
     uint8_t     kind = 0;   /* scalar kind, RANT_STR, or the enum backing kind */
     uint8_t     is_array = 0;
     uint8_t     is_enum = 0;   /* wire kind ENUM, copied as its backing integer */
     uint16_t    count = 1, cap = 0;   /* elements, or the string capacity */
-    uint32_t    s_stride = 0, w_stride = 0;     /* per-element byte strides */
-    std::string path;                           /* dotted path for by-name offset lookup */
-    std::vector<uint16_t> elems;                /* its index in each enclosing struct array */
+    uint32_t    s_stride = 0, w_stride = 0;     /* per element byte strides */
+    std::string path;                           /* its row's path within its record */
+    std::vector<uint16_t> elems;                /* its index in each enclosing fixed array */
 };
 
-/* One variable member, a length framed section on the message tail reached by dotted path
- * through the C accessors. Access is type erased through function pointers. */
-struct Tail {
-    uint32_t    struct_off = 0;
-    uint8_t     is_string = 0;                  /* std::string member (VSTR frame) */
-    uint8_t     elem_kind = 0;                  /* std::vector<E>: E's wire kind */
-    uint16_t    cap = 0;                        /* std::vector<String<N>>: N */
-    std::string path;
-    /* std::vector of structs: one element's leaves, offsets within the element, copied
-       per element through the array's frame */
-    uint8_t     is_structs = 0;
-    std::vector<Leaf> elem;
-    uint32_t    elem_host = 0;                  /* sizeof the element */
-    uint32_t    elem_wire = 0;                  /* its wire size, resolved per schema */
-    uint16_t    index = 0;                      /* the array's row, resolved per schema */
+struct Plan;
+
+/* One variable value of a record, written and read through its row by the C value
+ * accessors, which take one index per enclosing array. */
+struct Var {
+    enum Kind : uint8_t { String, Packed, Elements };
+    Kind        kind = String;   /* std::string, an array of fixed elements, of variable ones */
+    uint32_t    host_off = 0;
+    std::string path;            /* its row's path within its record */
+    uint32_t    fixed_n = 0;     /* a C or std::array: its count. 0 for a std::vector */
+    uint32_t    elem_host = 0;   /* sizeof one element */
+    bool        trivial = false; /* the element is trivially copyable */
     size_t (*count)(const uint8_t* member) = nullptr;
     const uint8_t* (*items)(const uint8_t* member) = nullptr;
-    uint8_t* (*resize)(uint8_t* member, size_t n) = nullptr;
-    size_t (*extra)(const uint8_t* member) = nullptr;   /* payload bytes to reserve */
-    bool (*write)(const uint8_t* member, uint8_t* buf, size_t cap,
-                  const detail::RantSchema* s, const char* path) = nullptr;
-    bool (*read)(uint8_t* member, detail::RantBytes msg,
-                 const detail::RantSchema* s, const char* path) = nullptr;
+    uint8_t* (*resize)(uint8_t* member, size_t n) = nullptr;   /* nullptr when n will not fit */
+    std::shared_ptr<const Plan> elem;   /* one element's plan, offsets within the element */
+    /* resolved per schema */
+    uint16_t    row = 0;
+    uint32_t    elem_wire = 0;   /* the element row's size */
+    uint32_t    elem_min = 0;    /* the element row's min_len */
+    bool        block = false;   /* Packed: host and wire elements coincide, one memcpy */
 };
 
-inline void copy_swapped(uint8_t* dst, const uint8_t* src, size_t n);
-
-template <class E> struct vector_tail {
-    static size_t extra(const uint8_t* m) {
-        return reinterpret_cast<const std::vector<E>*>(m)->size() * sizeof(E);
-    }
-    static bool write(const uint8_t* m, uint8_t* buf, size_t cap,
-                      const detail::RantSchema* s, const char* path) {
-        const std::vector<E>& v = *reinterpret_cast<const std::vector<E>*>(m);
-        size_t bytes = v.size() * sizeof(E);
-        if (host_le() || sizeof(E) == 1)
-            return detail::rant_set_array(buf, cap, s, path,
-                                          detail::rant_bytes(v.data(), bytes)) != 0;
-        std::vector<uint8_t> tmp(bytes);        /* big-endian host: the wire is LE */
-        for (size_t i = 0; i < v.size(); i++)
-            copy_swapped(tmp.data() + i * sizeof(E),
-                         reinterpret_cast<const uint8_t*>(&v[i]), sizeof(E));
-        return detail::rant_set_array(buf, cap, s, path,
-                                      detail::rant_bytes(tmp.data(), bytes)) != 0;
-    }
-    static bool read(uint8_t* m, detail::RantBytes msg,
-                     const detail::RantSchema* s, const char* path) {
-        std::vector<E>& v = *reinterpret_cast<std::vector<E>*>(m);
-        detail::RantBytes view = detail::rant_get_array(msg, s, path);
-        if (!view.data) return false;   /* empty is non NULL, NULL = mismatch */
-        const uint8_t* src = view.data;
-        size_t n = view.len / sizeof(E);
-        v.resize(n);
-        if (host_le() || sizeof(E) == 1) {      /* memcpy: the view may be unaligned */
-            if (n) std::memcpy(v.data(), src, n * sizeof(E));
-        } else {
-            for (size_t i = 0; i < n; i++)
-                copy_swapped(reinterpret_cast<uint8_t*>(&v[i]), src + i * sizeof(E), sizeof(E));
-        }
-        return true;
-    }
+/* How a type maps onto a record: its fixed leaves, then its variable values in order. */
+struct Plan {
+    std::vector<Leaf> leaves;
+    std::vector<Var>  vars;
 };
 
-/* a std::vector<String<N>>: [u16 len][N bytes] slots, copied one by one since the
- * struct may carry a pad byte */
-template <uint16_t N> struct string_vector_tail {
-    static size_t extra(const uint8_t* m) {
-        return reinterpret_cast<const std::vector<String<N>>*>(m)->size() * (2u + N);
-    }
-    static bool write(const uint8_t* m, uint8_t* buf, size_t cap,
-                      const detail::RantSchema* s, const char* path) {
-        const std::vector<String<N>>& v = *reinterpret_cast<const std::vector<String<N>>*>(m);
-        std::vector<uint8_t> tmp(v.size() * (2u + N), 0);
-        for (size_t i = 0; i < v.size(); i++) {
-            uint8_t* slot = tmp.data() + i * (2u + N);
-            if (v[i].len > N) return false;   /* past its slot: refused, never cut */
-            uint16_t len = v[i].len;
-            slot[0] = (uint8_t)len; slot[1] = (uint8_t)(len >> 8);
-            std::memcpy(slot + 2, v[i].data, len);
-        }
-        return detail::rant_set_array(buf, cap, s, path,
-                                      detail::rant_bytes(tmp.data(), tmp.size())) != 0;
-    }
-    static bool read(uint8_t* m, detail::RantBytes msg,
-                     const detail::RantSchema* s, const char* path) {
-        std::vector<String<N>>& v = *reinterpret_cast<std::vector<String<N>>*>(m);
-        detail::RantBytes view = detail::rant_get_array(msg, s, path);
-        if (!view.data) return false;
-        size_t n = view.len / (2u + N);
-        v.assign(n, String<N>());
-        for (size_t i = 0; i < n; i++) {
-            const uint8_t* slot = view.data + i * (2u + N);
-            uint16_t len = (uint16_t)(slot[0] | (slot[1] << 8));
-            if (len > N) len = N;                  /* clamp a hostile length prefix */
-            v[i].len = len;
-            std::memcpy(v[i].data, slot + 2, len);
-        }
-        return true;
-    }
+/* E[N] and std::array<E, N> */
+template <class U> struct fixed_array : std::false_type {};
+template <class E, size_t N> struct fixed_array<E[N]> : std::true_type {
+    using elem = E;
+    static constexpr size_t count = N;
+};
+template <class E, size_t N> struct fixed_array<std::array<E, N>> : std::true_type {
+    using elem = E;
+    static constexpr size_t count = N;
 };
 
-/* the type erased access to a std::vector of structs */
-template <class E> struct struct_vector_ops {
+template <class E> struct vector_ops {
     static size_t count(const uint8_t* m) {
         return reinterpret_cast<const std::vector<E>*>(m)->size();
     }
@@ -1537,28 +1463,19 @@ template <class E> struct struct_vector_ops {
     }
     static uint8_t* resize(uint8_t* m, size_t n) {
         std::vector<E>& v = *reinterpret_cast<std::vector<E>*>(m);
-        v.assign(n, E{});
+        v.clear();
+        v.resize(n);
         return reinterpret_cast<uint8_t*>(v.data());
     }
 };
-
-struct string_tail {
-    static size_t extra(const uint8_t* m) {
-        return reinterpret_cast<const std::string*>(m)->size();
+template <class A> struct array_ops {
+    static size_t count(const uint8_t*) { return fixed_array<A>::count; }
+    static const uint8_t* items(const uint8_t* m) {
+        if constexpr (std::is_array_v<A>) return m;
+        else return reinterpret_cast<const uint8_t*>(reinterpret_cast<const A*>(m)->data());
     }
-    static bool write(const uint8_t* m, uint8_t* buf, size_t cap,
-                      const detail::RantSchema* s, const char* path) {
-        const std::string& v = *reinterpret_cast<const std::string*>(m);
-        detail::RantString sv; sv.data = v.data(); sv.len = v.size();
-        return detail::rant_set_string(buf, cap, s, path, sv) != 0;
-    }
-    static bool read(uint8_t* m, detail::RantBytes msg,
-                     const detail::RantSchema* s, const char* path) {
-        std::string& v = *reinterpret_cast<std::string*>(m);
-        detail::RantString sv = detail::rant_get_string(msg, s, path);
-        if (!sv.data) return false;
-        v.assign(sv.data, sv.len);
-        return true;
+    static uint8_t* resize(uint8_t* m, size_t n) {
+        return n == fixed_array<A>::count ? const_cast<uint8_t*>(items(m)) : nullptr;
     }
 };
 
@@ -1568,353 +1485,291 @@ inline std::string strip_namespaces(const char* type_name) {
     return p == std::string::npos ? n : n.substr(p + 1);
 }
 
-struct SchemaBuilder {
-    std::string       dsl;
-    std::vector<Leaf> leaves;
-    std::vector<Tail> tails;
-    uint32_t          base = 0;
-    std::string       prefix;
-    bool              first = true;
-    bool              value_root = false;   /* the schema IS one bare type: no name, no braces */
-    int               quiet = 0;            /* > 0: emit leaves only (inside a NAMED type,
-                                               whose spelling is just its name) */
-    std::vector<uint16_t> elems;            /* the element being walked in each struct array */
-    std::string       defs;                 /* nested struct definitions, before the root */
-    std::unordered_set<const void*> defined;   /* the types already in defs */
-    SchemaBuilder*    root = nullptr;       /* a definition's builder writes defs here */
-
-    void put(const char* s)        { if (!quiet) dsl += s; }
-    void put(const std::string& s) { if (!quiet) dsl += s; }
-    void sep(const char* name) {
-        if (value_root || quiet) return;    /* a bare type spells only itself */
-        if (!first) dsl += ", ";
-        first = false;
-        dsl += name;
-        dsl += ": ";
-    }
-    template <class E> void add_scalar(const char* name, size_t off, size_t count, bool arr) {
-        constexpr int k = scalar_kind_of<E>();
-        static_assert(k >= 0, "RANT_SCHEMA: field/element type is not a wire scalar");
-        static_assert(!std::is_same_v<E, bool> || sizeof(bool) == 1, "bool must be one byte");
-        sep(name);
-        put(scalar_kind_name(k));
-        if (arr) { put("["); put(std::to_string(count)); put("]"); }
-        Leaf l;
-        l.struct_off = base + (uint32_t)off;
-        l.kind = (uint8_t)k; l.is_array = arr ? 1 : 0;
-        l.count = (uint16_t)count;
-        l.s_stride = (uint32_t)sizeof(E);
-        l.w_stride = scalar_wire_size(k);
-        l.path = prefix + name;
-        l.elems = elems;
-        leaves.push_back(std::move(l));
-    }
-    template <class E> void add_string(const char* name, size_t off, size_t count, bool arr) {
-        constexpr uint16_t cap = is_rant_string<E>::cap;
-        sep(name);
-        put("string<"); put(std::to_string(cap)); put(">");
-        if (arr) { put("["); put(std::to_string(count)); put("]"); }
-        Leaf l;
-        l.struct_off = base + (uint32_t)off;
-        l.kind = (uint8_t)detail::RANT_STR; l.is_array = arr ? 1 : 0;
-        l.count = (uint16_t)count; l.cap = cap;
-        l.s_stride = (uint32_t)sizeof(E);
-        l.w_stride = 2u + cap;
-        l.path = prefix + name;
-        l.elems = elems;
-        leaves.push_back(std::move(l));
-    }
-    /* a RANT_ENUM-registered enum: emit `enum<uN> { A=v, ... }`, copy as the backing int */
-    template <class E> void add_enum(const char* name, size_t off) {
-        using Backing = std::underlying_type_t<E>;
-        constexpr int k = scalar_kind_of<Backing>();
-        static_assert(k >= 0 && k <= (int)detail::RANT_I64,
-                      "RANT_ENUM: backing must be an integer type (u8..i64)");
-        sep(name);
-        put("enum<"); put(scalar_kind_name(k)); put("> { ");
-        bool firstv = true;
-        reflect_enum<E>::visit([&](int64_t value, const char* vn) {
-            if (!firstv) put(", ");
-            firstv = false;
-            put(vn); put("="); put(std::to_string(value));
-        });
-        put(" }");
-        Leaf l;
-        l.struct_off = base + (uint32_t)off;
-        l.kind = (uint8_t)k; l.is_enum = 1;
-        l.s_stride = (uint32_t)sizeof(E);
-        l.w_stride = scalar_wire_size(k);
-        l.path = prefix + name;
-        l.elems = elems;
-        leaves.push_back(std::move(l));
-    }
-    /* a VARIABLE member: no fixed leaf, a Tail reached by path via the C accessors */
-    template <class E> void add_vector(const char* name, size_t off) {
-        constexpr int k = scalar_kind_of<E>();
-        static_assert(k >= 0, "RANT_SCHEMA: std::vector element must be a wire scalar "
-                              "or a rant::String<N> or a struct (no std::string, no vectors of vectors)");
-        static_assert(!std::is_same_v<E, bool>,
-                      "RANT_SCHEMA: std::vector<bool> is bit-packed; use std::vector<uint8_t>");
-        sep(name);
-        put(scalar_kind_name(k)); put("[]");
-        Tail t;
-        t.struct_off = base + (uint32_t)off;
-        t.elem_kind  = (uint8_t)k;
-        t.path  = prefix + name;
-        t.extra = &vector_tail<E>::extra;
-        t.write = &vector_tail<E>::write;
-        t.read  = &vector_tail<E>::read;
-        tails.push_back(std::move(t));
-    }
-    void add_var_string(const char* name, size_t off) {
-        sep(name);
-        put("string");
-        Tail t;
-        t.struct_off = base + (uint32_t)off;
-        t.is_string  = 1;
-        t.path  = prefix + name;
-        t.extra = &string_tail::extra;
-        t.write = &string_tail::write;
-        t.read  = &string_tail::read;
-        tails.push_back(std::move(t));
-    }
-    template <class U> void add(const char* name, size_t off);
-    template <class U> void define();
-    template <class U> void members(const char* name, size_t off);
-    template <class E> void add_struct_array(const char* name, size_t off, size_t n);
-    template <class E> void add_struct_vector(const char* name, size_t off);
-    template <class E> void add_string_vector(const char* name, size_t off);
-};
-
 /* a struct shaped type: reflected, or a standard struct, never an alias */
 template <class U> constexpr bool is_struct_type() {
     if constexpr (std_type<U>::name != nullptr) return std::is_void_v<typename std_type<U>::repr>;
     else return is_reflected<U>::value;
 }
 
-struct SchemaVisit {
-    SchemaBuilder* b;
-    template <class U> void operator()(field_tag<U>, const char* name, size_t off) const {
-        b->add<U>(name, off);
+template <class U> struct type_key { static constexpr char id = 0; };
+
+/* The DSL text of a type. Each struct it uses is defined once, after the types it uses. */
+struct Speller {
+    std::string defs;
+    std::unordered_set<const void*> defined;
+    template <class U> std::string spell();
+    template <class U> std::string members();
+};
+
+struct SpellVisit {
+    Speller* sp; std::string* out;
+    template <class U> void operator()(field_tag<U>, const char* name, size_t) const {
+        if (!out->empty()) *out += ", ";
+        *out += name;
+        *out += ": ";
+        *out += sp->spell<U>();
     }
 };
 
-template <class U> void SchemaBuilder::add(const char* name, size_t off) {
+/* "a: T, b: U" for the members of struct U */
+template <class U> std::string Speller::members() {
+    std::string out;
+    reflect<U>::visit(SpellVisit{ this, &out });
+    return out;
+}
+
+template <class U> std::string Speller::spell() {
     if constexpr (scalar_kind_of<U>() >= 0) {
-        add_scalar<U>(name, off, 1, false);
+        return scalar_kind_name(scalar_kind_of<U>());
     } else if constexpr (std::is_enum_v<U>) {
-        if constexpr (is_reg_enum<U>::value) add_enum<U>(name, off);   /* named options */
-        else add_scalar<std::underlying_type_t<U>>(name, off, 1, false); /* a plain int */
-    } else if constexpr (is_rant_string<U>::value) {
-        add_string<U>(name, off, 1, false);
-    } else if constexpr (std::is_array_v<U>) {
-        using E = std::remove_extent_t<U>;
-        constexpr size_t n = std::extent_v<U>;
-        if constexpr (is_rant_string<E>::value) add_string<E>(name, off, n, true);
-        else if constexpr (is_struct_type<E>()) add_struct_array<E>(name, off, n);
-        else                                    add_scalar<E>(name, off, n, true);
-    } else if constexpr (is_std_array<U>::value) {
-        using E = typename is_std_array<U>::elem;
-        constexpr size_t n = is_std_array<U>::count;
-        if constexpr (is_rant_string<E>::value) add_string<E>(name, off, n, true);
-        else if constexpr (is_struct_type<E>()) add_struct_array<E>(name, off, n);
-        else                                    add_scalar<E>(name, off, n, true);
-    } else if constexpr (std_type<U>::name != nullptr) {
-        /* a NAMED type: it spells as its name alone, but still contributes the leaves of
-           whatever it wraps, so the copy loops and the memcpy fast path are unchanged */
-        sep(name);
-        put(std_type<U>::name);
-        uint32_t    saved_base   = base;
-        std::string saved_prefix = prefix;
-        base = base + (uint32_t)off;
-        ++quiet;
-        if constexpr (std::is_void_v<typename std_type<U>::repr>) {
-            prefix = prefix + name + ".";          /* struct-shaped: its members are fields */
-            reflect<U>::visit(SchemaVisit{ this });
+        using Backing = std::underlying_type_t<U>;
+        if constexpr (is_reg_enum<U>::value) {
+            constexpr int k = scalar_kind_of<Backing>();
+            static_assert(k >= 0 && k <= (int)detail::RANT_I64,
+                          "RANT_ENUM: backing must be an integer type (u8..i64)");
+            std::string out = "enum<";
+            out += scalar_kind_name(k);
+            out += "> { ";
+            bool first = true;
+            reflect_enum<U>::visit([&](int64_t value, const char* vn) {
+                if (!first) out += ", ";
+                first = false;
+                out += vn; out += "="; out += std::to_string(value);
+            });
+            return out + " }";
         } else {
-            base = saved_base;                     /* alias-shaped: one leaf, at this offset */
-            add<typename std_type<U>::repr>(name, off);
+            return spell<Backing>();                     /* a plain enum is its integer */
         }
-        --quiet;
-        base   = saved_base;
-        prefix = std::move(saved_prefix);
+    } else if constexpr (is_rant_string<U>::value) {
+        return "string<" + std::to_string(is_rant_string<U>::cap) + ">";
+    } else if constexpr (fixed_array<U>::value) {
+        return spell<typename fixed_array<U>::elem>() + "[" + std::to_string(fixed_array<U>::count) + "]";
+    } else if constexpr (std_type<U>::name != nullptr) {
+        return std_type<U>::name;
     } else if constexpr (is_reflected<U>::value) {
-        /* a nested struct spells as its name, defined once above the root as C# and
-           Python do, and still contributes its leaves one level deeper */
-        sep(name);
-        put(strip_namespaces(reflect<U>::type_name));
-        define<U>();
-        members<U>(name, off);
+        std::string name = strip_namespaces(reflect<U>::type_name);
+        if (defined.insert(&type_key<U>::id).second) {
+            std::string body = members<U>();
+            defs += name + " { " + body + " }\n";
+        }
+        return name;
     } else if constexpr (is_std_vector<U>::value) {
-        using E = typename is_std_vector<U>::elem;
-        if constexpr (is_struct_type<E>())            add_struct_vector<E>(name, off);
-        else if constexpr (is_rant_string<E>::value)  add_string_vector<E>(name, off);
-        else                                          add_vector<E>(name, off);
+        static_assert(!std::is_same_v<typename is_std_vector<U>::elem, bool>,
+                      "RANT_SCHEMA: std::vector<bool> is bit packed, use std::vector<uint8_t>");
+        return spell<typename is_std_vector<U>::elem>() + "[]";
     } else if constexpr (is_var_string<U>::value) {
-        add_var_string(name, off);
+        return "string";
     } else {
         static_assert(always_false<U>,
-            "RANT_SCHEMA: unsupported field type (no pointers/maps; use scalars, "
-            "rant::String<N>, fixed arrays, std::vector of scalars, structs or strings, "
-            "std::string, or a "
-            "nested RANT_SCHEMA struct)");
+            "RANT_SCHEMA: unsupported field type (no pointers or maps: use scalars, enums, "
+            "rant::String<N>, std::string, fixed arrays, std::vector or a nested RANT_SCHEMA "
+            "struct, nested in any combination)");
+        return {};
     }
 }
 
-template <class U> struct type_key { static constexpr char id = 0; };
-
-/* U's definition in the root's defs, once per type and after the types it uses */
-template <class U> void SchemaBuilder::define() {
-    SchemaBuilder& top = root ? *root : *this;
-    if (!top.defined.insert(&type_key<U>::id).second) return;
-    SchemaBuilder d;
-    d.root = &top;
-    d.dsl  = strip_namespaces(reflect<U>::type_name);
-    d.dsl += " { ";
-    reflect<U>::visit(SchemaVisit{ &d });
-    d.dsl += " }\n";
-    top.defs += d.dsl;
+inline std::string join_path(const std::string& base, const std::string& rel) {
+    if (rel.empty()) return base;
+    if (base.empty() || rel[0] == '[') return base + rel;
+    return base + "." + rel;
 }
 
-/* U's leaves under name, one level deeper, without spelling anything */
-template <class U> void SchemaBuilder::members(const char* name, size_t off) {
-    uint32_t    saved_base   = base;
-    std::string saved_prefix = prefix;
-    base   = base + (uint32_t)off;
-    prefix = prefix + name + ".";
-    ++quiet;
-    reflect<U>::visit(SchemaVisit{ this });
-    --quiet;
-    base   = saved_base;
-    prefix = std::move(saved_prefix);
+template <class U> void place(Plan& p, const std::string& path, uint32_t off,
+                              std::vector<uint16_t>& elems);
+
+/* U's plan with paths from U itself, built once per type */
+template <class U> const std::shared_ptr<const Plan>& plan_of() {
+    static const std::shared_ptr<const Plan> plan = [] {
+        auto q = std::make_shared<Plan>();
+        std::vector<uint16_t> elems;
+        place<U>(*q, std::string(), 0, elems);
+        return std::shared_ptr<const Plan>(std::move(q));
+    }();
+    return plan;
 }
 
-/* A fixed array of structs: `name: Elem[n]`, the element defined once above. Every
- * element contributes its own leaves, each carrying its index, so nesting needs nothing more. */
-template <class E> void SchemaBuilder::add_struct_array(const char* name, size_t off, size_t n) {
-    sep(name);
-    if constexpr (std_type<E>::name != nullptr) put(std_type<E>::name);
-    else { put(strip_namespaces(reflect<E>::type_name)); define<E>(); }
-    put("["); put(std::to_string(n)); put("]");
-    for (size_t i = 0; i < n; i++) {
-        std::string at = std::string(name) + "[" + std::to_string(i) + "]";
-        elems.push_back((uint16_t)i);
-        members<E>(at.c_str(), off + i * sizeof(E));
-        elems.pop_back();
+struct PlaceVisit {
+    Plan* p; const std::string* prefix; uint32_t base; std::vector<uint16_t>* elems;
+    template <class U> void operator()(field_tag<U>, const char* name, size_t off) const {
+        place<U>(*p, join_path(*prefix, name), base + (uint32_t)off, *elems);
     }
+};
+
+template <class E> Leaf scalar_leaf(const std::string& path, uint32_t off, size_t count, bool arr,
+                                    const std::vector<uint16_t>& elems) {
+    constexpr int k = scalar_kind_of<E>();
+    static_assert(!std::is_same_v<E, bool> || sizeof(bool) == 1, "bool must be one byte");
+    Leaf l;
+    l.struct_off = off;
+    l.kind = (uint8_t)k; l.is_array = arr ? 1 : 0;
+    l.count = (uint16_t)count;
+    l.s_stride = (uint32_t)sizeof(E);
+    l.w_stride = scalar_wire_size(k);
+    l.path = path;
+    l.elems = elems;
+    return l;
 }
 
-/* A variable array of structs: `name: Elem[]`, a tail whose element leaves sit relative
- * to one element, copied per element through the array's frame. */
-template <class E> void SchemaBuilder::add_struct_vector(const char* name, size_t off) {
-    sep(name);
-    if constexpr (std_type<E>::name != nullptr) put(std_type<E>::name);
-    else { put(strip_namespaces(reflect<E>::type_name)); define<E>(); }
-    put("[]");
-    SchemaBuilder sub;                          /* the element's leaves, base 0 */
-    sub.root   = root ? root : this;
-    sub.prefix = prefix + name + ".";
-    sub.quiet  = 1;
-    reflect<E>::visit(SchemaVisit{ &sub });
-    Tail t;
-    t.struct_off = base + (uint32_t)off;
-    t.path       = prefix + name;
-    t.is_structs = 1;
-    t.elem_kind  = (uint8_t)detail::RANT_STRUCT;
-    t.elem       = std::move(sub.leaves);
-    t.elem_host  = (uint32_t)sizeof(E);
-    t.count  = &struct_vector_ops<E>::count;
-    t.items  = &struct_vector_ops<E>::items;
-    t.resize = &struct_vector_ops<E>::resize;
-    tails.push_back(std::move(t));
-}
-
-/* A variable array of capped strings: `name: string<N>[]`. */
-template <class E> void SchemaBuilder::add_string_vector(const char* name, size_t off) {
+template <class E> Leaf string_leaf(const std::string& path, uint32_t off, size_t count, bool arr,
+                                    const std::vector<uint16_t>& elems) {
     constexpr uint16_t cap = is_rant_string<E>::cap;
-    sep(name);
-    put("string<"); put(std::to_string(cap)); put(">[]");
-    Tail t;
-    t.struct_off = base + (uint32_t)off;
-    t.elem_kind  = (uint8_t)detail::RANT_STR;
-    t.cap        = cap;
-    t.path  = prefix + name;
-    t.extra = &string_vector_tail<cap>::extra;
-    t.write = &string_vector_tail<cap>::write;
-    t.read  = &string_vector_tail<cap>::read;
-    tails.push_back(std::move(t));
+    Leaf l;
+    l.struct_off = off;
+    l.kind = (uint8_t)detail::RANT_STR; l.is_array = arr ? 1 : 0;
+    l.count = (uint16_t)count; l.cap = cap;
+    l.s_stride = (uint32_t)sizeof(E);
+    l.w_stride = 2u + cap;
+    l.path = path;
+    l.elems = elems;
+    return l;
 }
 
-/* the wire offset of field fi reached through the enclosing struct arrays by elems, each
- * fixed, stopping at row stop, a variable array whose frame is the base. False when an
- * index is out of range or another array is variable. */
+/* an array of variable elements, or with Packed fixed ones, reached through ops */
+template <class E, class Ops> Var array_var(Var::Kind kind, const std::string& path, uint32_t off,
+                                            uint32_t fixed_n) {
+    Var v;
+    v.kind = kind;
+    v.host_off = off;
+    v.path = path;
+    v.fixed_n = fixed_n;
+    v.elem_host = (uint32_t)sizeof(E);
+    v.trivial = std::is_trivially_copyable<E>::value;
+    v.count = &Ops::count;
+    v.items = &Ops::items;
+    v.resize = &Ops::resize;
+    v.elem = plan_of<E>();
+    return v;
+}
+
+/* U's copy ops at host offset off, its row at path within the record. A fixed type adds
+ * leaves, a fixed array of a fixed struct one set per element, anything variable a Var. */
+template <class U> void place(Plan& p, const std::string& path, uint32_t off,
+                              std::vector<uint16_t>& elems) {
+    if constexpr (scalar_kind_of<U>() >= 0) {
+        p.leaves.push_back(scalar_leaf<U>(path, off, 1, false, elems));
+    } else if constexpr (std::is_enum_v<U>) {
+        using Backing = std::underlying_type_t<U>;
+        if constexpr (is_reg_enum<U>::value) {
+            Leaf l = scalar_leaf<Backing>(path, off, 1, false, elems);
+            l.is_enum = 1;
+            l.s_stride = (uint32_t)sizeof(U);
+            p.leaves.push_back(std::move(l));
+        } else {
+            place<Backing>(p, path, off, elems);
+        }
+    } else if constexpr (is_rant_string<U>::value) {
+        p.leaves.push_back(string_leaf<U>(path, off, 1, false, elems));
+    } else if constexpr (fixed_array<U>::value) {
+        using E = typename fixed_array<U>::elem;
+        constexpr size_t n = fixed_array<U>::count;
+        if constexpr (scalar_kind_of<E>() >= 0) {
+            p.leaves.push_back(scalar_leaf<E>(path, off, n, true, elems));
+        } else if constexpr (is_rant_string<E>::value) {
+            p.leaves.push_back(string_leaf<E>(path, off, n, true, elems));
+        } else if (plan_of<E>()->vars.empty()) {
+            for (size_t i = 0; i < n; i++) {
+                elems.push_back((uint16_t)i);
+                place<E>(p, path + "[" + std::to_string(i) + "]", off + (uint32_t)(i * sizeof(E)), elems);
+                elems.pop_back();
+            }
+        } else {
+            p.vars.push_back(array_var<E, array_ops<U>>(Var::Elements, path, off, (uint32_t)n));
+        }
+    } else if constexpr (std_type<U>::name != nullptr && !is_struct_type<U>()) {
+        place<typename std_type<U>::repr>(p, path, off, elems);
+    } else if constexpr (is_struct_type<U>()) {
+        reflect<U>::visit(PlaceVisit{ &p, &path, off, &elems });
+    } else if constexpr (is_std_vector<U>::value) {
+        using E = typename is_std_vector<U>::elem;
+        Var::Kind kind = plan_of<E>()->vars.empty() ? Var::Packed : Var::Elements;
+        p.vars.push_back(array_var<E, vector_ops<E>>(kind, path, off, 0));
+    } else if constexpr (is_var_string<U>::value) {
+        Var v;
+        v.host_off = off;
+        v.path = path;
+        p.vars.push_back(std::move(v));
+    } else {
+        static_assert(always_false<U>, "RANT_SCHEMA: unsupported field type");
+    }
+}
+
+/* The wire offset of row fi within its record or element, reached through the fixed arrays
+ * around it by elems up to row stop. False when an index is out of range or a variable
+ * array lies between. */
 inline bool static_offset(const detail::RantSchema* s, detail::RantSchemaFieldInfo fi,
-                          const std::vector<uint16_t>& elems, uint32_t& out,
-                          uint16_t stop = 0xFFFF) {
+                          const std::vector<uint16_t>& elems, uint32_t& out, uint16_t stop) {
     uint64_t off = fi.offset;
     size_t k = elems.size();
-    if (k + (stop != 0xFFFF ? 1u : 0u) != fi.arr_depth) return false;
-    while (fi.arr_parent != 0xFFFF && fi.arr_parent != stop) {
-        detail::RantSchemaFieldInfo pa;
-        if (!detail::rant_schema_field_at(s, fi.arr_parent, &pa)) return false;
+    while (fi.arr_parent != stop) {
+        detail::RantSchemaFieldInfo pa, el;
+        if (fi.arr_parent == 0xFFFF || !k
+            || !detail::rant_schema_field_at(s, fi.arr_parent, &pa)
+            || !detail::rant_schema_field_at(s, (uint16_t)(fi.arr_parent + 1u), &el)) return false;
         uint16_t e = elems[--k];
-        if (pa.kind != (uint8_t)detail::RANT_ARR || e >= pa.count) return false;
-        off += (uint64_t)e * pa.elem_size;
+        if (pa.kind != (uint8_t)detail::RANT_ARR || pa.size == 0 || e >= pa.count) return false;
+        off += (uint64_t)e * el.size + pa.offset;
         fi = pa;
     }
-    if (off > 0xFFFFFFFFu) return false;
+    if (k || off > 0xFFFFFFFFu) return false;
     out = (uint32_t)off;
     return true;
 }
 
-/* resolve every leaf's wire offset by dotted path in a compiled schema, verifying the kinds.
- * Used on our own schema at registration and on an incoming one for the rebase decode. */
-inline bool fill_offsets(const detail::RantSchema* s, std::vector<Leaf>& lv) {
-    for (Leaf& l : lv) {
-        int idx = detail::rant_schema_field_index(s, l.path.c_str());
-        if (idx < 0) return false;
-        detail::RantSchemaFieldInfo fi;
-        if (!detail::rant_schema_field_at(s, (uint16_t)idx, &fi)) return false;
-        if (l.is_enum) {
-            if (fi.kind != (uint8_t)detail::RANT_ENUM || fi.elem != l.kind) return false;
-        } else if (l.is_array) {
-            if (fi.kind != (uint8_t)detail::RANT_ARR || fi.elem != l.kind || fi.count != l.count) return false;
-            if (l.kind == (uint8_t)detail::RANT_STR && fi.str_cap != l.cap) return false;
-        } else if (l.kind == (uint8_t)detail::RANT_STR) {
-            if (fi.kind != (uint8_t)detail::RANT_STR || fi.str_cap != l.cap) return false;
-        } else {
-            if (fi.kind != l.kind) return false;
-        }
-        if (!static_offset(s, fi, l.elems, l.wire_off)) return false;
+/* one leaf's row at path, its kind verified, and its wire offset */
+inline bool resolve_leaf(const detail::RantSchema* s, Leaf& l, const std::string& path, uint16_t stop) {
+    int idx = detail::rant_schema_field_index(s, path.c_str());
+    detail::RantSchemaFieldInfo fi, el;
+    if (idx < 0 || !detail::rant_schema_field_at(s, (uint16_t)idx, &fi)) return false;
+    if (l.is_enum) {
+        if (fi.kind != (uint8_t)detail::RANT_ENUM || fi.backing != l.kind) return false;
+    } else if (l.is_array) {
+        if (fi.kind != (uint8_t)detail::RANT_ARR || fi.count != l.count
+            || !detail::rant_schema_field_at(s, (uint16_t)(idx + 1), &el) || el.kind != l.kind) return false;
+        if (l.kind == (uint8_t)detail::RANT_STR && el.str_cap != l.cap) return false;
+    } else if (l.kind == (uint8_t)detail::RANT_STR) {
+        if (fi.kind != (uint8_t)detail::RANT_STR || fi.str_cap != l.cap) return false;
+    } else if (fi.kind != l.kind) {
+        return false;
     }
-    return true;
+    return static_offset(s, fi, l.elems, l.wire_off, stop);
 }
 
-/* resolve every tail member in a compiled schema with the matching variable kind. A
- * frame needs no offset, the accessors walk it per message, but a struct vector's element
- * leaves get their offsets within one element, and the element's wire size. */
-inline bool tails_resolve(const detail::RantSchema* s, std::vector<Tail>& tv) {
-    for (Tail& t : tv) {
-        int idx = detail::rant_schema_field_index(s, t.path.c_str());
-        if (idx < 0) return false;
-        detail::RantSchemaFieldInfo fi;
-        if (!detail::rant_schema_field_at(s, (uint16_t)idx, &fi)) return false;
-        if (t.is_string) {
+/* Fills p's rows and wire offsets from schema s, verifying every kind. base is the path of
+ * p's record, stop the array it is an element of, room the record's fixed bytes. Used on
+ * our own schema at registration and on an incoming one for the rebase decode. */
+inline bool resolve(const detail::RantSchema* s, Plan& p, const std::string& base, uint16_t stop,
+                    uint32_t room) {
+    for (Leaf& l : p.leaves) {
+        if (!resolve_leaf(s, l, join_path(base, l.path), stop)) return false;
+        if ((uint64_t)l.wire_off + (uint64_t)l.w_stride * l.count > room) return false;
+    }
+    for (Var& v : p.vars) {
+        std::string path = join_path(base, v.path);
+        int idx = detail::rant_schema_field_index(s, path.c_str());
+        detail::RantSchemaFieldInfo fi, el;
+        if (idx < 0 || !detail::rant_schema_field_at(s, (uint16_t)idx, &fi)) return false;
+        v.row = (uint16_t)idx;
+        if (v.kind == Var::String) {
             if (fi.kind != (uint8_t)detail::RANT_VSTR) return false;
             continue;
         }
-        if (fi.kind != (uint8_t)detail::RANT_VARR || fi.elem != t.elem_kind) return false;
-        if (t.elem_kind == (uint8_t)detail::RANT_STR && fi.str_cap != t.cap) return false;
-        if (!t.is_structs) continue;
-        t.index = (uint16_t)idx;
-        t.elem_wire = fi.elem_size;
-        for (Leaf& l : t.elem) {
-            int li = detail::rant_schema_field_index(s, l.path.c_str());
-            detail::RantSchemaFieldInfo lf;
-            if (li < 0 || !detail::rant_schema_field_at(s, (uint16_t)li, &lf)) return false;
-            if (!static_offset(s, lf, l.elems, l.wire_off, t.index)) return false;
-            if ((uint64_t)l.wire_off + (uint64_t)l.w_stride * l.count > t.elem_wire) return false;
+        if (fi.kind != (uint8_t)(v.fixed_n ? detail::RANT_ARR : detail::RANT_VARR)
+            || (v.fixed_n && fi.count != v.fixed_n)
+            || !detail::rant_schema_field_at(s, (uint16_t)(idx + 1), &el)) return false;
+        bool fixed = el.size != 0 && el.min_len == el.size;
+        if (fixed != (v.kind == Var::Packed)) return false;
+        v.elem_wire = el.size;
+        v.elem_min  = el.min_len;
+        auto e = std::make_shared<Plan>(*v.elem);
+        if (!resolve(s, *e, path + "[0]", v.row, el.size)) return false;
+        if (v.kind == Var::Packed) {
+            bool co = v.trivial && host_le() && v.elem_host == v.elem_wire;
+            for (const Leaf& l : e->leaves)
+                co = co && l.kind != (uint8_t)detail::RANT_STR && l.struct_off == l.wire_off
+                        && l.s_stride == l.w_stride;
+            v.block = co;
         }
+        v.elem = std::move(e);
     }
     return true;
 }
@@ -1973,42 +1828,145 @@ inline void leaf_from_wire(const Leaf& l, uint8_t* sbase, const uint8_t* wire, b
     }
 }
 
-/* a struct vector into its sized frame, element by element */
-inline bool struct_vector_write(const Tail& t, const uint8_t* member, uint8_t* buf, size_t cap,
-                                const detail::RantSchema* s, bool le) {
-    size_t n = t.count(member);
-    if (!detail::rant_set_array_count(buf, cap, s, t.path.c_str(), (uint32_t)n)) return false;
-    detail::RantBytes fr = detail::rant_get_array(detail::rant_bytes(buf, cap), s, t.path.c_str());
-    if (n && (!fr.data || fr.len < n * t.elem_wire)) return false;
-    uint8_t* w = const_cast<uint8_t*>(fr.data);   /* a view into buf, ours to write */
-    const uint8_t* src = t.items(member);
-    for (size_t i = 0; i < n; i++)
-        for (const Leaf& l : t.elem)
-            if (!leaf_to_wire(l, src + i * t.elem_host, w + i * t.elem_wire, le)) return false;
-    return true;
+/* the bytes p's variable values add to its record's default, so a buffer is sized once */
+inline size_t plan_extra(const Plan& p, const uint8_t* host);
+inline size_t var_extra(const Var& v, const uint8_t* m) {
+    if (v.kind == Var::String) return reinterpret_cast<const std::string*>(m)->size();
+    size_t n = v.count(m);
+    if (v.kind == Var::Packed) return n * v.elem_wire;
+    size_t out = v.fixed_n ? 0 : n * (4u + (size_t)v.elem_min);   /* an end and a default body */
+    const uint8_t* it = v.items(m);
+    for (size_t i = 0; i < n; i++) out += plan_extra(*v.elem, it + i * v.elem_host);
+    return out;
+}
+inline size_t plan_extra(const Plan& p, const uint8_t* host) {
+    size_t out = 0;
+    for (const Var& v : p.vars) out += var_extra(v, host + v.host_off);
+    return out;
 }
 
-/* a struct vector out of its frame, resized to the live element count */
-inline bool struct_vector_read(const Tail& t, uint8_t* member, detail::RantBytes msg,
-                               const detail::RantSchema* s, bool le) {
-    detail::RantBytes fr = detail::rant_get_array(msg, s, t.path.c_str());
-    if (!fr.data || !t.elem_wire) return false;
-    size_t n = fr.len / t.elem_wire;
-    uint8_t* dst = t.resize(member, n);
-    for (size_t i = 0; i < n; i++)
-        for (const Leaf& l : t.elem)
-            leaf_from_wire(l, dst + i * t.elem_host, fr.data + i * t.elem_wire, le);
-    return true;
-}
+/* Writes a value into a default message: fixed leaves in place, each variable value
+ * through rant_set_value_at, in record order so every resize moves only defaults. */
+struct Writer {
+    uint8_t*                  buf;
+    size_t                    cap;
+    const detail::RantSchema* s;
+    bool                      le;
+    std::vector<uint32_t>     ix;   /* the index in each enclosing array */
+
+    bool set(uint16_t row, const detail::RantValue& val) {
+        return detail::rant_set_value_at(buf, cap, s, row, ix.data(), (uint16_t)ix.size(), &val) != 0;
+    }
+    /* a view into buf, ours to write: an element's fixed part or packed elements */
+    uint8_t* view(uint16_t row, size_t need) {
+        detail::RantValue got{};
+        if (!detail::rant_get_value_at(detail::rant_bytes(buf, cap), s, row, ix.data(),
+                                       (uint16_t)ix.size(), &got)
+            || !got.bytes.data || got.bytes.len < need) return nullptr;
+        return const_cast<uint8_t*>(got.bytes.data);
+    }
+    bool plan(const Plan& p, const uint8_t* host, uint8_t* fixed) {
+        for (const Leaf& l : p.leaves)
+            if (!leaf_to_wire(l, host, fixed, le)) return false;
+        for (const Var& v : p.vars)
+            if (!var(v, host + v.host_off)) return false;
+        return true;
+    }
+    bool var(const Var& v, const uint8_t* m) {
+        detail::RantValue val{};
+        if (v.kind == Var::String) {
+            const std::string& str = *reinterpret_cast<const std::string*>(m);
+            val.bytes = detail::rant_bytes(str.data(), str.size());
+            return set(v.row, val);
+        }
+        size_t n = v.count(m);
+        const uint8_t* it = v.items(m);
+        if (n > 0xFFFFFFFFu) return false;
+        if (v.kind == Var::Packed && v.block && n) {
+            val.bytes = detail::rant_bytes(it, n * v.elem_wire);
+            return set(v.row, val);
+        }
+        if (!v.fixed_n && !detail::rant_set_array_count_at(buf, cap, s, v.row, ix.data(), (uint16_t)ix.size(),
+                                                            (uint32_t)n)) return false;   /* n zeroed or default elements */
+        if (v.kind == Var::Packed) {
+            uint8_t* w = n ? view(v.row, n * v.elem_wire) : nullptr;
+            if (n && !w) return false;
+            for (size_t i = 0; i < n; i++)
+                for (const Leaf& l : v.elem->leaves)
+                    if (!leaf_to_wire(l, it + i * v.elem_host, w + i * v.elem_wire, le)) return false;
+            return true;
+        }
+        for (size_t i = 0; i < n; i++) {
+            ix.push_back((uint32_t)i);
+            uint8_t* fixed = v.elem->leaves.empty() ? nullptr : view((uint16_t)(v.row + 1), v.elem_wire);
+            bool ok = (fixed || v.elem->leaves.empty()) && plan(*v.elem, it + i * v.elem_host, fixed);
+            ix.pop_back();
+            if (!ok) return false;
+        }
+        return true;
+    }
+};
+
+/* Reads a value out of a message, each variable value through rant_get_value_at. */
+struct Reader {
+    detail::RantBytes         msg;
+    const detail::RantSchema* s;
+    bool                      le;
+    std::vector<uint32_t>     ix;
+
+    bool get(uint16_t row, detail::RantValue& val) {
+        return detail::rant_get_value_at(msg, s, row, ix.data(), (uint16_t)ix.size(), &val) != 0;
+    }
+    bool plan(const Plan& p, uint8_t* host, const uint8_t* fixed) {
+        for (const Leaf& l : p.leaves) leaf_from_wire(l, host, fixed, le);
+        for (const Var& v : p.vars)
+            if (!var(v, host + v.host_off)) return false;
+        return true;
+    }
+    bool var(const Var& v, uint8_t* m) {
+        detail::RantValue val{};
+        if (!get(v.row, val)) return false;
+        if (v.kind == Var::String) {
+            std::string& str = *reinterpret_cast<std::string*>(m);
+            if (val.bytes.len) str.assign(reinterpret_cast<const char*>(val.bytes.data), val.bytes.len);
+            else str.clear();
+            return true;
+        }
+        size_t n = val.count;
+        uint8_t* it = v.resize(m, n);
+        if (!it && n) return false;                       /* a fixed array of another count */
+        if (v.kind == Var::Packed) {
+            if (n && (!val.bytes.data || val.bytes.len < n * v.elem_wire)) return false;
+            if (v.block) {
+                if (n) std::memcpy(it, val.bytes.data, n * v.elem_wire);
+                return true;
+            }
+            for (size_t i = 0; i < n; i++)
+                for (const Leaf& l : v.elem->leaves)
+                    leaf_from_wire(l, it + i * v.elem_host, val.bytes.data + i * v.elem_wire, le);
+            return true;
+        }
+        for (size_t i = 0; i < n; i++) {
+            ix.push_back((uint32_t)i);
+            detail::RantValue fv{};
+            bool ok = v.elem->leaves.empty()
+                   || (get((uint16_t)(v.row + 1), fv) && fv.bytes.data && fv.bytes.len >= v.elem_wire);
+            ok = ok && plan(*v.elem, it + i * v.elem_host, fv.bytes.data);
+            ix.pop_back();
+            if (!ok) return false;
+        }
+        return true;
+    }
+};
 
 /* T is a bare wire type, usable as a handle's whole schema with no RANT_SCHEMA. std::string
- * is the unbounded string root and std::vector<E> the E[] root, both on the tail path. */
+ * is the unbounded string root and std::vector<E> the E[] root. */
 template <class U> constexpr bool is_value_type() {
     return scalar_kind_of<U>() >= 0 || std::is_enum_v<U> || is_rant_string<U>::value
-        || is_std_array<U>::value || is_std_vector<U>::value || is_var_string<U>::value;
+        || fixed_array<U>::value || is_std_vector<U>::value || is_var_string<U>::value;
 }
 
-/* the per node, per T registration: schema, copy table and rebase cache, built once per
+/* the per node, per T registration: schema, copy plan and rebase cache, built once per
  * node and freed with it */
 struct TypeCodec {
     bool                      ok = false;
@@ -2017,16 +1975,15 @@ struct TypeCodec {
     bool                      has_strings = false;    /* a String<N> leaf, checked on the memcpy path */
     const detail::RantSchema* raw = nullptr;          /* the node's schema for T */
     uint64_t                  hash = 0;
-    uint32_t                  wire_size = 0;   /* the fixed section, all of it when no tails */
-    uint32_t                  msg_min = 0;            /* fixed section + one empty frame per tail */
+    uint32_t                  wire_size = 0;   /* the message's fixed part, all of it with no vars */
+    uint32_t                  msg_min = 0;     /* the default message's length */
     uint32_t                  struct_size = 0;
-    std::vector<Leaf>         leaves;
-    std::vector<Tail>         tails;                  /* variable members, declaration order */
+    std::shared_ptr<const Plan> tmpl;          /* T's plan before any schema */
+    Plan                      plan;            /* resolved against raw */
 
-    /* one incoming schema pointer's resolved offsets. A rebased schema keeps our hash with the
-     * publisher's offsets, so offsets are resolved per pointer and never chosen by hash. */
-    struct Rebased { std::vector<Leaf> leaves; std::vector<Tail> tails; uint32_t size = 0;
-                     bool ok = false, coincide = false; };
+    /* one incoming schema pointer's resolved plan. A rebased schema keeps our hash with the
+     * publisher's offsets, so a plan is resolved per pointer and never chosen by hash. */
+    struct Rebased { Plan plan; uint32_t size = 0; bool ok = false, coincide = false; };
     std::mutex                                       mu;
     std::map<const detail::RantSchema*, Rebased>       rebased;
 
@@ -2037,13 +1994,12 @@ struct TypeCodec {
         auto it = rebased.find(s);
         if (it != rebased.end()) return &it->second;
         Rebased r;
-        r.leaves = leaves;                    /* keep struct offsets, refill wire offsets */
-        r.tails  = tails;
-        r.ok     = fill_offsets(s, r.leaves) && tails_resolve(s, r.tails);
-        r.size   = detail::rant_schema_size(s);
-        if (r.ok && memcpy_capable && r.size >= struct_size) {
+        r.plan = *tmpl;                       /* keep host offsets, fill rows and wire offsets */
+        r.size = detail::rant_schema_size(s);
+        r.ok   = resolve(s, r.plan, std::string(), 0xFFFF, r.size);
+        if (r.ok && memcpy_capable && r.plan.vars.empty() && r.size >= struct_size) {
             bool co = true;
-            for (const Leaf& l : r.leaves)
+            for (const Leaf& l : r.plan.leaves)
                 co = co && l.struct_off == l.wire_off && l.s_stride == l.w_stride;
             r.coincide = co;
         }
@@ -2055,39 +2011,29 @@ template <class T> TypeCodec* build_codec(detail::RantNode* node) {
     static_assert(std_type<T>::name != nullptr || is_reflected<T>::value || is_value_type<T>(),
                   "type has no RANT_SCHEMA(T, fields...) declaration and is not a bare wire type");
     auto* c = new TypeCodec();
-    SchemaBuilder b;
-    if constexpr (std_type<T>::name != nullptr) {
-        b.dsl = std_type<T>::name;              /* the standard type IS the whole schema */
-        ++b.quiet;
-        if constexpr (std::is_void_v<typename std_type<T>::repr>)
-            reflect<T>::visit(SchemaVisit{ &b });          /* fields at the root: "position.x" */
-        else
-            b.add<typename std_type<T>::repr>("", 0);      /* an alias root: the empty path */
-        --b.quiet;
-    } else if constexpr (is_reflected<T>::value) {
-        b.dsl = strip_namespaces(reflect<T>::type_name);
-        b.dsl += " { ";
-        reflect<T>::visit(SchemaVisit{ &b });
-        b.dsl += " }";
-    } else {
-        b.value_root = true;                    /* a bare type: the schema is its spelling alone */
-        b.add<T>("", 0);                        /* (std::string / std::vector roots land a Tail) */
-    }
-    c->leaves = std::move(b.leaves);
-    c->tails  = std::move(b.tails);
-    b.dsl = b.defs + b.dsl;                     /* nested definitions come first */
-    c->raw = detail::rant_node_schema(node, b.dsl.c_str());
+    Speller sp;
+    std::string root;
+    if constexpr (std_type<T>::name != nullptr)
+        root = std_type<T>::name;                /* the standard type IS the whole schema */
+    else if constexpr (is_reflected<T>::value)
+        root = strip_namespaces(reflect<T>::type_name) + " { " + sp.members<T>() + " }";
+    else
+        root = sp.spell<T>();                    /* a bare type: the schema is its spelling alone */
+    std::string dsl = sp.defs + root;            /* nested definitions come first */
+    c->raw = detail::rant_node_schema(node, dsl.c_str());
     if (!c->raw) return c;
     c->hash        = detail::rant_schema_hash(c->raw);
     c->wire_size   = detail::rant_schema_size(c->raw);
     c->msg_min     = detail::rant_schema_msg_min(c->raw);
     c->struct_size = (uint32_t)sizeof(T);
-    if (!fill_offsets(c->raw, c->leaves)) return c;
-    if (!tails_resolve(c->raw, c->tails)) return c;
+    c->tmpl        = plan_of<T>();
+    c->plan        = *c->tmpl;
+    if (!resolve(c->raw, c->plan, std::string(), 0xFFFF, c->wire_size)) return c;
     c->memcpy_capable = std::is_trivially_copyable<T>::value && host_le();
-    for (const Leaf& l : c->leaves) c->has_strings = c->has_strings || l.kind == (uint8_t)detail::RANT_STR;
-    bool coincide = c->memcpy_capable && c->tails.empty() && sizeof(T) == c->wire_size;
-    for (const Leaf& l : c->leaves)
+    for (const Leaf& l : c->plan.leaves)
+        c->has_strings = c->has_strings || l.kind == (uint8_t)detail::RANT_STR;
+    bool coincide = c->memcpy_capable && c->plan.vars.empty() && sizeof(T) == c->wire_size;
+    for (const Leaf& l : c->plan.leaves)
         coincide = coincide && l.struct_off == l.wire_off && l.s_stride == l.w_stride;
     c->memcpy_ok = coincide;
     c->ok = true;
@@ -2112,31 +2058,21 @@ template <class T> std::optional<Bytes> encode(TypeCodec& c, const T& v, std::ve
     if (!c.ok) return std::nullopt;
     const uint8_t* base = reinterpret_cast<const uint8_t*>(&v);
     if (c.memcpy_ok) {
-        if (c.has_strings && !strings_fit(c.leaves, base)) return std::nullopt;
+        if (c.has_strings && !strings_fit(c.plan.leaves, base)) return std::nullopt;
         return Bytes(&v, sizeof(T));
     }
     const bool le = host_le();
-    if (c.tails.empty()) {
+    if (c.plan.vars.empty()) {
         scratch.assign(c.wire_size, 0);
-        for (const Leaf& l : c.leaves)
+        for (const Leaf& l : c.plan.leaves)
             if (!leaf_to_wire(l, base, scratch.data(), le)) return std::nullopt;
         return Bytes(scratch.data(), scratch.size());
     }
-    size_t need = c.msg_min;
-    for (const Tail& t : c.tails)
-        need += t.is_structs ? t.count(base + t.struct_off) * t.elem_wire
-                             : t.extra(base + t.struct_off);
-    scratch.assign(need, 0);
+    scratch.assign(c.msg_min + plan_extra(c.plan, base), 0);
     if (!detail::rant_schema_message_default(c.raw, scratch.data(), scratch.size()))
         return std::nullopt;
-    for (const Leaf& l : c.leaves)
-        if (!leaf_to_wire(l, base, scratch.data(), le)) return std::nullopt;
-    for (const Tail& t : c.tails) {
-        bool ok = t.is_structs
-            ? struct_vector_write(t, base + t.struct_off, scratch.data(), scratch.size(), c.raw, le)
-            : t.write(base + t.struct_off, scratch.data(), scratch.size(), c.raw, t.path.c_str());
-        if (!ok) return std::nullopt;
-    }
+    Writer w{ scratch.data(), scratch.size(), c.raw, le, {} };
+    if (!w.plan(c.plan, base, scratch.data())) return std::nullopt;
     return Bytes(scratch.data(),
                  detail::rant_schema_msg_len(c.raw, scratch.data(), scratch.size()));
 }
@@ -2146,20 +2082,18 @@ template <class T> std::optional<Bytes> encode(TypeCodec& c, const T& v, std::ve
 template <class T> bool decode(TypeCodec& c, T& out, Bytes data, const detail::RantSchema* schema) {
     if (!c.ok) return false;
     const detail::RantSchema* sch = c.raw;
-    const std::vector<Leaf>* lv = &c.leaves;
-    const std::vector<Tail>* tv = &c.tails;
+    const Plan* plan = &c.plan;
     uint32_t need = c.wire_size;
     bool fast = c.memcpy_ok;
     if (schema && schema != c.raw) {
         const TypeCodec::Rebased* rb = c.rebased_for(schema);
         if (!rb->ok) return false;
-        lv   = &rb->leaves;
-        tv   = &rb->tails;
+        plan = &rb->plan;
         need = rb->size;
         fast = rb->coincide;
         sch  = schema;
     }
-    if constexpr (std::is_trivially_copyable<T>::value) {   /* a tail type is never fast */
+    if constexpr (std::is_trivially_copyable<T>::value) {   /* a type with vars is never fast */
         if (fast) {
             if (data.size() < sizeof(T)) return false;
             std::memcpy(&out, data.data(), sizeof(T));
@@ -2169,18 +2103,8 @@ template <class T> bool decode(TypeCodec& c, T& out, Bytes data, const detail::R
         (void)fast;
     }
     if (data.size() < need) return false;
-    const bool le = host_le();
-    uint8_t* base = reinterpret_cast<uint8_t*>(&out);
-    for (const Leaf& l : *lv) leaf_from_wire(l, base, data.data(), le);
-    if (!tv->empty()) {                         /* frames walked per message, by path */
-        detail::RantBytes mb; mb.data = data.data(); mb.len = data.size();
-        for (const Tail& t : *tv) {
-            bool ok = t.is_structs ? struct_vector_read(t, base + t.struct_off, mb, sch, le)
-                                   : t.read(base + t.struct_off, mb, sch, t.path.c_str());
-            if (!ok) return false;
-        }
-    }
-    return true;
+    Reader r{ detail::rant_bytes(data.data(), data.size()), sch, host_le(), {} };
+    return r.plan(*plan, reinterpret_cast<uint8_t*>(&out), data.data());
 }
 
 }   /* namespace priv */

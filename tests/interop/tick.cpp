@@ -10,7 +10,8 @@
 #include <cstring>
 #include <string>
 
-static const char TICK_SCHEMA[] = "Tick { seq: u64, when: Timestamp, value: f64, at: Transform }";
+static const char TICK_SCHEMA[] = "Hop { name: string, pts: Float2[] }\n"
+                                  "Tick { seq: u64, when: Timestamp, value: f64, at: Transform, hops: Hop[] }";
 static const int TICK_WANT = 20;
 
 static bool near(double a, double b) { return std::fabs(a - b) < 1e-9; }
@@ -37,7 +38,10 @@ int main(int argc, char** argv) {
         bool ok = m.has_schema() && m.publisher_name() == from && m.get_int("when") > 0
                && near(m.get_f64("value"), std::sin(angle))
                && near(m.get_f64("at.pose.position.x"), std::cos(angle))
-               && near(m.get_f64("at.pose.position.y"), std::sin(angle));
+               && near(m.get_f64("at.pose.position.y"), std::sin(angle))
+               && m.get_array_count("hops") == 1 && m.get_string("hops[0].name") == "h" + std::to_string(seq)
+               && m.get_array_count("hops[0].pts") == 1
+               && m.get_f32("hops[0].pts[0].x") == (float)(seq % 1000) && m.get_f32("hops[0].pts[0].y") == 0.5f;
         if (ok) good++;
         else if (bad++ == 0) std::printf("FAIL: tick %llu decoded wrong\n", (unsigned long long)seq);
     };
@@ -54,12 +58,18 @@ int main(int argc, char** argv) {
     for (uint64_t seq = 0; std::chrono::steady_clock::now() < deadline;) {
         if (topic.match_count() > 0) {
             double angle = (double)seq * 0.01;
+            std::string hop = "h" + std::to_string(seq);
             rant::MessageBuilder msg(schema);
             msg.set_uint("seq", seq)
                .set_int("when", rant::types::now().us)
                .set_f64("value", std::sin(angle))
                .set_f64("at.pose.position.x", std::cos(angle))
-               .set_f64("at.pose.position.y", std::sin(angle));
+               .set_f64("at.pose.position.y", std::sin(angle))
+               .set_array_count("hops", 1)
+               .set_string("hops[0].name", hop)
+               .set_array_count("hops[0].pts", 1)
+               .set_f32("hops[0].pts[0].x", (float)(seq % 1000))
+               .set_f32("hops[0].pts[0].y", 0.5f);
             topic.send(msg);
             seq++;
         }

@@ -94,11 +94,13 @@ Supported members:
 
 - numbers and `bool`
 - `rant::String<N>` (a string of at most N bytes) and `std::string`
-- `T[N]`, `std::array<T, N>` and `std::vector<T>`
+- `T[N]`, `std::array<T, N>` and `std::vector<T>` of any of these, nested up to 8 levels:
+  `std::vector<std::string>`, `std::vector<std::vector<float>>`, a vector of structs
+  that hold vectors
 - other `RANT_SCHEMA` structs
 - `enum class`, named with `RANT_ENUM(E, values...)`
 
-Not supported: pointers, maps, `std::vector<bool>` and `std::vector<std::string>`.
+Not supported: pointers, maps and `std::vector<bool>`.
 
 A plain type works without `RANT_SCHEMA`: `Publisher<float>`, `Subscriber<std::string>`.
 

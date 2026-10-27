@@ -493,10 +493,10 @@ static bool stdtypes_leg() {
         chk("std: named types nest and array", !cloud.empty());
         if (cloud) {
             rant::Schema::Field f;
-            int i = cloud.field_index("pts");
-            chk("std: an array element reports its type name",
-                i >= 0 && cloud.field_at((uint16_t)i, f)
-                       && f.elem_name == "Float3" && f.elem_size == 12);
+            int i = cloud.field_index("pts[0]");
+            chk("std: an array's element row reports its type name",
+                i >= 0 && cloud.field_at((uint16_t)i, f) && f.name.empty()
+                       && f.type_name == "Float3" && f.size == 12 && f.min_len == 12);
         }
         chk("std: the same text is the same handle", a.schema("Transform").raw() == tf.raw());
     }
@@ -673,6 +673,26 @@ RANT_SCHEMA(Scene, seq, outlines, tags, note);
 struct Stamped { uint32_t seq = 0; };
 struct Reading : Stamped { float value = 0.f; std::string unit; };
 RANT_SCHEMA(Reading, seq, value, unit);
+/* any type as an element: records with variable members, arrays of arrays, strings */
+struct Stretch { float speed = 0.f; std::vector<rant::types::Float2> pts; };
+RANT_SCHEMA(Stretch, speed, pts);
+struct Route { uint32_t id = 0; std::vector<Stretch> segments; std::string name; };
+RANT_SCHEMA(Route, id, segments, name);
+enum class Lane : uint8_t { Left, Right };
+RANT_ENUM(Lane, Left, Right);
+struct Layers {
+    std::vector<std::vector<float>> grid;
+    std::vector<std::array<float, 3>> rows;
+    std::vector<std::string> names;
+    std::array<std::string, 2> pair;
+    Stretch legs[2];
+    float m[2][3] = {};
+    std::vector<rant::types::Uuid> ids;
+    std::vector<rant::types::Polygon2D> areas;
+    std::vector<Lane> lanes;
+    std::vector<std::vector<std::string>> words;
+};
+RANT_SCHEMA(Layers, grid, rows, names, pair, legs, m, ids, areas, lanes, words);
 
 /* encode then decode through the node's typed codec, no network */
 template <class T> static bool round_trip(rant::Node& n, const T& in, T& out) {
@@ -819,6 +839,107 @@ static bool nested_leg() {
         std::vector<Corner> in = { { 1.0f, 2.0f }, { 3.0f, 4.0f } }, out;
         chk("nest: a variable struct array root round trips",
             round_trip(a, in, out) && out.size() == 2 && out[1].x == 3.0f);
+    }
+    {   auto sc = rant::priv::schema_of<Route>(a);
+        rant::Schema same = a.schema("Stretch { speed: f32, pts: Float2[] }\n"
+                                     "Route { id: u32, segments: Stretch[], name: string }");
+        chk("nest: a record element spells as C# and Python do", sc && same && sc->hash() == same.hash());
+        Route in, out;
+        in.id = 7;
+        in.segments.resize(2);
+        in.segments[0].speed = 1.5f;
+        in.segments[0].pts = { { 1, 2 }, { 3, 4 } };
+        in.segments[1].speed = 2.5f;
+        in.segments[1].pts = { { 5, 6 } };
+        in.name = "loop";
+        out.segments.resize(4);
+        chk("nest: a record element with its own array round trips",
+            round_trip(a, in, out) && out.id == 7 && out.segments.size() == 2
+            && out.segments[0].pts.size() == 2 && out.segments[0].pts[1].y == 4.0f
+            && out.segments[1].speed == 2.5f && out.segments[1].pts[0].x == 5.0f && out.name == "loop");
+        std::vector<uint8_t> scratch;
+        rant::priv::TypeCodec* c = rant::priv::type_codec<Route>(a);
+        rant::Bytes by = c ? rant::priv::encode(*c, in, scratch).value_or(rant::Bytes()) : rant::Bytes();
+        rant::detail::RantBytes mb; mb.data = by.data(); mb.len = by.size();
+        chk("nest: the C path reads every level the C++ codec wrote",
+            c && rant::detail::rant_schema_validate(c->raw, mb)
+            && rant::detail::rant_get_f32(mb, c->raw, "segments[1].pts[0].y") == 6.0f
+            && rant::detail::rant_get_array_count(mb, c->raw, "segments[0].pts") == 2
+            && rant::detail::rant_get_string(mb, c->raw, "name").len == 4);
+
+        rant::Node w("nest-r", opts);
+        rant::Schema wide = w.schema("Stretch { speed: f32, pts: Float2[] }\n"
+                                     "Route { tag: string, id: u32, extra: f64[], "
+                                     "segments: Stretch[], name: string }");
+        rant::MessageBuilder mbld(wide);
+        mbld.set_string("tag", "first").set_uint("id", 9)
+            .set_array_count("extra", 3)
+            .set_array_count("segments", 2)
+            .set_f32("segments[0].speed", 4.0f)
+            .set_array_count("segments[1].pts", 2)
+            .set_f32("segments[1].pts[1].x", 7.0f)
+            .set_string("name", "wide");
+        Route rb;
+        chk("nest: MessageBuilder sizes and fills arrays inside elements", mbld.ok());
+        rant::Bytes raw = mbld.bytes();
+        std::vector<uint8_t> msg(raw.data(), raw.data() + raw.size());
+        chk("nest: another layout decodes a record element through its own rows",
+            c && rant::priv::decode(*c, rb, rant::Bytes(msg.data(), msg.size()), wide.raw())
+            && rb.id == 9 && rb.segments.size() == 2 && rb.segments[0].speed == 4.0f
+            && rb.segments[0].pts.empty() && rb.segments[1].pts.size() == 2
+            && rb.segments[1].pts[1].x == 7.0f && rb.name == "wide");
+    }
+    {   auto sc = rant::priv::schema_of<Layers>(a);
+        rant::Schema same = a.schema(
+            "Stretch { speed: f32, pts: Float2[] }\n"
+            "Layers { grid: f32[][], rows: f32[3][], names: string[], pair: string[2], "
+            "legs: Stretch[2], m: f32[3][2], ids: Uuid[], areas: Polygon2D[], "
+            "lanes: enum<u8> { Left=0, Right=1 }[], words: string[][] }");
+        chk("nest: every nesting spells as the DSL does", sc && same && sc->hash() == same.hash());
+        Layers in, out;
+        in.grid = { { 1.0f, 2.0f }, {}, { 3.0f } };
+        in.rows = { { 1.0f, 2.0f, 3.0f }, { 4.0f, 5.0f, 6.0f } };
+        in.names = { "abc", "", "hello" };
+        in.pair = { "left", "right" };
+        in.legs[1].speed = 3.0f;
+        in.legs[1].pts = { { 8, 9 } };
+        in.m[1][2] = 6.0f;
+        in.m[0][1] = 2.0f;
+        in.ids.resize(2);
+        in.ids[1].bytes[15] = 0xAB;
+        in.areas.resize(2);
+        in.areas[1].points = { { 1, 1 }, { 2, 1 }, { 2, 2 } };
+        in.lanes = { Lane::Right, Lane::Left };
+        in.words = { { "a", "bc" }, {}, { "def" } };
+        chk("nest: arrays of arrays, strings and records round trip",
+            round_trip(a, in, out) && out.grid.size() == 3 && out.grid[0][1] == 2.0f
+            && out.grid[1].empty() && out.grid[2][0] == 3.0f && out.rows[1][2] == 6.0f
+            && out.names.size() == 3 && out.names[2] == "hello" && out.names[1].empty()
+            && out.pair[1] == "right" && out.legs[1].pts.size() == 1 && out.legs[1].pts[0].y == 9.0f
+            && out.legs[0].pts.empty() && out.m[1][2] == 6.0f && out.m[0][1] == 2.0f
+            && out.ids.size() == 2 && out.ids[1].bytes[15] == 0xAB
+            && out.areas.size() == 2 && out.areas[1].points.size() == 3
+            && out.areas[1].points[2].y == 2.0 && out.lanes.size() == 2 && out.lanes[0] == Lane::Right
+            && out.words.size() == 3 && out.words[0][1] == "bc" && out.words[2][0] == "def");
+        std::vector<uint8_t> scratch;
+        rant::priv::TypeCodec* c = rant::priv::type_codec<Layers>(a);
+        rant::Bytes by = c ? rant::priv::encode(*c, in, scratch).value_or(rant::Bytes()) : rant::Bytes();
+        rant::detail::RantBytes mb; mb.data = by.data(); mb.len = by.size();
+        chk("nest: the C path reads the nested arrays",
+            c && rant::detail::rant_schema_validate(c->raw, mb)
+            && rant::detail::rant_get_f32(mb, c->raw, "grid[2][0]") == 3.0f
+            && rant::detail::rant_get_f32(mb, c->raw, "m[1][2]") == 6.0f
+            && rant::detail::rant_get_string(mb, c->raw, "words[0][1]").len == 2
+            && rant::detail::rant_get_f64(mb, c->raw, "areas[1].points[2].x") == 2.0);
+        Layers empty, back;
+        back.grid = { { 1.0f } };
+        back.words = { { "x" } };
+        chk("nest: empty nested arrays decode empty",
+            round_trip(a, empty, back) && back.grid.empty() && back.words.empty()
+            && back.pair[0].empty() && back.legs[0].pts.empty());
+        std::vector<std::vector<std::string>> rin = { { "x", "yz" }, { "w" } }, rout;
+        chk("nest: a bare array of string arrays is a whole schema",
+            round_trip(a, rin, rout) && rout.size() == 2 && rout[0][1] == "yz" && rout[1][0] == "w");
     }
     {   rant::types::JointNames in, out;
         in.name.resize(2);
