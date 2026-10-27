@@ -15,11 +15,8 @@ const SKIPPED: &[(&str, &str)] = &[
     ("rant_topic_subscriber_progress", "a transport diagnostic no binding exposes"),
     ("rant_field_name", "Rust names are the wire spelling, and the parser normalizes any other"),
     ("rant_type_name", "as rant_field_name"),
-    ("rant_get_value", "the codec reads by resolved offset and tail path, as C++"),
-    ("rant_get_value_at", "as rant_get_value"),
+    ("rant_get_value", "the codec takes rant_get_value_at, which serves the root too"),
     ("rant_set_value", "as rant_get_value"),
-    ("rant_set_value_at", "as rant_get_value"),
-    ("rant_array_count_at", "as rant_get_value"),
     ("rant_enum_name_of", "Schema::enum_variants lists both directions, MessageView::get_enum_name reads one"),
     ("rant_enum_value_of", "MessageBuilder::set_enum takes the name"),
     ("rant_map_valid", "MessageBuilder::set_map validates through rant_set_map"),
@@ -30,7 +27,6 @@ const SKIPPED: &[(&str, &str)] = &[
     ("rant_std_text", "as rant_std_by_name"),
     ("rant_std_recognize", "as rant_std_by_name"),
     ("rant_std_recognize_field", "as rant_std_by_name"),
-    ("rant_std_recognize_elem", "as rant_std_by_name"),
 ];
 
 fn source(name: &str) -> String {

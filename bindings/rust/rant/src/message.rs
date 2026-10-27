@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use crate::error::{Error, ErrorKind};
 use crate::ffi;
 use crate::node::{NodeInner, lock};
-use crate::schema::{FieldView, MessageView, Schema, c_bytes, rbytes, rstring_bytes};
+use crate::schema::{FieldView, MessageView, Schema, c_bytes, rbytes};
 
 /// The type argument of a raw handle, which sends any bytes and reads fields by name through
 /// a [`MessageView`]. Only a raw handle takes a schema or `reflect_from_mesh` in its options.
@@ -212,7 +212,6 @@ pub mod kind {
     pub const F64: u8 = ffi::RANT_F64 as u8;
     pub const BOOL: u8 = ffi::RANT_BOOL as u8;
     pub(crate) const ARR: u8 = ffi::RANT_ARR as u8;
-    pub(crate) const STRUCT: u8 = ffi::RANT_STRUCT as u8;
     pub(crate) const STR: u8 = ffi::RANT_STR as u8;
     pub(crate) const VSTR: u8 = ffi::RANT_VSTR as u8;
     pub(crate) const VARR: u8 = ffi::RANT_VARR as u8;
@@ -228,21 +227,26 @@ pub mod kind {
     }
 }
 
-/// One leaf or tail of the flattened type, in the order the type's encode visits it.
+/// One leaf or variable value of the flattened type, in the order the type's encode visits it.
+#[derive(Clone)]
 pub(crate) struct Op {
-    path: CString,
-    /// its index in each enclosing fixed struct array, outermost first
+    /// its row's path within its record
+    path: String,
+    /// its index in each enclosing fixed array within the record, outermost first
     elems: Vec<u16>,
     shape: Shape,
 }
 
+#[derive(Clone)]
 enum Shape {
     /// a scalar, enum or capped string slot, or a fixed array of them, stride bytes apart
     Fixed { kind: u8, count: u16, cap: u16, is_enum: bool, is_array: bool, stride: usize },
     VarString,
-    VarArray { elem: u8, cap: u16 },
-    /// a variable array of structs: the element's ops, relative to one element
-    VecStruct { sub: Vec<Op> },
+    /// a variable array of scalars, enums or capped strings, one packed value
+    Packed { kind: u8, cap: u16, is_enum: bool },
+    /// an array whose elements go one at a time with the element's ops: a variable array of
+    /// anything else, or a fixed array of variable elements
+    Elements { fixed_n: u16, sub: Vec<Op> },
 }
 
 impl Shape {
@@ -259,11 +263,23 @@ impl Shape {
     }
 }
 
-/// An array wrapper waiting for its element's spelling.
-#[derive(Clone, Copy)]
-enum ArrayCtx {
-    Fixed(u16),
-    Var,
+/// A lone scalar, enum or capped string at the element's own row: an element that packs.
+fn lone_leaf(sub: &[Op]) -> Option<(u8, u16, bool)> {
+    match sub {
+        [Op { path, shape: Shape::Fixed { kind, cap, is_enum, is_array: false, .. }, .. }] if path.is_empty() => Some((*kind, *cap, *is_enum)),
+        _ => None,
+    }
+}
+
+/// A row's path under base. An index joins with no dot.
+fn join(base: &str, rel: &str) -> String {
+    if rel.is_empty() {
+        base.to_owned()
+    } else if base.is_empty() || rel.starts_with('[') {
+        format!("{base}{rel}")
+    } else {
+        format!("{base}.{rel}")
+    }
 }
 
 struct TextCtx {
@@ -284,7 +300,8 @@ pub struct Spell {
     path: String,
     prefix: String,
     elems: Vec<u16>,
-    array: Option<ArrayCtx>,
+    /// the suffixes of the arrays waiting for their element's spelling, outermost first
+    suffixes: Vec<String>,
     ops: Vec<Op>,
     error: Option<String>,
 }
@@ -300,7 +317,7 @@ impl Spell {
             path: String::new(),
             prefix: String::new(),
             elems: Vec::new(),
-            array: None,
+            suffixes: Vec::new(),
             ops: Vec::new(),
             error: None,
         }
@@ -322,18 +339,24 @@ impl Spell {
         self.error.get_or_insert(why);
     }
 
-    fn push_op(&mut self, shape: Shape) {
+    /// A type's name or token, then the suffixes of the arrays around it, innermost first.
+    fn base(&mut self, s: &str) {
+        self.put(s);
+        while let Some(suffix) = self.suffixes.pop() {
+            self.put(&suffix);
+        }
+        self.at_root = false;
+    }
+
+    fn emit(&mut self, op: Op) {
         if self.mute_ops == 0 {
-            let path = CString::new(self.path.as_str()).unwrap_or_default();
-            self.ops.push(Op { path, elems: self.elems.clone(), shape });
+            self.ops.push(op);
         }
     }
 
-    fn array_suffix(&mut self, a: ArrayCtx) {
-        match a {
-            ArrayCtx::Fixed(n) => self.put(&format!("[{n}]")),
-            ArrayCtx::Var => self.put("[]"),
-        }
+    fn push_op(&mut self, shape: Shape) {
+        let op = Op { path: self.path.clone(), elems: self.elems.clone(), shape };
+        self.emit(op);
     }
 
     /// A member of the struct being spelled: `name: Type`, with M's ops under its path.
@@ -353,95 +376,81 @@ impl Spell {
         self.path = saved;
     }
 
-    /// A fixed array `E[n]`.
+    /// One element's spelling, its ops relative to the element.
+    fn element<E: Message>(&mut self) -> Vec<Op> {
+        self.at_root = false;
+        let saved = (std::mem::take(&mut self.ops), std::mem::take(&mut self.path), std::mem::take(&mut self.prefix), std::mem::take(&mut self.elems));
+        E::__spell(self);
+        let sub = std::mem::replace(&mut self.ops, saved.0);
+        (self.path, self.prefix, self.elems) = (saved.1, saved.2, saved.3);
+        sub
+    }
+
+    /// A fixed array `E[n]`. Fixed elements flatten into leaves, variable ones go one at a time.
     pub fn fixed_array<E: Message>(&mut self, n: usize) {
-        if self.array.is_some() {
-            return self.refuse("an array of arrays is not a wire type".to_owned());
-        }
         let Ok(n) = u16::try_from(n) else {
             return self.refuse(format!("a fixed array of {n} elements is over 65535"));
         };
-        self.array = Some(ArrayCtx::Fixed(n));
-        E::__spell(self);
-        self.at_root = false;
+        self.suffixes.push(format!("[{n}]"));
+        let sub = self.element::<E>();
+        if let Some((kind, cap, is_enum)) = lone_leaf(&sub) {
+            self.push_op(Shape::fixed(kind, n, cap, is_enum, true));
+        } else if sub.iter().all(|op| matches!(op.shape, Shape::Fixed { .. })) {
+            for i in 0..n {
+                let at = format!("{}[{i}]", self.path);
+                for op in &sub {
+                    let mut elems = self.elems.clone();
+                    elems.push(i);
+                    elems.extend_from_slice(&op.elems);
+                    self.emit(Op { path: join(&at, &op.path), elems, shape: op.shape.clone() });
+                }
+            }
+        } else {
+            self.push_op(Shape::Elements { fixed_n: n, sub });
+        }
     }
 
     /// A variable array `E[]`.
     pub fn var_array<E: Message>(&mut self) {
-        if self.array.is_some() {
-            return self.refuse("an array of arrays is not a wire type".to_owned());
-        }
-        self.array = Some(ArrayCtx::Var);
-        E::__spell(self);
-        self.at_root = false;
+        self.suffixes.push("[]".to_owned());
+        let sub = self.element::<E>();
+        let shape = match lone_leaf(&sub) {
+            Some((kind, cap, is_enum)) => Shape::Packed { kind, cap, is_enum },
+            None => Shape::Elements { fixed_n: 0, sub },
+        };
+        self.push_op(shape);
     }
 
-    /// A number or bool, alone or as an array element.
+    /// A number or bool.
     pub fn scalar(&mut self, k: u8) {
-        self.put(kind::name(k));
-        match self.array.take() {
-            None => self.push_op(Shape::fixed(k, 1, 0, false, false)),
-            Some(a @ ArrayCtx::Fixed(n)) => {
-                self.array_suffix(a);
-                self.push_op(Shape::fixed(k, n, 0, false, true));
-            }
-            Some(a @ ArrayCtx::Var) => {
-                self.array_suffix(a);
-                self.push_op(Shape::VarArray { elem: k, cap: 0 });
-            }
-        }
-        self.at_root = false;
+        self.base(kind::name(k));
+        self.push_op(Shape::fixed(k, 1, 0, false, false));
     }
 
-    /// A capped string `string<cap>`, alone or as an array element.
+    /// A capped string `string<cap>`.
     pub fn fixed_string(&mut self, cap: usize) {
         let Ok(cap) = u16::try_from(cap) else {
             return self.refuse(format!("a string capacity of {cap} is over 65535"));
         };
-        self.put(&format!("string<{cap}>"));
-        match self.array.take() {
-            None => self.push_op(Shape::fixed(kind::STR, 1, cap, false, false)),
-            Some(a @ ArrayCtx::Fixed(n)) => {
-                self.array_suffix(a);
-                self.push_op(Shape::fixed(kind::STR, n, cap, false, true));
-            }
-            Some(a @ ArrayCtx::Var) => {
-                self.array_suffix(a);
-                self.push_op(Shape::VarArray { elem: kind::STR, cap });
-            }
-        }
-        self.at_root = false;
+        self.base(&format!("string<{cap}>"));
+        self.push_op(Shape::fixed(kind::STR, 1, cap, false, false));
     }
 
     /// A variable string `string`.
     pub fn var_string(&mut self) {
-        if self.array.take().is_some() {
-            return self.refuse("an array of String is not a wire type, use rant::String<N>".to_owned());
-        }
-        self.put("string");
+        self.base("string");
         self.push_op(Shape::VarString);
-        self.at_root = false;
     }
 
     /// A named integer `enum<k> { A=0, B=1 }`, spelled inline as C++ does.
     pub fn enumeration(&mut self, backing: u8, options: &[(&str, i64)]) {
-        if self.array.take().is_some() {
-            return self.refuse("an array of enums is not a wire type".to_owned());
-        }
         let body: Vec<String> = options.iter().map(|(n, v)| format!("{n}={v}")).collect();
-        self.put(&format!("enum<{}> {{ {} }}", kind::name(backing), body.join(", ")));
+        self.base(&format!("enum<{}> {{ {} }}", kind::name(backing), body.join(", ")));
         self.push_op(Shape::fixed(backing, 1, 0, true, false));
-        self.at_root = false;
     }
 
-    /// A struct: at the root its own definition, as a member its name, defined once above.
+    /// A struct: at the root its own definition, elsewhere its name, defined once above.
     pub fn structure(&mut self, id: TypeId, name: &str, members: fn(&mut Spell)) {
-        if let Some(a) = self.array.take() {
-            self.put(name);
-            self.array_suffix(a);
-            self.define(id, name, members);
-            return self.array_members(a, members);
-        }
         if std::mem::replace(&mut self.at_root, false) {
             self.put(name);
             self.put(" { ");
@@ -451,75 +460,40 @@ impl Spell {
             self.put(" }");
             return;
         }
-        self.put(name);
+        self.base(name);
         self.define(id, name, members);
         self.members_under(members);
     }
 
     /// A standard type: always in scope by name, so it is never defined.
     pub fn standard(&mut self, name: &str, members: fn(&mut Spell)) {
-        self.put(name);
-        if let Some(a) = self.array.take() {
-            self.array_suffix(a);
-            return self.array_members(a, members);
-        }
         if std::mem::replace(&mut self.at_root, false) {
+            self.put(name);
             self.quiet(1);
             members(self);
             self.quiet(-1);
             return;
         }
+        self.base(name);
         self.members_under(members);
     }
 
     /// A standard alias such as `Timestamp`, spelled by name and carried as its repr.
     pub fn standard_alias(&mut self, name: &str, repr: fn(&mut Spell)) {
-        if self.array.take().is_some() {
-            return self.refuse(format!("an array of {name} is not a wire type"));
-        }
-        self.put(name);
+        self.base(name);
         self.quiet(1);
         repr(self);
         self.quiet(-1);
-        self.at_root = false;
     }
 
     /// The members' ops one level down, under this member's path, spelling nothing.
     fn members_under(&mut self, members: fn(&mut Spell)) {
-        let saved = std::mem::replace(&mut self.prefix, format!("{}.", self.path));
+        let prefix = if self.path.is_empty() { String::new() } else { format!("{}.", self.path) };
+        let saved = std::mem::replace(&mut self.prefix, prefix);
         self.quiet(1);
         members(self);
         self.quiet(-1);
         self.prefix = saved;
-    }
-
-    /// Ops for every element of a fixed array of structs, or one element template for a
-    /// variable one, as C++ flattens them.
-    fn array_members(&mut self, a: ArrayCtx, members: fn(&mut Spell)) {
-        let path = self.path.clone();
-        match a {
-            ArrayCtx::Fixed(n) => {
-                for i in 0..n {
-                    self.path = format!("{path}[{i}]");
-                    self.elems.push(i);
-                    self.members_under(members);
-                    self.elems.pop();
-                }
-                self.path = path;
-            }
-            ArrayCtx::Var => {
-                let ops = std::mem::take(&mut self.ops);
-                let elems = std::mem::take(&mut self.elems);
-                self.members_under(members);
-                let sub = std::mem::replace(&mut self.ops, ops);
-                self.elems = elems;
-                if sub.iter().any(|op| !matches!(op.shape, Shape::Fixed { .. })) {
-                    return self.refuse("a variable array element must be fixed: no String, Vec or nested Vec of structs".to_owned());
-                }
-                self.push_op(Shape::VecStruct { sub });
-            }
-        }
-        self.at_root = false;
     }
 
     /// The definition `Name { ... }` once, after the definitions it uses.
@@ -527,7 +501,7 @@ impl Spell {
         if !self.defined.insert(id) {
             return;
         }
-        let saved = (std::mem::take(&mut self.prefix), std::mem::take(&mut self.path), std::mem::take(&mut self.elems));
+        let saved = (std::mem::take(&mut self.prefix), std::mem::take(&mut self.path), std::mem::take(&mut self.elems), std::mem::take(&mut self.suffixes));
         self.text.push(TextCtx { buf: format!("{name} {{ "), first: true, quiet: 0 });
         self.mute_ops += 1;
         members(self);
@@ -535,7 +509,7 @@ impl Spell {
         let def = self.text.pop().unwrap().buf;
         self.defs.push_str(&def);
         self.defs.push_str(" }\n");
-        (self.prefix, self.path, self.elems) = saved;
+        (self.prefix, self.path, self.elems, self.suffixes) = saved;
     }
 
     fn finish(mut self) -> Result<(String, Vec<Op>), String> {
@@ -549,9 +523,12 @@ impl Spell {
 
 /// Where each op lives in one compiled schema.
 enum Place {
+    /// a leaf's offset in its record's fixed part
     Fixed(u32),
-    Tail,
-    VecStruct { elem_wire: u32, sub: Vec<Place> },
+    /// a variable value's row
+    Var(u16),
+    /// an array's row and its element row's sizes, and where the element's ops live in it
+    Elements { row: u16, elem_wire: u32, elem_min: u32, fixed: bool, leaves: bool, sub: Vec<Place> },
 }
 
 /// The ops resolved against one schema: a decode plan.
@@ -568,62 +545,78 @@ fn info(s: *const ffi::RantSchema, i: u16) -> Option<ffi::RantSchemaFieldInfo> {
     (unsafe { ffi::rant_schema_field_at(s, i, &mut f) } != 0).then_some(f)
 }
 
-/// The wire offset of a field reached through its enclosing fixed struct arrays by elems,
-/// stopping at the variable array `stop` whose element is the base.
+/// The wire offset of row fi within its record or element, reached through the fixed arrays
+/// around it by elems up to row stop. None when an index is out of range or a variable array
+/// lies between.
 fn static_offset(s: *const ffi::RantSchema, mut fi: ffi::RantSchemaFieldInfo, elems: &[u16], stop: u16) -> Option<u32> {
     let mut off = fi.offset as u64;
     let mut k = elems.len();
-    if k + usize::from(stop != NO_PARENT) != fi.arr_depth as usize {
-        return None;
-    }
-    while fi.arr_parent != NO_PARENT && fi.arr_parent != stop {
-        let pa = info(s, fi.arr_parent)?;
-        k = k.checked_sub(1)?;
-        let e = elems[k];
-        if pa.kind != kind::ARR || e >= pa.count {
+    while fi.arr_parent != stop {
+        if fi.arr_parent == NO_PARENT {
             return None;
         }
-        off += e as u64 * pa.elem_size as u64;
+        let (pa, el) = (info(s, fi.arr_parent)?, info(s, fi.arr_parent + 1)?);
+        k = k.checked_sub(1)?;
+        let e = elems[k];
+        if pa.kind != kind::ARR || pa.size == 0 || e >= pa.count {
+            return None;
+        }
+        off += e as u64 * el.size as u64 + pa.offset as u64;
         fi = pa;
+    }
+    if k != 0 {
+        return None;
     }
     u32::try_from(off).ok()
 }
 
-fn resolve(ops: &[Op], s: *const ffi::RantSchema, stop: u16) -> Option<Vec<Place>> {
+/// The row holds this leaf: the scalar kind, the enum backing or the capped string.
+fn leaf_fits(fi: &ffi::RantSchemaFieldInfo, k: u8, cap: u16, is_enum: bool) -> bool {
+    if is_enum {
+        fi.kind == kind::ENUM && fi.backing == k
+    } else if k == kind::STR {
+        fi.kind == kind::STR && fi.str_cap == cap
+    } else {
+        fi.kind == k
+    }
+}
+
+/// The ops' rows and offsets in schema s, every kind verified. base is the path of the ops'
+/// record, stop the array it is an element of, room its fixed bytes.
+fn resolve(ops: &[Op], s: *const ffi::RantSchema, base: &str, stop: u16, room: u32) -> Option<Vec<Place>> {
     let mut places = Vec::with_capacity(ops.len());
     for op in ops {
+        let path = join(base, &op.path);
+        let cpath = CString::new(path.as_str()).ok()?;
         // SAFETY: the caller holds the schema's node open
-        let idx = u16::try_from(unsafe { ffi::rant_schema_field_index(s, op.path.as_ptr()) }).ok()?;
+        let idx = u16::try_from(unsafe { ffi::rant_schema_field_index(s, cpath.as_ptr()) }).ok()?;
         let fi = info(s, idx)?;
         let place = match &op.shape {
-            &Shape::Fixed { kind: k, count, cap, is_enum, is_array, .. } => {
-                let fits = if is_enum {
-                    fi.kind == kind::ENUM && fi.elem == k
-                } else if is_array {
-                    fi.kind == kind::ARR && fi.elem == k && fi.count == count && (k != kind::STR || fi.str_cap == cap)
-                } else if k == kind::STR {
-                    fi.kind == kind::STR && fi.str_cap == cap
+            &Shape::Fixed { kind: k, count, cap, is_enum, is_array, stride } => {
+                let fits = if is_array {
+                    fi.kind == kind::ARR && fi.count == count && leaf_fits(&info(s, idx + 1)?, k, cap, is_enum)
                 } else {
-                    fi.kind == k
+                    leaf_fits(&fi, k, cap, is_enum)
                 };
-                if !fits {
+                let off = static_offset(s, fi, &op.elems, stop).filter(|_| fits)?;
+                if off as u64 + stride as u64 * count as u64 > room as u64 {
                     return None;
                 }
-                Place::Fixed(static_offset(s, fi, &op.elems, stop)?)
+                Place::Fixed(off)
             }
-            Shape::VarString if fi.kind == kind::VSTR => Place::Tail,
-            &Shape::VarArray { elem, cap } if fi.kind == kind::VARR && fi.elem == elem && (elem != kind::STR || fi.str_cap == cap) => {
-                Place::Tail
-            }
-            Shape::VecStruct { sub } if fi.kind == kind::VARR && fi.elem == kind::STRUCT => {
-                let sub_places = resolve(sub, s, idx)?;
-                for (op, place) in sub.iter().zip(&sub_places) {
-                    let (Place::Fixed(off), Shape::Fixed { count, .. }) = (place, &op.shape) else { return None };
-                    if *off as usize + op.shape.stride() * *count as usize > fi.elem_size as usize {
-                        return None;
-                    }
+            Shape::VarString if fi.kind == kind::VSTR => Place::Var(idx),
+            &Shape::Packed { kind: k, cap, is_enum } if fi.kind == kind::VARR => {
+                let el = info(s, idx + 1)?;
+                if el.size == 0 || el.min_len != el.size || !leaf_fits(&el, k, cap, is_enum) {
+                    return None;
                 }
-                Place::VecStruct { elem_wire: fi.elem_size, sub: sub_places }
+                Place::Var(idx)
+            }
+            &Shape::Elements { fixed_n, ref sub } if fi.kind == if fixed_n > 0 { kind::ARR } else { kind::VARR } && (fixed_n == 0 || fi.count == fixed_n) => {
+                let el = info(s, idx + 1)?;
+                let sub_places = resolve(sub, s, &join(&path, "[0]"), idx, el.size)?;
+                let leaves = sub.iter().any(|o| matches!(o.shape, Shape::Fixed { .. }));
+                Place::Elements { row: idx, elem_wire: el.size, elem_min: el.min_len, fixed: el.size != 0 && el.min_len == el.size, leaves, sub: sub_places }
             }
             _ => return None,
         };
@@ -672,11 +665,11 @@ impl Codec {
         if schema.is_null() {
             return Err(Error::last(raw, &what));
         }
-        let places = resolve(&ops, schema, NO_PARENT)
-            .ok_or_else(|| Error::new(ErrorKind::BadSchema, format!("{what}: the type does not fit its own schema")))?;
         // SAFETY: as above
         let (hash, size, msg_min) =
             unsafe { (ffi::rant_schema_hash(schema), ffi::rant_schema_size(schema), ffi::rant_schema_msg_min(schema)) };
+        let places = resolve(&ops, schema, "", NO_PARENT, size)
+            .ok_or_else(|| Error::new(ErrorKind::BadSchema, format!("{what}: the type does not fit its own schema")))?;
         let codec = Arc::new(Codec {
             schema,
             hash,
@@ -698,9 +691,10 @@ impl Codec {
         if let Some(p) = plans.get(&(s as usize)) {
             return Ok(Arc::clone(p));
         }
-        let places = resolve(&self.ops, s, NO_PARENT).ok_or_else(|| format!("the publisher's schema does not fit {}", self.name))?;
         // SAFETY: the caller holds the delivered schema valid
-        let plan = Arc::new(Plan { places, size: unsafe { ffi::rant_schema_size(s) } });
+        let size = unsafe { ffi::rant_schema_size(s) };
+        let places = resolve(&self.ops, s, "", NO_PARENT, size).ok_or_else(|| format!("the publisher's schema does not fit {}", self.name))?;
+        let plan = Arc::new(Plan { places, size });
         plans.insert(s as usize, Arc::clone(&plan));
         Ok(plan)
     }
@@ -721,7 +715,7 @@ impl Codec {
             if unsafe { ffi::rant_schema_message_default(self.schema, buf.as_mut_ptr().cast(), buf.len()) } == 0 {
                 return Err(format!("{}: no default message", self.name));
             }
-            let mut e = Encoder { buf, mode: EncodeMode::Ops { schema: self.schema, ops: &self.ops, places: &self.own.places, base: 0, i: 0, elem: 0 } };
+            let mut e = Encoder { buf, mode: EncodeMode::Ops { schema: self.schema, ix: &[], ops: &self.ops, places: &self.own.places, base: 0, i: 0, elem: 0 } };
             v.__encode(&mut e)?;
             // SAFETY: as above
             let n = unsafe { ffi::rant_schema_msg_len(self.schema, e.buf.as_ptr().cast(), e.buf.len()) } as usize;
@@ -739,18 +733,22 @@ impl Codec {
             return Err(format!("{} bytes is short of {}'s {}", data.len(), self.name, plan.size));
         }
         let s = if schema.is_null() { self.schema } else { schema };
-        let mut d = Decoder { data, mode: DecodeMode::Ops { schema: s, ops: &self.ops, places: &plan.places, base: 0, i: 0, elem: 0 } };
+        let mut d = Decoder { data, mode: DecodeMode::Ops { schema: s, ix: &[], ops: &self.ops, places: &plan.places, base: 0, i: 0, elem: 0 } };
         T::__decode(&mut d)
     }
 }
 
+/// The next op and its place, for a variable value.
+type Next<'a> = (*const ffi::RantSchema, &'a [u32], &'a Op, &'a Place);
+
 enum EncodeMode<'a> {
-    Ops { schema: *const ffi::RantSchema, ops: &'a [Op], places: &'a [Place], base: usize, i: usize, elem: u16 },
+    /// ix holds the index in each enclosing array, base the record's fixed part in the buffer
+    Ops { schema: *const ffi::RantSchema, ix: &'a [u32], ops: &'a [Op], places: &'a [Place], base: usize, i: usize, elem: u16 },
     /// a variable array's packed elements, appended in order
     Append,
 }
 
-/// Writes a value's leaves and tails in the order its type's spelling flattened them.
+/// Writes a value's leaves and variable values in the order its type's spelling flattened them.
 #[doc(hidden)]
 pub struct Encoder<'a> {
     buf: &'a mut Vec<u8>,
@@ -769,7 +767,7 @@ impl<'a> Encoder<'a> {
                 let (Some(op), Some(&Place::Fixed(off))) = (ops.get(*i), places.get(*i)) else {
                     return Err("the value has more fields than its schema".to_owned());
                 };
-                let Shape::Fixed { count, .. } = op.shape else { return Err("a fixed field met a tail".to_owned()) };
+                let Shape::Fixed { count, .. } = op.shape else { return Err("a fixed field met a variable one".to_owned()) };
                 let at = *base + off as usize + *elem as usize * op.shape.stride();
                 let slot = self.buf.get_mut(at..at + bytes.len()).ok_or("a field lies past the message")?;
                 slot.copy_from_slice(bytes);
@@ -794,19 +792,24 @@ impl<'a> Encoder<'a> {
         self.leaf(&slot)
     }
 
-    fn tail(&mut self) -> Result<(*const ffi::RantSchema, &'a Op, &'a Place), String> {
+    fn next(&mut self) -> Result<Next<'a>, String> {
         match &mut self.mode {
-            EncodeMode::Ops { schema, ops, places, i, .. } => {
-                let (ops, places): (&'a [Op], &'a [Place]) = (ops, places);
+            EncodeMode::Ops { schema, ix, ops, places, i, .. } => {
+                let (ix, ops, places): (&'a [u32], &'a [Op], &'a [Place]) = (ix, ops, places);
                 let (op, place) = ops.get(*i).zip(places.get(*i)).ok_or("the value has more fields than its schema")?;
                 *i += 1;
-                Ok((*schema, op, place))
+                Ok((*schema, ix, op, place))
             }
-            EncodeMode::Append => Err("a tail inside an array element".to_owned()),
+            EncodeMode::Append => Err("a variable value inside a packed element".to_owned()),
         }
     }
 
-    /// Room for a tail to grow by `extra` past the live message.
+    /// True when the next op is an array whose elements go one at a time.
+    fn next_is_elements(&self) -> bool {
+        matches!(&self.mode, EncodeMode::Ops { ops, i, .. } if matches!(ops.get(*i), Some(Op { shape: Shape::Elements { .. }, .. })))
+    }
+
+    /// Room for a variable value to grow by `extra` past the live message.
     fn grow(buf: &mut Vec<u8>, schema: *const ffi::RantSchema, extra: usize) {
         // SAFETY: the buffer is a live message of the schema, held open by the caller
         let used = unsafe { ffi::rant_schema_msg_len(schema, buf.as_ptr().cast(), buf.len()) } as usize;
@@ -821,61 +824,92 @@ impl<'a> Encoder<'a> {
         }
     }
 
+    /// Sets the value at row under ix through the C value accessor.
+    fn set(&mut self, schema: *const ffi::RantSchema, row: u16, ix: &[u32], val: &ffi::RantValue) -> bool {
+        // SAFETY: the buffer and its length are live, and the caller holds the node open
+        unsafe { ffi::rant_set_value_at(self.buf.as_mut_ptr().cast(), self.buf.len(), schema, row, ix.as_ptr(), ix.len() as u16, val) != 0 }
+    }
+
+    /// The offset in the buffer of row's bytes under ix: an element's fixed part.
+    fn view(&self, schema: *const ffi::RantSchema, row: u16, ix: &[u32], need: u32) -> Result<usize, String> {
+        let mut got = ffi::RantValue::default();
+        // SAFETY: the buffer is a live message of the schema, held open by the caller
+        let ok = unsafe { ffi::rant_get_value_at(c_bytes(self.buf), schema, row, ix.as_ptr(), ix.len() as u16, &mut got) } != 0;
+        if !ok || got.bytes.data.is_null() || got.bytes.len < need as usize {
+            return Err("an array element found no room".to_owned());
+        }
+        Ok(got.bytes.data as usize - self.buf.as_ptr() as usize)
+    }
+
     /// The next variable string.
     pub fn var_string(&mut self, v: &str) -> Result<(), String> {
-        let (schema, op, _) = self.tail()?;
-        let path = op.path.as_ptr();
+        let (schema, ix, _, place) = self.next()?;
+        let &Place::Var(row) = place else { return Err("a String met a field that is not a string".to_owned()) };
         Encoder::grow(self.buf, schema, v.len());
-        let s = ffi::RantString { data: v.as_ptr().cast(), len: v.len() };
-        // SAFETY: the buffer and its length are live, and the path is the op's own
-        let ok = unsafe { ffi::rant_set_string(self.buf.as_mut_ptr().cast(), self.buf.len(), schema, path, s) } != 0;
-        if ok { Ok(()) } else { Err("a String did not fit its field".to_owned()) }
+        let val = ffi::RantValue { bytes: c_bytes(v.as_bytes()), ..Default::default() };
+        if self.set(schema, row, ix, &val) { Ok(()) } else { Err("a String did not fit its field".to_owned()) }
     }
 
     /// The next variable array, from its elements in order.
     pub fn sequence<E: Message>(&mut self, items: &[E]) -> Result<(), String> {
-        let (schema, op, place) = self.tail()?;
-        let path = op.path.as_ptr();
+        let (schema, ix, op, place) = self.next()?;
         match (&op.shape, place) {
-            (Shape::VarArray { .. }, _) => {
+            (Shape::Packed { .. }, &Place::Var(row)) => {
                 let packed = E::__pack(items)?;
                 Encoder::grow(self.buf, schema, packed.len());
-                // SAFETY: as var_string
-                let ok = unsafe { ffi::rant_set_array(self.buf.as_mut_ptr().cast(), self.buf.len(), schema, path, c_bytes(&packed)) } != 0;
-                if ok { Ok(()) } else { Err("a Vec did not fit its field".to_owned()) }
+                let val = ffi::RantValue { bytes: c_bytes(&packed), ..Default::default() };
+                if self.set(schema, row, ix, &val) { Ok(()) } else { Err("a Vec did not fit its field".to_owned()) }
             }
-            (Shape::VecStruct { sub }, Place::VecStruct { elem_wire, sub: sub_places }) => {
-                let n = items.len();
-                Encoder::grow(self.buf, schema, n * *elem_wire as usize);
-                // SAFETY: as var_string
-                if unsafe { ffi::rant_set_array_count(self.buf.as_mut_ptr().cast(), self.buf.len(), schema, path, n as u32) } == 0 {
-                    return Err("a Vec of structs did not fit its field".to_owned());
+            (Shape::Elements { sub, .. }, &Place::Elements { row, elem_wire, elem_min, fixed, leaves, sub: ref sub_places }) => {
+                let count = u32::try_from(items.len()).map_err(|_| "a Vec is over 4294967295 elements".to_owned())?;
+                // each element adds its end and its default body, or its fixed bytes
+                Encoder::grow(self.buf, schema, items.len() * if fixed { elem_wire as usize } else { 4 + elem_min as usize });
+                // SAFETY: as set
+                let sized = unsafe { ffi::rant_set_array_count_at(self.buf.as_mut_ptr().cast(), self.buf.len(), schema, row, ix.as_ptr(), ix.len() as u16, count) } != 0;
+                if !sized {
+                    return Err("a Vec did not fit its field".to_owned());
                 }
-                // SAFETY: the frame is a view into the buffer
-                let frame = unsafe { ffi::rant_get_array(c_bytes(self.buf), schema, path) };
-                if n > 0 && (frame.data.is_null() || frame.len < n * *elem_wire as usize) {
-                    return Err("a Vec of structs found no frame".to_owned());
-                }
-                let at = frame.data as usize - self.buf.as_ptr() as usize;
-                for (k, item) in items.iter().enumerate() {
-                    let base = at + k * *elem_wire as usize;
-                    let mut e = Encoder { buf: &mut *self.buf, mode: EncodeMode::Ops { schema, ops: sub, places: sub_places, base, i: 0, elem: 0 } };
-                    item.__encode(&mut e)?;
-                }
-                Ok(())
+                self.elements(schema, ix, items, row, elem_wire, leaves, sub, sub_places)
             }
             _ => Err("a Vec met a field that is not a variable array".to_owned()),
         }
     }
+
+    /// A fixed array: its leaves in order, or each variable element on its own.
+    pub fn array<E: Message>(&mut self, items: &[E]) -> Result<(), String> {
+        if !self.next_is_elements() {
+            return items.iter().try_for_each(|x| x.__encode(self));
+        }
+        let (schema, ix, op, place) = self.next()?;
+        let (Shape::Elements { sub, .. }, &Place::Elements { row, elem_wire, leaves, sub: ref sub_places, .. }) = (&op.shape, place) else {
+            return Err("a fixed array met a field that is not an array".to_owned());
+        };
+        self.elements(schema, ix, items, row, elem_wire, leaves, sub, sub_places)
+    }
+
+    /// Each element through the element row after row, its fixed part a view of the buffer.
+    #[allow(clippy::too_many_arguments)]
+    fn elements<E: Message>(&mut self, schema: *const ffi::RantSchema, ix: &[u32], items: &[E], row: u16, elem_wire: u32, leaves: bool, sub: &[Op], sub_places: &[Place]) -> Result<(), String> {
+        let mut at = ix.to_vec();
+        at.push(0);
+        for (k, item) in items.iter().enumerate() {
+            *at.last_mut().unwrap() = k as u32;
+            let base = if leaves { self.view(schema, row + 1, &at, elem_wire)? } else { 0 };
+            let mut e = Encoder { buf: &mut *self.buf, mode: EncodeMode::Ops { schema, ix: &at, ops: sub, places: sub_places, base, i: 0, elem: 0 } };
+            item.__encode(&mut e)?;
+        }
+        Ok(())
+    }
 }
 
 enum DecodeMode<'a> {
-    Ops { schema: *const ffi::RantSchema, ops: &'a [Op], places: &'a [Place], base: usize, i: usize, elem: u16 },
+    /// as EncodeMode::Ops, base the record's fixed part in the message
+    Ops { schema: *const ffi::RantSchema, ix: &'a [u32], ops: &'a [Op], places: &'a [Place], base: usize, i: usize, elem: u16 },
     /// a variable array's packed elements, read in order
     Packed { pos: usize },
 }
 
-/// Reads a value's leaves and tails in the order its type's spelling flattened them.
+/// Reads a value's leaves and variable values in the order its type's spelling flattened them.
 #[doc(hidden)]
 pub struct Decoder<'a> {
     data: &'a [u8],
@@ -896,7 +930,7 @@ impl<'a> Decoder<'a> {
                 let (Some(op), Some(&Place::Fixed(off))) = (ops.get(*i), places.get(*i)) else {
                     return Err("the type has more fields than the message".to_owned());
                 };
-                let Shape::Fixed { count, .. } = op.shape else { return Err("a fixed field met a tail".to_owned()) };
+                let Shape::Fixed { count, .. } = op.shape else { return Err("a fixed field met a variable one".to_owned()) };
                 let at = *base + off as usize + *elem as usize * op.shape.stride();
                 *elem += 1;
                 if *elem >= count {
@@ -916,50 +950,86 @@ impl<'a> Decoder<'a> {
         Ok(&slot[2..2 + len])
     }
 
-    fn tail(&mut self) -> Result<(*const ffi::RantSchema, &'a Op, &'a Place), String> {
+    fn next(&mut self) -> Result<Next<'a>, String> {
         match &mut self.mode {
-            DecodeMode::Ops { schema, ops, places, i, .. } => {
+            DecodeMode::Ops { schema, ix, ops, places, i, .. } => {
+                let (ix, ops, places): (&'a [u32], &'a [Op], &'a [Place]) = (ix, ops, places);
                 let (op, place) = ops.get(*i).zip(places.get(*i)).ok_or("the type has more fields than the message")?;
                 *i += 1;
-                Ok((*schema, op, place))
+                Ok((*schema, ix, op, place))
             }
-            DecodeMode::Packed { .. } => Err("a tail inside an array element".to_owned()),
+            DecodeMode::Packed { .. } => Err("a variable value inside a packed element".to_owned()),
         }
+    }
+
+    fn next_is_elements(&self) -> bool {
+        matches!(&self.mode, DecodeMode::Ops { ops, i, .. } if matches!(ops.get(*i), Some(Op { shape: Shape::Elements { .. }, .. })))
+    }
+
+    /// The value at row under ix through the C value accessor.
+    fn get(&self, schema: *const ffi::RantSchema, row: u16, ix: &[u32]) -> Result<ffi::RantValue, String> {
+        let mut v = ffi::RantValue::default();
+        // SAFETY: the data is a delivered message of the schema
+        let ok = unsafe { ffi::rant_get_value_at(c_bytes(self.data), schema, row, ix.as_ptr(), ix.len() as u16, &mut v) } != 0;
+        if ok { Ok(v) } else { Err("a field is missing from the message".to_owned()) }
     }
 
     /// The next variable string's bytes.
     pub fn var_string(&mut self) -> Result<&'a [u8], String> {
-        let (schema, op, _) = self.tail()?;
-        // SAFETY: the data is a delivered message of the schema
-        let s = unsafe { ffi::rant_get_string(c_bytes(self.data), schema, op.path.as_ptr()) };
-        if s.data.is_null() {
-            return Err("a string field is missing".to_owned());
-        }
-        Ok(rstring_bytes(s))
+        let (schema, ix, _, place) = self.next()?;
+        let &Place::Var(row) = place else { return Err("a String met a field that is not a string".to_owned()) };
+        Ok(rbytes(self.get(schema, row, ix)?.bytes))
     }
 
     /// The next variable array's elements.
     pub fn sequence<E: Message>(&mut self) -> Result<Vec<E>, String> {
-        let (schema, op, place) = self.tail()?;
-        // SAFETY: as var_string
-        let frame = rbytes(unsafe { ffi::rant_get_array(c_bytes(self.data), schema, op.path.as_ptr()) });
+        let (schema, ix, op, place) = self.next()?;
         match (&op.shape, place) {
-            (&Shape::VarArray { elem, cap }, _) => {
-                let size = if elem == kind::STR { 2 + cap as usize } else { kind::size(elem) };
-                E::__unpack(frame, frame.len().checked_div(size).unwrap_or(0))
+            (Shape::Packed { .. }, &Place::Var(row)) => {
+                let v = self.get(schema, row, ix)?;
+                E::__unpack(rbytes(v.bytes), v.count as usize)
             }
-            (Shape::VecStruct { sub }, Place::VecStruct { elem_wire, sub: sub_places }) => {
-                let n = frame.len().checked_div(*elem_wire as usize).unwrap_or(0);
-                (0..n)
-                    .map(|k| {
-                        let base = k * *elem_wire as usize;
-                        let mut d = Decoder { data: frame, mode: DecodeMode::Ops { schema, ops: sub, places: sub_places, base, i: 0, elem: 0 } };
-                        E::__decode(&mut d)
-                    })
-                    .collect()
+            (Shape::Elements { sub, .. }, &Place::Elements { row, elem_wire, leaves, sub: ref sub_places, .. }) => {
+                let n = self.get(schema, row, ix)?.count as usize;
+                self.elements(schema, ix, n, row, elem_wire, leaves, sub, sub_places)
             }
             _ => Err("a Vec met a field that is not a variable array".to_owned()),
         }
+    }
+
+    /// A fixed array's n elements: its leaves in order, or each variable element on its own.
+    pub fn array<E: Message>(&mut self, n: usize) -> Result<Vec<E>, String> {
+        if !self.next_is_elements() {
+            return (0..n).map(|_| E::__decode(self)).collect();
+        }
+        let (schema, ix, op, place) = self.next()?;
+        let (Shape::Elements { sub, .. }, &Place::Elements { row, elem_wire, leaves, sub: ref sub_places, .. }) = (&op.shape, place) else {
+            return Err("a fixed array met a field that is not an array".to_owned());
+        };
+        self.elements(schema, ix, n, row, elem_wire, leaves, sub, sub_places)
+    }
+
+    /// n elements through the element row after row, each fixed part a view of the message.
+    #[allow(clippy::too_many_arguments)]
+    fn elements<E: Message>(&self, schema: *const ffi::RantSchema, ix: &[u32], n: usize, row: u16, elem_wire: u32, leaves: bool, sub: &[Op], sub_places: &[Place]) -> Result<Vec<E>, String> {
+        let mut at = ix.to_vec();
+        at.push(0);
+        let mut out = Vec::with_capacity(n.min(self.data.len()));
+        for k in 0..n {
+            *at.last_mut().unwrap() = k as u32;
+            let base = if leaves {
+                let v = self.get(schema, row + 1, &at)?;
+                if v.bytes.data.is_null() || v.bytes.len < elem_wire as usize {
+                    return Err("an array element lies past the message".to_owned());
+                }
+                v.bytes.data as usize - self.data.as_ptr() as usize
+            } else {
+                0
+            };
+            let mut d = Decoder { data: self.data, mode: DecodeMode::Ops { schema, ix: &at, ops: sub, places: sub_places, base, i: 0, elem: 0 } };
+            out.push(E::__decode(&mut d)?);
+        }
+        Ok(out)
     }
 }
 
@@ -1032,10 +1102,10 @@ impl<E: Message, const N: usize> Message for [E; N] {
         s.fixed_array::<E>(N)
     }
     fn __encode(&self, e: &mut Encoder<'_>) -> Result<(), String> {
-        self.iter().try_for_each(|x| x.__encode(e))
+        e.array(self)
     }
     fn __decode(d: &mut Decoder<'_>) -> Result<Self, String> {
-        let v = (0..N).map(|_| E::__decode(d)).collect::<Result<Vec<E>, String>>()?;
+        let v = d.array::<E>(N)?;
         v.try_into().map_err(|_| "a fixed array came back short".to_owned())
     }
 }

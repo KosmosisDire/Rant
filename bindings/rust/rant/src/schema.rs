@@ -74,36 +74,35 @@ impl FieldType {
 }
 
 /// One row of a schema's flat depth first field table, as the C reports it. A struct's
-/// members follow it one level deeper.
+/// members follow it one level deeper, and an array's element is the next row, named "".
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Field {
-    /// The field's own name, "" for a bare root.
+    /// The field's own name, "" for a bare root or an array's element.
     pub name: String,
     /// The field type's name, None when anonymous.
     pub type_name: Option<String>,
-    /// An array element type's name, None when anonymous.
-    pub elem_name: Option<String>,
     /// The field's kind. A named type reports what it wraps.
     pub kind: FieldType,
-    /// The array element kind, or an enum's backing kind.
-    pub elem: FieldType,
+    /// An enum's backing kind.
+    pub backing: FieldType,
     /// A fixed array's element count, or an enum's option count.
     pub count: u16,
-    /// 0 at the top level, n for a member n structs down.
+    /// 0 at the top level, n for a row n types down.
     pub depth: u16,
-    /// The string capacity of a String field or element.
+    /// A capped string's capacity.
     pub str_cap: u16,
-    /// The flat index of the nearest enclosing struct array, 0xFFFF for none.
+    /// The flat index of the nearest enclosing array, 0xFFFF for none.
     pub arr_parent: u16,
-    /// The struct arrays around the field, one index each in an access.
+    /// The arrays around the field, one index each in an access.
     pub arr_depth: u16,
-    /// The byte offset in the fixed section, 0 for a tail kind.
+    /// The byte offset from the start of the nearest enclosing element or the message, 0
+    /// for a variable kind.
     pub offset: u32,
-    /// The byte size, 0 for a tail kind.
+    /// The fixed bytes. A struct counts its fixed members, any other variable kind is 0.
     pub size: u32,
-    /// The bytes of one array element, else 0.
-    pub elem_size: u32,
+    /// A default value's bytes, what one more element at least costs.
+    pub min_len: u32,
 }
 
 /// One option of an enum field.
@@ -249,9 +248,8 @@ pub(crate) fn field_at(s: *const ffi::RantSchema, i: u16) -> Option<Field> {
     Some(Field {
         name: utf8_prefix(rstring_bytes(f.name)).to_owned(),
         type_name: opt(rstring_bytes(f.type_name)),
-        elem_name: opt(rstring_bytes(f.elem_name)),
         kind: FieldType::from_c(f.kind),
-        elem: FieldType::from_c(f.elem),
+        backing: FieldType::from_c(f.backing),
         count: f.count,
         depth: f.depth,
         str_cap: f.str_cap,
@@ -259,7 +257,7 @@ pub(crate) fn field_at(s: *const ffi::RantSchema, i: u16) -> Option<Field> {
         arr_depth: f.arr_depth,
         offset: f.offset,
         size: f.size,
-        elem_size: f.elem_size,
+        min_len: f.min_len,
     })
 }
 
@@ -356,14 +354,6 @@ impl<'a> FieldView<'a> {
     pub fn get_string(&self, field: &str) -> Cow<'a, str> {
         // SAFETY: as get_array
         String::from_utf8_lossy(rstring_bytes(with_c(field, |f| unsafe { ffi::rant_get_string(self.msg(), self.schema, f) })))
-    }
-
-    /// One element of a string array, empty past the live count.
-    pub fn get_string_at(&self, field: &str, index: u16) -> Cow<'a, str> {
-        // SAFETY: as get_array
-        String::from_utf8_lossy(rstring_bytes(with_c(field, |f| unsafe {
-            ffi::rant_get_string_at(self.msg(), self.schema, f, index)
-        })))
     }
 
     /// A map field, as a reader over its body.
@@ -562,19 +552,14 @@ impl MessageBuilder {
         self.set(field, v.len(), |b, c, sc, f| unsafe { ffi::rant_set_string(b.cast(), c, sc, f, s) })
     }
 
-    /// One element of a string array. Size a variable one first with set_array_count.
-    pub fn set_string_at(&mut self, field: &str, index: u16, v: &str) -> Result<&mut Self, Error> {
-        let s = ffi::RantString { data: v.as_ptr().cast(), len: v.len() };
-        // SAFETY: as set_uint
-        self.set(field, v.len() + 2, |b, c, sc, f| unsafe { ffi::rant_set_string_at(b.cast(), c, sc, f, index, s) })
-    }
-
-    /// Sizes a variable array to `count` zeroed elements, so a struct array's members can
-    /// be set by path such as `pts[2].x`.
+    /// Sizes a variable array to `count` default elements, so their members can be set by
+    /// path such as `pts[2].x` or `names[1]`.
     pub fn set_array_count(&mut self, field: &str, count: u32) -> Result<&mut Self, Error> {
-        let elem = self.schema.field_index(field).and_then(|i| self.schema.read(|s| field_at(s, i))).map_or(0, |f| f.elem_size);
+        // an element at most adds its end and its default value, whose length its row reports
+        let elem = self.schema.field_index(field).and_then(|i| self.schema.read(|s| field_at(s, i.checked_add(1)?)));
+        let each = elem.map_or(0, |e| if e.size != 0 && e.min_len == e.size { e.size } else { 4 + e.min_len });
         // SAFETY: as set_uint
-        self.set(field, count as usize * elem as usize, |b, c, s, f| unsafe { ffi::rant_set_array_count(b.cast(), c, s, f, count) })
+        self.set(field, count as usize * each as usize, |b, c, s, f| unsafe { ffi::rant_set_array_count(b.cast(), c, s, f, count) })
     }
 
     /// A fixed or variable array from little endian element bytes, whole elements only.

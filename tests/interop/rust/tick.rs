@@ -6,10 +6,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rant::types::{Timestamp, Transform};
+use rant::types::{Float2, Timestamp, Transform};
 use rant::{Node, NodeOptions, Qos, Threading};
 
 const TICK_WANT: u32 = 20;
+
+#[derive(rant::Message, Clone, Default)]
+struct Hop {
+    name: String,
+    pts: Vec<Float2>,
+}
 
 #[derive(rant::Message, Clone, Default)]
 struct Tick {
@@ -17,6 +23,7 @@ struct Tick {
     when: Timestamp,
     value: f64,
     at: Transform,
+    hops: Vec<Hop>,
 }
 
 fn near(a: f64, b: f64) -> bool {
@@ -45,7 +52,9 @@ fn main() -> ExitCode {
             .subscriber::<Tick>("tick", qos, move |t| {
                 let angle = t.seq as f64 * 0.01;
                 let p = &t.at.pose.position;
-                let ok = t.publisher_name() == from && t.when.us > 0 && near(t.value, angle.sin()) && near(p.x, angle.cos()) && near(p.y, angle.sin());
+                let hops = t.hops.len() == 1 && t.hops[0].name == format!("h{}", t.seq) && t.hops[0].pts.len() == 1
+                    && t.hops[0].pts[0].x == (t.seq % 1000) as f32 && t.hops[0].pts[0].y == 0.5;
+                let ok = t.publisher_name() == from && t.when.us > 0 && near(t.value, angle.sin()) && near(p.x, angle.cos()) && near(p.y, angle.sin()) && hops;
                 if ok {
                     g.fetch_add(1, Ordering::SeqCst);
                 } else if b.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -66,7 +75,8 @@ fn main() -> ExitCode {
     while Instant::now() < deadline {
         if ticks.match_count() > 0 {
             let angle = seq as f64 * 0.01;
-            let mut t = Tick { seq, when: Timestamp::now(), value: angle.sin(), at: Transform::identity() };
+            let hops = vec![Hop { name: format!("h{seq}"), pts: vec![Float2 { x: (seq % 1000) as f32, y: 0.5 }] }];
+            let mut t = Tick { seq, when: Timestamp::now(), value: angle.sin(), at: Transform::identity(), hops };
             t.at.pose.position.x = angle.cos();
             t.at.pose.position.y = angle.sin();
             let _ = ticks.send(&t);

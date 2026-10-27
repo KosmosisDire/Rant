@@ -66,11 +66,11 @@ Supported fields:
 
 - numbers and `bool`
 - `rant::String<N>` (a string of at most N bytes) and `String`
-- `[T; N]` and `Vec<T>`
+- `[T; N]` and `Vec<T>` of any supported type, nested: `Vec<Vec<String>>` is `string[][]`
 - other `rant::Message` structs
 - enums with `#[derive(rant::Enum)]` and an integer `#[repr]`
 
-Not supported: `Option`, maps, references, and arrays of `String`, of enums or of arrays.
+Not supported: `Option`, maps and references.
 
 - Field names are the wire names, and `#[rant(name = "Other")]` renames the type.
 - A plain type works without a derive: `publisher::<f32>`.

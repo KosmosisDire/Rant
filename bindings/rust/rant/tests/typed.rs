@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{golden, options, wait_for};
-use rant::types::{Double3, Float3, Image, ImageFormat, Pose, Quaternion, Timestamp, Transform, Uuid, VideoCodec, VideoFrame};
+use rant::types::{Double2, Double3, Float2, Float3, Image, ImageFormat, Polygon2D, Pose, Quaternion, Timestamp, Transform, Uuid, VideoCodec, VideoFrame};
 use rant::{Bytes, ErrorKind, Message, MessageBuilder, Node, Qos, Threading};
 
 #[derive(rant::Message, Clone, Debug, PartialEq)]
@@ -62,6 +62,71 @@ fn shape() -> Shape {
         id: Uuid { bytes: [7; 16] },
         scale: [1.0, 2.0, 0.5],
         origin: Corner { x: 0.0, y: 1.0 },
+    }
+}
+
+// Any type as an array element: records with arrays of their own, arrays of arrays, strings,
+// enums and aliases. The same shapes as the C++, C# and Python tests.
+#[derive(rant::Message, Clone, Debug, PartialEq, Default)]
+struct Stretch {
+    speed: f32,
+    pts: Vec<Float2>,
+}
+
+#[derive(rant::Message, Clone, Debug, PartialEq, Default)]
+struct Route {
+    id: u32,
+    segments: Vec<Stretch>,
+    name: String,
+}
+
+#[derive(rant::Enum, Clone, Copy, Debug, PartialEq)]
+#[repr(u8)]
+enum Lane {
+    Left,
+    Right,
+}
+
+#[derive(rant::Message, Clone, Debug, PartialEq, Default)]
+struct Layers {
+    grid: Vec<Vec<f32>>,
+    rows: Vec<[f32; 3]>,
+    names: Vec<String>,
+    pair: [String; 2],
+    legs: [Stretch; 2],
+    m: [[f32; 3]; 2],
+    areas: Vec<Polygon2D>,
+    lanes: Vec<Lane>,
+    words: Vec<Vec<String>>,
+    tags: Vec<[rant::String<8>; 2]>,
+    flags: Vec<bool>,
+    ids: Vec<Uuid>,
+}
+
+fn f2(x: f32, y: f32) -> Float2 {
+    Float2 { x, y }
+}
+
+fn route() -> Route {
+    Route { id: 7, segments: vec![Stretch { speed: 1.5, pts: vec![f2(1.0, 2.0), f2(3.0, 4.0)] }, Stretch { speed: 2.5, pts: vec![f2(5.0, 6.0)] }], name: "loop".to_owned() }
+}
+
+fn layers() -> Layers {
+    let s = |v: &str| v.to_owned();
+    let d2 = |x: f64, y: f64| Double2 { x, y };
+    Layers {
+        grid: vec![vec![1.0, 2.0], vec![], vec![3.0]],
+        rows: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        names: vec![s("abc"), s(""), s("hello")],
+        pair: [s("left"), s("right")],
+        legs: [Stretch::default(), Stretch { speed: 3.0, pts: vec![f2(8.0, 9.0)] }],
+        m: [[0.0, 2.0, 0.0], [0.0, 0.0, 6.0]],
+        areas: vec![Polygon2D::default(), Polygon2D { points: vec![d2(1.0, 1.0), d2(2.0, 1.0), d2(2.0, 2.0)] }],
+        lanes: vec![Lane::Right, Lane::Left],
+        words: vec![vec![s("a"), s("bc")], vec![], vec![s("def")]],
+        tags: vec![["t1".parse().unwrap(), "".parse().unwrap()], ["t2".parse().unwrap(), "t3".parse().unwrap()]],
+        flags: vec![true, false, true],
+        ids: vec![Uuid::default(), Uuid { bytes: [0xAB; 16] }],
     }
 }
 
@@ -156,6 +221,54 @@ fn bare_roots_round_trip() {
     assert_eq!(round_trip(32, "c", corners.clone()), corners);
 }
 
+#[test]
+fn any_type_as_an_element_spells_as_the_dsl_does() {
+    let opts = options(36, Threading::Manual);
+    let a = Node::new("nest_a", opts.clone()).unwrap();
+    let b = Node::new("nest_b", opts).unwrap();
+    let route = a.publisher::<Route>("r", Qos::new()).unwrap().schema().unwrap();
+    let text = "Stretch { speed: f32, pts: Float2[] }\nRoute { id: u32, segments: Stretch[], name: string }";
+    assert_eq!(route.hash(), b.schema(text).unwrap().hash(), "Route spells as\n{}", route.to_dsl());
+    let layers = a.publisher::<Layers>("l", Qos::new()).unwrap().schema().unwrap();
+    let text = "Layers { grid: f32[][], rows: f32[3][], names: string[], pair: string[2], legs: Stretch[2], \
+                m: f32[3][2], areas: Polygon2D[], lanes: enum<u8> { Left=0, Right=1 }[], words: string[][], \
+                tags: string<8>[2][], flags: bool[], ids: Uuid[] }";
+    assert_eq!(layers.hash(), b.schema(text).unwrap().hash(), "Layers spells as\n{}", layers.to_dsl());
+    let words = a.publisher::<Vec<Vec<String>>>("w", Qos::new()).unwrap().schema().unwrap();
+    assert_eq!(words.hash(), b.schema("string[][]").unwrap().hash());
+}
+
+#[test]
+fn nested_arrays_round_trip() {
+    assert_eq!(round_trip(37, "route", route()), route());
+    assert_eq!(round_trip(38, "layers", layers()), layers());
+    assert_eq!(round_trip(39, "empty", Layers::default()), Layers::default());
+    let words = vec![vec!["x".to_owned(), "yz".to_owned()], vec!["w".to_owned()]];
+    assert_eq!(round_trip(45, "words", words.clone()), words);
+}
+
+#[test]
+fn a_record_element_decodes_from_another_layout() {
+    let opts = options(46, Threading::ServiceThread);
+    let a = Node::new("nest_wide", opts.clone()).unwrap();
+    let b = Node::new("nest_narrow", opts).unwrap();
+    let got = Arc::new(Mutex::new(None));
+    let g = Arc::clone(&got);
+    let _sub = b.subscriber::<Route>("route", Qos::new().reliable(true), move |r| *g.lock().unwrap() = Some(r.into_inner())).unwrap();
+    let wide = a.schema("Stretch { speed: f32, pts: Float2[] }\nRoute { tag: string, id: u32, extra: f64[], segments: Stretch[], name: string }").unwrap();
+    let p = a.publisher::<Bytes>("route", Qos::new().reliable(true).schema(&wide)).unwrap();
+    assert!(wait_for(4000, None, || p.match_count() > 0 && p.ready()));
+    let mut m = MessageBuilder::new(&wide);
+    m.set_string("tag", "first").unwrap().set_uint("id", 9).unwrap().set_array_count("extra", 3).unwrap();
+    m.set_array_count("segments", 2).unwrap().set_f32("segments[0].speed", 4.0).unwrap();
+    m.set_array_count("segments[1].pts", 2).unwrap().set_f32("segments[1].pts[1].x", 7.0).unwrap();
+    m.set_string("name", "wide").unwrap();
+    p.send(m.bytes()).unwrap();
+    assert!(wait_for(3000, None, || got.lock().unwrap().is_some()));
+    let want = Route { id: 9, segments: vec![Stretch { speed: 4.0, pts: vec![] }, Stretch { speed: 0.0, pts: vec![f2(0.0, 0.0), f2(7.0, 0.0)] }], name: "wide".to_owned() };
+    assert_eq!(got.lock().unwrap().take().unwrap(), want);
+}
+
 /// One list of every number type, which pack as a whole slice, beside bools, which do not.
 #[derive(rant::Message, Clone, Debug, PartialEq)]
 struct Lists {
@@ -219,7 +332,7 @@ fn a_reader_of_fewer_fields_decodes_the_writers_layout() {
 
 #[derive(rant::Message)]
 struct Unwired {
-    names: Vec<String>,
+    none: [f32; 0],
 }
 
 #[test]

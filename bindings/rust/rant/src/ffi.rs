@@ -13,7 +13,7 @@ pub const RANT_DISCOVERY_PORT: u32 = 6730;
 pub const RANT_ANNOUNCE_INTERVAL_US: u32 = 3000000;
 pub const RANT_MAX_PEERS: u32 = 16;
 pub const RANT_ALLOCATOR_PAGE: u32 = 65536;
-pub const RANT_WIRE_VERSION: u32 = 8;
+pub const RANT_WIRE_VERSION: u32 = 9;
 pub const RANT_DISCOVERY_META_MAX: u32 = 64;
 pub const RANT_DISCOVERY_WIRE_MAX: u32 = 128;
 pub const RANT_DISCOVERY_FIXED_LEN: u32 = 37;
@@ -360,9 +360,8 @@ pub struct RantSchema {
 pub struct RantSchemaFieldInfo {
     pub name: RantString,
     pub type_name: RantString,
-    pub elem_name: RantString,
     pub kind: u8,
-    pub elem: u8,
+    pub backing: u8,
     pub count: u16,
     pub depth: u16,
     pub str_cap: u16,
@@ -370,7 +369,7 @@ pub struct RantSchemaFieldInfo {
     pub arr_depth: u16,
     pub offset: u32,
     pub size: u32,
-    pub elem_size: u32,
+    pub min_len: u32,
 }
 impl Default for RantSchemaFieldInfo {
     fn default() -> Self {
@@ -385,9 +384,7 @@ impl Default for RantSchemaFieldInfo {
 #[derive(Copy, Clone)]
 pub struct RantValue {
     pub kind: u8,
-    pub elem: u8,
-    pub count: u16,
-    pub str_cap: u16,
+    pub count: u32,
     pub v: RantValue__bindgen_ty_1,
     pub bytes: RantBytes,
 }
@@ -1252,12 +1249,6 @@ unsafe extern "C" {
         s: *const RantSchema,
         field: *const ::std::os::raw::c_char,
     ) -> RantString;
-    pub fn rant_get_string_at(
-        msg: RantBytes,
-        s: *const RantSchema,
-        field: *const ::std::os::raw::c_char,
-        index: u16,
-    ) -> RantString;
     pub fn rant_get_map(
         msg: RantBytes,
         s: *const RantSchema,
@@ -1327,14 +1318,6 @@ unsafe extern "C" {
         field: *const ::std::os::raw::c_char,
         v: RantString,
     ) -> ::std::os::raw::c_int;
-    pub fn rant_set_string_at(
-        buf: *mut ::std::os::raw::c_void,
-        cap: usize,
-        s: *const RantSchema,
-        field: *const ::std::os::raw::c_char,
-        index: u16,
-        v: RantString,
-    ) -> ::std::os::raw::c_int;
     pub fn rant_set_map(
         buf: *mut ::std::os::raw::c_void,
         cap: usize,
@@ -1379,7 +1362,15 @@ unsafe extern "C" {
         n_elems: u16,
         val: *const RantValue,
     ) -> ::std::os::raw::c_int;
-    pub fn rant_array_count_at(msg: RantBytes, s: *const RantSchema, field: u16) -> u32;
+    pub fn rant_set_array_count_at(
+        buf: *mut ::std::os::raw::c_void,
+        cap: usize,
+        s: *const RantSchema,
+        field: u16,
+        elems: *const u32,
+        n_elems: u16,
+        count: u32,
+    ) -> ::std::os::raw::c_int;
     pub fn rant_map_begin(buf: *mut ::std::os::raw::c_void, cap: usize) -> RantMapWriter;
     pub fn rant_map_put_uint(
         w: *mut RantMapWriter,
@@ -1489,11 +1480,6 @@ unsafe extern "C" {
     pub fn rant_uuid_new(out: *mut RantUuid);
     pub fn rant_std_recognize(n: *mut RantNode, s: *const RantSchema) -> RantStdType;
     pub fn rant_std_recognize_field(
-        n: *mut RantNode,
-        s: *const RantSchema,
-        field: u16,
-    ) -> RantStdType;
-    pub fn rant_std_recognize_elem(
         n: *mut RantNode,
         s: *const RantSchema,
         field: u16,

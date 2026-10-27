@@ -110,8 +110,10 @@ fn schemas_reflect_the_c_field_table() {
     let variants: Vec<(i64, String)> = s.enum_variants(mode).into_iter().map(|v| (v.value, v.name)).collect();
     assert_eq!(variants, [(0, "Idle".to_owned()), (2, "Run".to_owned())]);
     let fields = s.fields();
-    let corners = &fields[s.field_index("corners").unwrap() as usize];
-    assert_eq!((corners.kind, corners.elem, corners.count, corners.elem_name.as_deref()), (FieldType::Array, FieldType::Struct, 4, Some("Float2")));
+    let at = s.field_index("corners").unwrap() as usize;
+    let (corners, elem) = (&fields[at], &fields[at + 1]);
+    assert_eq!((corners.kind, corners.count), (FieldType::Array, 4));
+    assert_eq!((elem.name.as_str(), elem.kind, elem.type_name.as_deref(), elem.size), ("", FieldType::Struct, Some("Float2"), 8), "the element is the row after its array");
     assert!(s.field_index("corners[2].x").is_some());
     assert_eq!(fields[s.field_index("tags").unwrap() as usize].kind, FieldType::VString);
     assert_eq!(a.schema(&s.to_dsl()).unwrap(), s, "the printed DSL compiles back to the same handle");
