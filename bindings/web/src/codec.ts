@@ -16,22 +16,24 @@ const NO_PARENT = 0xffff;
 const SIZE = [1, 2, 4, 8, 1, 2, 4, 8, 4, 8, 1];
 const MAX_DEPTH = 8;     /* RANT_SCHEMA_MAX_DEPTH, which bounds a map's nesting too */
 
-/* One field of the flat depth first table, as the C RantSchemaFieldInfo has it. */
+/* One field of the flat depth first table, as the C RantSchemaFieldInfo has it. An array's
+ * element is the next row, named "". */
 export interface FieldInfo {
-    name: string; typeName: string; elemName: string; kind: FieldKind;
-    /* the array element kind or the enum backing, null for any other field */
-    elem: FieldKind | null;
+    name: string; typeName: string; kind: FieldKind;
+    /* an enum's backing kind, null for any other field */
+    backing: FieldKind | null;
     count: number; depth: number; strCap: number;
-    /* the flat index of the nearest enclosing struct array, -1 for none */
+    /* the flat index of the nearest enclosing array, -1 for none */
     arrParent: number;
-    arrDepth: number; offset: number; size: number; elemSize: number;
+    arrDepth: number; offset: number; size: number;
+    /* a default value's bytes, what one more element at least costs */
+    minLen: number;
 }
 
 interface Row {
     info: FieldInfo;
-    kind: number; elem: number; count: number; strCap: number; elemSize: number;
-    end: number;                          /* one past the members of a struct or struct array */
-    structArray: boolean;
+    kind: number; backing: number; count: number; strCap: number; size: number; minLen: number;
+    end: number;                          /* one past the row's element and members */
     variants: Map<number, string> | null; /* an enum's option names */
 }
 
@@ -50,13 +52,13 @@ export class Table {
             for (let i = 0; i < count; i++) {
                 c.rant_schema_field_at(s, i, p);
                 const F = L.RantSchemaFieldInfo;
-                const kind = n.u8(p + F.kind), elem = n.u8(p + F.elem), parent = n.u16(p + F.arr_parent);
+                const kind = n.u8(p + F.kind), backing = n.u8(p + F.backing), parent = n.u16(p + F.arr_parent);
                 const info: FieldInfo = {
-                    name: n.strAt(p + F.name), typeName: n.strAt(p + F.type_name), elemName: n.strAt(p + F.elem_name),
-                    kind: KIND_NAMES[kind], elem: kind === K.ARR || kind === K.VARR || kind === K.ENUM ? KIND_NAMES[elem] : null,
+                    name: n.strAt(p + F.name), typeName: n.strAt(p + F.type_name),
+                    kind: KIND_NAMES[kind], backing: kind === K.ENUM ? KIND_NAMES[backing] : null,
                     count: n.u16(p + F.count), depth: n.u16(p + F.depth), strCap: n.u16(p + F.str_cap),
                     arrParent: parent === NO_PARENT ? -1 : parent, arrDepth: n.u16(p + F.arr_depth),
-                    offset: n.u32(p + F.offset), size: n.u32(p + F.size), elemSize: n.u32(p + F.elem_size),
+                    offset: n.u32(p + F.offset), size: n.u32(p + F.size), minLen: n.u32(p + F.min_len),
                 };
                 let variants: Map<number, string> | null = null;
                 if (kind === K.ENUM) {
@@ -64,8 +66,8 @@ export class Table {
                     for (let v = 0, m = c.rant_schema_enum_count(s, i); v < m; v++)
                         if (c.rant_schema_enum_variant(s, i, v, vvalue, vname)) variants.set(Number(n.i64(vvalue)), n.strAt(vname));
                 }
-                this.rows.push({ info, kind, elem, count: info.count, strCap: info.strCap, elemSize: info.elemSize, end: i + 1,
-                                 structArray: (kind === K.ARR || kind === K.VARR) && elem === K.STRUCT, variants });
+                this.rows.push({ info, kind, backing, count: info.count, strCap: info.strCap, size: info.size,
+                                 minLen: info.minLen, end: i + 1, variants });
             }
         });
         for (let i = 0; i < this.rows.length; i++) {
@@ -78,6 +80,11 @@ export class Table {
 
     get fields(): FieldInfo[] { return this.rows.map((r) => ({ ...r.info })); }
 }
+
+/* A row of fixed bytes. */
+const fixed = (r: Row) => r.size !== 0 && r.minLen === r.size;
+/* An array element that packs: a fixed scalar, enum or capped string. */
+const packs = (el: Row) => fixed(el) && (el.kind <= K.BOOL || el.kind === K.ENUM || el.kind === K.STR);
 
 /* Your member names for the wire's, per struct level: a member called partNumber travels as
  * part_number. null where the values carry the wire's names. */
@@ -125,80 +132,50 @@ class Reader {
     }
 
     root(names: Names | null): unknown {
-        const rows = this.t.rows;
-        if (this.t.bare) return rows[0].structArray ? this.array(0, [], names) : this.value(0, []);
-        const root: Record<string, unknown> = {};
-        const dests: { obj: Record<string, unknown>; names: Names | null }[] = [{ obj: root, names }];
-        for (let i = 0; i < rows.length; i++) {
-            const r = rows[i];
-            if (r.info.arrParent >= 0) continue;          /* an element template member: its array reads it */
-            const d = dests[r.info.depth];
-            const nm = d.names?.get(r.info.name);
-            const key = nm?.mine ?? r.info.name;
-            if (r.structArray) d.obj[key] = this.array(i, [], nm?.sub ?? null);
-            else if (r.kind === K.STRUCT) {
-                const child: Record<string, unknown> = {};
-                d.obj[key] = child;
-                dests[r.info.depth + 1] = { obj: child, names: nm?.sub ?? null };
-            }
-            else d.obj[key] = this.value(i, []);
-        }
-        return root;
+        return this.t.bare ? this.row(0, [], names) : this.members(-1, [], names);
     }
 
-    private array(i: number, outer: number[], names: Names | null): Record<string, unknown>[] {
-        const n = this.t.n;
-        const count = n.c.rant_array_count_at(this.mb, this.t.s, i);
-        const out: Record<string, unknown>[] = [];
-        for (let e = 0; e < count; e++) out.push(this.element(i, [...outer, e], names));
+    /* The members of the struct at row i, or of the root at -1, under your names for them. */
+    private members(i: number, idx: number[], names: Names | null): Record<string, unknown> {
+        const rows = this.t.rows, out: Record<string, unknown> = {};
+        const depth = i < 0 ? 0 : rows[i].info.depth + 1;
+        for (let j = i + 1; j < rows.length && rows[j].info.depth >= depth; j = rows[j].end) {
+            const nm = names?.get(rows[j].info.name);
+            out[nm?.mine ?? rows[j].info.name] = this.row(j, idx, nm?.sub ?? null);
+        }
         return out;
     }
 
-    private element(i: number, idx: number[], names: Names | null): Record<string, unknown> {
-        const rows = this.t.rows;
-        const top: Record<string, unknown> = {};
-        const dests: Record<number, { obj: Record<string, unknown>; names: Names | null }> = { [rows[i].info.depth + 1]: { obj: top, names } };
-        for (let j = i + 1; j < rows[i].end;) {
-            const m = rows[j];
-            const d = dests[m.info.depth];
-            const nm = d.names?.get(m.info.name);
-            const key = nm?.mine ?? m.info.name;
-            if (m.structArray) {
-                d.obj[key] = this.array(j, idx, nm?.sub ?? null);
-                j = m.end;
-                continue;
-            }
-            if (m.kind === K.STRUCT) {
-                const child: Record<string, unknown> = {};
-                d.obj[key] = child;
-                dests[m.info.depth + 1] = { obj: child, names: nm?.sub ?? null };
-            }
-            else d.obj[key] = this.value(j, idx);
-            j++;
-        }
-        return top;
-    }
-
-    /* One field through rant_get_value_at, idx holding every enclosing array's index. */
-    private value(i: number, idx: number[]): unknown {
-        const n = this.t.n, V = L.RantValue, v = this.val;
+    /* Row i through rant_get_value_at, idx holding every enclosing array's index. An array of
+     * fixed scalars is a typed array, of strings or enums their values, of anything else a
+     * list of its elements. */
+    private row(i: number, idx: number[], names: Names | null): unknown {
+        const n = this.t.n, V = L.RantValue, v = this.val, rows = this.t.rows, r = rows[i];
+        if (r.kind === K.STRUCT) return this.members(i, idx, names);
         idx.forEach((e, k) => n.setU32(this.idx + 4 * k, e));
         if (!n.c.rant_get_value_at(this.mb, this.t.s, i, this.idx, idx.length, v))
-            throw new SchemaError(`the field '${this.t.rows[i].info.name}' did not read`);
-        const kind = n.u8(v + V.kind), elem = n.u8(v + V.elem);
-        const data = n.u32(v + V.bytes), len = n.u32(v + V.bytes + 4);
-        switch (kind) {
+            throw new SchemaError(`the field '${r.info.name}' did not read`);
+        const count = n.u32(v + V.count), data = n.u32(v + V.bytes), len = n.u32(v + V.bytes + 4);
+        switch (r.kind) {
         case K.STR: case K.VSTR: return n.str(data, len);
         case K.MAP: return decodeMap(n.copy(data, len));
         case K.ARR: case K.VARR: {
+            const el = rows[i + 1];
+            if (!packs(el)) {
+                const out: unknown[] = [];
+                for (let e = 0; e < count; e++) out.push(this.row(i + 1, [...idx, e], names));
+                return out;
+            }
             const raw = n.copy(data, len);
-            if (elem === K.STR) return stringSlots(raw, n.u16(v + V.str_cap));
-            return scalarArray(elem, raw);
+            if (el.kind === K.STR) return stringSlots(raw, el.strCap);
+            if (el.kind !== K.ENUM) return scalarArray(el.kind, raw);
+            return Array.from(scalarArray(el.backing, raw) as ArrayLike<number | bigint>,
+                              (x) => el.variants?.get(Number(x)) ?? Number(x));
         }
         case K.F32: case K.F64: return n.f64(v + V.v_f);
         case K.ENUM: {
             const num = Number(n.i64(v + V.v_i));
-            return this.t.rows[i].variants?.get(num) ?? num;
+            return r.variants?.get(num) ?? num;
         }
         case K.I64: return n.i64(v + V.v_i);
         case K.U64: return n.u64(v + V.v_u);
@@ -242,53 +219,77 @@ function scalarArray(elem: number, raw: Uint8Array): unknown {
 /* A message in the C heap, which the caller frees. */
 export interface HeapBytes { ptr: number; len: number }
 
+/* One rant_set_value_at: a scalar, the bytes of a string, map or packed array, or the count a
+ * variable array is sized to. */
+interface Op { i: number; idx: number[]; val?: unknown; bytes?: Uint8Array | null; count?: number }
+
 /* The message for value, or SchemaError when it does not fit. A missing fixed field encodes as
  * zero and a missing variable one as empty. */
 export function encode(t: Table, value: unknown, names: Names | null): HeapBytes {
-    const n = t.n, rows = t.rows;
-    const src: Record<string, unknown> = t.bare ? { "": value } : asObject(value, "the value");
-    const ops: { i: number; val: unknown; bytes?: Uint8Array | null; elems?: unknown[]; names?: Names | null }[] = [];
-    let tail = 0;
-    const srcs: { obj: Record<string, unknown> | null; names: Names | null }[] = [{ obj: src, names: t.bare ? null : names }];
-    for (let i = 0; i < rows.length; i++) {
-        const r = rows[i];
-        if (r.info.arrParent >= 0) continue;              /* an element template member: its array writes it */
-        const d = srcs[r.info.depth];
-        const nm = d.names?.get(r.info.name);
-        const val = d.obj ? pick(d.obj, r.info.name, nm?.mine) : undefined;
-        if (r.kind === K.STRUCT) {
-            srcs[r.info.depth + 1] = { obj: val == null ? null : asObject(val, r.info.name), names: nm?.sub ?? null };
-            continue;
-        }
-        if (val == null) continue;                        /* keeps the zeroed default */
-        const sub = t.bare ? names : nm?.sub ?? null;
-        if (r.structArray) {
-            if (!Array.isArray(val)) throw new SchemaError(`${r.info.name || "the value"} is an array of structs and takes an array`);
-            const count = r.kind === K.VARR ? val.length : Math.min(val.length, r.count);
-            if (r.kind === K.VARR) tail += count * r.elemSize;
-            ops.push({ i, val, elems: val.slice(0, count), names: sub });
-            continue;
-        }
-        const bytes = payload(t, i, val);
-        if (bytes && (r.kind === K.VSTR || r.kind === K.VARR || r.kind === K.MAP)) tail += bytes.length;
-        ops.push({ i, val, bytes });
-    }
-
-    const size = n.c.rant_schema_msg_min(t.s) + tail;
+    const n = t.n, ops = new Ops(t);
+    if (t.bare) ops.row(0, value, [], names);
+    else ops.members(-1, asObject(value, "the value"), [], names);
+    const size = n.c.rant_schema_msg_min(t.s) + ops.grow;
     const buf = n.alloc(size);
     try {
         n.c.rant_schema_message_default(t.s, buf, size);
         scoped(n, (sc) => {
             const w = new Writer(t, sc, buf, size);
-            for (const op of ops) {
-                if (op.elems) w.elements(op.i, op.elems, [], op.names ?? null);
-                else w.set(op.i, [], op.val, op.bytes);
-            }
+            for (const op of ops.list) w.set(op);
         });
         return { ptr: buf, len: n.c.rant_schema_msg_len(t.s, buf, size) };
     } catch (e) {
         n.free(buf);
         throw e;
+    }
+}
+
+/* The setter calls a value makes, in table order, and the bytes they add to the default
+ * message at most. */
+class Ops {
+    readonly list: Op[] = [];
+    grow = 0;
+    constructor(private t: Table) {}
+
+    /* The members of the struct at row i, or of the root at -1, valued from src. */
+    members(i: number, src: Record<string, unknown>, idx: number[], names: Names | null): void {
+        const rows = this.t.rows;
+        const depth = i < 0 ? 0 : rows[i].info.depth + 1;
+        for (let j = i + 1; j < rows.length && rows[j].info.depth >= depth; j = rows[j].end) {
+            const nm = names?.get(rows[j].info.name);
+            this.row(j, pick(src, rows[j].info.name, nm?.mine), idx, nm?.sub ?? null);
+        }
+    }
+
+    /* Row i valued val under idx. A missing value keeps the default. */
+    row(i: number, val: unknown, idx: number[], names: Names | null): void {
+        if (val == null) return;
+        const r = this.t.rows[i];
+        if (r.kind === K.STRUCT) return this.members(i, asObject(val, r.info.name), idx, names);
+        if (r.kind === K.ARR || r.kind === K.VARR) return this.array(i, val, idx, names);
+        const bytes = payload(this.t, i, val);
+        if (bytes && r.kind !== K.STR) this.grow += bytes.length;
+        this.list.push({ i, idx, val, bytes });
+    }
+
+    /* An array of fixed scalars, enums or capped strings is one packed value. Any other
+     * element is set on its own through the element row, once a variable array is sized. */
+    private array(i: number, val: unknown, idx: number[], names: Names | null): void {
+        const r = this.t.rows[i], el = this.t.rows[i + 1];
+        if (packs(el)) {
+            let bytes = packElements(this.t, i + 1, val, r.info.name);
+            if (r.kind === K.VARR) this.grow += bytes.length;
+            else bytes = bytes.subarray(0, r.count * el.size);   /* a fixed array keeps its first count */
+            this.list.push({ i, idx, bytes });
+            return;
+        }
+        if (!Array.isArray(val)) throw new SchemaError(`${r.info.name || "the value"} is an array and takes an array`);
+        const count = r.kind === K.VARR ? val.length : Math.min(val.length, r.count);
+        if (r.kind === K.VARR) {
+            this.list.push({ i, idx, count });
+            this.grow += count * (fixed(el) ? el.size : 4 + el.minLen);   /* an end and a default body each */
+        }
+        for (let e = 0; e < count; e++) this.row(i + 1, val[e], [...idx, e], names);
     }
 }
 
@@ -300,61 +301,35 @@ class Writer {
         this.idx = sc.alloc(4 * MAX_DEPTH);
     }
 
-    /* Every member of every element of the struct array at i, a variable one sized first. */
-    elements(i: number, items: unknown[], outer: number[], names: Names | null): void {
-        const rows = this.t.rows, r = rows[i];
-        if (r.kind === K.VARR) this.set(i, outer, null, new Uint8Array(items.length * r.elemSize));
-        items.forEach((item, e) => {
-            const idx = [...outer, e];
-            const srcs: Record<number, { obj: Record<string, unknown> | null; names: Names | null }> =
-                { [r.info.depth + 1]: { obj: asObject(item, `${r.info.name}[${e}]`), names } };
-            for (let j = i + 1; j < r.end;) {
-                const m = rows[j];
-                const d = srcs[m.info.depth];
-                const nm = d.names?.get(m.info.name);
-                const val = d.obj ? pick(d.obj, m.info.name, nm?.mine) : undefined;
-                if (m.structArray) {
-                    if (val != null) {
-                        if (!Array.isArray(val)) throw new SchemaError(`${m.info.name} is an array of structs and takes an array`);
-                        this.elements(j, m.kind === K.VARR ? val : val.slice(0, m.count), idx, nm?.sub ?? null);
-                    }
-                    j = m.end;
-                    continue;
-                }
-                if (m.kind === K.STRUCT) srcs[m.info.depth + 1] = { obj: val == null ? null : asObject(val, m.info.name), names: nm?.sub ?? null };
-                else if (val != null) this.set(j, idx, val, payload(this.t, j, val));
-                j++;
-            }
-        });
-    }
-
-    /* One field through rant_set_value_at, bytes carrying a string, array or map. */
-    set(i: number, idx: number[], val: unknown, bytes?: Uint8Array | null): void {
-        const n = this.t.n, V = L.RantValue, v = this.val, r = this.t.rows[i];
+    /* One op through rant_set_value_at, or rant_set_array_count_at for a count. */
+    set(op: Op): void {
+        const n = this.t.n, V = L.RantValue, v = this.val, r = this.t.rows[op.i];
+        op.idx.forEach((e, k) => n.setU32(this.idx + 4 * k, e));
+        if (op.count !== undefined) {
+            if (!n.c.rant_set_array_count_at(this.buf, this.size, this.t.s, op.i, this.idx, op.idx.length, op.count))
+                throw new SchemaError(`'${r.info.name || "the value"}' does not fit ${op.count} elements`);
+            return;
+        }
         n.heap.fill(0, v, v + V.sizeof);
         n.setU8(v + V.kind, r.kind);
-        n.setU8(v + V.elem, r.elem);
-        n.setU16(v + V.count, r.count);
-        n.setU16(v + V.str_cap, r.strCap);
-        if (bytes) {
-            n.setU32(v + V.bytes, bytes.length ? this.sc.data(bytes) : 0);
-            n.setU32(v + V.bytes + 4, bytes.length);
+        if (op.bytes) {
+            n.setU32(v + V.bytes, op.bytes.length ? this.sc.data(op.bytes) : 0);
+            n.setU32(v + V.bytes + 4, op.bytes.length);
         } else {
             switch (r.kind) {
-            case K.F32: case K.F64: n.setF64(v + V.v_f, num(val, r.info.name)); break;
-            case K.BOOL: n.setU64(v + V.v_u, val ? 1n : 0n); break;
-            case K.ENUM: n.setI64(v + V.v_i, BigInt(enumNumber(this.t, i, val))); break;
-            case K.I8: case K.I16: case K.I32: case K.I64: n.setI64(v + V.v_i, int(val, r.info.name)); break;
-            default: n.setU64(v + V.v_u, BigInt.asUintN(64, int(val, r.info.name)));
+            case K.F32: case K.F64: n.setF64(v + V.v_f, num(op.val, r.info.name)); break;
+            case K.BOOL: n.setU64(v + V.v_u, op.val ? 1n : 0n); break;
+            case K.ENUM: n.setI64(v + V.v_i, BigInt(enumNumber(this.t, op.i, op.val))); break;
+            case K.I8: case K.I16: case K.I32: case K.I64: n.setI64(v + V.v_i, int(op.val, r.info.name)); break;
+            default: n.setU64(v + V.v_u, BigInt.asUintN(64, int(op.val, r.info.name)));
             }
         }
-        idx.forEach((e, k) => n.setU32(this.idx + 4 * k, e));
-        if (!n.c.rant_set_value_at(this.buf, this.size, this.t.s, i, this.idx, idx.length, v))
+        if (!n.c.rant_set_value_at(this.buf, this.size, this.t.s, op.i, this.idx, op.idx.length, v))
             throw new SchemaError(`the value does not fit '${r.info.name || "the value"}'`);
     }
 }
 
-/* The bytes a string, array or map field carries, null for a scalar. */
+/* The bytes a string or map field carries, null for a scalar. */
 function payload(t: Table, i: number, val: unknown): Uint8Array | null {
     const r = t.rows[i];
     switch (r.kind) {
@@ -365,24 +340,28 @@ function payload(t: Table, i: number, val: unknown): Uint8Array | null {
         return b;
     }
     case K.MAP: return encodeMap(asObject(val, r.info.name));
-    case K.ARR: case K.VARR: {
-        if (r.elem === K.STR) {
-            if (!Array.isArray(val)) throw new SchemaError(`'${r.info.name}' takes an array of strings`);
-            const items = r.kind === K.ARR ? val.slice(0, r.count) : val;
-            const slot = 2 + r.strCap, out = new Uint8Array(items.length * slot);
-            items.forEach((s, k) => {
-                const b = encodeUtf8(String(s));
-                if (b.length > r.strCap) throw new SchemaError(`'${r.info.name}[${k}]' takes at most ${r.strCap} bytes`);
-                out[k * slot] = b.length & 255;
-                out[k * slot + 1] = b.length >> 8;
-                out.set(b, k * slot + 2);
-            });
-            return out;
-        }
-        return packScalars(r.elem, val, r.info.name);
-    }
     default: return null;
     }
+}
+
+/* The packed elements of an array whose element row e is a fixed scalar, enum or capped string. */
+function packElements(t: Table, e: number, val: unknown, name: string): Uint8Array {
+    const el = t.rows[e];
+    if (el.kind === K.STR) {
+        if (!Array.isArray(val)) throw new SchemaError(`'${name}' takes an array of strings`);
+        const slot = 2 + el.strCap, out = new Uint8Array(val.length * slot);
+        val.forEach((s, k) => {
+            const b = encodeUtf8(String(s));
+            if (b.length > el.strCap) throw new SchemaError(`'${name}[${k}]' takes at most ${el.strCap} bytes`);
+            out[k * slot] = b.length & 255;
+            out[k * slot + 1] = b.length >> 8;
+            out.set(b, k * slot + 2);
+        });
+        return out;
+    }
+    if (el.kind !== K.ENUM) return packScalars(el.kind, val, name);
+    if (!Array.isArray(val)) throw new SchemaError(`'${name}' takes an array`);
+    return packScalars(el.backing, val.map((x) => enumNumber(t, e, x)), name);
 }
 
 /* The view type whose bytes already are the wire kind, so one copy suffices. */

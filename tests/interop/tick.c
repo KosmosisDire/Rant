@@ -8,7 +8,8 @@
 #include <stdlib.h>
 #include "rant.h"
 
-#define TICK_SCHEMA "Tick { seq: u64, when: Timestamp, value: f64, at: Transform }"
+#define TICK_SCHEMA "Hop { name: string, pts: Float2[] }\n" \
+                    "Tick { seq: u64, when: Timestamp, value: f64, at: Transform, hops: Hop[] }"
 #define TICK_WANT   20
 
 static const RantSchema *g_schema;
@@ -20,13 +21,22 @@ static int near(double a, double b){ return fabs(a - b) < 1e-9; }
 static void on_tick(const RantMsg *m){
     uint64_t seq = rant_get_uint(m->data, g_schema, "seq");
     double angle = (double)seq * 0.01;
-    int ok = m->schema != NULL
+    RantString hop = rant_get_string(m->data, g_schema, "hops[0].name");
+    char want[24];
+    int ok;
+    snprintf(want, sizeof want, "h%llu", (unsigned long long)seq);
+    ok = m->schema != NULL
           && m->publisher_name.len == strlen(g_from)
           && memcmp(m->publisher_name.data, g_from, m->publisher_name.len) == 0
           && rant_get_int(m->data, g_schema, "when") > 0
           && near(rant_get_f64(m->data, g_schema, "value"), sin(angle))
           && near(rant_get_f64(m->data, g_schema, "at.pose.position.x"), cos(angle))
-          && near(rant_get_f64(m->data, g_schema, "at.pose.position.y"), sin(angle));
+          && near(rant_get_f64(m->data, g_schema, "at.pose.position.y"), sin(angle))
+          && rant_get_array_count(m->data, g_schema, "hops") == 1
+          && hop.len == strlen(want) && memcmp(hop.data, want, hop.len) == 0
+          && rant_get_array_count(m->data, g_schema, "hops[0].pts") == 1
+          && rant_get_f32(m->data, g_schema, "hops[0].pts[0].x") == (float)(seq % 1000)
+          && rant_get_f32(m->data, g_schema, "hops[0].pts[0].y") == 0.5f;
     if (ok) g_good++;
     else if (g_bad++ == 0) printf("FAIL: tick %llu decoded wrong\n", (unsigned long long)seq);
 }
@@ -59,13 +69,20 @@ int main(int argc, char **argv){
     while ((double)(rant_timestamp_now() - start) < seconds * 1e6 && !g_bad && g_good < TICK_WANT){
         if (!sub && rant_topic_match_count(topic) > 0){
             double angle = (double)seq * 0.01;
+            char hop[24];
+            snprintf(hop, sizeof hop, "h%llu", (unsigned long long)seq);
             rant_schema_message_default(g_schema, msg, sizeof msg);
             rant_set_uint(msg, sizeof msg, g_schema, "seq", seq);
             rant_set_int(msg, sizeof msg, g_schema, "when", rant_timestamp_now());
             rant_set_f64(msg, sizeof msg, g_schema, "value", sin(angle));
             rant_set_f64(msg, sizeof msg, g_schema, "at.pose.position.x", cos(angle));
             rant_set_f64(msg, sizeof msg, g_schema, "at.pose.position.y", sin(angle));
-            rant_topic_send(topic, rant_bytes(msg, rant_schema_size(g_schema)), NULL);
+            rant_set_array_count(msg, sizeof msg, g_schema, "hops", 1);
+            rant_set_string(msg, sizeof msg, g_schema, "hops[0].name", rant_string(hop, strlen(hop)));
+            rant_set_array_count(msg, sizeof msg, g_schema, "hops[0].pts", 1);
+            rant_set_f32(msg, sizeof msg, g_schema, "hops[0].pts[0].x", (float)(seq % 1000));
+            rant_set_f32(msg, sizeof msg, g_schema, "hops[0].pts[0].y", 0.5f);
+            rant_topic_send(topic, rant_bytes(msg, rant_schema_msg_len(g_schema, msg, sizeof msg)), NULL);
             seq++;
         }
         rant_node_poll(node, 2);

@@ -43,9 +43,10 @@ node.subscriber("Line1/Conveyor", Conveyor, (c) => console.log(c.speed));
   backing?)`, `map`, `struct(name, fields)` and the standard types of docs/stdtypes.md as
   `types.Pose` and the rest. A handle takes its value type from the schema, and
   `Infer<typeof S>` names it.
+- An array's element may be any schema, nested: `array(array(string()))` is `string[][]`.
 - Values: numbers, bigints for 64 bit integers, strings, an enum's option names, typed
   arrays for numeric arrays (`Uint8Array` for `u8`, and another element type converts),
-  `boolean[]`, `string[]`, plain objects for structs and maps.
+  plain arrays for any other array, plain objects for structs and maps.
 - Member names are yours: `partNumber` travels as `part_number` and decodes back into
   `partNumber`.
 - A schema argument is a builder, DSL text, a `CompiledSchema`, or `null` for raw

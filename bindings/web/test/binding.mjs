@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-    openNode, version, struct, f64, f32, bool, u8, u16, u64, i16, i32, i64, string, array, enumOf, map, types, CancelledError, AppError,
+    openNode, version, struct, f64, f32, bool, u8, u16, u32, u64, i16, i32, i64, string, array, enumOf, map, types, CancelledError, AppError,
 } from "../dist/rant.js";
 
 const domain = 190 + (process.pid % 10);
@@ -245,6 +245,51 @@ await check("a scalar array of another element type converts", async () => {
     assert.deepEqual([...back.g], [7, 8]);
     assert.deepEqual([...back.s], [9, 10]);
     assert.deepEqual([...back.h], [11, 12]);
+});
+
+await check("any type nests as an array element", async () => {
+    const Stretch = struct("Stretch", { speed: f32, topSpeed: f32, pts: array(types.Float2) });
+    const Route = struct("Route", { id: u32, segments: array(Stretch), name: string() });
+    const Layers = struct("Layers", {
+        grid: array(array(f32)), rows: array(array(f32, 3)), names: array(string()), pair: array(string(), 2),
+        legs: array(Stretch, 2), m: array(array(f32, 3), 2), areas: array(types.Polygon2D),
+        lanes: array(enumOf({ Left: 0, Right: 1 })), words: array(array(string())), tags: array(array(string(8), 2)),
+        flags: array(bool), notes: array(map),
+    });
+    assert.equal(a.schema(Route).hash, b.schema("Stretch { speed: f32, top_speed: f32, pts: Float2[] }\n" +
+        "Route { id: u32, segments: Stretch[], name: string }").hash);
+    assert.equal(a.schema(Layers).hash, b.schema("Layers { grid: f32[][], rows: f32[3][], names: string[], " +
+        "pair: string[2], legs: Stretch[2], m: f32[3][2], areas: Polygon2D[], lanes: enum<u8> { Left=0, Right=1 }[], " +
+        "words: string[][], tags: string<8>[2][], flags: bool[], notes: map[] }").hash);
+
+    const got = [];
+    b.subscriber("Nest/Route", Route, (v) => got.push(v), { reliable: true });
+    const pub = a.publisher("Nest/Route", Route, { reliable: true });
+    await until(() => pub.matchCount === 1);
+    const route = { id: 7, name: "loop", segments: [
+        { speed: 1.5, topSpeed: 2, pts: [{ x: 1, y: 2 }, { x: 3, y: 4 }] }, { speed: 2.5, topSpeed: 0, pts: [{ x: 5, y: 6 }] }] };
+    assert.equal(pub.send(route), "ok");
+    await until(() => got.length);
+    assert.deepEqual(got[0], { id: 7, segments: route.segments, name: "loop" });
+
+    const sc = a.schema(Layers);
+    const value = {
+        grid: [new Float32Array([1, 2]), new Float32Array([]), new Float32Array([3])],
+        rows: [new Float32Array([1, 2, 3]), new Float32Array([4, 5, 6])],
+        names: ["abc", "", "hello"], pair: ["left", "right"],
+        legs: [{ speed: 0, top_speed: 0, pts: [] }, { speed: 3, top_speed: 0, pts: [{ x: 8, y: 9 }] }],
+        m: [new Float32Array([0, 2, 0]), new Float32Array([0, 0, 6])],
+        areas: [{ points: [] }, { points: [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 }] }],
+        lanes: ["Right", "Left"], words: [["a", "bc"], [], ["def"]], tags: [["t1", ""], ["t2", "t3"]],
+        flags: [true, false, true], notes: [{ k: 1 }, {}],
+    };
+    assert.deepEqual(sc.decode(sc.encode(value)), value);
+    const empty = sc.decode(sc.encode({}));
+    assert.deepEqual([empty.grid, empty.pair, empty.legs.length, [...empty.m[1]], empty.tags], [[], ["", ""], 2, [0, 0, 0], []]);
+    assert.throws(() => sc.encode({ tags: [["far too long"]] }), /at most 8 bytes/);
+    const words = a.schema(array(array(string())));
+    assert.equal(words.hash, a.schema("string[][]").hash);
+    assert.deepEqual(words.decode(words.encode([["x", "yz"], ["w"]])), [["x", "yz"], ["w"]]);
 });
 
 const errors = events.filter((e) => e.kind === "error");

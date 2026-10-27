@@ -35,7 +35,7 @@ export const RantRequest = { sizeof: 56, node: 0, function_name: 4, data: 12, sc
 
 export const RantResponse = { sizeof: 40, status: 0, data: 4, schema: 12, provider: 16, user: 20, written_us: 24, message: 32 } as const;
 
-export const RantSchemaFieldInfo = { sizeof: 48, name: 0, type_name: 8, elem_name: 16, kind: 24, elem: 25, count: 26, depth: 28, str_cap: 30, arr_parent: 32, arr_depth: 34, offset: 36, size: 40, elem_size: 44 } as const;
+export const RantSchemaFieldInfo = { sizeof: 40, name: 0, type_name: 8, kind: 16, backing: 17, count: 18, depth: 20, str_cap: 22, arr_parent: 24, arr_depth: 26, offset: 28, size: 32, min_len: 36 } as const;
 
 export const RantSendOpts = { sizeof: 8, capture_us: 0 } as const;
 
@@ -47,7 +47,7 @@ export const RantTaskOpts = { sizeof: 24, progress_best_effort: 0, progress_keep
 
 export const RantTopicOpts = { sizeof: 48, qos: 0, reflect_from_mesh: 36, queue: 40, pull: 44 } as const;
 
-export const RantValue = { sizeof: 24, kind: 0, elem: 1, count: 2, str_cap: 4, v: 8, v_u: 8, v_i: 8, v_f: 8, bytes: 16 } as const;
+export const RantValue = { sizeof: 24, kind: 0, count: 4, v: 8, v_u: 8, v_i: 8, v_f: 8, bytes: 16 } as const;
 
 export const RantVariableOpts = { sizeof: 28, initial: 0, access: 8, allow_force: 9, catch_up: 10, keep_last: 12, backpressure_wait_us: 16, reflect_from_mesh: 20, queue: 24 } as const;
 

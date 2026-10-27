@@ -596,10 +596,12 @@ are idiomatic, so `-Wmissing-field-initializers` stays off.
 ## Interop
 
 Each binding suite talks only to itself, so `tests/interop/` crosses them. Every language
-has a Tick program (`tick.c`, `tick.cpp`, `tick.py`, `csharp/`) on one schema, `Tick { seq:
-u64, when: Timestamp, value: f64, at: Transform }`, reliable with keep_last 64 on loopback.
-`pub` sends `value = sin(seq * 0.01)` and the position `(cos, sin, 0)`, `sub <seconds>
-<publisher>` exits 0 once twenty ticks from that node decoded right. `rant_interop_pair`
+has a Tick program (`tick.c`, `tick.cpp`, `tick.py`, `csharp/`, `rust/`, `tick.mjs`) on one
+schema, `Tick { seq: u64, when: Timestamp, value: f64, at: Transform, hops: Hop[] }` with
+`Hop { name: string, pts: Float2[] }`, reliable with keep_last 64 on loopback. `pub` sends
+`value = sin(seq * 0.01)`, the position `(cos, sin, 0)` and one hop named `h<seq>` at
+`(seq % 1000, 0.5)`, so every codec writes and reads records with arrays of their own.
+`sub <seconds> <publisher>` exits 0 once twenty ticks from that node decoded right. `rant_interop_pair`
 starts a publisher, then a subscriber, returns the subscriber's exit code and stops the
 publisher. ctest runs every ordered pair of the languages this machine has, one
 `interop.<pub>_to_<sub>` entry each, and hands the pair its domain through `RANT_DOMAIN`.

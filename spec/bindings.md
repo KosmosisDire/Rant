@@ -167,8 +167,8 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   microseconds.
 - `RANT_SCHEMA(T, fields...)` synthesizes DSL text and compiles it through
   `rant_node_schema`, once per node and type, so the C compiler stays the single source of
-  wire truth. It builds a flat codec table and uses memcpy only when the type is
-  trivially copyable, little endian and padding free. The decode cache is keyed per
+  wire truth. It builds a plan (below) and copies the whole value with memcpy only when
+  the type is trivially copyable, little endian and padding free. The decode cache is keyed per
   incoming schema pointer, not per hash, because a rebased schema keeps our hash with the
   publisher's offsets. The node keeps every delivered schema until close
   (spec/schema.md), so a pointer never names two schemas.
@@ -176,10 +176,16 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   scratch buffer, empty when the value does not fit, such as an over long `String<N>`.
   A send or set then answers `SendStatus::Schema` and a reply answers AppError, never a
   cut or empty message.
-- Tail members: `std::vector<scalar>` and `std::string` struct members ride their tail
-  frame through the C accessors by dotted path. Bare `std::vector<E>` roots work, and so
-  do fixed and variable arrays of structs and of `String<N>`. Still refused at compile
-  time: `vector<bool>`, maps, pointers.
+- A type's plan is built once from its members: fixed leaves copied at their wire offsets,
+  and each variable value (`std::string`, `std::vector<E>`, an array of variable
+  elements) written and read through `rant_set_value_at` and `rant_get_value_at` with one
+  index per enclosing array, in record order so each resize moves only defaults. A variable
+  array is sized first by `rant_set_array_count_at`. Fixed
+  elements go as one packed block, a single memcpy when host and wire agree. A struct
+  element's fixed part is written in place through its element row. The buffer is sized
+  once from `msg_min` plus what each value adds, an element costing its `min_len` and an
+  end. Any element nests, roots included. Still refused at compile time: `vector<bool>`,
+  maps, pointers.
 - `rant::std_type<T>` names a user type the way the standard roster is named. `RANT_ENUM`
   registers an `enum class`. Unregistered enums ship as their backing integer.
 - Callbacks never unwind into C. `priv::guarded` wraps every app callback run from a C
@@ -244,12 +250,20 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   a failed create carries the `rant_last_error` event, `CallException` and
   `SchemaException` derive from it, and `LastError` is null while the C reads no error. A
   task `CallAsync` whose own token was cancelled ends in `OperationCanceledException`.
-- Typed messages by reflection: any struct or class with public fields. `[RantSchema("Name")]`
-  overrides the type name, `[RantArray(N)]` marks fixed arrays, `[RantString(cap)]` is
-  required on every string field, `[RantField("name")]` overrides a wire name. Fields
-  order by MetadataToken. Wire names default to the C# names, so cross language interop
-  needs lowercase `[RantField]` overrides (the std mirrors silently decoded to zeros
-  without them). An over cap string throws.
+- Typed messages by reflection: any struct, class or record with public fields or auto
+  properties, ordered by MetadataToken. Each member's C# type becomes a `Shape`, one per
+  array level down to the element, which spells the DSL. Encode and decode walk the
+  compiled flat table instead, so they serve a peer's schema too. Encode takes each row's
+  value by wire name from a typed object or a Dictionary, sets an array of fixed scalars,
+  enums or capped strings as one packed value, and sets any other element by its indexed
+  path once a variable array is sized. The buffer is sized once: `msg_min` plus every
+  payload, and an array sized to n adds n times the element's `min_len` plus 4. An array
+  whose element type is the wire kind's is pinned where it lies, and a `List` of it is
+  copied in one block. Decode reads each row through `rant_get_value_at`: a typed decode
+  builds the type directly, with numbers copied once, and an untyped one builds
+  dictionaries. The copy is `Buffer.MemoryCopy` under `RANT_UNSAFE`, which the NuGet project
+  and the Unity asmdef define with unsafe code allowed, else `Marshal.Copy`, whose signed
+  overloads .NET also lets an unsigned array through. A file compiled without it still works. An over cap string throws.
 - Callbacks are static trampolines dispatched by an int id in `user_data`, marked
   `[MonoPInvokeCallback]` for IL2CPP. Allocators are managed callbacks over
   `Marshal.ReAllocHGlobal`, which pays a native to managed transition per page.
@@ -313,11 +327,14 @@ platform serves every interpreter.
   `on_log` rebinding. `Threading.DISPATCH` and `queue=` on every handle mirror C#'s
   Dispatch and `Qos.Queue`, with `rant.Queue` from `node.create_queue()`.
 - Any annotated class is a schema, no decorator needed. Field types: `rant.u8` to
-  `rant.f64`, `rant.string(cap)`, `rant.<t>[N]`, a nested class, plain int, float and
-  bool, `str` (VSTR), `list[...]` (VARR), `dict` (MAP), or a bare `IntEnum`.
-  `__rant_name__` overrides the type name. `rant.dsl(cls)` computes DSL with no library
-  load. The standard types are tagged dataclasses in `bindings/python/rant/types.py`, reached as
-  `rant.types.*`.
+  `rant.f64`, `rant.string(cap)`, a nested class, plain int, float and bool, `str`
+  (VSTR), `dict` (MAP), a bare `IntEnum`, and `rant.<t>[N]` (ARR) or `list[...]` (VARR) of
+  any of them, nested. `__rant_name__` overrides the type name. `rant.dsl(cls)` computes
+  DSL with no library load. The standard types are tagged dataclasses in
+  `bindings/python/rant/types.py`, reached as `rant.types.*`. Encode and decode walk the
+  compiled flat table as C# does, so a peer's schema works the same. A numeric buffer of
+  the field's own type is read in place, a send views the encoded buffer where it was
+  built, and a numeric array decodes into an `array.array` by one copy from the message.
 - `__init__.pyi` and `types.pyi` are the checker's view, hand maintained beside the runtime
   and checked by running pyright over `bindings/python/test.py`. Handles are `Generic[T]` there
   while the runtime subscripts through `__class_getitem__`. The scalars are `int` and
@@ -350,7 +367,12 @@ needs no DLL and no cmake.
 - `#[derive(rant::Message)]` and `#[derive(rant::Enum)]` spell DSL text and compile it
   through `rant_node_schema`, once per node and type, as `RANT_SCHEMA` does. The codec
   resolves the type's flat ops against a schema into a plan, one per delivered schema
-  pointer.
+  pointer. An op is a fixed leaf at a static offset, a String, a `Vec` of scalars, enums
+  or capped strings packed as one value, or an array whose elements each take the
+  element's own ops. A fixed array of fixed elements flattens into leaves. Variable values
+  go through `rant_set_value_at` and `rant_get_value_at` with one index per enclosing
+  array, a `Vec` is sized by `rant_set_array_count_at`, and an element's fixed part is a
+  view the leaves write in place.
 - `Payload` is sealed: a `Message` type, or `Bytes` for raw bytes, which alone takes a
   schema or `reflect_from_mesh`. A typed and a raw side may mix on one pattern handle.
 - The node gate is the one above. Every function, task and variable handle has a gate of
@@ -394,9 +416,11 @@ the module prebuilt.
   dispatches its one queue, which every handle, the events and the logs are created with. So
   a handler runs outside the poll and may use the whole API, and a close asked for while
   handlers run waits until they end. A pulled subscriber has no queue, as the C requires.
-- Values are encoded and decoded by walking the flat field table and calling
-  `rant_set_value_at` and `rant_get_value_at` by index, as Python does, so the wire layout
-  stays the C's alone. Only the map body is built and parsed in TypeScript. Member names map
+- Values are encoded and decoded by walking the flat field table, an array's element row
+  once per element, and calling `rant_set_value_at` and `rant_get_value_at` with one index
+  per enclosing array, so the wire layout stays the C's alone. A variable array of
+  variable elements is sized first by `rant_set_array_count_at`, and the buffer once from
+  `msg_min` and each element's `min_len`. Only the map body is built and parsed in TypeScript. Member names map
   to wire names through `rant_field_name`.
 - A message decodes when it is delivered, since its view lives only for the callback.
 - Nothing blocks: `settle`, `drain` and a variable `wait` are promises that check after

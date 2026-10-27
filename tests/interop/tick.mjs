@@ -3,12 +3,13 @@
 // from that node decoded right and 1 on a wrong one or when the seconds run out. Loopback, on
 // RANT_DOMAIN.
 
-import { openNode, struct, u64, f64, types } from "../../bindings/web/dist/rant.js";
+import { openNode, struct, u64, f64, string, array, types } from "../../bindings/web/dist/rant.js";
 
 const TICK_WANT = 20;
 const [mode, secs, sender] = process.argv.slice(2);
 const sub = mode === "sub";
-const Tick = struct("Tick", { seq: u64, when: types.Timestamp, value: f64, at: types.Transform });
+const Hop = struct("Hop", { name: string(), pts: array(types.Float2) });
+const Tick = struct("Tick", { seq: u64, when: types.Timestamp, value: f64, at: types.Transform, hops: array(Hop) });
 const near = (a, b) => Math.abs(a - b) < 1e-9;
 
 const node = await openNode(sub ? "ts-tick-sub" : "ts-tick-pub", { multicastInterface: "127.0.0.1" });
@@ -17,9 +18,11 @@ const deadline = Date.now() + Number(secs ?? 10) * 1000;
 if (sub) {
     let good = 0, bad = 0;
     node.subscriber("tick", Tick, (t, m) => {
-        const angle = Number(t.seq) * 0.01, p = t.at.pose.position;
+        const angle = Number(t.seq) * 0.01, p = t.at.pose.position, h = t.hops;
+        const hops = h.length === 1 && h[0].name === `h${t.seq}` && h[0].pts.length === 1 &&
+            h[0].pts[0].x === Number(t.seq % 1000n) && h[0].pts[0].y === 0.5;
         if (m.publisherName === sender && t.when > 0n && near(t.value, Math.sin(angle)) &&
-            near(p.x, Math.cos(angle)) && near(p.y, Math.sin(angle))) good++;
+            near(p.x, Math.cos(angle)) && near(p.y, Math.sin(angle)) && hops) good++;
         else if (!bad++) console.log(`FAIL: tick ${t.seq} decoded wrong`);
     }, { reliable: true, keepLast: 64 });
     while (Date.now() < deadline && !bad && good < TICK_WANT) await new Promise((r) => setTimeout(r, 5));
@@ -35,7 +38,8 @@ while (Date.now() < deadline) {
     if (pub.matchCount > 0) {
         const angle = seq * 0.01;
         pub.send({ seq: BigInt(seq), when: BigInt(Date.now()) * 1000n, value: Math.sin(angle),
-                   at: { pose: { position: { x: Math.cos(angle), y: Math.sin(angle), z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } }, parent: "" } });
+                   at: { pose: { position: { x: Math.cos(angle), y: Math.sin(angle), z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } }, parent: "" },
+                   hops: [{ name: `h${seq}`, pts: [{ x: seq % 1000, y: 0.5 }] }] });
         seq++;
     }
     await new Promise((r) => setTimeout(r, 2));
