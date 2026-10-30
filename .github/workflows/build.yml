@@ -11,6 +11,7 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +42,7 @@ jobs:
         run: sudo ip link set lo multicast on
 
       - name: Test
+        timeout-minutes: 20
         run: ctest --test-dir build -C Release --output-on-failure --parallel 4
 
       # The CPM and FetchContent path: a consumer writes no anchor and defines nothing.
@@ -70,6 +72,7 @@ jobs:
   # on loopback, then the web package with the wasm inside.
   web:
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -86,6 +89,7 @@ jobs:
         run: sudo ip link set lo multicast on
 
       - name: Build and test
+        timeout-minutes: 10
         run: |
           cmake --preset web
           cmake --build --preset web

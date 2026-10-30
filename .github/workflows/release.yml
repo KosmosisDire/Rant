@@ -16,6 +16,7 @@ jobs:
   native:
     name: native ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -79,6 +80,7 @@ jobs:
   programs:
     name: programs ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -113,6 +115,7 @@ jobs:
   release:
     needs: [native, programs]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
       PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
