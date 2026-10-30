@@ -225,9 +225,18 @@ def std_types():
                       (T.Cylinder, 56), (T.Cone, 56), (T.Circle, 24), (T.Empty, 0),
                       (T.Transform2D, 56), (T.Twist2D, 24), (T.Wrench2D, 24),
                       (T.Plane2D, 32), (T.Segment2D, 32), (T.Capsule2D, 40)):
-        s = a.schema(cls)
-        check("%s mirror is the canonical type, %d bytes" % (cls.__name__, size),
-              s.hash == a.schema(cls.__name__).hash and len(s.encode(cls())) == size)
+        check("%s mirror is %d bytes" % (cls.__name__, size), len(a.schema(cls).encode(cls())) == size)
+    # every shipped mirror IS the library type it names, so none drifts unseen
+    for cls in vars(T).values():
+        std = getattr(cls, "__rant_std__", None)
+        if not std:
+            continue
+        try:
+            same = a.schema(cls).hash == a.schema(std).hash
+        except rant.SchemaError as e:
+            print("       %s: %s" % (std, str(e).splitlines()[0]))
+            same = False
+        check("the %s mirror IS that type" % std, same)
     check("Capsule and Cylinder never cross wire",
           not a.schema("Capsule").can_read(a.schema("Cylinder")))
     poly = a.schema(T.Polygon2D)

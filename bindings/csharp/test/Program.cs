@@ -765,10 +765,16 @@ static class Program
                 (typeof(Rant.Types.Segment2D), 32), (typeof(Rant.Types.Capsule2D), 40),
             };
             foreach (var (type, size) in shapes)
+                Check($"{type.Name} mirror is {size} bytes", SizeOf(a.Schema(type)) == size);
+            // every shipped mirror IS the library type it names, so none drifts unseen
+            foreach (var type in typeof(Rant.Types.Float3).Assembly.GetTypes())
             {
-                var mirror = a.Schema(type);
-                Check($"{type.Name} mirror is the canonical type, {size} bytes",
-                      mirror.Hash == a.Schema(type.Name).Hash && SizeOf(mirror) == size);
+                var attr = (RantSchemaAttribute)Attribute.GetCustomAttribute(type, typeof(RantSchemaAttribute));
+                if (type.Namespace != "Rant.Types" || attr == null) continue;
+                bool same;
+                try { same = a.Schema(type).Hash == a.Schema(attr.Name).Hash; }
+                catch (Exception e) { Console.WriteLine($"       {attr.Name}: {e.Message}"); same = false; }
+                Check($"the {attr.Name} mirror IS that type", same);
             }
             Check("Capsule and Cylinder never cross wire",
                   !a.Schema("Capsule").CanRead(a.Schema("Cylinder")));
