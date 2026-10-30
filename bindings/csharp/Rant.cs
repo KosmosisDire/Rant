@@ -1426,6 +1426,50 @@ namespace Rant
             /// <summary>The torque in N m, turning from +x toward +y.</summary>
             public double Torque;
         }
+        /// <summary>An acceleration: linear in m/s^2 and angular in rad/s^2.</summary>
+        [RantSchema("Accel")] public struct Accel
+        {
+            /// <summary>The linear acceleration in m/s^2.</summary>
+            public Double3 Linear;
+            /// <summary>The angular acceleration in rad/s^2 about each axis.</summary>
+            public Double3 Angular;
+        }
+        /// <summary>A 2D acceleration: linear in m/s^2 and angular in rad/s^2.</summary>
+        [RantSchema("Accel2D")] public struct Accel2D
+        {
+            /// <summary>The linear acceleration in m/s^2.</summary>
+            public Double2 Linear;
+            /// <summary>The angular acceleration in rad/s^2, turning from +x toward +y.</summary>
+            public double Angular;
+        }
+        /// <summary>A pose and how uncertain it is.</summary>
+        [RantSchema("PoseWithCovariance")] public struct PoseWithCovariance
+        {
+            /// <summary>The pose.</summary>
+            public Pose Pose;
+            /// <summary>The 6 by 6 covariance, indexed row then column, over x, y, z and then
+            /// the turn about x, y and z.</summary>
+            [RantTypeName("Covariance6")] [RantArray(6, 6)] public double[][] Covariance;
+        }
+        /// <summary>A twist and how uncertain it is.</summary>
+        [RantSchema("TwistWithCovariance")] public struct TwistWithCovariance
+        {
+            /// <summary>The twist.</summary>
+            public Twist Twist;
+            /// <summary>The 6 by 6 covariance, indexed row then column, over the linear part
+            /// and then the angular.</summary>
+            [RantTypeName("Covariance6")] [RantArray(6, 6)] public double[][] Covariance;
+        }
+        /// <summary>Where a moving body is and how fast it moves, as dead reckoning estimates it.</summary>
+        [RantSchema("Odometry")] public struct Odometry
+        {
+            /// <summary>The body's pose in the Parent frame.</summary>
+            public PoseWithCovariance Pose;
+            /// <summary>The body's velocity in its own frame.</summary>
+            public TwistWithCovariance Twist;
+            /// <summary>The frame Pose is measured in, "" when unstated.</summary>
+            [RantString(30)] public string Parent;
+        }
         /// <summary>A place on the earth.</summary>
         [RantSchema("GeoPoint")] public struct GeoPoint
         {
@@ -1485,6 +1529,14 @@ namespace Rant
             /// <summary>The other end.</summary>
             public Double3 B;
         }
+        /// <summary>A straight line from a point, endless in one direction.</summary>
+        [RantSchema("Ray")] public struct Ray
+        {
+            /// <summary>Where it starts.</summary>
+            public Double3 Origin;
+            /// <summary>The unit direction away from Origin.</summary>
+            public Double3 Direction;
+        }
         /// <summary>A sphere.</summary>
         [RantSchema("Sphere")] public struct Sphere
         {
@@ -1541,6 +1593,14 @@ namespace Rant
             /// <summary>The other end.</summary>
             public Double2 B;
         }
+        /// <summary>A 2D straight line from a point, endless in one direction.</summary>
+        [RantSchema("Ray2D")] public struct Ray2D
+        {
+            /// <summary>Where it starts.</summary>
+            public Double2 Origin;
+            /// <summary>The unit direction away from Origin.</summary>
+            public Double2 Direction;
+        }
         /// <summary>A circle.</summary>
         [RantSchema("Circle")] public struct Circle
         {
@@ -1562,6 +1622,60 @@ namespace Rant
         {
             /// <summary>The corners in order. The last joins the first.</summary>
             public Double2[] Points;
+        }
+        /// <summary>A flat polygon raised to a height, such as a zone of a floor.</summary>
+        [RantSchema("Prism")] public struct Prism
+        {
+            /// <summary>The frame the base lies in.</summary>
+            public Pose Pose;
+            /// <summary>The base, in the xy plane of Pose.</summary>
+            public Polygon2D Base;
+            /// <summary>The height along +z of Pose.</summary>
+            public double Height;
+        }
+        /// <summary>An open line through points in order.</summary>
+        [RantSchema("Polyline")] public struct Polyline
+        {
+            /// <summary>The points in order.</summary>
+            public Double3[] Points;
+        }
+        /// <summary>An open 2D line through points in order.</summary>
+        [RantSchema("Polyline2D")] public struct Polyline2D
+        {
+            /// <summary>The points in order.</summary>
+            public Double2[] Points;
+        }
+        /// <summary>A route of poses to follow in order.</summary>
+        [RantSchema("Path")] public struct Path
+        {
+            /// <summary>The poses in order.</summary>
+            public Pose[] Poses;
+        }
+        /// <summary>A route of 2D poses to follow in order.</summary>
+        [RantSchema("Path2D")] public struct Path2D
+        {
+            /// <summary>The poses in order.</summary>
+            public Pose2D[] Poses;
+        }
+        /// <summary>The mass of a rigid body and how it resists turning.</summary>
+        [RantSchema("Inertia")] public struct Inertia
+        {
+            /// <summary>The mass in kg.</summary>
+            public double Mass;
+            /// <summary>The center of mass in the body frame, in m.</summary>
+            public Double3 Center;
+            /// <summary>The inertia tensor in kg m^2 about the center of mass.</summary>
+            public double Ixx;
+            /// <summary>The inertia tensor in kg m^2.</summary>
+            public double Ixy;
+            /// <summary>The inertia tensor in kg m^2.</summary>
+            public double Ixz;
+            /// <summary>The inertia tensor in kg m^2.</summary>
+            public double Iyy;
+            /// <summary>The inertia tensor in kg m^2.</summary>
+            public double Iyz;
+            /// <summary>The inertia tensor in kg m^2.</summary>
+            public double Izz;
         }
         /// <summary>No data: zero bytes on the wire, for a signal alone.</summary>
         [RantSchema("Empty")] public struct Empty { }
@@ -1718,7 +1832,248 @@ namespace Rant
         [RantSchema("JointNames")] public struct JointNames
         {
             /// <summary>The joint names in order.</summary>
-            [RantString(32)] public string[] Name;
+            public string[] Name;
+        }
+        /// <summary>Where the joints should be at one time, in the order of their JointNames.</summary>
+        [RantSchema("JointTrajectoryPoint")] public struct JointTrajectoryPoint
+        {
+            /// <summary>Microseconds from the start of the trajectory.</summary>
+            [RantTypeName("Duration")] public long Time;
+            /// <summary>Each joint's position.</summary>
+            public double[] Position;
+            /// <summary>Each joint's velocity, or empty.</summary>
+            public double[] Velocity;
+            /// <summary>Each joint's acceleration, or empty.</summary>
+            public double[] Acceleration;
+            /// <summary>Each joint's force or torque, or empty.</summary>
+            public double[] Effort;
+        }
+        /// <summary>A motion of the joints over time.</summary>
+        [RantSchema("JointTrajectory")] public struct JointTrajectory
+        {
+            /// <summary>The points in time order.</summary>
+            public JointTrajectoryPoint[] Points;
+        }
+
+        /// <summary>One reading of an inertial measurement unit, in its own frame. A covariance
+        /// with -1 first means that value is not measured.</summary>
+        [RantSchema("Imu")] public struct Imu
+        {
+            /// <summary>The orientation.</summary>
+            public Quaternion Orientation;
+            /// <summary>The covariance of the turn about x, y and z, in rad^2.</summary>
+            [RantTypeName("Covariance3")] [RantArray(3, 3)] public double[][] OrientationCovariance;
+            /// <summary>The angular velocity in rad/s about each axis.</summary>
+            public Double3 AngularVelocity;
+            /// <summary>Its covariance.</summary>
+            [RantTypeName("Covariance3")] [RantArray(3, 3)] public double[][] AngularVelocityCovariance;
+            /// <summary>The linear acceleration in m/s^2, gravity included.</summary>
+            public Double3 LinearAcceleration;
+            /// <summary>Its covariance.</summary>
+            [RantTypeName("Covariance3")] [RantArray(3, 3)] public double[][] LinearAccelerationCovariance;
+        }
+        /// <summary>One sweep of a planar range sensor, its beams turning from +x toward +y.</summary>
+        [RantSchema("LaserScan")] public struct LaserScan
+        {
+            /// <summary>The first beam's angle in rad.</summary>
+            public float AngleMin;
+            /// <summary>The angle from one beam to the next in rad.</summary>
+            public float AngleStep;
+            /// <summary>The time from one beam to the next in s, 0 when unstated.</summary>
+            public float TimeStep;
+            /// <summary>A shorter range in m is not valid.</summary>
+            public float RangeMin;
+            /// <summary>A longer range in m is not valid.</summary>
+            public float RangeMax;
+            /// <summary>The ranges per beam, 0 reads as 1.</summary>
+            public byte Echoes;
+            /// <summary>The ranges in m, each beam's echoes together, +inf when nothing returns.</summary>
+            public float[] Ranges;
+            /// <summary>In the order of Ranges, or empty.</summary>
+            public float[] Intensities;
+        }
+        /// <summary>What a range sensor measures with.</summary>
+        [RantSchema("RangeKind")] public enum RangeKind : byte
+        {
+            /// <summary>Unstated.</summary>
+            Unknown = 0,
+            /// <summary>Sound.</summary>
+            Ultrasound = 1,
+            /// <summary>Infrared light.</summary>
+            Infrared = 2,
+            /// <summary>A laser.</summary>
+            Laser = 3,
+            /// <summary>Radio.</summary>
+            Radar = 4
+        }
+        /// <summary>One distance from a sensor with a single beam or cone along its +x.</summary>
+        [RantSchema("RangeReading")] public struct RangeReading
+        {
+            /// <summary>The distance in m, +inf when nothing is in range.</summary>
+            public double Distance;
+            /// <summary>The shortest distance it reads, in m.</summary>
+            public double Min;
+            /// <summary>The longest distance it reads, in m.</summary>
+            public double Max;
+            /// <summary>The full angle of the cone in rad.</summary>
+            public double FieldOfView;
+            /// <summary>What it measures with.</summary>
+            public RangeKind Kind;
+        }
+        /// <summary>The quality of a satellite position fix.</summary>
+        [RantSchema("GnssStatus")] public enum GnssStatus : byte
+        {
+            /// <summary>The position is not valid.</summary>
+            NoFix = 0,
+            /// <summary>Satellites alone.</summary>
+            Fix = 1,
+            /// <summary>Corrected by SBAS or DGPS.</summary>
+            Differential = 2,
+            /// <summary>RTK, ambiguities not yet resolved.</summary>
+            RtkFloat = 3,
+            /// <summary>RTK, centimeter level.</summary>
+            RtkFixed = 4
+        }
+        /// <summary>A position from satellite navigation.</summary>
+        [RantSchema("GnssFix")] public struct GnssFix
+        {
+            /// <summary>The position.</summary>
+            public GeoPoint Position;
+            /// <summary>The covariance east, north and up, in m^2.</summary>
+            [RantTypeName("Covariance3")] [RantArray(3, 3)] public double[][] Covariance;
+            /// <summary>The quality of the fix.</summary>
+            public GnssStatus Status;
+        }
+
+        /// <summary>The kind of number in a block of raw data, numbered as in PCL.</summary>
+        [RantSchema("ScalarKind")] public enum ScalarKind : byte
+        {
+            /// <summary>A signed 8 bit integer.</summary>
+            I8 = 1,
+            /// <summary>An unsigned 8 bit integer.</summary>
+            U8 = 2,
+            /// <summary>A signed 16 bit integer.</summary>
+            I16 = 3,
+            /// <summary>An unsigned 16 bit integer.</summary>
+            U16 = 4,
+            /// <summary>A signed 32 bit integer.</summary>
+            I32 = 5,
+            /// <summary>An unsigned 32 bit integer.</summary>
+            U32 = 6,
+            /// <summary>A 32 bit float.</summary>
+            F32 = 7,
+            /// <summary>A 64 bit float.</summary>
+            F64 = 8,
+            /// <summary>A signed 64 bit integer.</summary>
+            I64 = 9,
+            /// <summary>An unsigned 64 bit integer.</summary>
+            U64 = 10
+        }
+        /// <summary>One value that every point of a PointCloud holds.</summary>
+        [RantSchema("PointField")] public struct PointField
+        {
+            /// <summary>Such as x, y, z, intensity or rgb.</summary>
+            public string Name;
+            /// <summary>Bytes from the start of the point.</summary>
+            public uint Offset;
+            /// <summary>The kind of number.</summary>
+            public ScalarKind Kind;
+            /// <summary>The numbers in a row, 1 for a single number.</summary>
+            public uint Count;
+        }
+        /// <summary>Points with any values each, packed one point after another as in PCL.</summary>
+        [RantSchema("PointCloud")] public struct PointCloud
+        {
+            /// <summary>The frame the points are in.</summary>
+            public Transform Origin;
+            /// <summary>Points per row when the cloud is an image, 0 when it has no rows.</summary>
+            public uint Width;
+            /// <summary>What each point holds.</summary>
+            public PointField[] Fields;
+            /// <summary>Bytes from one point to the next.</summary>
+            public uint PointStep;
+            /// <summary>True when no point holds an invalid value.</summary>
+            public bool Dense;
+            /// <summary>The points, little endian.</summary>
+            public byte[] Data;
+        }
+        /// <summary>A surface of triangles.</summary>
+        [RantSchema("Mesh")] public struct Mesh
+        {
+            /// <summary>The corners, with x, y and z among their fields.</summary>
+            public PointCloud Vertices;
+            /// <summary>Three vertex indices each, counterclockwise seen from outside.</summary>
+            public uint[] Triangles;
+        }
+        /// <summary>One value that every cell of a Grid holds.</summary>
+        [RantSchema("GridField")] public struct GridField
+        {
+            /// <summary>Such as occupancy, height or cost.</summary>
+            public string Name;
+            /// <summary>The kind of number.</summary>
+            public ScalarKind Kind;
+            /// <summary>One number per cell, x fastest, then y, then z, little endian.</summary>
+            public byte[] Data;
+        }
+        /// <summary>A 2D or 3D grid of cells with any values each, such as a map.</summary>
+        [RantSchema("Grid")] public struct Grid
+        {
+            /// <summary>The frame, and the pose of the outer corner of cell 0.</summary>
+            public Transform Origin;
+            /// <summary>The edge of a cell in m.</summary>
+            public double Resolution;
+            /// <summary>Cells along x.</summary>
+            public uint CellsX;
+            /// <summary>Cells along y.</summary>
+            public uint CellsY;
+            /// <summary>Cells along z, 1 for a 2D grid.</summary>
+            public uint CellsZ;
+            /// <summary>What each cell holds.</summary>
+            public GridField[] Fields;
+        }
+        /// <summary>An array of numbers with any number of dimensions.</summary>
+        [RantSchema("Tensor")] public struct Tensor
+        {
+            /// <summary>The kind of number.</summary>
+            public ScalarKind Kind;
+            /// <summary>The size of each dimension, outermost first.</summary>
+            public uint[] Shape;
+            /// <summary>The numbers, last dimension fastest, little endian.</summary>
+            public byte[] Data;
+        }
+        /// <summary>A whole file.</summary>
+        [RantSchema("File")] public struct File
+        {
+            /// <summary>The file name with its extension.</summary>
+            public string Name;
+            /// <summary>Such as image/png, "" when unknown.</summary>
+            [RantString(64)] public string MediaType;
+            /// <summary>The file bytes.</summary>
+            public byte[] Data;
+        }
+        /// <summary>An object found in an image or a 2D frame.</summary>
+        [RantSchema("Detection2D")] public struct Detection2D
+        {
+            /// <summary>Where it is.</summary>
+            public OrientedBox2D Bounds;
+            /// <summary>What it is.</summary>
+            public string Label;
+            /// <summary>The confidence, 0 to 1.</summary>
+            public float Score;
+            /// <summary>The same id in every frame, 0 when not tracked.</summary>
+            public uint Track;
+        }
+        /// <summary>An object found in a 3D frame.</summary>
+        [RantSchema("Detection3D")] public struct Detection3D
+        {
+            /// <summary>Where it is.</summary>
+            public OrientedBox Bounds;
+            /// <summary>What it is.</summary>
+            public string Label;
+            /// <summary>The confidence, 0 to 1.</summary>
+            public float Score;
+            /// <summary>The same id in every frame, 0 when not tracked.</summary>
+            public uint Track;
         }
 
         /// <summary>The Timestamp clock: microseconds since the Unix epoch UTC, the units of a

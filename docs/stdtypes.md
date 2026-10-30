@@ -59,8 +59,16 @@ Twist       { linear: Double3, angular: Double3 }       -- m/s and rad/s
 Twist2D     { linear: Double2, angular: f64 }
 Wrench      { force: Double3, torque: Double3 }         -- N and N m, torque about the frame origin
 Wrench2D    { force: Double2, torque: f64 }
+Accel       { linear: Double3, angular: Double3 }       -- m/s^2 and rad/s^2
+Accel2D     { linear: Double2, angular: f64 }
 GeoPoint    { lat: f64, lon: f64, alt: f64 }            -- degrees, degrees, meters
-Matrix3x3 = f32[9]        Matrix4x4 = f32[16]           -- row major
+Matrix3x3   = f32[3][3]     Matrix4x4   = f32[4][4]     -- m[row][column]
+Covariance3 = f64[3][3]     Covariance6 = f64[6][6]
+PoseWithCovariance  { pose: Pose, covariance: Covariance6 }
+TwistWithCovariance { twist: Twist, covariance: Covariance6 }
+Odometry    { pose: PoseWithCovariance,                 -- in the parent frame
+              twist: TwistWithCovariance,               -- in the body's own frame
+              parent: string<30> }
 Timestamp = i64           Duration  = i64               -- microseconds
 Uuid      = u8[16]                                      -- RFC 4122 byte order
 ```
@@ -75,25 +83,33 @@ AlignedBox    { min: Double3, max: Double3 }            -- min <= max on every a
 OrientedBox   { pose: Pose, size: Double3 }             -- full edge lengths, centered on pose
 Plane         { position: Double3, normal: Double3 }    -- any point on the plane, unit normal
 Segment       { a: Double3, b: Double3 }
+Ray           { origin: Double3, direction: Double3 }   -- endless one way, unit direction
 Sphere        { center: Double3, radius: f64 }
 Capsule       { axis: Segment, radius: f64 }
 Cylinder      { axis: Segment, radius: f64 }            -- axis ends are the cap centers
 Cone          { base: Double3, tip: Double3, radius: f64 }   -- radius at the base
 Polygon       { points: Double3[] }                     -- closed, planar
+Prism         { pose: Pose, base: Polygon2D,            -- base in the xy plane of pose
+                height: f64 }                           -- along +z of pose
+Polyline      { points: Double3[] }                     -- open
+Path          { poses: Pose[] }                         -- a route to follow in order
 
 AlignedBox2D  { min: Double2, max: Double2 }
 OrientedBox2D { pose: Pose2D, size: Double2 }
 Plane2D       { position: Double2, normal: Double2 }    -- a line: any point on it, unit normal
 Segment2D     { a: Double2, b: Double2 }
+Ray2D         { origin: Double2, direction: Double2 }
 Circle        { center: Double2, radius: f64 }
 Capsule2D     { axis: Segment2D, radius: f64 }
 Polygon2D     { points: Double2[] }                     -- closed
+Polyline2D    { points: Double2[] }
+Path2D        { poses: Pose2D[] }
 ```
 
 A pixel region is an `AlignedBox2D` in image coordinates. A scene of mixed shapes is a
 struct of per kind arrays: `Scene { boxes: OrientedBox[], zones: Polygon[] }`.
 
-Sensing and robots:
+Sensing:
 
 ```
 DistortionModel = enum<u8> { None, BrownConrady, Fisheye, Rational }
@@ -101,8 +117,46 @@ CameraIntrinsics { width: u32, height: u32,             -- the resolution these 
                    fx: f64, fy: f64, cx: f64, cy: f64,
                    model: DistortionModel,
                    coeffs: f64[8] }                     -- zero filled past the model's count
+Imu { orientation: Quaternion, orientation_covariance: Covariance3,
+      angular_velocity: Double3, angular_velocity_covariance: Covariance3,
+      linear_acceleration: Double3, linear_acceleration_covariance: Covariance3 }
+LaserScan { angle_min: f32, angle_step: f32, time_step: f32,
+            range_min: f32, range_max: f32,
+            echoes: u8,                                 -- ranges per beam, 0 reads as 1
+            ranges: f32[], intensities: f32[] }
+RangeKind = enum<u8> { Unknown, Ultrasound, Infrared, Laser, Radar }
+RangeReading { distance: f64, min: f64, max: f64, field_of_view: f64, kind: RangeKind }
+GnssStatus = enum<u8> { NoFix, Fix, Differential, RtkFloat, RtkFixed }
+GnssFix { position: GeoPoint, covariance: Covariance3, status: GnssStatus }
+Detection2D { bounds: OrientedBox2D, label: string, score: f32, track: u32 }
+Detection3D { bounds: OrientedBox, label: string, score: f32, track: u32 }
+```
+
+Robots:
+
+```
 JointState { position: f64[], velocity: f64[], effort: f64[] }
-JointNames { name: string<32>[] }
+JointNames { name: string[] }
+JointTrajectoryPoint { time: Duration,                  -- from the start
+                       position: f64[], velocity: f64[], acceleration: f64[], effort: f64[] }
+JointTrajectory { points: JointTrajectoryPoint[] }
+Inertia { mass: f64, center: Double3,                   -- kg, and m in the body frame
+          ixx: f64, ixy: f64, ixz: f64, iyy: f64, iyz: f64, izz: f64 }   -- kg m^2
+```
+
+Point clouds, meshes, grids and raw data:
+
+```
+ScalarKind = enum<u8> { I8 = 1, U8, I16, U16, I32, U32, F32, F64, I64, U64 }
+PointField { name: string, offset: u32, kind: ScalarKind, count: u32 }
+PointCloud { origin: Transform, width: u32, fields: PointField[],
+             point_step: u32, dense: bool, data: u8[] }
+Mesh       { vertices: PointCloud, triangles: u32[] }
+GridField  { name: string, kind: ScalarKind, data: u8[] }
+Grid       { origin: Transform, resolution: f64,
+             cells_x: u32, cells_y: u32, cells_z: u32, fields: GridField[] }
+Tensor     { kind: ScalarKind, shape: u32[], data: u8[] }
+File       { name: string, media_type: string<64>, data: u8[] }
 ```
 
 Presentation and other:
@@ -160,6 +214,31 @@ signal WebRTC through Rant itself models it as the interaction it is: a function
 source (offer text in, answer text out) with SDP and candidate lines carried as the opaque
 strings every signaling stack passes verbatim.
 
+`PointCloud` packs its points one after another in the PCL layout, so a cloud converts to
+and from PCL and ROS without touching each point.
+
+- Each `PointField` says where its numbers sit: `offset` bytes from the start of a point,
+  `count` numbers of `kind`.
+- `point_step` is the bytes from one point to the next, and `data` holds them little endian.
+- `width` is the points per row of a cloud taken from a depth image, and 0 for a cloud with
+  no rows.
+- `dense` says no point holds an invalid value such as NaN.
+
+`Mesh` keeps its vertices as a `PointCloud`, so a vertex carries x, y and z and any other
+value, such as a normal or a color. Each three `triangles` are vertex indices,
+counterclockwise seen from outside.
+
+`Grid` is a 2D or 3D map of cells, such as an occupancy map or a voxel map.
+
+- `origin` is the pose of the outer corner of cell 0, and the cells run along its +x, +y
+  and +z. `cells_z` is 1 for a 2D grid.
+- Each `GridField` holds one number per cell in its own block, x fastest, then y, then z.
+- A map that grows sends a new Grid with a new origin and size.
+
+A covariance is indexed row then column. `Covariance6` runs over x, y and z, then the turn
+about x, y and z. An `Imu` covariance with -1 in its first cell means that value is not
+measured.
+
 ## Conventions
 
 These are pinned, not suggestions. A number crossing Rant in one of these types means
@@ -182,7 +261,7 @@ this:
 - Quaternions are stored x, y, z, w, in that order.
 - `rant_quaternion_mul(a, b)` is the rotation a followed by b, the Hamilton product b times
   a. `rant_color_from_hex` and `rant_color_to_hex` use 0xRRGGBBAA, the CSS order.
-- Matrices are row major `f32`.
+- Matrices and covariances are indexed row then column, `m[row][column]`.
 - Color is RGBA bytes in sRGB, straight alpha.
 - Uuid holds the 16 bytes in RFC 4122 order, not a platform GUID's mixed endian layout.
   The C# binding converts explicitly rather than calling `Guid.ToByteArray`.
@@ -206,11 +285,11 @@ this:
   and a C `frameId` meet with no attribute, and a path such as `"frameId"` given to
   `rant_get_f32` finds `frame_id`.
 
-Deliberately absent for now: meshes, polylines, civil date and time, unit annotated value types (SI by
+Deliberately absent for now: civil date and time, unit annotated value types (SI by
 convention today, schema level unit annotations are the future mechanism), IP addresses,
-the rest of the sensor tier (PointCloud, Imu, LaserScan), a TF tree, and WebRTC
-session signaling (SDP and ICE ride as opaque strings through an app level function, see
-the media section).
+sparse grids, magnetometer, battery and joystick readings, a TF tree, and WebRTC session
+signaling (SDP and ICE ride as opaque strings through an app level function, see the media
+section).
 
 ## Using them from C
 
@@ -234,9 +313,10 @@ time access through `rant_get_f64(msg, s, "at.pose.position.x")` works exactly a
 for any other nested struct.
 
 A type only gets a C mirror when its packed wire size already equals its natural C size.
-`Image`, `VideoFrame`, `ExternalVideoStream`, `CameraIntrinsics`, `Polygon`, `Polygon2D`
-and `Empty` have none: they carry a variable member, would gain padding, or are empty. The other bindings reflect field by field, so
-they mirror every type either way.
+`ExternalVideoStream`, `CameraIntrinsics`, `RangeReading`, `GnssFix`, `Empty` and every type
+with a variable member, such as `Image`, `Polygon` or `PointCloud`, have none: they would
+gain padding, carry a variable member, or are empty. The other bindings reflect field by
+field, so they mirror every type either way.
 
 The operations are deliberately thin: construction, add, sub, scale, dot, cross, length,
 normalize, quaternion multiply, conjugate and rotate, `Color` hex conversion, and

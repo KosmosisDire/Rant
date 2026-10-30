@@ -761,6 +761,10 @@ static class Program
                 (typeof(Rant.Types.Transform2D), 56), (typeof(Rant.Types.Twist2D), 24),
                 (typeof(Rant.Types.Wrench2D), 24), (typeof(Rant.Types.Plane2D), 32),
                 (typeof(Rant.Types.Segment2D), 32), (typeof(Rant.Types.Capsule2D), 40),
+                (typeof(Rant.Types.Accel), 48), (typeof(Rant.Types.Accel2D), 24),
+                (typeof(Rant.Types.PoseWithCovariance), 344), (typeof(Rant.Types.TwistWithCovariance), 336),
+                (typeof(Rant.Types.Odometry), 712), (typeof(Rant.Types.Imu), 296),
+                (typeof(Rant.Types.Inertia), 80), (typeof(Rant.Types.Ray), 48), (typeof(Rant.Types.Ray2D), 32),
             };
             foreach (var (type, size) in shapes)
                 Check($"{type.Name} mirror is {size} bytes", SizeOf(a.Schema(type)) == size);
@@ -782,6 +786,29 @@ static class Program
                 new Rant.Types.Double2 { X = 1, Y = 2 } } };
             var pb = (Rant.Types.Polygon2D)poly.Decode(poly.Encode(p));
             Check("a Polygon2D round-trips whole", pb.Points != null && pb.Points.Length == 3 && pb.Points[2].Y == 2);
+            var cloud = a.Schema(typeof(Rant.Types.PointCloud));
+            var cb = (Rant.Types.PointCloud)cloud.Decode(cloud.Encode(new Rant.Types.PointCloud {
+                Width = 2, PointStep = 8, Dense = true, Data = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 },
+                Fields = new[] {
+                    new Rant.Types.PointField { Name = "x", Offset = 0, Kind = Rant.Types.ScalarKind.F32, Count = 1 },
+                    new Rant.Types.PointField { Name = "rgb", Offset = 4, Kind = Rant.Types.ScalarKind.U8, Count = 3 } } }));
+            Check("a PointCloud round-trips whole",
+                  cb.Width == 2 && cb.Fields.Length == 2 && cb.Fields[1].Name == "rgb"
+                  && cb.Fields[1].Kind == Rant.Types.ScalarKind.U8 && cb.Dense && cb.Data.Length == 16 && cb.Data[15] == 16);
+            var grid = a.Schema(typeof(Rant.Types.Grid));
+            var gb = (Rant.Types.Grid)grid.Decode(grid.Encode(new Rant.Types.Grid {
+                Resolution = 0.05, CellsX = 2, CellsY = 3, CellsZ = 1,
+                Fields = new[] { new Rant.Types.GridField { Name = "occupancy", Kind = Rant.Types.ScalarKind.I8, Data = new byte[6] } } }));
+            Check("a Grid round-trips whole",
+                  gb.CellsY == 3 && gb.Fields.Length == 1 && gb.Fields[0].Name == "occupancy"
+                  && gb.Fields[0].Kind == Rant.Types.ScalarKind.I8 && gb.Fields[0].Data.Length == 6);
+            var odo = a.Schema(typeof(Rant.Types.Odometry));
+            var o = new Rant.Types.Odometry { Parent = "odom" };
+            o.Pose.Covariance = new double[6][];
+            for (int r = 0; r < 6; r++) o.Pose.Covariance[r] = new double[6];
+            o.Pose.Covariance[5][4] = 7.0;
+            var ob = (Rant.Types.Odometry)odo.Decode(odo.Encode(o));
+            Check("an Odometry round-trips whole", ob.Pose.Covariance[5][4] == 7.0 && ob.Parent == "odom");
             var empty = a.Schema(typeof(Rant.Types.Empty));
             Check("an Empty encodes to zero bytes and decodes back",
                   empty.Encode(new Rant.Types.Empty()).Length == 0
@@ -1102,14 +1129,16 @@ static class Program
         {
             ("Timestamp", 1234567L), ("Duration", -5L),
             ("Uuid", new byte[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }),
-            ("Matrix3x3", new float[] { 0, 1, 2, 3, 4, 5, 6, 7, 8 }),
-            ("Matrix4x4", new float[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }),
+            ("Matrix3x3", new[] { new float[] { 0, 1, 2 }, new float[] { 3, 4, 5 }, new float[] { 6, 7, 8 } }),
+            ("Matrix4x4", new[] { new float[] { 0, 1, 2, 3 }, new float[] { 4, 5, 6, 7 },
+                                  new float[] { 8, 9, 10, 11 }, new float[] { 12, 13, 14, 15 } }),
             ("Uri", "rtsp://host/stream"),
         };
         foreach (var (name, v) in aliases)
         {
             var s = node.Schema(name);
             object back = s.Decode(s.Encode(v));
+            if (back is List<object> rows) back = rows.ToArray();   /* an untyped nested array decodes as rows */
             Check($"round-trip {name} root -> {back}", System.Collections.StructuralComparisons
                   .StructuralEqualityComparer.Equals(back, v));
         }

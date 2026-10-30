@@ -454,41 +454,74 @@ pub const RANT_STD_TWIST: RantStdType = 16;
 pub const RANT_STD_TWIST2D: RantStdType = 17;
 pub const RANT_STD_WRENCH: RantStdType = 18;
 pub const RANT_STD_WRENCH2D: RantStdType = 19;
-pub const RANT_STD_GEOPOINT: RantStdType = 20;
-pub const RANT_STD_ALIGNEDBOX: RantStdType = 21;
-pub const RANT_STD_ALIGNEDBOX2D: RantStdType = 22;
-pub const RANT_STD_ORIENTEDBOX: RantStdType = 23;
-pub const RANT_STD_ORIENTEDBOX2D: RantStdType = 24;
-pub const RANT_STD_PLANE: RantStdType = 25;
-pub const RANT_STD_SEGMENT: RantStdType = 26;
-pub const RANT_STD_SPHERE: RantStdType = 27;
-pub const RANT_STD_CAPSULE: RantStdType = 28;
-pub const RANT_STD_CYLINDER: RantStdType = 29;
-pub const RANT_STD_CONE: RantStdType = 30;
-pub const RANT_STD_POLYGON: RantStdType = 31;
-pub const RANT_STD_PLANE2D: RantStdType = 32;
-pub const RANT_STD_SEGMENT2D: RantStdType = 33;
-pub const RANT_STD_CIRCLE: RantStdType = 34;
-pub const RANT_STD_CAPSULE2D: RantStdType = 35;
-pub const RANT_STD_POLYGON2D: RantStdType = 36;
-pub const RANT_STD_EMPTY: RantStdType = 37;
-pub const RANT_STD_UUID: RantStdType = 38;
-pub const RANT_STD_TIMESTAMP: RantStdType = 39;
-pub const RANT_STD_DURATION: RantStdType = 40;
-pub const RANT_STD_MATRIX3X3: RantStdType = 41;
-pub const RANT_STD_MATRIX4X4: RantStdType = 42;
-pub const RANT_STD_URI: RantStdType = 43;
-pub const RANT_STD_IMAGEFORMAT: RantStdType = 44;
-pub const RANT_STD_IMAGE: RantStdType = 45;
-pub const RANT_STD_VIDEOCODEC: RantStdType = 46;
-pub const RANT_STD_VIDEOFRAME: RantStdType = 47;
-pub const RANT_STD_VIDEOSTREAMKIND: RantStdType = 48;
-pub const RANT_STD_EXTERNALVIDEOSTREAM: RantStdType = 49;
-pub const RANT_STD_DISTORTIONMODEL: RantStdType = 50;
-pub const RANT_STD_CAMERAINTRINSICS: RantStdType = 51;
-pub const RANT_STD_JOINTSTATE: RantStdType = 52;
-pub const RANT_STD_JOINTNAMES: RantStdType = 53;
-pub const RANT_STD_COUNT: RantStdType = 54;
+pub const RANT_STD_ACCEL: RantStdType = 20;
+pub const RANT_STD_ACCEL2D: RantStdType = 21;
+pub const RANT_STD_POSEWITHCOVARIANCE: RantStdType = 22;
+pub const RANT_STD_TWISTWITHCOVARIANCE: RantStdType = 23;
+pub const RANT_STD_ODOMETRY: RantStdType = 24;
+pub const RANT_STD_GEOPOINT: RantStdType = 25;
+pub const RANT_STD_ALIGNEDBOX: RantStdType = 26;
+pub const RANT_STD_ALIGNEDBOX2D: RantStdType = 27;
+pub const RANT_STD_ORIENTEDBOX: RantStdType = 28;
+pub const RANT_STD_ORIENTEDBOX2D: RantStdType = 29;
+pub const RANT_STD_PLANE: RantStdType = 30;
+pub const RANT_STD_SEGMENT: RantStdType = 31;
+pub const RANT_STD_RAY: RantStdType = 32;
+pub const RANT_STD_SPHERE: RantStdType = 33;
+pub const RANT_STD_CAPSULE: RantStdType = 34;
+pub const RANT_STD_CYLINDER: RantStdType = 35;
+pub const RANT_STD_CONE: RantStdType = 36;
+pub const RANT_STD_POLYGON: RantStdType = 37;
+pub const RANT_STD_PLANE2D: RantStdType = 38;
+pub const RANT_STD_SEGMENT2D: RantStdType = 39;
+pub const RANT_STD_RAY2D: RantStdType = 40;
+pub const RANT_STD_CIRCLE: RantStdType = 41;
+pub const RANT_STD_CAPSULE2D: RantStdType = 42;
+pub const RANT_STD_POLYGON2D: RantStdType = 43;
+pub const RANT_STD_PRISM: RantStdType = 44;
+pub const RANT_STD_POLYLINE: RantStdType = 45;
+pub const RANT_STD_POLYLINE2D: RantStdType = 46;
+pub const RANT_STD_PATH: RantStdType = 47;
+pub const RANT_STD_PATH2D: RantStdType = 48;
+pub const RANT_STD_INERTIA: RantStdType = 49;
+pub const RANT_STD_EMPTY: RantStdType = 50;
+pub const RANT_STD_UUID: RantStdType = 51;
+pub const RANT_STD_TIMESTAMP: RantStdType = 52;
+pub const RANT_STD_DURATION: RantStdType = 53;
+pub const RANT_STD_MATRIX3X3: RantStdType = 54;
+pub const RANT_STD_MATRIX4X4: RantStdType = 55;
+pub const RANT_STD_COVARIANCE3: RantStdType = 56;
+pub const RANT_STD_COVARIANCE6: RantStdType = 57;
+pub const RANT_STD_URI: RantStdType = 58;
+pub const RANT_STD_IMAGEFORMAT: RantStdType = 59;
+pub const RANT_STD_IMAGE: RantStdType = 60;
+pub const RANT_STD_VIDEOCODEC: RantStdType = 61;
+pub const RANT_STD_VIDEOFRAME: RantStdType = 62;
+pub const RANT_STD_VIDEOSTREAMKIND: RantStdType = 63;
+pub const RANT_STD_EXTERNALVIDEOSTREAM: RantStdType = 64;
+pub const RANT_STD_DISTORTIONMODEL: RantStdType = 65;
+pub const RANT_STD_CAMERAINTRINSICS: RantStdType = 66;
+pub const RANT_STD_JOINTSTATE: RantStdType = 67;
+pub const RANT_STD_JOINTNAMES: RantStdType = 68;
+pub const RANT_STD_JOINTTRAJECTORYPOINT: RantStdType = 69;
+pub const RANT_STD_JOINTTRAJECTORY: RantStdType = 70;
+pub const RANT_STD_IMU: RantStdType = 71;
+pub const RANT_STD_LASERSCAN: RantStdType = 72;
+pub const RANT_STD_RANGEKIND: RantStdType = 73;
+pub const RANT_STD_RANGEREADING: RantStdType = 74;
+pub const RANT_STD_GNSSSTATUS: RantStdType = 75;
+pub const RANT_STD_GNSSFIX: RantStdType = 76;
+pub const RANT_STD_SCALARKIND: RantStdType = 77;
+pub const RANT_STD_POINTFIELD: RantStdType = 78;
+pub const RANT_STD_POINTCLOUD: RantStdType = 79;
+pub const RANT_STD_MESH: RantStdType = 80;
+pub const RANT_STD_GRIDFIELD: RantStdType = 81;
+pub const RANT_STD_GRID: RantStdType = 82;
+pub const RANT_STD_TENSOR: RantStdType = 83;
+pub const RANT_STD_FILE: RantStdType = 84;
+pub const RANT_STD_DETECTION2D: RantStdType = 85;
+pub const RANT_STD_DETECTION3D: RantStdType = 86;
+pub const RANT_STD_COUNT: RantStdType = 87;
 pub type RantStdType = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
@@ -621,6 +654,18 @@ pub struct RantWrench2D {
 }
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
+pub struct RantAccel {
+    pub linear: RantDouble3,
+    pub angular: RantDouble3,
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct RantAccel2D {
+    pub linear: RantDouble2,
+    pub angular: f64,
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
 pub struct RantGeoPoint {
     pub lat: f64,
     pub lon: f64,
@@ -664,6 +709,12 @@ pub struct RantSegment {
 }
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
+pub struct RantRay {
+    pub origin: RantDouble3,
+    pub direction: RantDouble3,
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
 pub struct RantSphere {
     pub center: RantDouble3,
     pub radius: f64,
@@ -701,6 +752,12 @@ pub struct RantSegment2D {
 }
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
+pub struct RantRay2D {
+    pub origin: RantDouble2,
+    pub direction: RantDouble2,
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
 pub struct RantCircle {
     pub center: RantDouble2,
     pub radius: f64,
@@ -721,12 +778,64 @@ pub type RantDuration = i64;
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct RantMatrix3x3 {
-    pub m: [f32; 9usize],
+    pub m: [[f32; 3usize]; 3usize],
 }
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct RantMatrix4x4 {
-    pub m: [f32; 16usize],
+    pub m: [[f32; 4usize]; 4usize],
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct RantCovariance3 {
+    pub m: [[f64; 3usize]; 3usize],
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct RantCovariance6 {
+    pub m: [[f64; 6usize]; 6usize],
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct RantPoseWithCovariance {
+    pub pose: RantPose,
+    pub covariance: RantCovariance6,
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct RantTwistWithCovariance {
+    pub twist: RantTwist,
+    pub covariance: RantCovariance6,
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct RantOdometry {
+    pub pose: RantPoseWithCovariance,
+    pub twist: RantTwistWithCovariance,
+    pub parent_len: u16,
+    pub parent: [::std::os::raw::c_char; 30usize],
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct RantImu {
+    pub orientation: RantQuaternion,
+    pub orientation_covariance: RantCovariance3,
+    pub angular_velocity: RantDouble3,
+    pub angular_velocity_covariance: RantCovariance3,
+    pub linear_acceleration: RantDouble3,
+    pub linear_acceleration_covariance: RantCovariance3,
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct RantInertia {
+    pub mass: f64,
+    pub center: RantDouble3,
+    pub ixx: f64,
+    pub ixy: f64,
+    pub ixz: f64,
+    pub iyy: f64,
+    pub iyz: f64,
+    pub izz: f64,
 }
 pub const RANT_IMAGE_MONO8: RantImageFormat = 0;
 pub const RANT_IMAGE_MONO16: RantImageFormat = 1;
@@ -758,6 +867,29 @@ pub const RANT_STREAM_RTP: RantStreamKind = 4;
 pub const RANT_STREAM_HTTP_MJPEG: RantStreamKind = 5;
 pub const RANT_STREAM_OTHER: RantStreamKind = 15;
 pub type RantStreamKind = ::std::os::raw::c_uint;
+pub const RANT_SCALAR_I8: RantScalarKind = 1;
+pub const RANT_SCALAR_U8: RantScalarKind = 2;
+pub const RANT_SCALAR_I16: RantScalarKind = 3;
+pub const RANT_SCALAR_U16: RantScalarKind = 4;
+pub const RANT_SCALAR_I32: RantScalarKind = 5;
+pub const RANT_SCALAR_U32: RantScalarKind = 6;
+pub const RANT_SCALAR_F32: RantScalarKind = 7;
+pub const RANT_SCALAR_F64: RantScalarKind = 8;
+pub const RANT_SCALAR_I64: RantScalarKind = 9;
+pub const RANT_SCALAR_U64: RantScalarKind = 10;
+pub type RantScalarKind = ::std::os::raw::c_uint;
+pub const RANT_RANGE_UNKNOWN: RantRangeKind = 0;
+pub const RANT_RANGE_ULTRASOUND: RantRangeKind = 1;
+pub const RANT_RANGE_INFRARED: RantRangeKind = 2;
+pub const RANT_RANGE_LASER: RantRangeKind = 3;
+pub const RANT_RANGE_RADAR: RantRangeKind = 4;
+pub type RantRangeKind = ::std::os::raw::c_uint;
+pub const RANT_GNSS_NO_FIX: RantGnssStatus = 0;
+pub const RANT_GNSS_FIX: RantGnssStatus = 1;
+pub const RANT_GNSS_DIFFERENTIAL: RantGnssStatus = 2;
+pub const RANT_GNSS_RTK_FLOAT: RantGnssStatus = 3;
+pub const RANT_GNSS_RTK_FIXED: RantGnssStatus = 4;
+pub type RantGnssStatus = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct RantIter {

@@ -293,6 +293,25 @@ await check("any type nests as an array element", async () => {
     assert.deepEqual(words.decode(words.encode([["x", "yz"], ["w"]])), [["x", "yz"], ["w"]]);
 });
 
+await check("a PointCloud, a Grid and an Odometry round trip by their standard names", async () => {
+    const cloud = a.schema(types.PointCloud);
+    const pc = {
+        origin: { pose: { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } }, parent: "lidar" },
+        width: 2, point_step: 8, dense: true, data: new Uint8Array(16).fill(0x5a),
+        fields: [{ name: "x", offset: 0, kind: "F32", count: 1 }, { name: "rgb", offset: 4, kind: "U8", count: 3 }],
+    };
+    assert.deepEqual(cloud.decode(cloud.encode(pc)), pc);
+    const grid = a.schema(types.Grid);
+    const g = grid.decode(grid.encode({ resolution: 0.05, cells_x: 2, cells_y: 3, cells_z: 1,
+        fields: [{ name: "occupancy", kind: "I8", data: new Uint8Array(6) }] }));
+    assert.deepEqual([g.cells_y, g.fields[0].name, g.fields[0].kind, g.fields[0].data.length], [3, "occupancy", "I8", 6]);
+    const odom = a.schema(types.Odometry);
+    const cov = Array.from({ length: 6 }, () => new Float64Array(6));
+    cov[5][4] = 7;
+    const o = odom.decode(odom.encode({ pose: { covariance: cov }, parent: "odom" }));
+    assert.deepEqual([o.pose.covariance[5][4], o.parent], [7, "odom"]);
+});
+
 const errors = events.filter((e) => e.kind === "error");
 await check("no errors were reported", async () => assert.deepEqual(errors.map((e) => e.text), []));
 

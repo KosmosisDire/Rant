@@ -110,6 +110,21 @@ export type ImageFormat = "Mono8" | "Mono16" | "Rgb8" | "Rgba8" | "Bgr8" | "Yuyv
 export type VideoCodec = "Unknown" | "Mjpeg" | "H264" | "H265" | "Av1";
 export type VideoStreamKind = "Rtsp" | "WebrtcWhep" | "Hls" | "Srt" | "Rtp" | "HttpMjpeg" | "Other";
 export type DistortionModel = "None" | "BrownConrady" | "Fisheye" | "Rational";
+export type RangeKind = "Unknown" | "Ultrasound" | "Infrared" | "Laser" | "Radar";
+export type GnssStatus = "NoFix" | "Fix" | "Differential" | "RtkFloat" | "RtkFixed";
+export type ScalarKind = "I8" | "U8" | "I16" | "U16" | "I32" | "U32" | "F32" | "F64" | "I64" | "U64";
+export interface PointFieldValue { name: string; offset: number; kind: ScalarKind; count: number }
+/* The PCL layout: point_step bytes per point, little endian. width 0 when it has no rows. */
+export interface PointCloudValue {
+    origin: { pose: PoseT; parent: string }; width: number; fields: PointFieldValue[];
+    point_step: number; dense: boolean; data: Uint8Array;
+}
+export interface GridFieldValue { name: string; kind: ScalarKind; data: Uint8Array }
+/* origin is the outer corner of cell 0, each field one number per cell, x fastest, then y, then z. */
+export interface GridValue {
+    origin: { pose: PoseT; parent: string }; resolution: number;
+    cells_x: number; cells_y: number; cells_z: number; fields: GridFieldValue[];
+}
 export interface VideoFrameValue {
     codec: VideoCodec;
     width: number; height: number; keyframe: boolean; pts: bigint; data: Uint8Array;
@@ -130,6 +145,10 @@ type Seg = { a: D3; b: D3 };
 type Seg2 = { a: D2; b: D2 };
 type PoseT = { position: D3; orientation: D4 };
 type Pose2T = { position: D2; angle: number };
+type PoseCov = { pose: PoseT; covariance: Float64Array[] };
+type TwistCov = { twist: { linear: D3; angular: D3 }; covariance: Float64Array[] };
+type TrajectoryPoint = { time: bigint; position: Float64Array; velocity: Float64Array;
+                         acceleration: Float64Array; effort: Float64Array };
 
 /* The standard types of docs/stdtypes.md, by name. */
 export const types = {
@@ -142,11 +161,17 @@ export const types = {
     Transform2D: named<{ pose: Pose2T; parent: string }>("Transform2D"),
     Twist: named<{ linear: D3; angular: D3 }>("Twist"), Twist2D: named<{ linear: D2; angular: number }>("Twist2D"),
     Wrench: named<{ force: D3; torque: D3 }>("Wrench"), Wrench2D: named<{ force: D2; torque: number }>("Wrench2D"),
+    Accel: named<{ linear: D3; angular: D3 }>("Accel"), Accel2D: named<{ linear: D2; angular: number }>("Accel2D"),
+    PoseWithCovariance: named<PoseCov>("PoseWithCovariance"),
+    TwistWithCovariance: named<TwistCov>("TwistWithCovariance"),
+    Odometry: named<{ pose: PoseCov; twist: TwistCov; parent: string }>("Odometry"),
     GeoPoint: named<{ lat: number; lon: number; alt: number }>("GeoPoint"),
-    Matrix3x3: named<Float32Array>("Matrix3x3"), Matrix4x4: named<Float32Array>("Matrix4x4"),
+    Matrix3x3: named<Float32Array[]>("Matrix3x3"), Matrix4x4: named<Float32Array[]>("Matrix4x4"),
+    Covariance3: named<Float64Array[]>("Covariance3"), Covariance6: named<Float64Array[]>("Covariance6"),
     Timestamp: named<bigint>("Timestamp"), Duration: named<bigint>("Duration"), Uuid: named<Uint8Array>("Uuid"),
     AlignedBox: named<{ min: D3; max: D3 }>("AlignedBox"), OrientedBox: named<{ pose: PoseT; size: D3 }>("OrientedBox"),
     Plane: named<{ position: D3; normal: D3 }>("Plane"), Segment: named<Seg>("Segment"),
+    Ray: named<{ origin: D3; direction: D3 }>("Ray"), Ray2D: named<{ origin: D2; direction: D2 }>("Ray2D"),
     Sphere: named<{ center: D3; radius: number }>("Sphere"), Capsule: named<{ axis: Seg; radius: number }>("Capsule"),
     Cylinder: named<{ axis: Seg; radius: number }>("Cylinder"), Cone: named<{ base: D3; tip: D3; radius: number }>("Cone"),
     Polygon: named<{ points: D3[] }>("Polygon"),
@@ -154,11 +179,37 @@ export const types = {
     Plane2D: named<{ position: D2; normal: D2 }>("Plane2D"), Segment2D: named<Seg2>("Segment2D"),
     Circle: named<{ center: D2; radius: number }>("Circle"), Capsule2D: named<{ axis: Seg2; radius: number }>("Capsule2D"),
     Polygon2D: named<{ points: D2[] }>("Polygon2D"),
+    Prism: named<{ pose: PoseT; base: { points: D2[] }; height: number }>("Prism"),
+    Polyline: named<{ points: D3[] }>("Polyline"), Polyline2D: named<{ points: D2[] }>("Polyline2D"),
+    Path: named<{ poses: PoseT[] }>("Path"), Path2D: named<{ poses: Pose2T[] }>("Path2D"),
+    Inertia: named<{ mass: number; center: D3; ixx: number; ixy: number; ixz: number;
+                     iyy: number; iyz: number; izz: number }>("Inertia"),
     DistortionModel: named<DistortionModel>("DistortionModel"),
     CameraIntrinsics: named<{ width: number; height: number; fx: number; fy: number; cx: number; cy: number;
                               model: DistortionModel; coeffs: Float64Array }>("CameraIntrinsics"),
     JointState: named<{ position: Float64Array; velocity: Float64Array; effort: Float64Array }>("JointState"),
     JointNames: named<{ name: string[] }>("JointNames"),
+    JointTrajectoryPoint: named<TrajectoryPoint>("JointTrajectoryPoint"),
+    JointTrajectory: named<{ points: TrajectoryPoint[] }>("JointTrajectory"),
+    Imu: named<{ orientation: D4; orientation_covariance: Float64Array[];
+                 angular_velocity: D3; angular_velocity_covariance: Float64Array[];
+                 linear_acceleration: D3; linear_acceleration_covariance: Float64Array[] }>("Imu"),
+    LaserScan: named<{ angle_min: number; angle_step: number; time_step: number; range_min: number;
+                       range_max: number; echoes: number; ranges: Float32Array; intensities: Float32Array }>("LaserScan"),
+    RangeKind: named<RangeKind>("RangeKind"),
+    RangeReading: named<{ distance: number; min: number; max: number; field_of_view: number;
+                          kind: RangeKind }>("RangeReading"),
+    GnssStatus: named<GnssStatus>("GnssStatus"),
+    GnssFix: named<{ position: { lat: number; lon: number; alt: number }; covariance: Float64Array[];
+                     status: GnssStatus }>("GnssFix"),
+    ScalarKind: named<ScalarKind>("ScalarKind"),
+    PointField: named<PointFieldValue>("PointField"), PointCloud: named<PointCloudValue>("PointCloud"),
+    Mesh: named<{ vertices: PointCloudValue; triangles: Uint32Array }>("Mesh"),
+    GridField: named<GridFieldValue>("GridField"), Grid: named<GridValue>("Grid"),
+    Tensor: named<{ kind: ScalarKind; shape: Uint32Array; data: Uint8Array }>("Tensor"),
+    File: named<{ name: string; media_type: string; data: Uint8Array }>("File"),
+    Detection2D: named<{ bounds: { pose: Pose2T; size: D2 }; label: string; score: number; track: number }>("Detection2D"),
+    Detection3D: named<{ bounds: { pose: PoseT; size: D3 }; label: string; score: number; track: number }>("Detection3D"),
     Color: named<{ r: number; g: number; b: number; a: number }>("Color"),
     Uri: named<string>("Uri"), Empty: named<Record<string, never>>("Empty"),
     ImageFormat: named<ImageFormat>("ImageFormat"), VideoCodec: named<VideoCodec>("VideoCodec"),

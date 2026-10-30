@@ -9,9 +9,15 @@ from . import _StdAlias, _std, _String, u8, u32, i32, i64, f32, f64, string, enu
 Timestamp = _StdAlias("Timestamp", i64)     # microseconds since the Unix epoch, UTC
 Duration  = _StdAlias("Duration", i64)      # microseconds
 Uuid      = _StdAlias("Uuid", u8[16])       # RFC 4122 byte order
-Matrix3x3 = _StdAlias("Matrix3x3", f32[9])  # row-major
-Matrix4x4 = _StdAlias("Matrix4x4", f32[16])
+Matrix3x3 = _StdAlias("Matrix3x3", f32[3][3])  # m[row][column]
+Matrix4x4 = _StdAlias("Matrix4x4", f32[4][4])
+Covariance3 = _StdAlias("Covariance3", f64[3][3])
+Covariance6 = _StdAlias("Covariance6", f64[6][6])  # x, y, z, then the turn about each
 Uri       = _StdAlias("Uri", _String(256))
+
+
+def _square(n):
+    return _dataclasses.field(default_factory=lambda: [[0.0] * n for _ in range(n)])
 
 
 @_std("Float2")
@@ -142,6 +148,38 @@ class Wrench2D:
     torque: f64 = 0.0                                                 # N m, from +x toward +y
 
 
+@_std("Accel")
+class Accel:
+    linear: Double3 = _dataclasses.field(default_factory=Double3)    # m/s^2
+    angular: Double3 = _dataclasses.field(default_factory=Double3)   # rad/s^2 about each axis
+
+
+@_std("Accel2D")
+class Accel2D:
+    linear: Double2 = _dataclasses.field(default_factory=Double2)    # m/s^2
+    angular: f64 = 0.0                                                # rad/s^2, from +x toward +y
+
+
+@_std("PoseWithCovariance")
+class PoseWithCovariance:
+    pose: Pose = _dataclasses.field(default_factory=Pose)
+    covariance: Covariance6 = _square(6)
+
+
+@_std("TwistWithCovariance")
+class TwistWithCovariance:
+    twist: Twist = _dataclasses.field(default_factory=Twist)
+    covariance: Covariance6 = _square(6)
+
+
+# pose in the parent frame, twist in the body's own frame
+@_std("Odometry")
+class Odometry:
+    pose: PoseWithCovariance = _dataclasses.field(default_factory=PoseWithCovariance)
+    twist: TwistWithCovariance = _dataclasses.field(default_factory=TwistWithCovariance)
+    parent: string(30) = ""
+
+
 @_std("GeoPoint")
 class GeoPoint:
     lat: f64 = 0.0      # degrees
@@ -187,6 +225,12 @@ class Segment:
     b: Double3 = _dataclasses.field(default_factory=Double3)
 
 
+@_std("Ray")
+class Ray:
+    origin: Double3 = _dataclasses.field(default_factory=Double3)
+    direction: Double3 = _dataclasses.field(default_factory=Double3)  # unit length, away from origin
+
+
 @_std("Sphere")
 class Sphere:
     center: Double3 = _dataclasses.field(default_factory=Double3)
@@ -229,6 +273,12 @@ class Segment2D:
     b: Double2 = _dataclasses.field(default_factory=Double2)
 
 
+@_std("Ray2D")
+class Ray2D:
+    origin: Double2 = _dataclasses.field(default_factory=Double2)
+    direction: Double2 = _dataclasses.field(default_factory=Double2)
+
+
 @_std("Circle")
 class Circle:
     center: Double2 = _dataclasses.field(default_factory=Double2)
@@ -244,6 +294,45 @@ class Capsule2D:
 @_std("Polygon2D")
 class Polygon2D:
     points: list[Double2] = _dataclasses.field(default_factory=list)  # closed
+
+
+@_std("Prism")
+class Prism:
+    pose: Pose = _dataclasses.field(default_factory=Pose)
+    base: Polygon2D = _dataclasses.field(default_factory=Polygon2D)  # in the xy plane of pose
+    height: f64 = 0.0                                                 # along +z of pose
+
+
+@_std("Polyline")
+class Polyline:
+    points: list[Double3] = _dataclasses.field(default_factory=list)  # open
+
+
+@_std("Polyline2D")
+class Polyline2D:
+    points: list[Double2] = _dataclasses.field(default_factory=list)
+
+
+@_std("Path")
+class Path:
+    poses: list[Pose] = _dataclasses.field(default_factory=list)
+
+
+@_std("Path2D")
+class Path2D:
+    poses: list[Pose2D] = _dataclasses.field(default_factory=list)
+
+
+@_std("Inertia")
+class Inertia:
+    mass: f64 = 0.0                                                   # kg
+    center: Double3 = _dataclasses.field(default_factory=Double3)    # m, in the body frame
+    ixx: f64 = 0.0                                                    # kg m^2 about the center
+    ixy: f64 = 0.0
+    ixz: f64 = 0.0
+    iyy: f64 = 0.0
+    iyz: f64 = 0.0
+    izz: f64 = 0.0
 
 
 @_std("Empty")
@@ -358,7 +447,171 @@ class JointState:
 # Published once as a variable. The order every JointState array follows.
 @_std("JointNames")
 class JointNames:
-    name: list[string(32)] = _dataclasses.field(default_factory=list)
+    name: list[str] = _dataclasses.field(default_factory=list)
+
+
+# time from the start of the trajectory. velocity, acceleration and effort may be empty.
+@_std("JointTrajectoryPoint")
+class JointTrajectoryPoint:
+    time: Duration = 0
+    position: list[f64] = _dataclasses.field(default_factory=list)
+    velocity: list[f64] = _dataclasses.field(default_factory=list)
+    acceleration: list[f64] = _dataclasses.field(default_factory=list)
+    effort: list[f64] = _dataclasses.field(default_factory=list)
+
+
+@_std("JointTrajectory")
+class JointTrajectory:
+    points: list[JointTrajectoryPoint] = _dataclasses.field(default_factory=list)
+
+
+# In its own frame. A covariance with -1 first means that value is not measured.
+@_std("Imu")
+class Imu:
+    orientation: Quaternion = _dataclasses.field(default_factory=Quaternion)
+    orientation_covariance: Covariance3 = _square(3)
+    angular_velocity: Double3 = _dataclasses.field(default_factory=Double3)       # rad/s
+    angular_velocity_covariance: Covariance3 = _square(3)
+    linear_acceleration: Double3 = _dataclasses.field(default_factory=Double3)    # m/s^2
+    linear_acceleration_covariance: Covariance3 = _square(3)
+
+
+# ranges holds each beam's echoes together, +inf when nothing returns. echoes 0 reads as 1.
+@_std("LaserScan")
+class LaserScan:
+    angle_min: f32 = 0.0                        # rad
+    angle_step: f32 = 0.0                       # rad
+    time_step: f32 = 0.0                        # s
+    range_min: f32 = 0.0                        # m
+    range_max: f32 = 0.0                        # m
+    echoes: u8 = 0
+    ranges: list[f32] = _dataclasses.field(default_factory=list)
+    intensities: list[f32] = _dataclasses.field(default_factory=list)
+
+
+class RangeKind(_pyenum.IntEnum):
+    """What a range sensor measures with."""
+    __rant_std__ = "RangeKind"
+    Unknown = 0
+    Ultrasound = 1
+    Infrared = 2
+    Laser = 3
+    Radar = 4
+
+
+@_std("RangeReading")
+class RangeReading:
+    distance: f64 = 0.0                         # m, +inf when nothing is in range
+    min: f64 = 0.0
+    max: f64 = 0.0
+    field_of_view: f64 = 0.0                    # rad, the full cone
+    kind: enum(RangeKind, u8) = RangeKind.Unknown
+
+
+class GnssStatus(_pyenum.IntEnum):
+    """The quality of a satellite position fix."""
+    __rant_std__ = "GnssStatus"
+    NoFix = 0
+    Fix = 1
+    Differential = 2
+    RtkFloat = 3
+    RtkFixed = 4
+
+
+@_std("GnssFix")
+class GnssFix:
+    position: GeoPoint = _dataclasses.field(default_factory=GeoPoint)
+    covariance: Covariance3 = _square(3)       # m^2, east, north and up
+    status: enum(GnssStatus, u8) = GnssStatus.NoFix
+
+
+class ScalarKind(_pyenum.IntEnum):
+    """The kind of number in a block of raw data, numbered as in PCL."""
+    __rant_std__ = "ScalarKind"
+    I8 = 1
+    U8 = 2
+    I16 = 3
+    U16 = 4
+    I32 = 5
+    U32 = 6
+    F32 = 7
+    F64 = 8
+    I64 = 9
+    U64 = 10
+
+
+@_std("PointField")
+class PointField:
+    name: str = ""
+    offset: u32 = 0                             # bytes from the start of the point
+    kind: enum(ScalarKind, u8) = ScalarKind.F32
+    count: u32 = 0                              # numbers in a row, 1 for a single number
+
+
+# The PCL layout: point_step bytes per point, little endian. width 0 when it has no rows.
+@_std("PointCloud")
+class PointCloud:
+    origin: Transform = _dataclasses.field(default_factory=Transform)
+    width: u32 = 0
+    fields: list[PointField] = _dataclasses.field(default_factory=list)
+    point_step: u32 = 0
+    dense: bool = False
+    data: list[u8] = b""
+
+
+@_std("Mesh")
+class Mesh:
+    vertices: PointCloud = _dataclasses.field(default_factory=PointCloud)
+    triangles: list[u32] = _dataclasses.field(default_factory=list)  # counterclockwise seen from outside
+
+
+@_std("GridField")
+class GridField:
+    name: str = ""
+    kind: enum(ScalarKind, u8) = ScalarKind.F32
+    data: list[u8] = b""                        # one number per cell, x fastest, then y, then z
+
+
+# origin is the outer corner of cell 0. cells_z is 1 for a 2D grid.
+@_std("Grid")
+class Grid:
+    origin: Transform = _dataclasses.field(default_factory=Transform)
+    resolution: f64 = 0.0                       # m
+    cells_x: u32 = 0
+    cells_y: u32 = 0
+    cells_z: u32 = 0
+    fields: list[GridField] = _dataclasses.field(default_factory=list)
+
+
+@_std("Tensor")
+class Tensor:
+    kind: enum(ScalarKind, u8) = ScalarKind.F32
+    shape: list[u32] = _dataclasses.field(default_factory=list)  # outermost first
+    data: list[u8] = b""
+
+
+@_std("File")
+class File:
+    name: str = ""
+    media_type: string(64) = ""
+    data: list[u8] = b""
+
+
+# score 0 to 1, track 0 when not tracked
+@_std("Detection2D")
+class Detection2D:
+    bounds: OrientedBox2D = _dataclasses.field(default_factory=OrientedBox2D)
+    label: str = ""
+    score: f32 = 0.0
+    track: u32 = 0
+
+
+@_std("Detection3D")
+class Detection3D:
+    bounds: OrientedBox = _dataclasses.field(default_factory=OrientedBox)
+    label: str = ""
+    score: f32 = 0.0
+    track: u32 = 0
 
 
 def now():
@@ -368,4 +621,4 @@ def now():
 
 
 # the vocabulary only built the roster, so it stays on rant. and not on rant.types.
-del _StdAlias, _std, _String, u8, u32, i32, i64, f32, f64, string, enum
+del _StdAlias, _std, _String, _square, u8, u32, i32, i64, f32, f64, string, enum

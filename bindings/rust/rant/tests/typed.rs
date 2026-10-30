@@ -211,6 +211,36 @@ fn standard_types_round_trip() {
 }
 
 #[test]
+fn point_clouds_grids_and_covariances_round_trip() {
+    use rant::types::{Grid, GridField, Matrix3x3, Odometry, PointCloud, PointField, ScalarKind};
+    let cloud = PointCloud {
+        width: 2,
+        fields: vec![
+            PointField { name: "x".into(), offset: 0, kind: ScalarKind::F32, count: 1 },
+            PointField { name: "rgb".into(), offset: 4, kind: ScalarKind::U8, count: 3 },
+        ],
+        point_step: 8,
+        dense: true,
+        data: (0..16).collect(),
+        ..Default::default()
+    };
+    assert_eq!(round_trip(40, "cloud", cloud.clone()), cloud);
+    let grid = Grid {
+        resolution: 0.05, cells_x: 2, cells_y: 3, cells_z: 1,
+        fields: vec![GridField { name: "occupancy".into(), kind: ScalarKind::I8, data: vec![100; 6] }],
+        ..Default::default()
+    };
+    assert_eq!(round_trip(41, "grid", grid.clone()), grid);
+    let mut odom = Odometry { parent: "odom".parse().unwrap(), ..Default::default() };
+    odom.pose.covariance.m[5][4] = 7.0;
+    odom.twist.twist.angular.z = 0.5;
+    assert_eq!(round_trip(42, "odom", odom.clone()), odom);
+    let mut m = Matrix3x3::default();
+    m.m[2][1] = 4.0;
+    assert_eq!(round_trip(43, "m", m), m);
+}
+
+#[test]
 fn bare_roots_round_trip() {
     assert_eq!(round_trip(27, "f", 2.5f32), 2.5);
     assert_eq!(round_trip(28, "s", "hello".to_owned()), "hello");

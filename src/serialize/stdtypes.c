@@ -57,6 +57,30 @@ static const i_RantStdEntry i_rant_std_table[] = {
                  "{ force: Double2           -- [N]\n"
                  "  torque: f64              -- [N m] from +x toward +y\n"
                  "}" },
+    { "Accel",   "-- Linear and angular acceleration in 3D\n"
+                 "{ linear: Double3          -- [m/s^2]\n"
+                 "  angular: Double3         -- [rad/s^2] about each axis\n"
+                 "}" },
+    { "Accel2D", "-- Linear and angular acceleration in 2D\n"
+                 "{ linear: Double2          -- [m/s^2]\n"
+                 "  angular: f64             -- [rad/s^2] from +x toward +y\n"
+                 "}" },
+    { "PoseWithCovariance",
+                 "-- A Pose and how uncertain it is\n"
+                 "{ pose: Pose\n"
+                 "  covariance: Covariance6  -- [m^2 and rad^2] the position, then the rotation about x, y and z\n"
+                 "}" },
+    { "TwistWithCovariance",
+                 "-- A Twist and how uncertain it is\n"
+                 "{ twist: Twist\n"
+                 "  covariance: Covariance6  -- [m^2/s^2 and rad^2/s^2] the linear part, then the angular\n"
+                 "}" },
+    { "Odometry",
+                 "-- Where a moving body is and how fast it moves, as dead reckoning estimates it\n"
+                 "{ pose: PoseWithCovariance -- the body in the parent frame\n"
+                 "  twist: TwistWithCovariance  -- in the body's own frame\n"
+                 "  parent: string<30>       -- the frame pose is measured in, empty when unstated\n"
+                 "}" },
     { "GeoPoint","-- A point on the Earth\n"
                  "{ lat: f64                 -- [deg] latitude\n"
                  "  lon: f64                 -- [deg] longitude\n"
@@ -90,6 +114,10 @@ static const i_RantStdEntry i_rant_std_table[] = {
                  "{ a: Double3               -- [m]\n"
                  "  b: Double3               -- [m]\n"
                  "}" },
+    { "Ray",     "-- A straight line from a point, endless in one direction\n"
+                 "{ origin: Double3          -- [m]\n"
+                 "  direction: Double3       -- unit length, away from origin\n"
+                 "}" },
     { "Sphere",  "-- A ball around a center point\n"
                  "{ center: Double3          -- [m]\n"
                  "  radius: f64              -- [m]\n"
@@ -119,6 +147,10 @@ static const i_RantStdEntry i_rant_std_table[] = {
                  "{ a: Double2               -- [m or px]\n"
                  "  b: Double2               -- [m or px]\n"
                  "}" },
+    { "Ray2D",   "-- A straight line from a point, endless in one direction, in 2D\n"
+                 "{ origin: Double2          -- [m or px]\n"
+                 "  direction: Double2       -- unit length, away from origin\n"
+                 "}" },
     { "Circle",  "-- A circle around a center point\n"
                  "{ center: Double2          -- [m or px]\n"
                  "  radius: f64              -- [m or px]\n"
@@ -132,15 +164,50 @@ static const i_RantStdEntry i_rant_std_table[] = {
                  "-- A closed polygon in 2D\n"
                  "{ points: Double2[]        -- [m or px] the corners in order\n"
                  "}" },
+    { "Prism",   "-- A flat polygon raised to a height, such as a zone of a floor\n"
+                 "{ pose: Pose               -- the frame the base lies in\n"
+                 "  base: Polygon2D          -- [m] in the xy plane of pose\n"
+                 "  height: f64              -- [m] along +z of pose\n"
+                 "}" },
+    { "Polyline","-- An open line through points in order\n"
+                 "{ points: Double3[]        -- [m]\n"
+                 "}" },
+    { "Polyline2D",
+                 "-- An open line through points in order in 2D\n"
+                 "{ points: Double2[]        -- [m or px]\n"
+                 "}" },
+    { "Path",    "-- A route of poses to follow in order\n"
+                 "{ poses: Pose[]\n"
+                 "}" },
+    { "Path2D",  "-- A route of 2D poses to follow in order\n"
+                 "{ poses: Pose2D[]\n"
+                 "}" },
+    { "Inertia", "-- The mass of a rigid body and how it resists turning\n"
+                 "{ mass: f64                -- [kg]\n"
+                 "  center: Double3          -- [m] the center of mass in the body frame\n"
+                 "  ixx: f64                 -- [kg m^2] about the center of mass\n"
+                 "  ixy: f64                 -- [kg m^2]\n"
+                 "  ixz: f64                 -- [kg m^2]\n"
+                 "  iyy: f64                 -- [kg m^2]\n"
+                 "  iyz: f64                 -- [kg m^2]\n"
+                 "  izz: f64                 -- [kg m^2]\n"
+                 "}" },
     { "Empty",   "-- No data, for a signal such as a trigger\n{ }" },
     { "Uuid",    "-- A 16 byte unique id\nu8[16]                     -- RFC 4122 byte order" },
     { "Timestamp",
                  "-- A moment in time, counted from the Unix epoch in UTC\ni64     -- [us]" },
     { "Duration","-- A length of time\ni64                        -- [us]" },
     { "Matrix3x3",
-                 "-- A 3 by 3 matrix, row major\nf32[9]" },
+                 "-- A 3 by 3 matrix, indexed row then column\nf32[3][3]" },
     { "Matrix4x4",
-                 "-- A 4 by 4 matrix, row major\nf32[16]" },
+                 "-- A 4 by 4 matrix, indexed row then column\nf32[4][4]" },
+    { "Covariance3",
+                 "-- The covariance of three values, indexed row then column, in their units squared\n"
+                 "f64[3][3]" },
+    { "Covariance6",
+                 "-- The covariance of a 3D pose or twist, indexed row then column\n"
+                 "-- The order is x, y and z, then the turn about x, y and z\n"
+                 "f64[6][6]" },
     { "Uri",     "-- A URL or other URI\nstring<256>" },
     { "ImageFormat",
                  "-- How the data of an Image is laid out, 16 and up a compressed file\n"
@@ -228,7 +295,143 @@ static const i_RantStdEntry i_rant_std_table[] = {
                  "}" },
     { "JointNames",
                  "-- The joint names a JointState follows, published once\n"
-                 "{ name: string<32>[] }" }
+                 "{ name: string[] }" },
+    { "JointTrajectoryPoint",
+                 "-- Where the joints should be at one time, in the order of their JointNames\n"
+                 "{ time: Duration           -- [us] from the start of the trajectory\n"
+                 "  position: f64[]          -- [rad or m]\n"
+                 "  velocity: f64[]          -- [rad/s or m/s] may be empty\n"
+                 "  acceleration: f64[]      -- [rad/s^2 or m/s^2] may be empty\n"
+                 "  effort: f64[]            -- [N m or N] may be empty\n"
+                 "}" },
+    { "JointTrajectory",
+                 "-- A motion of the joints over time\n"
+                 "{ points: JointTrajectoryPoint[]  -- in time order\n"
+                 "}" },
+    { "Imu",     "-- One reading of an inertial measurement unit, in its own frame\n"
+                 "-- A covariance with -1 first means that value is not measured\n"
+                 "{ orientation: Quaternion\n"
+                 "  orientation_covariance: Covariance3  -- [rad^2] about x, y and z\n"
+                 "  angular_velocity: Double3  -- [rad/s] about each axis\n"
+                 "  angular_velocity_covariance: Covariance3  -- [rad^2/s^2]\n"
+                 "  linear_acceleration: Double3  -- [m/s^2] gravity included\n"
+                 "  linear_acceleration_covariance: Covariance3  -- [m^2/s^4]\n"
+                 "}" },
+    { "LaserScan",
+                 "-- One sweep of a planar range sensor, its beams turning from +x toward +y\n"
+                 "{ angle_min: f32           -- [rad] the first beam\n"
+                 "  angle_step: f32          -- [rad] from one beam to the next\n"
+                 "  time_step: f32           -- [s] from one beam to the next, 0 when unstated\n"
+                 "  range_min: f32           -- [m] a shorter range is not valid\n"
+                 "  range_max: f32           -- [m] a longer range is not valid\n"
+                 "  echoes: u8               -- the ranges per beam, 0 reads as 1\n"
+                 "  ranges: f32[]            -- [m] each beam's echoes together, +inf when nothing returns\n"
+                 "  intensities: f32[]       -- in the order of ranges, may be empty\n"
+                 "}" },
+    { "RangeKind",
+                 "-- What a range sensor measures with\n"
+                 "enum<u8> {\n"
+                 "  Unknown = 0              -- unstated\n"
+                 "  Ultrasound = 1\n"
+                 "  Infrared = 2\n"
+                 "  Laser = 3\n"
+                 "  Radar = 4\n"
+                 "}" },
+    { "RangeReading",
+                 "-- One distance from a sensor with a single beam or cone along its +x\n"
+                 "{ distance: f64            -- [m] +inf when nothing is in range\n"
+                 "  min: f64                 -- [m] the shortest distance it reads\n"
+                 "  max: f64                 -- [m] the longest distance it reads\n"
+                 "  field_of_view: f64       -- [rad] the full angle of the cone\n"
+                 "  kind: RangeKind\n"
+                 "}" },
+    { "GnssStatus",
+                 "-- The quality of a satellite position fix\n"
+                 "enum<u8> {\n"
+                 "  NoFix = 0                -- the position is not valid\n"
+                 "  Fix = 1                  -- satellites alone\n"
+                 "  Differential = 2         -- corrected by SBAS or DGPS\n"
+                 "  RtkFloat = 3             -- RTK, ambiguities not yet resolved\n"
+                 "  RtkFixed = 4             -- RTK, centimeter level\n"
+                 "}" },
+    { "GnssFix",
+                 "-- A position from satellite navigation\n"
+                 "{ position: GeoPoint\n"
+                 "  covariance: Covariance3  -- [m^2] east, north and up\n"
+                 "  status: GnssStatus\n"
+                 "}" },
+    { "ScalarKind",
+                 "-- The kind of number in a block of raw data, numbered as in PCL\n"
+                 "enum<u8> {\n"
+                 "  I8 = 1\n"
+                 "  U8 = 2\n"
+                 "  I16 = 3\n"
+                 "  U16 = 4\n"
+                 "  I32 = 5\n"
+                 "  U32 = 6\n"
+                 "  F32 = 7\n"
+                 "  F64 = 8\n"
+                 "  I64 = 9\n"
+                 "  U64 = 10\n"
+                 "}" },
+    { "PointField",
+                 "-- One value that every point of a PointCloud holds\n"
+                 "{ name: string             -- such as x, y, z, intensity or rgb\n"
+                 "  offset: u32              -- [bytes] from the start of the point\n"
+                 "  kind: ScalarKind\n"
+                 "  count: u32               -- the numbers in a row, 1 for a single number\n"
+                 "}" },
+    { "PointCloud",
+                 "-- Points with any values each, packed one point after another as in PCL\n"
+                 "{ origin: Transform        -- the frame the points are in\n"
+                 "  width: u32               -- points per row when the cloud is an image, 0 when it has no rows\n"
+                 "  fields: PointField[]     -- what each point holds\n"
+                 "  point_step: u32          -- [bytes] from one point to the next\n"
+                 "  dense: bool              -- no point holds an invalid value\n"
+                 "  data: u8[]               -- the points, little endian\n"
+                 "}" },
+    { "Mesh",    "-- A surface of triangles\n"
+                 "{ vertices: PointCloud     -- the corners, with x, y and z among their fields\n"
+                 "  triangles: u32[]         -- three vertex indices each, counterclockwise seen from outside\n"
+                 "}" },
+    { "GridField",
+                 "-- One value that every cell of a Grid holds\n"
+                 "{ name: string             -- such as occupancy, height or cost\n"
+                 "  kind: ScalarKind\n"
+                 "  data: u8[]               -- one number per cell, x fastest, then y, then z, little endian\n"
+                 "}" },
+    { "Grid",    "-- A 2D or 3D grid of cells with any values each, such as a map\n"
+                 "{ origin: Transform        -- the frame, and the pose of the outer corner of cell 0\n"
+                 "  resolution: f64          -- [m] the edge of a cell\n"
+                 "  cells_x: u32             -- cells along x\n"
+                 "  cells_y: u32             -- cells along y\n"
+                 "  cells_z: u32             -- cells along z, 1 for a 2D grid\n"
+                 "  fields: GridField[]      -- what each cell holds\n"
+                 "}" },
+    { "Tensor",  "-- An array of numbers with any number of dimensions\n"
+                 "{ kind: ScalarKind\n"
+                 "  shape: u32[]             -- the size of each dimension, outermost first\n"
+                 "  data: u8[]               -- the numbers, last dimension fastest, little endian\n"
+                 "}" },
+    { "File",    "-- A whole file\n"
+                 "{ name: string             -- the file name with its extension\n"
+                 "  media_type: string<64>   -- such as image/png, empty when unknown\n"
+                 "  data: u8[]               -- the file bytes\n"
+                 "}" },
+    { "Detection2D",
+                 "-- An object found in an image or a 2D frame\n"
+                 "{ bounds: OrientedBox2D    -- where it is\n"
+                 "  label: string            -- what it is\n"
+                 "  score: f32               -- the confidence, 0 to 1\n"
+                 "  track: u32               -- the same id in every frame, 0 when not tracked\n"
+                 "}" },
+    { "Detection3D",
+                 "-- An object found in a 3D frame\n"
+                 "{ bounds: OrientedBox      -- where it is\n"
+                 "  label: string            -- what it is\n"
+                 "  score: f32               -- the confidence, 0 to 1\n"
+                 "  track: u32               -- the same id in every frame, 0 when not tracked\n"
+                 "}" }
 };
 
 /* the table is indexed by RantStdType minus 1, a mismatch would shift every name */

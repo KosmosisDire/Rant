@@ -53,6 +53,16 @@ standard! {
     Wrench { force: Double3, torque: Double3 }
     /// Planar force and torque.
     Wrench2D { force: Double2, torque: f64 }
+    /// Linear m/s^2 and angular rad/s^2.
+    Accel { linear: Double3, angular: Double3 }
+    /// Planar linear m/s^2 and angular rad/s^2.
+    Accel2D { linear: Double2, angular: f64 }
+    /// A pose and its covariance over x, y, z, then the turn about each.
+    PoseWithCovariance { pose: Pose, covariance: Covariance6 }
+    /// A twist and its covariance, the linear part first.
+    TwistWithCovariance { twist: Twist, covariance: Covariance6 }
+    /// Dead reckoning: the pose in the parent frame and the twist in the body frame.
+    Odometry { pose: PoseWithCovariance, twist: TwistWithCovariance, parent: crate::String<30> }
     /// Degrees, degrees, meters.
     GeoPoint { lat: f64, lon: f64, alt: f64 }
     /// min <= max on every axis.
@@ -67,6 +77,8 @@ standard! {
     Plane { position: Double3, normal: Double3 }
     /// A line segment.
     Segment { a: Double3, b: Double3 }
+    /// A line from origin, endless along its unit direction.
+    Ray { origin: Double3, direction: Double3 }
     /// A sphere.
     Sphere { center: Double3, radius: f64 }
     /// A capsule around a segment.
@@ -81,12 +93,26 @@ standard! {
     Plane2D { position: Double2, normal: Double2 }
     /// A planar segment.
     Segment2D { a: Double2, b: Double2 }
+    /// A planar line from origin, endless along its unit direction.
+    Ray2D { origin: Double2, direction: Double2 }
     /// A circle.
     Circle { center: Double2, radius: f64 }
     /// A planar capsule.
     Capsule2D { axis: Segment2D, radius: f64 }
     /// A closed planar polygon.
     Polygon2D { points: Vec<Double2> }
+    /// A polygon in the xy plane of pose, raised height along its +z.
+    Prism { pose: Pose, base: Polygon2D, height: f64 }
+    /// An open line through points in order.
+    Polyline { points: Vec<Double3> }
+    /// An open planar line through points in order.
+    Polyline2D { points: Vec<Double2> }
+    /// A route of poses to follow in order.
+    Path { poses: Vec<Pose> }
+    /// A route of planar poses to follow in order.
+    Path2D { poses: Vec<Pose2D> }
+    /// Mass in kg, the center of mass in the body frame, and kg m^2 about that center.
+    Inertia { mass: f64, center: Double3, ixx: f64, ixy: f64, ixz: f64, iyy: f64, iyz: f64, izz: f64 }
     /// Zero bytes on the wire.
     Empty {}
     /// Pixels: stride is bytes per row, rows top first, data laid out per format.
@@ -100,7 +126,44 @@ standard! {
     /// SI positions, velocities and efforts. Velocity and effort may be empty.
     JointState { position: Vec<f64>, velocity: Vec<f64>, effort: Vec<f64> }
     /// The order every JointState array follows, published once as a variable.
-    JointNames { name: Vec<crate::String<32>> }
+    JointNames { name: Vec<String> }
+    /// The joints at a time from the start. Velocity, acceleration and effort may be empty.
+    JointTrajectoryPoint { time: Duration, position: Vec<f64>, velocity: Vec<f64>, acceleration: Vec<f64>, effort: Vec<f64> }
+    /// A motion of the joints over time.
+    JointTrajectory { points: Vec<JointTrajectoryPoint> }
+    /// An inertial reading in its own frame. A covariance with -1 first is not measured.
+    Imu {
+        orientation: Quaternion, orientation_covariance: Covariance3,
+        angular_velocity: Double3, angular_velocity_covariance: Covariance3,
+        linear_acceleration: Double3, linear_acceleration_covariance: Covariance3
+    }
+    /// A planar sweep, each beam's echoes together in ranges, +inf when nothing returns.
+    LaserScan {
+        angle_min: f32, angle_step: f32, time_step: f32, range_min: f32, range_max: f32,
+        echoes: u8, ranges: Vec<f32>, intensities: Vec<f32>
+    }
+    /// One distance along +x, +inf when nothing is in range.
+    RangeReading { distance: f64, min: f64, max: f64, field_of_view: f64, kind: RangeKind }
+    /// A satellite fix, covariance east, north and up in m^2.
+    GnssFix { position: GeoPoint, covariance: Covariance3, status: GnssStatus }
+    /// One value of every point: offset in bytes from the point start, count 1 for one number.
+    PointField { name: String, offset: u32, kind: ScalarKind, count: u32 }
+    /// The PCL layout, point_step bytes per point, little endian. Width 0 when it has no rows.
+    PointCloud { origin: Transform, width: u32, fields: Vec<PointField>, point_step: u32, dense: bool, data: Vec<u8> }
+    /// Triangles of three vertex indices, counterclockwise seen from outside.
+    Mesh { vertices: PointCloud, triangles: Vec<u32> }
+    /// One number per cell, x fastest, then y, then z.
+    GridField { name: String, kind: ScalarKind, data: Vec<u8> }
+    /// Origin is the outer corner of cell 0, cells_z 1 for a 2D grid.
+    Grid { origin: Transform, resolution: f64, cells_x: u32, cells_y: u32, cells_z: u32, fields: Vec<GridField> }
+    /// Numbers of any dimensions, shape outermost first, last dimension fastest.
+    Tensor { kind: ScalarKind, shape: Vec<u32>, data: Vec<u8> }
+    /// A whole file, media_type "" when unknown.
+    File { name: String, media_type: crate::String<64>, data: Vec<u8> }
+    /// An object in an image or a 2D frame, score 0 to 1, track 0 when not tracked.
+    Detection2D { bounds: OrientedBox2D, label: String, score: f32, track: u32 }
+    /// An object in a 3D frame.
+    Detection3D { bounds: OrientedBox, label: String, score: f32, track: u32 }
 }
 
 /// Image.format. 16 and up is a compressed container.
@@ -165,6 +228,53 @@ pub enum DistortionModel {
     Rational = 3,
 }
 
+/// RangeReading.kind.
+#[derive(Enum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[rant(standard)]
+#[allow(missing_docs)]
+pub enum RangeKind {
+    #[default]
+    Unknown = 0,
+    Ultrasound = 1,
+    Infrared = 2,
+    Laser = 3,
+    Radar = 4,
+}
+
+/// GnssFix.status.
+#[derive(Enum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[rant(standard)]
+#[allow(missing_docs)]
+pub enum GnssStatus {
+    #[default]
+    NoFix = 0,
+    Fix = 1,
+    Differential = 2,
+    RtkFloat = 3,
+    RtkFixed = 4,
+}
+
+/// The number kinds of PointField, GridField and Tensor, numbered as in PCL.
+#[derive(Enum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[rant(standard)]
+#[allow(missing_docs)]
+pub enum ScalarKind {
+    I8 = 1,
+    U8 = 2,
+    I16 = 3,
+    U16 = 4,
+    I32 = 5,
+    U32 = 6,
+    #[default]
+    F32 = 7,
+    F64 = 8,
+    I64 = 9,
+    U64 = 10,
+}
+
 /// An alias type: spelled by its standard name, carried as its one field.
 macro_rules! alias {
     ($( $(#[$m:meta])* $name:ident ( $f:ident : $t:ty ) $(, $derive:ident)* ; )*) => {$(
@@ -196,10 +306,14 @@ alias! {
     Timestamp(us: i64), Eq, Hash, PartialOrd, Ord;
     /// Microseconds.
     Duration(us: i64), Eq, Hash, PartialOrd, Ord;
-    /// Row major.
-    Matrix3x3(m: [f32; 9]);
-    /// Row major.
-    Matrix4x4(m: [f32; 16]);
+    /// Indexed m[row][column].
+    Matrix3x3(m: [[f32; 3]; 3]);
+    /// Indexed m[row][column].
+    Matrix4x4(m: [[f32; 4]; 4]);
+    /// A covariance indexed m[row][column], in the units of its values squared.
+    Covariance3(m: [[f64; 3]; 3]);
+    /// Over x, y, z, then the turn about each.
+    Covariance6(m: [[f64; 6]; 6]);
     /// A URL.
     Uri(value: crate::String<256>), Eq, Hash;
 }

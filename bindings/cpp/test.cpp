@@ -654,8 +654,8 @@ RANT_SCHEMA(Shape, origin, at, id);
 /* fixed struct arrays, one nested in another's element */
 struct Outline { rant::types::Float2 corners[4]; uint8_t n; };
 RANT_SCHEMA(Outline, corners, n);
-struct Grid { std::array<Outline, 2> rows; Corner mark[3]; };
-RANT_SCHEMA(Grid, rows, mark);
+struct Sheet { std::array<Outline, 2> rows; Corner mark[3]; };
+RANT_SCHEMA(Sheet, rows, mark);
 /* variable arrays of structs and of capped strings, beside other tail members */
 struct Scene {
     uint32_t seq = 0;
@@ -726,16 +726,16 @@ static bool nested_leg() {
             round_trip(a, in, out) && out.origin.x == 1.5f && out.origin.y == -2.0f
             && out.at.y == 4.0f && out.id == 7);
     }
-    {   auto sc = rant::priv::schema_of<Grid>(a);
+    {   auto sc = rant::priv::schema_of<Sheet>(a);
         std::string txt = sc ? sc->to_dsl() : std::string();
         chk("nest: fixed struct arrays spell by element name",
             txt.find("corners: Float2[4]") != std::string::npos
             && txt.find("rows: Outline[2]") != std::string::npos
             && txt.find("mark: Corner[3]") != std::string::npos);
         rant::Schema same = a.schema("Outline { corners: Float2[4], n: u8 }\n"
-                                     "Grid { rows: Outline[2], mark: Corner[3] }");
+                                     "Sheet { rows: Outline[2], mark: Corner[3] }");
         chk("nest: the same text is the same schema", sc && same && sc->hash() == same.hash());
-        Grid in{}, out{};
+        Sheet in{}, out{};
         in.rows[1].corners[3] = { 5.0f, 6.0f };
         in.rows[0].corners[0] = { 1.0f, 2.0f };
         in.rows[1].n = 9;
@@ -745,7 +745,7 @@ static bool nested_leg() {
             && out.rows[0].corners[0].x == 1.0f && out.rows[1].corners[0].x == 0.0f
             && out.rows[1].n == 9 && out.mark[2].y == -2.0f);
         std::vector<uint8_t> scratch;
-        rant::priv::TypeCodec* gc = rant::priv::type_codec<Grid>(a);
+        rant::priv::TypeCodec* gc = rant::priv::type_codec<Sheet>(a);
         rant::Bytes by = gc ? rant::priv::encode(*gc, in, scratch).value_or(rant::Bytes()) : rant::Bytes();
         {
             rant::detail::RantBytes mb; mb.data = by.data(); mb.len = by.size();
@@ -938,11 +938,43 @@ static bool nested_leg() {
             round_trip(a, rin, rout) && rout.size() == 2 && rout[0][1] == "yz" && rout[1][0] == "w");
     }
     {   rant::types::JointNames in, out;
-        in.name.resize(2);
-        in.name[0].assign("shoulder");
-        in.name[1].assign("elbow");
+        in.name = { "shoulder", "elbow" };
         chk("nest: the standard JointNames compiles and round trips",
             round_trip(a, in, out) && out.name.size() == 2 && out.name[1] == "elbow");
+    }
+    {   rant::types::PointCloud in, out;
+        in.origin.parent.assign("lidar");
+        in.width = 2;
+        in.fields = { { "x", 0, rant::types::ScalarKind::F32, 1 },
+                      { "rgb", 4, rant::types::ScalarKind::U8, 3 } };
+        in.point_step = 8;
+        in.dense = true;
+        in.data.assign(16, 0x5A);
+        chk("std: a PointCloud round trips",
+            round_trip(a, in, out) && out.origin.parent == "lidar" && out.width == 2
+            && out.fields.size() == 2 && out.fields[1].name == "rgb"
+            && out.fields[1].kind == rant::types::ScalarKind::U8 && out.fields[1].count == 3
+            && out.point_step == 8 && out.dense && out.data.size() == 16 && out.data[15] == 0x5A);
+    }
+    {   rant::types::Grid in, out;
+        in.resolution = 0.05;
+        in.cells_x = 2; in.cells_y = 3; in.cells_z = 1;
+        in.fields = { { "occupancy", rant::types::ScalarKind::I8, std::vector<uint8_t>(6, 100) } };
+        chk("std: a Grid round trips",
+            round_trip(a, in, out) && out.resolution == 0.05 && out.cells_y == 3
+            && out.fields.size() == 1 && out.fields[0].name == "occupancy"
+            && out.fields[0].kind == rant::types::ScalarKind::I8 && out.fields[0].data.size() == 6);
+    }
+    {   rant::types::Odometry in{}, out{};
+        in.pose.covariance.m[5][4] = 7.0;
+        in.twist.twist.angular.z = 0.5;
+        in.parent.assign("odom");
+        rant::types::Matrix3x3 min{}, mout{};
+        min.m[2][1] = 4.0f;
+        chk("std: an Odometry and a Matrix3x3 round trip",
+            round_trip(a, in, out) && out.pose.covariance.m[5][4] == 7.0
+            && out.twist.twist.angular.z == 0.5 && out.parent == "odom"
+            && round_trip(a, min, mout) && mout.m[2][1] == 4.0f);
     }
     return g_failures == fails_at_entry;
 }

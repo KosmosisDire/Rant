@@ -222,7 +222,10 @@ def std_types():
                       (T.Plane, 48), (T.Segment, 48), (T.Sphere, 32), (T.Capsule, 56),
                       (T.Cylinder, 56), (T.Cone, 56), (T.Circle, 24), (T.Empty, 0),
                       (T.Transform2D, 56), (T.Twist2D, 24), (T.Wrench2D, 24),
-                      (T.Plane2D, 32), (T.Segment2D, 32), (T.Capsule2D, 40)):
+                      (T.Plane2D, 32), (T.Segment2D, 32), (T.Capsule2D, 40),
+                      (T.Accel, 48), (T.Accel2D, 24), (T.PoseWithCovariance, 344),
+                      (T.TwistWithCovariance, 336), (T.Odometry, 712), (T.Imu, 296),
+                      (T.Inertia, 80), (T.Ray, 48), (T.Ray2D, 32)):
         check("%s mirror is %d bytes" % (cls.__name__, size), len(a.schema(cls).encode(cls())) == size)
     # every shipped mirror IS the library type it names, so none drifts unseen
     for cls in vars(T).values():
@@ -240,6 +243,24 @@ def std_types():
     poly = a.schema(T.Polygon2D)
     pb = poly.decode(poly.encode(T.Polygon2D([T.Double2(0, 0), T.Double2(1, 0), T.Double2(1, 2)])))
     check("a Polygon2D round-trips whole", len(pb.points) == 3 and pb.points[2].y == 2)
+    cloud = a.schema(T.PointCloud)
+    cb = cloud.decode(cloud.encode(T.PointCloud(
+        width=2, point_step=8, dense=True, data=bytes(range(16)),
+        fields=[T.PointField("x", 0, T.ScalarKind.F32, 1), T.PointField("rgb", 4, T.ScalarKind.U8, 3)])))
+    check("a PointCloud round-trips whole",
+          cb.width == 2 and len(cb.fields) == 2 and cb.fields[1].name == "rgb"
+          and cb.fields[1].kind == T.ScalarKind.U8 and cb.dense and bytes(cb.data) == bytes(range(16)))
+    grid = a.schema(T.Grid)
+    gb = grid.decode(grid.encode(T.Grid(resolution=0.05, cells_x=2, cells_y=3, cells_z=1,
+                                        fields=[T.GridField("occupancy", T.ScalarKind.I8, bytes(6))])))
+    check("a Grid round-trips whole",
+          gb.cells_y == 3 and gb.fields[0].name == "occupancy"
+          and gb.fields[0].kind == T.ScalarKind.I8 and len(gb.fields[0].data) == 6)
+    odo = a.schema(T.Odometry)
+    o = T.Odometry(parent="odom")
+    o.pose.covariance[5][4] = 7.0
+    ob = odo.decode(odo.encode(o))
+    check("an Odometry round-trips whole", ob.pose.covariance[5][4] == 7.0 and ob.parent == "odom")
     empty = a.schema(T.Empty)
     check("an Empty encodes to zero bytes and decodes back",
           len(empty.encode(T.Empty())) == 0 and isinstance(empty.decode(b""), T.Empty))
@@ -657,12 +678,15 @@ def value_roots():
     # a standard alias root is named after its type and is still a bare value
     T = rant.types
     for alias, value in ((T.Timestamp, 1234567), (T.Duration, -5), (T.Uuid, bytes(range(16))),
-                         (T.Matrix3x3, [float(i) for i in range(9)]),
-                         (T.Matrix4x4, [float(i) for i in range(16)]),
+                         (T.Matrix3x3, [[float(3 * r + c) for c in range(3)] for r in range(3)]),
+                         (T.Matrix4x4, [[float(4 * r + c) for c in range(4)] for r in range(4)]),
+                         (T.Covariance3, [[0.5 * (r + c) for c in range(3)] for r in range(3)]),
                          (T.Uri, "rtsp://host/stream")):
         for sch in (node.schema(alias), node.schema(alias.name)):
             out = sch.decode(sch.encode(value))
             got = bytes(out) if isinstance(value, bytes) else list(out) if isinstance(value, list) else out
+            if isinstance(value, list) and isinstance(value[0], list):
+                got = [list(row) for row in out]
             check("round-trip %s root -> %r" % (sch.name, out), got == value)
     # text DSL and the bare type agree, and a named bare root is an error
     check("text `bool` == plain bool", node.schema("bool").hash == HASH_BOOL)

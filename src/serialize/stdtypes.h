@@ -20,19 +20,30 @@ typedef enum {
     RANT_STD_COLOR,
     RANT_STD_POSE, RANT_STD_POSE2D, RANT_STD_TRANSFORM, RANT_STD_TRANSFORM2D,
     RANT_STD_TWIST, RANT_STD_TWIST2D, RANT_STD_WRENCH, RANT_STD_WRENCH2D,
+    RANT_STD_ACCEL, RANT_STD_ACCEL2D,
+    RANT_STD_POSEWITHCOVARIANCE, RANT_STD_TWISTWITHCOVARIANCE, RANT_STD_ODOMETRY,
     RANT_STD_GEOPOINT,
     RANT_STD_ALIGNEDBOX, RANT_STD_ALIGNEDBOX2D, RANT_STD_ORIENTEDBOX, RANT_STD_ORIENTEDBOX2D,
-    RANT_STD_PLANE, RANT_STD_SEGMENT, RANT_STD_SPHERE,
+    RANT_STD_PLANE, RANT_STD_SEGMENT, RANT_STD_RAY, RANT_STD_SPHERE,
     RANT_STD_CAPSULE, RANT_STD_CYLINDER, RANT_STD_CONE, RANT_STD_POLYGON,
-    RANT_STD_PLANE2D, RANT_STD_SEGMENT2D, RANT_STD_CIRCLE, RANT_STD_CAPSULE2D, RANT_STD_POLYGON2D,
+    RANT_STD_PLANE2D, RANT_STD_SEGMENT2D, RANT_STD_RAY2D, RANT_STD_CIRCLE, RANT_STD_CAPSULE2D,
+    RANT_STD_POLYGON2D,
+    RANT_STD_PRISM, RANT_STD_POLYLINE, RANT_STD_POLYLINE2D, RANT_STD_PATH, RANT_STD_PATH2D,
+    RANT_STD_INERTIA,
     RANT_STD_EMPTY,
     RANT_STD_UUID,
     RANT_STD_TIMESTAMP, RANT_STD_DURATION,
-    RANT_STD_MATRIX3X3, RANT_STD_MATRIX4X4,
+    RANT_STD_MATRIX3X3, RANT_STD_MATRIX4X4, RANT_STD_COVARIANCE3, RANT_STD_COVARIANCE6,
     RANT_STD_URI,
     RANT_STD_IMAGEFORMAT, RANT_STD_IMAGE, RANT_STD_VIDEOCODEC, RANT_STD_VIDEOFRAME,
     RANT_STD_VIDEOSTREAMKIND, RANT_STD_EXTERNALVIDEOSTREAM,
     RANT_STD_DISTORTIONMODEL, RANT_STD_CAMERAINTRINSICS, RANT_STD_JOINTSTATE, RANT_STD_JOINTNAMES,
+    RANT_STD_JOINTTRAJECTORYPOINT, RANT_STD_JOINTTRAJECTORY,
+    RANT_STD_IMU, RANT_STD_LASERSCAN, RANT_STD_RANGEKIND, RANT_STD_RANGEREADING,
+    RANT_STD_GNSSSTATUS, RANT_STD_GNSSFIX,
+    RANT_STD_SCALARKIND, RANT_STD_POINTFIELD, RANT_STD_POINTCLOUD, RANT_STD_MESH,
+    RANT_STD_GRIDFIELD, RANT_STD_GRID, RANT_STD_TENSOR, RANT_STD_FILE,
+    RANT_STD_DETECTION2D, RANT_STD_DETECTION3D,
     RANT_STD_COUNT
 } RantStdType;
 
@@ -63,6 +74,8 @@ typedef struct { RantDouble3 linear, angular; } RantTwist;       /* m/s and rad/
 typedef struct { RantDouble2 linear; double angular; } RantTwist2D;
 typedef struct { RantDouble3 force, torque; } RantWrench;        /* N and N m about the frame origin */
 typedef struct { RantDouble2 force; double torque; } RantWrench2D;
+typedef struct { RantDouble3 linear, angular; } RantAccel;       /* m/s^2 and rad/s^2 */
+typedef struct { RantDouble2 linear; double angular; } RantAccel2D;
 typedef struct { double lat, lon, alt; } RantGeoPoint;           /* degrees, degrees, meters */
 
 /* The shapes, in the units of their frame. Polygon and Polygon2D are variable, so no mirror. */
@@ -72,19 +85,39 @@ typedef struct { RantPose pose; RantDouble3 size; } RantOrientedBox;   /* full e
 typedef struct { RantPose2D pose; RantDouble2 size; } RantOrientedBox2D;
 typedef struct { RantDouble3 position, normal; } RantPlane;      /* any point on it, unit normal */
 typedef struct { RantDouble3 a, b; } RantSegment;
+typedef struct { RantDouble3 origin, direction; } RantRay;      /* unit direction, away from origin */
 typedef struct { RantDouble3 center; double radius; } RantSphere;
 typedef struct { RantSegment axis; double radius; } RantCapsule;
 typedef struct { RantSegment axis; double radius; } RantCylinder;      /* axis ends are the cap centers */
 typedef struct { RantDouble3 base, tip; double radius; } RantCone;    /* radius at the base */
 typedef struct { RantDouble2 position, normal; } RantPlane2D;    /* a line: any point on it, unit normal */
 typedef struct { RantDouble2 a, b; } RantSegment2D;
+typedef struct { RantDouble2 origin, direction; } RantRay2D;
 typedef struct { RantDouble2 center; double radius; } RantCircle;
 typedef struct { RantSegment2D axis; double radius; } RantCapsule2D;
 typedef struct { uint8_t bytes[16]; } RantUuid;                  /* RFC 4122 byte order */
 typedef int64_t RantTimestamp;     /* microseconds since the Unix epoch, UTC */
 typedef int64_t RantDuration;                                  /* microseconds */
-typedef struct { float m[9];  } RantMatrix3x3;                 /* row major */
-typedef struct { float m[16]; } RantMatrix4x4;                 /* row major */
+typedef struct { float m[3][3]; } RantMatrix3x3;              /* m[row][column] */
+typedef struct { float m[4][4]; } RantMatrix4x4;
+typedef struct { double m[3][3]; } RantCovariance3;
+typedef struct { double m[6][6]; } RantCovariance6;            /* x, y, z, then the turn about each */
+typedef struct { RantPose pose; RantCovariance6 covariance; } RantPoseWithCovariance;
+typedef struct { RantTwist twist; RantCovariance6 covariance; } RantTwistWithCovariance;
+typedef struct {
+    RantPoseWithCovariance pose;          /* in the parent frame */
+    RantTwistWithCovariance twist;        /* in the body frame */
+    uint16_t parent_len; char parent[30];
+} RantOdometry;
+typedef struct {
+    RantQuaternion orientation;        RantCovariance3 orientation_covariance;
+    RantDouble3 angular_velocity;      RantCovariance3 angular_velocity_covariance;
+    RantDouble3 linear_acceleration;   RantCovariance3 linear_acceleration_covariance;
+} RantImu;                                                     /* -1 first in a covariance: not measured */
+typedef struct {
+    double mass; RantDouble3 center;                           /* kg, and m in the body frame */
+    double ixx, ixy, ixz, iyy, iyz, izz;                       /* kg m^2 about the center */
+} RantInertia;
 
 /* Image.format, VideoFrame.codec and ExternalVideoStream.kind as the schema declares
  * them. A format of 16 or more is a compressed container. */
@@ -107,6 +140,20 @@ typedef enum {
     RANT_STREAM_SRT = 3, RANT_STREAM_RTP = 4, RANT_STREAM_HTTP_MJPEG = 5,
     RANT_STREAM_OTHER = 15
 } RantStreamKind;
+/* The number kinds of PointField, GridField and Tensor, numbered as in PCL. */
+typedef enum {
+    RANT_SCALAR_I8 = 1, RANT_SCALAR_U8 = 2, RANT_SCALAR_I16 = 3, RANT_SCALAR_U16 = 4,
+    RANT_SCALAR_I32 = 5, RANT_SCALAR_U32 = 6, RANT_SCALAR_F32 = 7, RANT_SCALAR_F64 = 8,
+    RANT_SCALAR_I64 = 9, RANT_SCALAR_U64 = 10
+} RantScalarKind;
+typedef enum {
+    RANT_RANGE_UNKNOWN = 0, RANT_RANGE_ULTRASOUND = 1, RANT_RANGE_INFRARED = 2,
+    RANT_RANGE_LASER = 3, RANT_RANGE_RADAR = 4
+} RantRangeKind;
+typedef enum {
+    RANT_GNSS_NO_FIX = 0, RANT_GNSS_FIX = 1, RANT_GNSS_DIFFERENTIAL = 2,
+    RANT_GNSS_RTK_FLOAT = 3, RANT_GNSS_RTK_FIXED = 4
+} RantGnssStatus;
 
 /* The layout pins. A mirror that ever gained padding would silently mis decode. */
 typedef char i_rant_std_size_check[
@@ -120,8 +167,12 @@ typedef char i_rant_std_size_check[
        sizeof(RantOrientedBox) == 80 && sizeof(RantOrientedBox2D) == 40 &&
        sizeof(RantPlane) == 48 && sizeof(RantSegment) == 48 && sizeof(RantSphere) == 32 &&
        sizeof(RantCapsule) == 56 && sizeof(RantCylinder) == 56 && sizeof(RantCone) == 56 &&
-       sizeof(RantCircle) == 24 &&
-       sizeof(RantUuid) == 16 && sizeof(RantMatrix4x4) == 64) ? 1 : -1];
+       sizeof(RantCircle) == 24 && sizeof(RantRay) == 48 && sizeof(RantRay2D) == 32 &&
+       sizeof(RantUuid) == 16 && sizeof(RantMatrix3x3) == 36 && sizeof(RantMatrix4x4) == 64 &&
+       sizeof(RantAccel) == 48 && sizeof(RantAccel2D) == 24 &&
+       sizeof(RantCovariance3) == 72 && sizeof(RantCovariance6) == 288 &&
+       sizeof(RantPoseWithCovariance) == 344 && sizeof(RantTwistWithCovariance) == 336 &&
+       sizeof(RantOdometry) == 712 && sizeof(RantImu) == 296 && sizeof(RantInertia) == 80) ? 1 : -1];
 
 /* The thin operations, header only. */
 static inline RantFloat3 rant_float3(float x, float y, float z){

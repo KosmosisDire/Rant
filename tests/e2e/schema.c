@@ -717,6 +717,24 @@ static void stdtypes_checks(void){
         }
         if (sp) i_rant_schema_free(sp, rant_allocator_alloc, &ma);
     }
+    {   RantSchema *so = test_compile(&ma, "Odometry", NULL);
+        RantOdometry o; uint8_t m[sizeof(RantOdometry)];
+        memset(&o, 0, sizeof o);
+        o.pose.covariance.m[5][4] = 7.0;
+        o.twist.twist.angular.z = 0.5;
+        o.parent_len = 3; memcpy(o.parent, "map", 3);
+        memcpy(m, &o, sizeof o);
+        if (so){
+            RantBytes b = rant_bytes(m, sizeof m);
+            RantString pn = rant_get_string(b, so, "parent");
+            CHECK(rant_get_f64(b, so, "pose.covariance[5][4]") == 7.0
+                     && rant_get_f64(b, so, "twist.twist.angular.z") == 0.5
+                     && pn.len == 3 && memcmp(pn.data, "map", 3) == 0,
+                     "stdtypes: a memcpy'd RantOdometry reads back through the schema");
+        }
+        else CHECK(0, "stdtypes: Odometry compiles");
+        if (so) i_rant_schema_free(so, rant_allocator_alloc, &ma);
+    }
     {   static const struct { const char *name; size_t size; } mirrors[] = {
             { "Pose", sizeof(RantPose) }, { "Pose2D", sizeof(RantPose2D) },
             { "Wrench", sizeof(RantWrench) },
@@ -728,7 +746,15 @@ static void stdtypes_checks(void){
             { "Circle", sizeof(RantCircle) },
             { "Transform2D", sizeof(RantTransform2D) }, { "Twist2D", sizeof(RantTwist2D) },
             { "Wrench2D", sizeof(RantWrench2D) }, { "Plane2D", sizeof(RantPlane2D) },
-            { "Segment2D", sizeof(RantSegment2D) }, { "Capsule2D", sizeof(RantCapsule2D) }
+            { "Segment2D", sizeof(RantSegment2D) }, { "Capsule2D", sizeof(RantCapsule2D) },
+            { "Matrix3x3", sizeof(RantMatrix3x3) }, { "Matrix4x4", sizeof(RantMatrix4x4) },
+            { "Accel", sizeof(RantAccel) }, { "Accel2D", sizeof(RantAccel2D) },
+            { "Covariance3", sizeof(RantCovariance3) }, { "Covariance6", sizeof(RantCovariance6) },
+            { "PoseWithCovariance", sizeof(RantPoseWithCovariance) },
+            { "TwistWithCovariance", sizeof(RantTwistWithCovariance) },
+            { "Odometry", sizeof(RantOdometry) }, { "Imu", sizeof(RantImu) },
+            { "Inertia", sizeof(RantInertia) },
+            { "Ray", sizeof(RantRay) }, { "Ray2D", sizeof(RantRay2D) }
         };
         int i, ok = 1;
         for (i = 0; i < (int)(sizeof mirrors / sizeof mirrors[0]); i++){
