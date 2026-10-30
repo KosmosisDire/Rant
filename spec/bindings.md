@@ -229,7 +229,7 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
 
 `bindings/csharp/Rant.cs` is a hand written P/Invoke layer over a prebuilt native library named
 `rant`, resolved from a NuGet package's `runtimes/<rid>/native/` or Unity's
-`Assets/Plugins/`. The standard types beside it, `bindings/csharp/types/Types.cs`, are generated and are their own assembly, `Rant.Types`, with no native code.
+`Assets/Plugins/`. The standard types beside it, `bindings/csharp/types/Types.cs`, are generated and are their own assembly, `Rant.Types`, with no native code. The NuGet package carries it and depends on nothing. A library may carry it too, since the .NET SDK keeps the copy with the newest version.
 
 - Collision prone nouns are Rant prefixed: `RantNode`, `RantEvent`, `RantMessage`,
   `RantRequest`, `RantResponse`. Domain names (`Publisher<T>`, `Subscriber<T>`,

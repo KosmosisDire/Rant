@@ -89,10 +89,12 @@ jobs:
         shell: bash
         run: ls -l dist/native/*/
 
+      # An example builds from Rant's package alone, so a package that needs another fails here.
       - name: NuGet package
         run: |
-          dotnet pack bindings/csharp/types/Rant.Types.csproj -c Release -o dist
           dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
+          dotnet build bindings/csharp/publisher -c Release
+          dotnet pack bindings/csharp/types/Rant.Types.csproj -c Release -o dist
 
       # Installed with no index, so a wheel that needs anything else fails here.
       - name: Python wheel

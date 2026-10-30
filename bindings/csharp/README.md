@@ -15,7 +15,7 @@ to run every parked callback.
 bindings/csharp/
   Rant.cs                 the wrapper (the one source; compiled by the package + the test)
   Rant.csproj             NuGet package: Rant.cs + ../../dist/native/<rid>/    ->  .nupkg
-  types/                  NuGet package Rant.Types: the generated standard types, no native code
+  types/                  assembly Rant.Types: the generated standard types, no native code
   nuget.config            the examples take the packed Rant from ../../dist
   test/                   the binding test (compiles ../Rant.cs)
   publisher/ subscriber/  console examples referencing the Rant package, as a user would
@@ -32,13 +32,13 @@ after a change to Rant.cs run the pack step below and build them again.
 cmake -S . -B build
 cmake --build build --config Release --target rant_shared     # -> dist/native/<rid>/
 # 2. pack the NuGet
-dotnet pack bindings/csharp/types/Rant.Types.csproj -c Release -o dist
 dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
 ```
 
 The binaries are **not committed** to git. The CMake target (or the release workflow)
-produces them before packing. The resulting `.nupkg` bundles `lib/netstandard2.1/Rant.dll`,
-its doc comments as `Rant.xml`, and `runtimes/<rid>/native/*`.
+produces them before packing. The resulting `.nupkg` bundles `lib/netstandard2.1/Rant.dll` and
+`Rant.Types.dll`, their doc comments as `.xml` files, and `runtimes/<rid>/native/*`. It needs no
+other package. `dotnet pack bindings/csharp/types/Rant.Types.csproj` packs the types alone.
 
 ## Install
 

@@ -145,9 +145,9 @@ read after `Close` throws.
 
 The standard types of docs/stdtypes.md are mirror structs in the `Rant.Types` namespace,
 apart from the root so `Color` or `Quaternion` never clashes with a Unity or
-`System.Numerics` type under `using Rant;`. They are the `Rant.Types` package, which holds no
-native code, so a library such as Rant Math shares them with Rant, and the `Rant` package brings
-it along. `Rant.Types.Timestamp.Now()` is the Timestamp clock, and the enums carry the wire values.
+`System.Numerics` type under `using Rant;`. They are the `Rant.Types` assembly, which holds no
+native code. The `Rant` package carries it, and a library such as Rant Math can carry it too, since
+.NET keeps one copy, the newest. `Rant.Types.Timestamp.Now()` is the Timestamp clock, and the enums carry the wire values.
 
 ## QoS and messages
 

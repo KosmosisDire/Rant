@@ -31,10 +31,20 @@
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
-  <!-- The standard types are their own package, so a library can take them with no middleware. -->
+  <!-- The standard types go inside this package, so it needs no other. A library may carry the
+       same assembly, and .NET loads the newest one. -->
+  <PropertyGroup>
+    <TargetsForTfmSpecificBuildOutput>$(TargetsForTfmSpecificBuildOutput);RantPackTypes</TargetsForTfmSpecificBuildOutput>
+  </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="types/Rant.Types.csproj" />
+    <ProjectReference Include="types/Rant.Types.csproj" PrivateAssets="all" />
   </ItemGroup>
+  <Target Name="RantPackTypes" DependsOnTargets="ResolveReferences">
+    <ItemGroup>
+      <RantTypes Include="@(ReferenceCopyLocalPaths->WithMetadataValue('ReferenceSourceTarget', 'ProjectReference'))" />
+      <BuildOutputInPackage Include="@(RantTypes);@(RantTypes->'%(RootDir)%(Directory)%(Filename).xml')" />
+    </ItemGroup>
+  </Target>
 
   <!-- Globbed, so a platform that was not built is left out rather than failing the pack. -->
   <ItemGroup>

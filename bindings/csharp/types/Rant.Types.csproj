@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- The standard types alone, with no native code, so Rant and a library such as Rant Math
-       share one definition of each. Types.cs is generated: rant_codegen standard. -->
+  <!-- The standard types alone, with no native code. The Rant package carries this assembly, and a
+       library such as Rant Math can too. Types.cs is generated: rant_codegen standard. -->
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
     <Nullable>disable</Nullable>
