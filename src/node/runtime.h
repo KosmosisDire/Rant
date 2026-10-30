@@ -1,0 +1,481 @@
+/* The node runtime and the public rant_node_* and rant_topic_* API. It owns the sockets
+ * and the clock and drives the cores. docs/node.md explains how to use it. */
+#ifndef RANT_NODE_H
+#define RANT_NODE_H
+
+#include "../common/api.h"
+#include "../transport/core.h"
+#include "../discovery/core.h"
+#include "../serialize/schema.h"
+#ifndef RANT_NO_STDTYPES
+#include "../serialize/stdtypes.h"
+#endif
+#include "../common/alloc.h"
+#include "core.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifndef RANT_MATCH_WAIT_MS
+#define RANT_MATCH_WAIT_MS 1000     /* the default send path match wait bound */
+#endif
+
+/* The node options, passed as a compound literal. NULL means all defaults. */
+typedef struct {
+    uint16_t              domain;
+    uint16_t              max_topics;  /* topics that can be created, 0 = 8 */
+    void                 *user_data;     /* RantMsg.user and RantEvent.user */
+    uint8_t               disable_shm;   /* 1 = never use the same host shared memory path */
+    uint8_t               fetch_details; /* 1 = fetch and cache every topic every peer advertises,
+                                            for observer UIs. Costs memory per peer topic */
+    int32_t               match_wait_ms; /* the send path match wait bound. 0 = RANT_MATCH_WAIT_MS,
+                                            negative = disabled and such a send fires UNMATCHED_SEND */
+    uint8_t               disable_logs;  /* 1 = no @rant/log topic, rant_node_log gives NOSYS */
+    uint8_t               disable_meta;  /* 1 = no built in @rant/meta function */
+    uint8_t               disable_error_logs; /* 1 = do not mirror errors onto @rant/log */
+    uint8_t               log_level;     /* the lowest RantLevel published, 0 = RANT_LOG_LEVEL, else INFO */
+    uint8_t               disable_status; /* 1 = no @rant/status topics, rant_node_set_status gives NOSYS */
+    RantNodeNet           net;
+    RantNodeDiscovery     discovery;
+    uint32_t              event_queue_bytes; /* the event ring cap once rant_node_set_event_queue is
+                                                called, 0 = 64 KB. Overflow drops the oldest event */
+    const char           *prefix;        /* goes with '/' in front of every name this node creates,
+                                            inside RANT_PREFIX. NULL = none. docs/node.md */
+    RantAllocator        *bulk;          /* a second pool for the big buffers touched rarely, such as
+                                            PSRAM. Copied at open and reset at close like alloc.
+                                            NULL = alloc. spec/allocation.md, Two pools */
+} RantNodeOpts;
+
+typedef struct RantQueue RantQueue;       /* a callback queue, owned by the node, freed at close */
+
+/* Per topic options, passed as a compound literal. */
+typedef struct {
+    RantQos    qos;
+    uint8_t    reflect_from_mesh;  /* fill what was left unspecified from the mesh: a NULL schema and
+                                    a zero reliability follow it. See docs/reflection.md */
+    RantQueue *queue;              /* callbacks park here and run on rant_queue_dispatch. NULL =
+                                    inline on the loop thread. Fixed for the topic's life */
+    uint8_t    pull;               /* 1 = no callbacks: messages wait in the topic's ring for
+                                    rant_topic_take. Refused together with a queue */
+} RantTopicOpts;
+
+typedef struct RantNode      RantNode;
+typedef struct RantTopic RantTopic;       /* an opaque handle, stable for the node's life */
+
+/* A delivered message. From the callback, send and read only queries on the same node
+ * are allowed. poll, create, set_role, drain, start, stop and close are refused. */
+typedef struct {
+    RantNode        *node;
+    void            *user;             /* RantNodeOpts.user_data */
+    uint16_t         topic_index;
+    uint32_t         publisher_id;
+    RantString       publisher_name;      /* never NULL data on delivery, "unknown-peer" at worst. A
+                                        view valid for the callback */
+    RantString       topic_name;     /* {NULL,0} if unknown */
+    RantBytes        header;           /* pattern header bytes in front of the payload, {NULL,0} on a
+                                        plain topic */
+    RantBytes        data;             /* the payload after the header */
+    const RantSchema *schema;          /* the schema data decodes with, validated before delivery,
+                                        valid until the node closes. NULL on a raw topic or an
+                                        untyped publisher */
+    uint64_t       recv_us;          /* the monotonic clock at receive, or at enqueue */
+    uint64_t       written_us;       /* the writer's wall clock at commit, UTC microseconds. 0 = the
+                                        publisher opted out. Never mix it with recv_us */
+    uint64_t       capture_us;       /* when the publisher says the data was true, UTC
+                                        microseconds. 0 = none given, written_us is all there is */
+} RantMsg;
+typedef void (*RantMsgFn)(const RantMsg *msg);
+
+/* The process heap as an allocator, for a caller with no page source of its own.
+ * page_size 0 is the default. spec/allocation.md explains the modes. */
+RANT_API RantAllocator rant_allocator_heap(uint32_t page_size);
+
+/* Opens a node on alloc, which it copies and resets on close, so use one per node. alloc
+ * is required and NULL refuses the open with RANT_E_OOM. name NULL gives an auto name,
+ * on_message and on_event may be NULL, opts NULL means defaults. */
+RANT_API RantNode        *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_message,
+                                     RantEventFn on_event, const RantNodeOpts *opts);
+/* The most recent error. n NULL returns the process global slot, the reason an open
+ * returned NULL. .error is RANT_E_NONE if none occurred. */
+RANT_API RantEvent        rant_last_error(RantNode *n);
+/* The compiled library's version, such as "0.0.17". RANT_VERSION is the header's. */
+RANT_API const char      *rant_version(void);
+/* One loop tick, blocking up to timeout_ms. RANT_ERR_STATE while a service thread runs
+ * or from inside a callback. */
+RANT_API int            rant_node_poll(RantNode *n, int timeout_ms);
+/* Stops the service thread, then tears the node down. RANT_ERR_STATE from a callback or
+ * while a queue is being dispatched: stop the draining threads first. */
+RANT_API int            rant_node_close(RantNode *n, int send_bye);
+
+/* Threading: every call is thread safe under one node lock never held across a wait.
+ * Drive the node with rant_node_poll or with rant_node_start. See docs/node.md. */
+/* Runs the background service thread. RANT_ERR_NOSYS when threads are compiled out. */
+RANT_API int            rant_node_start(RantNode *n);
+/* Stops and joins the service thread. Idempotent, implied by close. */
+RANT_API int            rant_node_stop(RantNode *n);
+/* 1 while the service thread runs. */
+RANT_API int            rant_node_is_started(RantNode *n);
+/* Hold the node lock from a non callback thread around reads of a view. Hold it briefly.
+ * No ops from a callback and when threads are compiled out. */
+RANT_API void           rant_node_lock(RantNode *n);
+RANT_API void           rant_node_unlock(RantNode *n);
+/* Sends that evicted never sent history after the bounded wait, since open. */
+RANT_API uint32_t       rant_node_evicted_unsent(RantNode *n);
+
+/* Compiles schema text in the node's registry. Every definition stays in scope for each
+ * later compile on this node, and a name on its own is a schema. The node owns the result,
+ * one handle per shape, freed at close. NULL fires RANT_E_BAD_SCHEMA, the reason and the
+ * place are in rant_last_error(n).detail. docs/stdtypes.md has the text. */
+RANT_API const RantSchema *rant_node_schema(RantNode *n, const char *text);
+/* The same from a schema's wire bytes, such as a peer's, bounds checked. Defines no name. */
+RANT_API const RantSchema *rant_node_schema_parse(RantNode *n, const void *wire, size_t wire_len);
+
+#ifndef RANT_NO_STDTYPES
+/* The two standard type values that need a platform: the wall clock a Timestamp counts
+ * from, and a random version 4 Uuid. Neither needs a node. */
+RANT_API RantTimestamp rant_timestamp_now(void);
+RANT_API void              rant_uuid_new(RantUuid *out);
+/* Recognizes a standard type in a schema we did not write: the name and the shape must
+ * both match the registry's. The result is stable per schema, so cache it. */
+RANT_API RantStdType rant_std_recognize(RantNode *n, const RantSchema *s);
+RANT_API RantStdType rant_std_recognize_field(RantNode *n, const RantSchema *s, uint16_t field);
+#endif
+
+/* Creates a topic. name is the identity, schema is registered in this node, NULL means raw
+ * bytes. A retired slot is reused. NULL when the reserve is full, the name is bad or out of
+ * memory. */
+RANT_API RantTopic *rant_node_create_topic(RantNode *n, const char *name, RantRole role,
+                                               const RantSchema *schema, const RantTopicOpts *opts);
+
+/* Retires a topic and frees the handle, invalid after RANT_OK. RANT_ERR_STATE from a
+ * callback, for a pattern channel or a builtin, or during a dispatch. See docs/topics.md. */
+RANT_API int rant_topic_retire(RantTopic *topic);
+/* A reflect_from_mesh topic: re reads the mesh and re types the handle in place when the
+ * provider moved. 1 re created, 0 current, negative on error, RANT_ERR_STATE from a callback. */
+RANT_API int rant_topic_refresh(RantTopic *topic);
+
+/* Callback queues: a handle created with opts.queue parks each callback as a record on its
+ * own ring, and rant_queue_dispatch runs the parked callbacks on the calling thread with
+ * the node lock released. docs/node.md explains the rules. */
+#ifndef RANT_QUEUE_CAP
+#define RANT_QUEUE_CAP (1u << 20)     /* the default ring growth cap, bytes per topic */
+#endif
+#ifndef RANT_QUEUES_MAX
+#define RANT_QUEUES_MAX 8             /* callback queues per node */
+#endif
+/* NULL with RANT_E_STATE from a callback or past RANT_QUEUES_MAX, RANT_E_OOM otherwise. */
+RANT_API RantQueue *rant_node_create_queue(RantNode *n);
+/* Runs the callbacks parked at entry, oldest first across the queue's handles, up to
+ * max_callbacks (0 = all). timeout_ms waits for the first record like take: 0 checks,
+ * positive waits, negative forever, driving the loop itself when no service thread runs.
+ * Returns the count run. RANT_ERR_STATE from an inline callback, from one of its own
+ * callbacks, or while another thread dispatches the same queue. */
+RANT_API int        rant_queue_dispatch(RantQueue *q, int max_callbacks, int timeout_ms);
+/* Records waiting across the queue's handles, and records dropped since open. */
+RANT_API void       rant_queue_stats(RantQueue *q, uint32_t *waiting, uint32_t *dropped);
+/* Parks on_event on q from now on, NULL = inline again and the parked events are dropped.
+ * rant_last_error stays current either way. RANT_ERR_STATE from a callback, for another
+ * node's queue or while the events are being dispatched, RANT_ERR_OOM for the ring. */
+RANT_API int        rant_node_set_event_queue(RantNode *n, RantQueue *q);
+/* Parks the log lines this node receives on q from now on, NULL = inline again and the
+ * parked lines are dropped. RANT_ERR_STATE as above, RANT_ERR_NOSYS when logs are disabled. */
+RANT_API int        rant_node_set_log_queue(RantNode *n, RantQueue *q);
+/* The same for the status sets this node receives. RANT_ERR_NOSYS when status is disabled. */
+RANT_API int        rant_node_set_status_queue(RantNode *n, RantQueue *q);
+
+/* Pull topics (RantTopicOpts.pull). take pops the oldest waiting message, take_latest the
+ * newest after dropping the older ones. The views stay valid until the topic's next take.
+ * timeout_ms 0 checks, positive waits, negative waits forever, driving the loop when no
+ * service thread runs. 1 got one, 0 none, RANT_ERR_STATE on a topic created without pull. */
+RANT_API int rant_topic_take(RantTopic *topic, RantMsg *out, int timeout_ms);
+RANT_API int rant_topic_take_latest(RantTopic *topic, RantMsg *out, int timeout_ms);
+/* A queued or pull topic's ring: messages waiting, bytes used and capacity, and messages
+ * dropped since open. All zero for an inline topic. */
+RANT_API void rant_topic_queue_stats(RantTopic *topic, uint32_t *msgs, uint32_t *bytes,
+                                       uint32_t *capacity, uint32_t *dropped);
+/* Publishes to every matched subscriber. RANT_OK or a negative RantResult. */
+/* Optional per send config, NULL means all defaults. capture_us is when the data was
+ * true rather than when it was sent, and costs 8 wire bytes only when it is set. */
+typedef struct {
+    uint64_t capture_us;   /* UTC microseconds, the rant_timestamp_now clock. 0 = none */
+} RantSendOpts;
+
+RANT_API int            rant_topic_send(RantTopic *topic, RantBytes data, const RantSendOpts *opts);
+/* Flips the role at runtime and re advertises. 0 ok, negative on error. */
+RANT_API int            rant_topic_set_role(RantTopic *topic, RantRole role);
+/* The local index, RantMsg.topic_index for its messages. */
+RANT_API uint16_t       rant_topic_index(const RantTopic *topic);
+/* The schema as passed to create, NULL for a raw topic. */
+RANT_API const RantSchema *rant_topic_schema(const RantTopic *topic);
+/* The handle by creation index, NULL if out of range. */
+RANT_API RantTopic *rant_node_topic(RantNode *n, uint16_t index);
+
+/* Reflection: three walks over one zero initialized RantIter, called until 0. Every view
+ * is valid until the next poll. docs/reflection.md explains them. */
+
+/* One discovered peer per call, dropped peers included. Gate on liveness. */
+RANT_API int rant_node_peers_next(RantNode *n, RantIter *it, RantPeerInfo *out);
+
+/* The entities one node advertises. RANT_SELF walks this node, a dropped peer serves its
+ * last known view. */
+RANT_API int rant_node_entities_next(RantNode *n, uint32_t peer, RantIter *it, RantEntityInfo *out);
+
+/* The whole mesh folded, one entity per kind and name across every active peer and this node. */
+RANT_API int rant_node_mesh_next(RantNode *n, RantIter *it, RantEntityInfo *out);
+RANT_API int rant_node_mesh_find(RantNode *n, RantEntityKind kind, const char *name, RantEntityInfo *out);
+
+/* Bumps on every reflected change anywhere. Re walk iff it moved. */
+RANT_API uint32_t rant_node_mesh_epoch(RantNode *n);
+
+/* Microseconds waited on slow subscribers and how many sends waited, since open. */
+RANT_API void       rant_node_backpressure_stats(RantNode *n, uint64_t *waited_us, uint32_t *waited_sends);
+
+/* The main pool's live bytes, high water mark and count of allocations. A flat count over a
+ * window proves the hot path is allocation free. The meta snapshot reports a bulk pool. */
+RANT_API void       rant_node_mem_stats(RantNode *n, size_t *in_use, size_t *peak, uint64_t *alloc_calls);
+/* The topic's cumulative repair counters. Zeroed for a NULL topic. */
+RANT_API void       rant_topic_repair_stats(RantTopic *topic, RantRepairStats *out);
+
+/* The in pump probe: sampled on a timer inside a blocked reliable send, so a stall becomes
+ * a time series of repair progress. Observational only. */
+typedef struct {
+    uint16_t topic;
+    uint64_t wait_elapsed_us; /* since this backpressure wait began */
+    uint64_t interval_us;     /* since the previous sample */
+    uint64_t frags_resent;    /* in the interval */
+    uint64_t nacks_recv;      /* in the interval */
+    uint32_t polls;           /* poll calls in the interval */
+    uint32_t polls_idle;      /* of those, polls with no repair pending */
+} RantPumpSample;
+typedef void (*RantPumpProbeFn)(void *user, const RantPumpSample *s);
+/* Registers the probe, NULL disables. interval_us 0 = 200 ms. */
+RANT_API void       rant_node_set_pump_probe(RantNode *n, RantPumpProbeFn fn, uint64_t interval_us, void *user);
+/* The in progress message from peer: 1 and its base seqno, fragments held and needed. */
+RANT_API int        rant_topic_subscriber_progress(RantTopic *topic, uint32_t peer,
+                                     uint64_t *base_seqno, uint32_t *have, uint32_t *total);
+/* Waits until every subscriber acked everything, or timeout_ms. 1 drained, 0 on timeout
+ * or from a callback. Call before close so a burst is not cut by the BYE. */
+RANT_API int        rant_topic_drain(RantTopic *topic, int timeout_ms);
+/* Subscribers matched now. */
+RANT_API int        rant_topic_match_count(RantTopic *topic);
+
+/* The send path match wait: a send that would reach nobody while a match is still
+ * resolving blocks up to opts.match_wait_ms. See docs/topics.md and spec/interest.md. */
+/* Unresolved candidate matches right now. 0 = converged for everyone known. */
+RANT_API int        rant_topic_pending_count(RantTopic *topic);
+/* 1 when a send would not wait: matched, or converged with nobody to wait for. The async
+ * form for a GUI that disables the wait. */
+RANT_API int        rant_topic_ready(RantTopic *topic);
+
+/* Blocks until discovery and matching settle. Call it after creating topics. timeout_ms
+ * negative = 3 announce intervals. 1 settled, 0 on timeout or from a callback. */
+RANT_API int        rant_node_settle(RantNode *n, int timeout_ms);
+#ifdef RANT_SHM
+/* Messages published and delivered through shared memory since open. */
+RANT_API void       rant_node_shm_stats(RantNode *n, uint32_t *sent, uint32_t *recv);
+#endif
+
+/* Messages and bytes this node committed to the topic and received on it, since open. */
+RANT_API void       rant_topic_counts(RantTopic *topic, uint64_t *tx_msgs, uint64_t *tx_bytes,
+                                    uint64_t *rx_msgs, uint64_t *rx_bytes);
+
+/* The built in @rant/log and @rant/status topics. docs/node.md explains them. */
+typedef enum { RANT_LEVEL_DEBUG = 1, RANT_LEVEL_INFO, RANT_LEVEL_WARN, RANT_LEVEL_ERROR } RantLevel;
+typedef enum { RANT_ORIGIN_APP = 0, RANT_ORIGIN_RANT = 1 } RantOrigin;   /* who wrote a line or condition */
+#ifndef RANT_LOG_MAX
+#define RANT_LOG_MAX 512     /* formatted log text bytes, longer is truncated */
+#endif
+/* printf style publish of one line. A level below the node's log_level sends nothing and
+ * returns RANT_OK. RANT_ERR_NOSYS when the log is disabled. */
+RANT_API int            rant_node_log(RantNode *n, RantLevel level, const char *fmt, ...);
+/* Publishes an already formatted line, len negative = NUL terminated. The FFI entry. */
+RANT_API int            rant_node_log_text(RantNode *n, RantLevel level, const char *text, int len);
+/* The node's own @rant/log handle, NULL when disabled. */
+RANT_API RantTopic       *rant_node_log_topic(RantNode *n);
+
+/* A node's status is its set of active conditions, published whole on @rant/status. The key
+ * and text caps are part of the wire schema, so they are fixed. */
+#define RANT_STATUS_KEY_MAX  48     /* key bytes, a longer key is refused */
+#define RANT_STATUS_TEXT_MAX 160    /* text bytes, longer is truncated */
+#ifndef RANT_STATUS_MAX
+#define RANT_STATUS_MAX      32     /* app conditions per node */
+#endif
+#ifndef RANT_STATUS_RANT_MAX
+#define RANT_STATUS_RANT_MAX 16     /* Rant's own conditions per node, the last a count of any more */
+#endif
+#ifndef RANT_STATUS_KIND_MAX
+#define RANT_STATUS_KIND_MAX 3      /* Rant's problems of one kind listed apart, more fold into one */
+#endif
+typedef struct {
+    uint8_t clearable;   /* 1 = another node may clear it with rant_node_clear_peer_status */
+} RantStatusOpts;
+/* Raises the condition key, or updates it when it is active. since_us stays from the raise,
+ * and setting what it already holds sends nothing. The set publishes on the next poll pass.
+ * RANT_ERR_TOO_BIG for a key over its cap or past RANT_STATUS_MAX conditions. */
+RANT_API int            rant_node_set_status(RantNode *n, const char *key, RantLevel level,
+                                             const char *text, const RantStatusOpts *opts);
+/* Clears the condition key. RANT_OK whether or not it was active. */
+RANT_API int            rant_node_clear_status(RantNode *n, const char *key);
+/* Asks peer to clear its clearable condition key raised at since_us, as its last status set
+ * reported. Nothing answers: the peer's next set shows it gone, or still there when refused. */
+RANT_API int            rant_node_clear_peer_status(RantNode *n, uint32_t peer, const char *key,
+                                                    uint64_t since_us);
+/* The node's own @rant/status handle, NULL when disabled. */
+RANT_API RantTopic       *rant_node_status_topic(RantNode *n);
+
+/* The @rant/meta snapshot section mask, a 4 byte LE u32 request payload, 0 = everything.
+ * The response is RantMeta { info: map } with one key per section. See docs/node.md. */
+#define RANT_META_NODE     0x1u
+#define RANT_META_PROC     0x2u
+#define RANT_META_TOPICS 0x4u
+#define RANT_META_PEERS    0x8u
+
+/* Internal hooks for the patterns layer: create a topic carrying an entity kind, route its
+ * messages to a handler, and observe node wide events and a per poll tick. */
+typedef void     (*i_RantSysMsgFn)(void *user, const RantMsg *msg);
+typedef void     (*i_RantSysEventFn)(void *user, const RantEvent *ev);
+typedef uint64_t (*i_RantSysTickFn)(void *user, uint64_t now_us);     /* next deadline, 0 = none */
+typedef void     (*i_RantSysCloseFn)(void *user);     /* the node is closing: settle promises */
+
+/* Creates a pattern topic: stamps the kind, prefix, directed flag and attrs, permits '@' in
+ * the name, and routes deliveries to on_msg. opts.queue gives it a ring, see the seams below. */
+RantTopic *i_rant_node_create_pattern_topic(RantNode *n, const char *name, RantRole role,
+                              const RantSchema *schema, const RantTopicOpts *opts,
+                              uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
+                              i_RantSysMsgFn on_msg, void *on_msg_user);
+/* The mesh name for a name the app passed: the node's prefix and '/' in front, or the rest
+ * after a leading '/'. NULL with RANT_E_BAD_NAME when it is empty, holds '@' or will not fit
+ * with room bytes of channel suffix. buf holds RANT_TOPIC_NAME_MAX + 1. */
+const char *i_rant_node_mesh_name(RantNode *n, const char *name, size_t room, char *buf);
+/* Re types a live pattern channel in place, the engine of every refresh. Lock held, outside
+ * any callback. */
+int  i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reliability);
+/* rant_topic_set_role with the node lock already held, from outside any callback. */
+int  i_rant_topic_set_role_held(RantTopic *topic, RantRole role);
+/* The reflect_from_mesh pick for one channel (which: 0 primary, 1 rsp, 2 prg). */
+int  i_rant_node_reflect_pick(RantNode *n, RantEntityKind kind, const char *name, int which, int writer,
+                              const RantSchema **schema, uint8_t *reliable, uint64_t *generation);
+/* Publishes hdr plus payload on a pattern topic to every matched subscriber. */
+int  i_rant_topic_send_hdr(RantTopic *topic, RantBytes hdr, RantBytes data);
+/* Publishes hdr plus payload to one peer, for function replies. */
+int  i_rant_topic_send_to(RantTopic *topic, uint32_t to_peer, RantBytes hdr, RantBytes data);
+/* Holds the re advertise of every create, role flip, retype and retire until the release,
+ * so a pattern handle's channels reach peers in one announce. Nests. Takes the node lock. */
+void i_rant_node_advertise_hold   (RantNode *n);
+void i_rant_node_advertise_release(RantNode *n);
+/* Clears a pattern topic's routing before its handle is freed. Under the node lock. */
+void i_rant_topic_clear_sys(RantTopic *topic);
+/* Callback queue seams. A pattern topic created with opts.queue keeps inline delivery: its
+ * handler does the bookkeeping, parks what the user callback needs as a record with a kind
+ * of its own, and on_dispatch gets the record back on the draining thread. A kind with the
+ * high bit set is synthetic: the body is the layer's own blob, handed back whole in
+ * msg->data with no prefix split and no schema. */
+#define I_RANT_REC_SYNTH 0x80u
+typedef void (*i_RantSysDispatchFn)(void *user, const RantMsg *msg, uint8_t kind);
+void       i_rant_topic_set_dispatch(RantTopic *topic, i_RantSysDispatchFn on_dispatch);
+/* Links a pattern handle's channels, so the request channel takes a peer's requests only
+ * once the answer channels reach that peer (spec/patterns.md). prg may be NULL. */
+int        i_rant_topic_link(RantTopic *req, RantTopic *rsp, RantTopic *prg);
+RantQueue *i_rant_topic_queue(RantTopic *topic);      /* NULL = inline */
+int        i_rant_topic_busy(RantTopic *topic);       /* 1 while a dispatched callback of it runs */
+/* Parks hdr then body as one record on the topic's ring. A pattern ring never parks the
+ * transport: at the cap the oldest record goes and MSG_LOST fires. recv_us 0 = now.
+ * Lock held. RANT_ERR_STATE when the topic has no ring. */
+int        i_rant_topic_park(RantTopic *topic, uint8_t kind, uint32_t from, RantBytes hdr,
+                             RantBytes body, uint64_t written_us, uint64_t recv_us);
+/* Hands every committed but unsent datagram to the wire now, transmit only. The pattern
+ * layer's retire and close flush their CANCELLED replies here. Takes the node lock. */
+void i_rant_node_flush_tx(RantNode *n);
+/* The topic's next seqno. The slot line continues across retire and reuse, so a pattern
+ * layer seeds its own monotonic counters from it. */
+uint64_t i_rant_topic_seqno(RantTopic *topic);
+/* The send path match wait without the send or the event: the caller derives its own
+ * verdict. Returns the matched count. No wait from a callback or once converged. */
+int  i_rant_topic_match_wait(RantTopic *topic);
+/* Registers the patterns layer's event observer, per poll tick and close hook, NULL clears.
+ * The close hook fires once at the top of close, with the node still fully alive. */
+void i_rant_node_set_sys_hooks(RantNode *n, i_RantSysEventFn on_event, i_RantSysTickFn tick,
+                               i_RantSysCloseFn on_close, void *user);
+/* Node pool allocation (size 0 frees), the layer's per node handle slot, the monotonic
+ * clock and the wall clock the transport stamps written_us from. Under the node lock. */
+void    *i_rant_node_sys_alloc(RantNode *n, void *ptr, size_t size);
+/* The same from the bulk pool, for message sized buffers. */
+void    *i_rant_node_sys_bulk(RantNode *n, void *ptr, size_t size);
+void   **i_rant_node_sys_slot (RantNode *n);
+uint64_t i_rant_node_now_us     (RantNode *n);
+uint64_t i_rant_node_wall_us    (RantNode *n);
+/* The node lock for a pattern call that mutates state: 1 = acquired here, 0 = already held
+ * by this thread. sys_unlock never kicks. sys_poll drives one loop tick. */
+int      i_rant_node_sys_lock    (RantNode *n);
+void     i_rant_node_sys_unlock(RantNode *n, int acquired);
+/* Brackets user code run with the node lock released on a marked callback thread. out
+ * counts the handle's callbacks out, so a writer of its state can wait on it. */
+typedef struct { uint64_t prev_thread; uint32_t prev_depth; uint8_t released, marked; } i_RantCallbackScope;
+void     i_rant_node_sys_callback_begin(RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out);
+void     i_rant_node_sys_callback_end  (RantNode *n, i_RantCallbackScope *s, volatile uint32_t *out);
+/* Waits until *out (NULL: any marked callback) is 0 on another thread. Lock held. */
+void     i_rant_node_sys_settle(RantNode *n, const volatile uint32_t *out);
+/* Wakes the threads a settle or a wait sleeps in, after a count they watch dropped. Lock held. */
+void     i_rant_node_sys_wake(RantNode *n);
+int      i_rant_node_sys_poll    (RantNode *n, int timeout_ms);
+/* Blocks until done says so or its deadline passes, under the node lock, on the service
+ * thread's progress when one runs and by pumping the loop otherwise. done runs under the
+ * lock and states this iteration's deadline, (uint64_t)-1 = none. 1 done, 0 timed out,
+ * -1 refused from a callback. */
+typedef int (*i_RantSysWaitFn)(RantNode *n, void *ctx, uint64_t now_us, uint64_t *deadline_us);
+int      i_rant_node_sys_wait    (RantNode *n, i_RantSysWaitFn done, void *ctx);
+/* Fires a topic scoped RANT_ERROR through the node's normal event path. Under the node lock. */
+void     i_rant_node_sys_error (RantNode *n, RantErrorKind error, RantTopic *topic, uint32_t peer);
+/* A peer's node name, "unknown-peer" when it has none. */
+RantString i_rant_node_sys_peer_name(RantNode *n, uint32_t peer);
+/* Rant's own conditions, one kind per problem source (spec/node.md). A source reports its
+ * whole current set of one kind between begin and end, and end clears what went unreported
+ * and folds a kind past RANT_STATUS_KIND_MAX into one. id names one problem, 0 when the kind
+ * has one. Lock held. */
+typedef enum {
+    I_RANT_PROB_WIRE_VERSION, I_RANT_PROB_PEER_REFUSED, I_RANT_PROB_PEER_TOO_BIG,
+    I_RANT_PROB_DIRECTORY_PARTIAL, I_RANT_PROB_SCHEMA_MISMATCH, I_RANT_PROB_QOS_INCOMPATIBLE, I_RANT_PROB_KIND_MISMATCH,
+    I_RANT_PROB_BRIDGE, I_RANT_PROB_ANNOUNCE_OVERFLOW, I_RANT_PROB_DUPLICATE_AUTHORITY,
+    I_RANT_PROB_FORCED, I_RANT_PROB_KINDS
+} i_RantProblemKind;
+typedef struct {
+    RantNode *n;
+    uint8_t   kind;
+    uint8_t   more;          /* set by the source: it saw more than it tracks, so count is a floor */
+    uint8_t   worst;         /* the most serious level reported */
+    uint16_t  n_ids;
+    uint32_t  count, over;   /* problems reported, and listed ones past RANT_STATUS_RANT_MAX */
+    uint32_t  ids[RANT_STATUS_KIND_MAX];
+    char      first[96];     /* the first problem's text, which a folded condition quotes */
+} i_RantProblems;
+void     i_rant_node_problems_begin(RantNode *n, i_RantProblems *ps, i_RantProblemKind kind);
+void     i_rant_node_problem       (i_RantProblems *ps, uint32_t id, RantLevel level, const char *text);
+void     i_rant_node_problems_end  (i_RantProblems *ps);
+/* An id for a problem from the bytes that name it, never 0. */
+uint32_t i_rant_node_problem_id(const void *bytes, size_t len);
+/* Matched subscribers excluding dormant peers, the provider liveness query. */
+int      i_rant_topic_live_match_count(RantTopic *topic);
+/* Is peer a matched subscriber of this PUB topic. The directed call severed lane backstop. */
+int      i_rant_topic_peer_matched(RantTopic *topic, uint32_t peer);
+/* Matched publishers feeding this topic's subscription side. */
+int      i_rant_topic_source_match_count(RantTopic *topic);
+/* The oldest live matched subscriber's peer id, 0 = none. The task layer's auto direct target. */
+uint32_t i_rant_topic_oldest_match(RantTopic *topic);
+/* This node's discovery uuid, stable for its lifetime. The task layer's progress demux filter. */
+const uint8_t *i_rant_node_uuid(RantNode *n);
+/* Reflection getters for the patterns layer's entity enumeration. */
+uint8_t      i_rant_topic_kind (const RantTopic *topic);       /* i_RantTopicKind */
+uint8_t      i_rant_topic_role (const RantTopic *topic);       /* the current RantRole */
+RantString i_rant_topic_name (const RantTopic *topic);         /* the stable name copy */
+uint8_t      i_rant_topic_reliability(const RantTopic *topic);       /* the create qos reliability */
+int          i_rant_node_peer_uuid(RantNode *n, uint32_t peer, uint8_t out[16]);       /* 1 = found, 0 = unknown */
+uint16_t   i_rant_node_topic_count(RantNode *n);             /* one past the highest defined index */
+/* Builds the RANT_META_* snapshot (0 = all sections) as a map body into a node owned grown
+ * buffer. A view valid until the next call, {NULL,0} on OOM. Under the node lock. */
+RantBytes i_rant_node_snapshot(RantNode *n, uint32_t sections);
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* RANT_NODE_H */

@@ -1,0 +1,253 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21 },
+  "configurePresets": [
+    {
+      "name": "windows",
+      "displayName": "Windows (Visual Studio)",
+      "description": "Newest installed Visual Studio",
+      "binaryDir": "${sourceDir}/build",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux (Ninja)",
+      "description": "Ninja",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+    {
+      "name": "windows-asan",
+      "displayName": "Windows AddressSanitizer",
+      "description": "MSVC /fsanitize=address in its own tree, programs and library kept there",
+      "inherits": "windows",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "RANT_BIN_DIR": "${sourceDir}/build-asan/bin",
+        "RANT_STAGE_NATIVE": "OFF",
+        "RANT_STATIC_RUNTIME": "OFF",
+        "CMAKE_C_FLAGS": "/DWIN32 /D_WINDOWS /fsanitize=address",
+        "CMAKE_CXX_FLAGS": "/DWIN32 /D_WINDOWS /EHsc /fsanitize=address",
+        "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO": "/debug /INCREMENTAL:NO",
+        "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO": "/debug /INCREMENTAL:NO"
+      }
+    },
+    {
+      "name": "linux-asan",
+      "displayName": "Linux AddressSanitizer and UBSan",
+      "description": "Every program instrumented in its own tree, an error stops the program",
+      "inherits": "linux",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "RANT_BIN_DIR": "${sourceDir}/build-asan/bin",
+        "RANT_STAGE_NATIVE": "OFF",
+        "RANT_STATIC_RUNTIME": "OFF",
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "displayName": "Linux ThreadSanitizer",
+      "description": "Every program instrumented for data races in its own tree",
+      "inherits": "linux",
+      "binaryDir": "${sourceDir}/build-tsan",
+      "cacheVariables": {
+        "RANT_BIN_DIR": "${sourceDir}/build-tsan/bin",
+        "RANT_STAGE_NATIVE": "OFF",
+        "RANT_STATIC_RUNTIME": "OFF",
+        "CMAKE_C_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread"
+      }
+    },
+    {
+      "name": "linux-coverage",
+      "displayName": "Linux coverage",
+      "description": "Thread safe gcov counters in its own tree, read with gcovr after a test run",
+      "inherits": "linux",
+      "binaryDir": "${sourceDir}/build-coverage",
+      "cacheVariables": {
+        "RANT_BIN_DIR": "${sourceDir}/build-coverage/bin",
+        "RANT_STAGE_NATIVE": "OFF",
+        "RANT_STATIC_RUNTIME": "OFF",
+        "CMAKE_C_FLAGS": "--coverage -fprofile-update=atomic",
+        "CMAKE_CXX_FLAGS": "--coverage -fprofile-update=atomic",
+        "CMAKE_EXE_LINKER_FLAGS": "--coverage",
+        "CMAKE_SHARED_LINKER_FLAGS": "--coverage"
+      }
+    },
+    {
+      "name": "windows-fuzz",
+      "displayName": "Windows libFuzzer",
+      "description": "The ASan tree plus the libFuzzer programs, for local fuzzing",
+      "inherits": "windows-asan",
+      "binaryDir": "${sourceDir}/build-fuzz",
+      "cacheVariables": {
+        "RANT_BIN_DIR": "${sourceDir}/build-fuzz/bin",
+        "RANT_FUZZ": "ON"
+      }
+    },
+    {
+      "name": "linux-fuzz",
+      "displayName": "Linux libFuzzer",
+      "description": "Clang with ASan and UBSan plus the libFuzzer programs, for local fuzzing",
+      "inherits": "linux-asan",
+      "binaryDir": "${sourceDir}/build-fuzz",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "RANT_BIN_DIR": "${sourceDir}/build-fuzz/bin",
+        "RANT_FUZZ": "ON"
+      }
+    },
+    {
+      "name": "web",
+      "displayName": "Web (Emscripten)",
+      "description": "Rant in a page or Node.js, the emsdk in EMSDK",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-web",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows",
+      "displayName": "Windows Release",
+      "configurePreset": "windows",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-debug",
+      "displayName": "Windows Debug",
+      "configurePreset": "windows",
+      "configuration": "Debug"
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux Release",
+      "configurePreset": "linux",
+      "configuration": "Release"
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Linux Debug",
+      "configurePreset": "linux",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-asan",
+      "configurePreset": "windows-asan",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "linux-asan",
+      "configurePreset": "linux-asan",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "linux-tsan",
+      "configurePreset": "linux-tsan",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "linux-coverage",
+      "configurePreset": "linux-coverage",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-fuzz",
+      "configurePreset": "windows-fuzz",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "linux-fuzz",
+      "configurePreset": "linux-fuzz",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "web",
+      "configurePreset": "web"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows",
+      "displayName": "Windows Release tests",
+      "configurePreset": "windows",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8 }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux Release tests",
+      "configurePreset": "linux",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8 }
+    },
+    {
+      "name": "web",
+      "displayName": "Rant in wasm under Node.js",
+      "configurePreset": "web",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "windows-asan",
+      "configurePreset": "windows-asan",
+      "configuration": "RelWithDebInfo",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8 }
+    },
+    {
+      "name": "linux-asan",
+      "configurePreset": "linux-asan",
+      "configuration": "RelWithDebInfo",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8 },
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=1:abort_on_error=1",
+        "UBSAN_OPTIONS": "print_stacktrace=1"
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "configurePreset": "linux-tsan",
+      "configuration": "RelWithDebInfo",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 4 },
+      "environment": { "TSAN_OPTIONS": "halt_on_error=1:second_deadlock_stack=1" }
+    },
+    {
+      "name": "linux-coverage",
+      "configurePreset": "linux-coverage",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8 }
+    },
+    {
+      "name": "windows-fuzz",
+      "configurePreset": "windows-fuzz",
+      "configuration": "RelWithDebInfo",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8 }
+    },
+    {
+      "name": "linux-fuzz",
+      "configurePreset": "linux-fuzz",
+      "configuration": "RelWithDebInfo",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8 },
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=1:abort_on_error=1",
+        "UBSAN_OPTIONS": "print_stacktrace=1"
+      }
+    }
+  ]
+}
