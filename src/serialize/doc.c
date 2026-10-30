@@ -116,7 +116,7 @@ static void i_rant_doc_fail(RantSchemaError *err, const char *why){
 RantSchemaDoc *i_rant_schema_doc_parse(RantAllocator *alloc, const char *text, int standalone,
                                        RantSchemaError *err){
     RantAllocator pool; RantSchemaDoc *d; i_RantDocRec rec; i_RantDocWork w;
-    i_RantSchemaErr ce; RantSchema *s; const char *p, *refused = NULL, *refused_at = NULL;
+    i_RantSchemaErr ce; RantSchema *s; const char *p;
     uint32_t i, k, n_members = 0;
 
     if (err){ err->why = NULL; err->line = 0; err->column = 0; }
@@ -168,7 +168,7 @@ RantSchemaDoc *i_rant_schema_doc_parse(RantAllocator *alloc, const char *text, i
     /* the marks run in text order: a definition, its body, then its members */
     {
         i_RantDocDef *cur = NULL; const char *body = text; uint32_t def_line = 0, note = 0;
-        for (i = 0, k = 0; i < rec.n_marks && !refused; i++){
+        for (i = 0, k = 0; i < rec.n_marks && !w.oom; i++){
             const i_RantDocMark *m = &rec.marks[i];
             if (m->what == I_RANT_DOC_DEF){
                 char word[256], wire[256]; size_t n = i_rant_ident_len(m->at);
@@ -181,13 +181,12 @@ RantSchemaDoc *i_rant_schema_doc_parse(RantAllocator *alloc, const char *text, i
                 cur->first_note = note;
                 cur->about = i_rant_doc_join(&w, i_rant_doc_run(&w, def_line, text), def_line, NULL);
                 body = m->at;
-                /* the text checks the wire rules on its last statement alone, so a definition
-                   nothing there uses can break one, and only compiling it by name shows it */
+                /* the text passed, so only memory can fail this */
                 if (i_rant_name_normalize(word, wire, sizeof wire, 1))
-                    cur->schema = i_rant_registry_compile(&d->reg, wire, &ce);
+                    cur->schema = i_rant_registry_compile(&d->reg, wire, NULL);
                 if (cur->schema)
                     cur->kind = cur->schema->value_root ? cur->schema->fields[0].kind : (uint8_t)RANT_STRUCT;
-                else { refused = ce.why ? ce.why : "out of memory"; refused_at = m->at; }
+                else w.oom = 1;
             } else if (m->what == I_RANT_DOC_BODY){
                 body = m->at;
             } else if (cur){
@@ -206,11 +205,6 @@ RantSchemaDoc *i_rant_schema_doc_parse(RantAllocator *alloc, const char *text, i
                 cur->n_notes++;
             }
         }
-    }
-    if (refused){
-        if (err){ err->why = refused; i_rant_doc_place(text, refused_at, err); }
-        rant_schema_doc_free(d);
-        return NULL;
     }
     if (w.oom){ rant_schema_doc_free(d); i_rant_doc_fail(err, "out of memory"); return NULL; }
     return d;

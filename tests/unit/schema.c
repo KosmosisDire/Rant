@@ -363,6 +363,14 @@ static void schema_dsl_checks(void){
         }
         CHECK(ok, "schema-dsl: a broken shape rule is named in the refusal");
     }
+    {   /* each definition passes the wire rules alone, used or not, and is refused at its name */
+        static const char UNUSED[] = "Pair { }\nNest { f: Pair[2] }\nf32";
+        i_RantSchemaErr ep = { NULL, NULL };
+        RantSchema *s = test_compile(&ma, UNUSED, &ep);
+        CHECK(!s && ep.why && strcmp(ep.why, "an array element cannot be empty") == 0
+              && ep.at == strstr(UNUSED, "Nest"),
+              "schema-dsl: a definition nothing uses still answers to the wire rules (%s)", ep.why ? ep.why : "-");
+    }
     {   /* the parser refuses unnamed wire as well, so a peer cannot send it */
         static const uint8_t anon_struct[] = { RANT_SCHEMA_WIRE_VERSION, 0, RANT_STRUCT, 1, 1, 'x', RANT_U8 };
         static const uint8_t anon_enum[] = { RANT_SCHEMA_WIRE_VERSION, 1, 'A', RANT_STRUCT, 1, 1, 'm',
@@ -1384,7 +1392,7 @@ static void schema_doc_checks(void){
     doc = rant_schema_doc_parse(&da, "Pair { }\nNest { f: Pair[2] }\nf32", &err);
     CHECK(!doc && err.why && strcmp(err.why, "an array element cannot be empty") == 0
           && err.line == 2 && err.column == 1,
-          "doc: a definition the last statement leaves unchecked is refused at its name (%s at %u:%u)",
+          "doc: a definition that breaks a wire rule is refused at its name (%s at %u:%u)",
           err.why ? err.why : "", err.line, err.column);
     doc = rant_schema_doc_parse(&da, "-- nothing but a comment\n", &err);
     CHECK(!doc && err.why && err.line == 2 && err.column == 1, "doc: an empty text is refused at its end");

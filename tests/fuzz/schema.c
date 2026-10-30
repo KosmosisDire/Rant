@@ -66,11 +66,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size){
         text[size - 1] = 0;
         s = i_rant_registry_compile(&reg, text, &err);
         if (!s) FUZZ_REQUIRE(err.why != NULL);
-        {   /* the doc parse is the same compiler, and also compiles each definition alone */
+        {   /* the doc parse is the same compiler, so it gives the same verdict */
             RantAllocator da = rant_allocator_heap(0);
             RantSchemaError derr; RantSchemaDef def; uint32_t i; uint16_t m;
             RantSchemaDoc *doc = rant_schema_doc_parse(&da, text, &derr);
-            FUZZ_REQUIRE(!doc || s);
+            FUZZ_REQUIRE(!doc == !s);
             if (!doc) FUZZ_REQUIRE(derr.why != NULL && derr.line >= 1);
             for (i = 0; i < rant_schema_doc_count(doc); i++){
                 FUZZ_REQUIRE(rant_schema_doc_at(doc, i, &def) && def.schema && def.line >= 1);

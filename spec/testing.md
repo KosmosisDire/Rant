@@ -647,7 +647,8 @@ as `fuzz_<name>`. Fuzzing itself runs by hand, never in CI.
 - `schema` compiles DSL text (first byte even) or parses a peer's wire (odd). Any schema
   reparses to the same hash and validates its default message. A compiled one also names
   every option, reads itself and prints back to the same schema. A wire may hold what text
-  refuses, so those three are not asked of it.
+  refuses, so those three are not asked of it. The doc parse of a text gives the compile's
+  verdict and reads back every definition and comment.
 - `message` reads a message of one of the `schemas.h` schemas, or a bare map body, through
   every getter, element and nested map. A valid map reads every entry, a valid message every
   row at every index under the live counts, and a valid message copied field by field onto

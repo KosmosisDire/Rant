@@ -811,9 +811,23 @@ static void i_rant_dsl_fields(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegist
     }
 }
 
+/* A whole schema wire around a type: the header, the name and the type. Free it with the
+ * registry's hook. NULL when out of memory. */
+static uint8_t *i_rant_wire_around(i_RantRegistry *defs, const char *name, size_t nlen,
+                                   const uint8_t *type, size_t tlen){
+    uint8_t *w = (uint8_t *)defs->arena.alloc(defs->arena.user, NULL, 2u + nlen + tlen);
+    if (!w) return NULL;
+    w[0] = (uint8_t)RANT_SCHEMA_WIRE_VERSION;
+    w[1] = (uint8_t)nlen;
+    if (nlen) memcpy(w + 2, name, nlen);
+    memcpy(w + 2 + nlen, type, tlen);
+    return w;
+}
+
 /* One definition, with d->p on its { or =. Name { fields } defines a struct and Name = type
- * names any other type. The body compiles on its own, then is kept, or must match an
- * existing or standard definition of the name exactly. Leaves the type's place in the arena. */
+ * names any other type. The body compiles on its own, passes the wire rules there so a
+ * refusal lands at its name, then is kept, or must match an existing or standard definition
+ * of the name exactly. Leaves the type's place in the arena. */
 static void i_rant_dsl_def(i_RantDsl *d, i_RantRegistry *defs, const char *name, const char *name_at,
                            uint32_t *toff, uint32_t *tlen){
     i_RantSchemaBuilder sb; int ok = 0, exists, is_struct = *d->p == '{';
@@ -844,9 +858,16 @@ static void i_rant_dsl_def(i_RantDsl *d, i_RantRegistry *defs, const char *name,
             ok = (*tlen == sb.len && memcmp(defs->arena.buf + *toff, sb.buf, sb.len) == 0);
             if (!ok) i_rant_dsl_fail(d, name_at, "the name is already defined with another shape");
         } else {
-            ok = i_rant_defs_add_bytes(defs, name, strlen(name), sb.buf, sb.len)
-              && i_rant_defs_find(defs, name, toff, tlen);
-            if (!ok) i_rant_dsl_fail(d, name_at, i_rant_builder_why(-1));
+            size_t nlen = strlen(name);
+            uint8_t *w = i_rant_wire_around(defs, name, nlen, sb.buf, sb.len);
+            const char *why = w ? i_rant_schema_wire_why(w, 2u + nlen + sb.len) : i_rant_builder_why(-1);
+            if (w) defs->arena.alloc(defs->arena.user, w, 0);
+            if (why){ i_rant_dsl_fail(d, name_at, why); }
+            else {
+                ok = i_rant_defs_add_bytes(defs, name, nlen, sb.buf, sb.len)
+                  && i_rant_defs_find(defs, name, toff, tlen);
+                if (!ok) i_rant_dsl_fail(d, name_at, i_rant_builder_why(-1));
+            }
         }
     }
     if (sb.buf) sb.alloc(sb.user, sb.buf, 0);
@@ -943,12 +964,8 @@ RantSchema *i_rant_registry_compile_rec(i_RantRegistry *defs, const char *text, 
     }
     if (!d.err){
         size_t wlen = 2u + rnlen + rtlen; const char *why = NULL;
-        uint8_t *w = (uint8_t *)defs->arena.alloc(defs->arena.user, NULL, wlen);
+        uint8_t *w = i_rant_wire_around(defs, rname, rnlen, rtype, rtlen);
         if (w){
-            w[0] = (uint8_t)RANT_SCHEMA_WIRE_VERSION;
-            w[1] = (uint8_t)rnlen;
-            if (rnlen) memcpy(w + 2, rname, rnlen);
-            memcpy(w + 2 + rnlen, rtype, rtlen);
             s = i_rant_registry_parse(defs, w, wlen);
             if (!s) why = i_rant_schema_wire_why(w, wlen);   /* a broken rule, not memory */
             defs->arena.alloc(defs->arena.user, w, 0);

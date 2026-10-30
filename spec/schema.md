@@ -181,10 +181,6 @@ no recorder and records nothing. `doc.c` then attaches the comments by line.
 - `[unit] text` is the convention: a comment that opens with brackets gives the unit, the
   rest the text.
 
-A text checks the wire rules on its last statement alone, so a definition nothing there uses
-can break one (`Nest { f: Pair[2] }` with `Pair { }` empty) and still compile. The doc parse
-compiles each definition by name, so it refuses such a text at that definition's name.
-
 `i_rant_schema_doc_parse` with standalone set resolves only names the text defines, with no
 standard library. That is for a text that defines the standard names itself, as the roster
 does, since it may change a type the compiled table still holds in its old shape.
@@ -253,8 +249,8 @@ one way to make a schema. The parser writes wire type bytes through an internal 
 writer, which holds the limits it can see while writing (name lengths, 255 fields per
 struct, nesting depth). An array suffix follows its element in the text, so the parser
 writes the element first and then splices the array head in front of it. Every other rule
-is checked once, when the finished bytes go through `rant_schema_parse`, the same check a
-peer's bytes get. A standard type expands at most 8 levels deep. Enum values may be omitted and then count up
+is the check a peer's bytes get, run on each definition as it closes, so a refusal lands at
+its name even when nothing uses it, and on the finished root. A standard type expands at most 8 levels deep. Enum values may be omitted and then count up
 from the previous one, starting at 0. Each definition sees the ones before it. A
 definition as the last statement gives a root that carries its name with no NAMED wrapper,
 and a bare reference as the last statement (`Uuid`, `Pose`) gives the same root, so a
