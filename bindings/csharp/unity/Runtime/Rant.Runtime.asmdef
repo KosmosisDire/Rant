@@ -1,0 +1,19 @@
+{
+  "name": "Rant.Runtime",
+  "rootNamespace": "Rant",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": true,
+  "overrideReferences": false,
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [
+    {
+      "name": "Unity",
+      "expression": "2021.3",
+      "define": "RANT_UNSAFE"
+    }
+  ],
+  "noEngineReferences": false
+}

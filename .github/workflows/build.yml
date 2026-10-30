@@ -1,0 +1,357 @@
+# Build and test Rant on every push and pull request, on the three desktop platforms and in
+# wasm. A run on main whose VERSION has no tag yet also releases it: every package and program
+# attached to a GitHub Release, the upm branch, the Rust crate tag, and NuGet and wheels where a
+# key is set (spec/build.md). Fuzzing stays local: ctest only replays each target's seeds.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  # Whether this run releases: on main, when no tag v<VERSION> exists yet
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: plan
+        run: |
+          v="$(tr -d '\r\n' < VERSION)"
+          found=0
+          git ls-remote --exit-code --tags origin "refs/tags/v$v" > /dev/null || found=$?
+          # 2 is no such tag, anything else a lookup that went wrong
+          test "$found" = 0 || test "$found" = 2
+          release=false
+          if [ "$GITHUB_REF" = refs/heads/main ] && [ "$found" = 2 ]; then release=true; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux }
+          - { os: windows-latest, name: windows }
+          - { os: macos-latest,   name: macos }
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Before the configure, which registers the C# and Python suites only when it finds them
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel 4
+
+      # The tests discover on loopback multicast, which a Linux runner leaves off
+      - name: Loopback multicast
+        if: runner.os == 'Linux'
+        run: sudo ip link set lo multicast on
+
+      - name: Test
+        timeout-minutes: 20
+        run: ctest --test-dir build -C Release --output-on-failure --parallel 4
+
+      # The CPM and FetchContent path: a consumer writes no anchor and defines nothing.
+      - name: A consumer builds from source
+        run: |
+          cmake -S tools/consumer -B build/consumer -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/consumer --config Release
+
+      - name: A consumer builds from an install
+        run: |
+          cmake --install build --prefix "${{ runner.temp }}/prefix"
+          cmake -S tools/consumer -B build/findpkg -DCMAKE_BUILD_TYPE=Release -DRANT_CONSUMER_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH="${{ runner.temp }}/prefix"
+          cmake --build build/findpkg --config Release
+
+      # The build above already made the shared library. This is where the packages read it.
+      - name: Shared library
+        shell: bash
+        run: ls -l dist/native/*/
+
+      - name: NuGet package
+        run: dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
+
+      - name: Python wheel
+        run: python -m pip wheel . --no-deps -w dist
+
+  # Rant built to wasm: an echo and a ping, and the TypeScript binding, in Node.js over UdpNet
+  # on loopback, then the web package with the wasm inside.
+  web:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Emscripten
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          "$HOME/emsdk/emsdk" install 3.1.56
+          "$HOME/emsdk/emsdk" activate 3.1.56
+          echo "EMSDK=$HOME/emsdk" >> "$GITHUB_ENV"
+
+      - name: Loopback multicast
+        run: sudo ip link set lo multicast on
+
+      - name: Build and test
+        timeout-minutes: 10
+        run: |
+          cmake --preset web
+          cmake --build --preset web
+          ctest --preset web
+
+      - name: Web package
+        run: cmake --build --preset web --target web_package
+
+  # The shared library and the Python wheel per platform, both from cibuildwheel: the
+  # library inside each wheel is the one the NuGet and Unity packages bundle too, so on
+  # Linux it comes out of the manylinux container and runs on any glibc since 2.28.
+  native:
+    name: native ${{ matrix.name }}
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux }
+          - { os: windows-latest, name: windows }
+          - { os: macos-latest,   name: macos }
+    steps:
+      - uses: actions/checkout@v7
+
+      # Cargo and npm cannot read VERSION, so the Rust workspace and the web package repeat it
+      - name: Cargo and npm say VERSION
+        shell: bash
+        run: |
+          grep -q "^version = \"$(tr -d '\r' < VERSION)\"" bindings/rust/Cargo.toml
+          grep -q "\"version\": \"$(tr -d '\r' < VERSION)\"" bindings/web/package.json
+
+      # aarch64 wheels build under emulation, since no arm runner is free on a private repo.
+      - uses: docker/setup-qemu-action@v4
+        if: runner.os == 'Linux'
+        with:
+          platforms: arm64
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - uses: pypa/cibuildwheel@v4.2.1
+
+      - name: The libraries out of the wheels
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import glob, os, zipfile
+          for w in glob.glob("wheelhouse/*.whl"):
+              tag = os.path.basename(w).rsplit("-", 1)[1]
+              rid = ("win-x64" if "win_amd64" in tag else "linux-arm64" if "aarch64" in tag
+                     else "linux-x64" if "x86_64" in tag else "osx")
+              with zipfile.ZipFile(w) as z:
+                  for n in z.namelist():
+                      if n in ("rant/rant.dll", "rant/librant.so", "rant/librant.dylib"):
+                          os.makedirs("dist/native/" + rid, exist_ok=True)
+                          with open("dist/native/" + rid + "/" + n[5:], "wb") as f:
+                              f.write(z.read(n))
+                          print(w, "->", rid)
+          EOF
+          ls -lR dist/native
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.name }}
+          path: wheelhouse/*.whl
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.name }}
+          path: dist/native/
+
+  # The command line tools, one zip per platform. Linux builds on ubuntu-22.04 so the
+  # binaries run on glibc 2.35 and newer.
+  programs:
+    name: programs ${{ matrix.name }}
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04,   name: linux-x64 }
+          - { os: windows-latest, name: win-x64 }
+          - { os: macos-latest,   name: osx-arm64 }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel 4
+
+      - name: Zip
+        shell: bash
+        run: |
+          mkdir -p out/rant
+          for p in rant_bench pubsub if_probe_check; do
+            cp "bin/$p" out/rant/ 2>/dev/null || cp "bin/$p.exe" out/rant/
+          done
+          ls out/rant
+          cd out && cmake -E tar cf "../rant-$(cat ../VERSION)-${{ matrix.name }}.zip" --format=zip rant
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: programs-${{ matrix.name }}
+          path: rant-*.zip
+
+  # Everything into one GitHub Release, the upm branch and the registries, once every check
+  # above passed. The release makes the tag v<VERSION> on this commit.
+  release:
+    needs: [plan, build, web, native, programs]
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+    steps:
+      # a later commit's run that passed too finds the version taken and stops
+      - name: The version is not released from another commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # gh prints the error body on a miss, so only a found tag is compared
+          if at="$(gh api "repos/$GITHUB_REPOSITORY/commits/v${{ needs.plan.outputs.version }}" --jq .sha 2>/dev/null)"; then
+            test "$at" = "$GITHUB_SHA"
+          fi
+
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # Before the platform artifacts land in the tree, so the sdist is the source alone.
+      - name: Source distribution
+        run: |
+          python -m pip install build
+          python -m build --sdist -o wheelhouse
+
+      # dist/ is not committed, so the single headers the release attaches are packed here.
+      - name: Single headers
+        run: cmake -P tools/pack.cmake
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Merge the platforms
+        run: |
+          mkdir -p dist/native
+          cp -r artifacts/native-*/. dist/native/
+          cp artifacts/wheels-*/*.whl wheelhouse/
+          ls -R dist/native wheelhouse
+
+      - name: NuGet package
+        run: dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
+
+      # The web package carries the binding's wasm, so it builds with Emscripten. It comes before
+      # the Unity package, whose WebGL plugin takes the binding's tunnel script.
+      - name: Web package
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          "$HOME/emsdk/emsdk" install 3.1.56
+          "$HOME/emsdk/emsdk" activate 3.1.56
+          export EMSDK="$HOME/emsdk"
+          cmake --preset web
+          cmake --build --preset web --target web_package
+
+      - name: Unity package
+        run: cmake -P tools/unity.cmake
+
+      - name: Stage the assets
+        run: |
+          VERSION="$(cat VERSION)"
+          mkdir -p release
+          cp dist/rant.h dist/rant.c dist/rant.hpp dist/rant.cpp release/
+          cp dist/Rant.*.nupkg dist/rant-*.unitypackage dist/rant-middleware-*.tgz wheelhouse/* artifacts/programs-*/*.zip release/
+          (cd dist && cmake -E tar cf "../release/rant-$VERSION-native.zip" --format=zip native)
+          ls -la release
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.plan.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: release/*
+          generate_release_notes: true
+
+      # The Unity package as a git URL: https://github.com/OWNER/REPO.git#upm
+      - name: Publish the upm branch
+        run: |
+          pkg="$RUNNER_TEMP/upm"
+          rm -rf "$pkg"
+          cp -r dist/com.rant.rant "$pkg"
+          cd "$pkg"
+          git init -q -b upm
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "upm $(cat "$GITHUB_WORKSPACE/VERSION")"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" upm
+
+      # The Rust crate as a git dependency, tag = "crate-vVERSION": the release tree plus the
+      # packed C in csrc/, as a commit with no parents so cargo fetches one snapshot. Never moved.
+      - name: Publish the crate tag
+        run: |
+          tag="crate-v$(cat VERSION)"
+          mkdir -p bindings/rust/rant/csrc
+          cp dist/rant.h dist/rant.c bindings/rust/rant/csrc/
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan crate
+          git add -f bindings/rust/rant/csrc
+          git commit -q -m "$tag"
+          git tag "$tag"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag"
+
+      # Set NUGET_API_KEY and PYPI_API_TOKEN as repository secrets and the next release
+      # publishes. Without them the release is the GitHub page alone.
+      - name: Publish to nuget.org
+        if: env.NUGET_API_KEY != ''
+        run: dotnet nuget push "dist/Rant.*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Publish to PyPI
+        if: env.PYPI_API_TOKEN != ''
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: wheelhouse
