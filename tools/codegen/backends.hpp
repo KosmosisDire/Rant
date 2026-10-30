@@ -15,6 +15,8 @@ struct Output {
 
 // The C structs with extras pasted at their end, the roster enum and the compiled table.
 std::vector<Output> write_c(const Model &model, const std::string &extras);
+// The C++ structs inside extras at its marker, and the reflection rant.hpp splices in.
+std::vector<Output> write_cpp(const Model &model, const std::string &extras);
 // The whole model for tools that read no schema text, such as the docs site.
 std::vector<Output> write_json(const Model &model);
 

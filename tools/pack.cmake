@@ -133,15 +133,21 @@ function(build_header f)
   message(STATUS "wrote ${f}")
 endfunction()
 
-# rant.hpp: the C++ wrapper with dist/rant.h spliced in at its @RANT_EMBED@ marker, so the
+# rant.hpp: the C++ wrapper with each file spliced in at its @RANT_EMBED@ marker, so the
 # shipped header is one self contained file serving both the C++ and the C side.
 function(build_cpp f rant_h)
-  set(tmpl "${CMAKE_CURRENT_LIST_DIR}/../bindings/cpp/rant.hpp")
-  file(READ "${tmpl}" hpp)
+  set(cpp "${CMAKE_CURRENT_LIST_DIR}/../bindings/cpp")
+  file(READ "${cpp}/rant.hpp" hpp)
   string(REGEX REPLACE "\r" "" hpp "${hpp}")   # normalize CRLF -> LF, deterministic output
-  file(READ "${rant_h}" dh)
-  string(REGEX REPLACE "\r" "" dh "${dh}")
-  string(REPLACE "#include \"rant.h\"   /* @RANT_EMBED@ */" "${dh}" hpp "${hpp}")
+  foreach(part "rant.h" "rant_types.hpp" "rant_reflect.inc")
+    if(part STREQUAL "rant.h")
+      file(READ "${rant_h}" body)
+    else()
+      file(READ "${cpp}/${part}" body)
+    endif()
+    string(REGEX REPLACE "\r" "" body "${body}")
+    string(REPLACE "#include \"${part}\"   /* @RANT_EMBED@ */" "${body}" hpp "${hpp}")
+  endforeach()
   file(WRITE "${f}" "${hpp}")
   message(STATUS "wrote ${f}")
 endfunction()
@@ -170,12 +176,22 @@ function(build_types f)
   message(STATUS "wrote ${f}")
 endfunction()
 
+# rant_types.hpp: the C++ standard types alone, under the same guard as their copy in rant.hpp.
+function(build_types_cpp f)
+  file(READ "${CMAKE_CURRENT_LIST_DIR}/../bindings/cpp/rant_types.hpp" c)
+  string(REGEX REPLACE "\r" "" c "${c}")
+  string(REPLACE "Rant, the core library of RANT" "The C++ standard types of Rant, the core library of RANT" b "${BANNER}")
+  file(WRITE "${f}" "${b}${c}")
+  message(STATUS "wrote ${f}")
+endfunction()
+
 # The C# wrapper is a hand written P/Invoke layer over the prebuilt native library, so
 # nothing is generated for it.
 
 build_header("${OUT}/rant.h")
 build_types("${OUT}/rant_types.h")
 build_cpp("${OUT}/rant.hpp" "${OUT}/rant.h")
+build_types_cpp("${OUT}/rant_types.hpp")
 build_anchor("${OUT}/rant.c" "rant.h")
 build_anchor("${OUT}/rant.cpp" "rant.hpp")
 message(STATUS "pack: done (${SRC} -> ${OUT})")

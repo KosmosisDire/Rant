@@ -302,7 +302,7 @@ jobs:
         run: |
           VERSION="$(cat VERSION)"
           mkdir -p release
-          cp dist/rant.h dist/rant_types.h dist/rant.c dist/rant.hpp dist/rant.cpp release/
+          cp dist/rant.h dist/rant_types.h dist/rant.c dist/rant.hpp dist/rant_types.hpp dist/rant.cpp release/
           cp dist/Rant.*.nupkg dist/rant-*.unitypackage dist/rant-middleware-*.tgz wheelhouse/* artifacts/programs-*/*.zip release/
           (cd dist && cmake -E tar cf "../release/rant-$VERSION-native.zip" --format=zip native)
           # the skill rant add offers, its files at the zip's top

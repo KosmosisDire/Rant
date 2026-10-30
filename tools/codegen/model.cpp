@@ -164,6 +164,16 @@ std::string snake(const std::string &name) {
     return out;
 }
 
+std::string alias_member(const Def &d) {
+    const Member &m = d.members[0];
+    if (m.unit == "us") return "us";
+    if (m.type.kind == Type::Array) {
+        if (m.type.elem->kind == Type::Array) return "m";
+        if (m.type.elem->kind == Type::Scalar && m.type.elem->word == "u8") return "bytes";
+    }
+    return "value";
+}
+
 std::string spell(const Type &t) {
     switch (t.kind) {
     case Type::Scalar: case Type::Named: return t.word;

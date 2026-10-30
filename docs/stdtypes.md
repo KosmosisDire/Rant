@@ -326,7 +326,8 @@ computes on them, from vector math to frames, shapes and images, is Rant Math.
 
 `rant_types.h` in a release holds the mirrors and constructors alone, with no middleware. It
 shares its include guard with the copy inside `rant.h`, so a library built on the types
-alone and Rant compile into one program in either order.
+alone and Rant compile into one program in either order. `rant_types.hpp` does the same for
+C++, see docs/cpp.md.
 
 Two values need a platform, so they live in the node runtime rather than beside the type:
 

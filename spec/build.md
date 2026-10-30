@@ -9,7 +9,7 @@ Rant as a subproject or finds the installed package.
 
 - `tools/pack.cmake` runs through an `add_custom_command` whose OUTPUT is `dist/rant.h`
   and the files made from it, so it re packs only when a `src/` file or pack.cmake
-  changes. It also splices `rant.h` into `dist/rant.hpp` and writes the two anchors. `dist/` is not committed,
+  changes. It also splices `rant.h`, `rant_types.hpp` and `rant_reflect.inc` into `dist/rant.hpp` and writes the two anchors. `dist/` is not committed,
   so configure also runs the packer once when any output is missing: a header only
   consumer depends on no build step, and cmake before 3.19 takes no dependency on an
   INTERFACE target. The target is `rant_dist`, not `dist`, since a consumer may own that
@@ -28,10 +28,11 @@ Rant as a subproject or finds the installed package.
 - The standard types have one definition, `types/stdtypes.schema`. `rant_codegen --standard`
   (`tools/codegen`) reads it with Rant's own compiler, standalone so it never needs the table
   it writes, and writes `src/common/stdtypes.h` with `types/extras.h` pasted at its end,
+  `bindings/cpp/rant_types.hpp` inside `types/extras.hpp` at its marker, `bindings/cpp/rant_reflect.inc`,
   `src/serialize/stdroster.h`, `src/serialize/stdtable.c` and `types/stdtypes.json`. The
   outputs are committed so a build needs no generator, and ctest `codegen.current` fails when
   one is stale. A definition sees only those above it, and file order is `RantStdType`'s.
-- The guard `RANT_STDTYPES_H` holds a revision made from every type's name and wire, so two
+- The guards `RANT_STDTYPES_H` and `RANT_TYPES_HPP` hold a revision made from every type's name and wire, so two
   different copies of the types in one program stop at an `#error` instead of missing a type.
 - `tools/static_runtime.cmake` links the C and C++ runtime statically so a copied binary
   runs with no redistributable. MSVC's default `/MD` needs VCRUNTIME140.dll and the debug
@@ -71,7 +72,7 @@ Rant as a subproject or finds the installed package.
   cmake 3.21 and the root asks for 3.15. The config type list really did reach a
   consumer once: it is a FORCEd cache entry, so it overwrote the consumer's own. `dist/` is
   not committed, so a consumer runs the packer and reads `src/`.
-- `install()` copies `dist/rant.h` and `dist/rant.hpp` into `include/` and writes an export set plus
+- `install()` copies `dist/rant.h`, `dist/rant_types.h`, `dist/rant.hpp` and `dist/rant_types.hpp` into `include/` and writes an export set plus
   `rant-config.cmake` (from `tools/rant-config.cmake.in`) into `share/cmake/rant`, so
   `find_package(rant CONFIG)` hands over the same two targets. The config finds Threads
   before the targets file, which names `Threads::Threads`.

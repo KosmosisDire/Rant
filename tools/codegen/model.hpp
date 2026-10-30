@@ -52,6 +52,10 @@ Model load_model(const std::string &text, bool standalone);
 // The wire spelling of a type name as a field name, Pose2D to pose2_d.
 std::string snake(const std::string &name);
 
+// The one member a wrapper holds, since the schema has no place to name it: bytes are bytes, a
+// matrix is m and a [us] value is us, as everyone writes them.
+std::string alias_member(const Def &def);
+
 // The type as schema text, such as string<30>, Double3[] or f32[3][3].
 std::string spell(const Type &type);
 // A member's comment as schema text, [unit] then note, with lines apart by newlines.

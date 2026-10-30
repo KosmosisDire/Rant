@@ -2,6 +2,7 @@
  * discovery pinned to loopback on isolated domains, never 0. `rant_cpp_test` runs every
  * leg, `rant_cpp_test name` one, `--list` lists them, `bench` runs the cost leg. Exit 0 =
  * PASS. */
+#include "rant_types.hpp"
 #include "rant.hpp"
 #include <array>
 #include <atomic>
@@ -626,10 +627,17 @@ static bool stdtypes_leg() {
         rant::types::Color c = rant::types::color_from_hex(0x11223344u);
         chk("std: Color hex round-trips", c.r == 0x11 && c.a == 0x44
                                           && rant::types::color_to_hex(c) == 0x11223344u);
-        chk("std: vector length", rant::types::length(rant::types::Double3{ 3.0, 4.0, 0.0 }) == 5.0);
-        rant::types::Double3 r = rant::types::rotate(rant::types::Quaternion{ 0.0, 0.0, 1.0, 0.0 },
-                                       rant::types::Double3{ 1.0, 0.0, 0.0 });
-        chk("std: quaternion rotate", r.x < -0.999 && r.x > -1.001);
+        /* a fixed type is the C struct's bytes, so it passes to a C library with no copy */
+        rant::types::CameraIntrinsics cam;
+        cam.fy = 2.0; cam.coeffs[7] = -0.5; cam.model = rant::types::DistortionModel::Rational;
+        const auto* ccam = reinterpret_cast<const rant::detail::RantCameraIntrinsics*>(&cam);
+        chk("std: a CameraIntrinsics reads as the C struct", ccam->fy == 2.0 && ccam->coeffs[7] == -0.5
+            && ccam->model == rant::detail::RANT_DISTORTION_MODEL_RATIONAL);
+        rant::types::ExternalVideoStream es;
+        es.height = 7; es.codec = rant::types::VideoCodec::H265; es.name.assign("cam");
+        const auto* ces = reinterpret_cast<const rant::detail::RantExternalVideoStream*>(&es);
+        chk("std: an ExternalVideoStream reads as the C struct", ces->height == 7
+            && ces->codec == rant::detail::RANT_VIDEO_CODEC_H265 && ces->name_len == 3 && ces->name[2] == 'm');
         rant::types::Uuid u1 = rant::types::new_uuid(), u2 = rant::types::new_uuid();
         chk("std: new_uuid is random and version 4",
             !rant::types::is_nil(u1) && std::memcmp(u1.bytes, u2.bytes, 16) != 0

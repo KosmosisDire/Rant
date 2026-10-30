@@ -62,6 +62,7 @@ set(RANT_DIST
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant_types.h" # the standard types alone
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.hpp"     # C++ wrapper with rant.h embedded
+    "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant_types.hpp" # the C++ standard types alone
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.c"       # the C implementation anchor
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.cpp")    # the C++ implementation anchor
     # (the C# wrapper bindings/csharp/Rant.cs is hand-written over the prebuilt native lib, not generated)
@@ -87,6 +88,8 @@ add_custom_command(
   DEPENDS ${RANT_SRC} "${CMAKE_CURRENT_SOURCE_DIR}/tools/pack.cmake"
           "${CMAKE_CURRENT_SOURCE_DIR}/VERSION"
           "${CMAKE_CURRENT_SOURCE_DIR}/bindings/cpp/rant.hpp"
+          "${CMAKE_CURRENT_SOURCE_DIR}/bindings/cpp/rant_types.hpp"
+          "${CMAKE_CURRENT_SOURCE_DIR}/bindings/cpp/rant_reflect.inc"
   COMMENT "Rant: amalgamating src/ -> dist/ single-headers"
   VERBATIM)
 
@@ -194,6 +197,7 @@ if(RANT_BUILD_TOOLS)
 
     # Writes each language's standard types from types/stdtypes.schema, on Rant's own compiler.
     add_executable(rant_codegen tools/codegen/main.cpp tools/codegen/model.cpp tools/codegen/c.cpp
+                   tools/codegen/cpp.cpp
                    tools/codegen/json.cpp "${PROJECT_SOURCE_DIR}/dist/rant.c")
     target_compile_features(rant_codegen PRIVATE cxx_std_17)
     target_link_libraries(rant_codegen PRIVATE rant rant_platform)
@@ -277,7 +281,9 @@ if(RANT_INSTALL)
   endif()
 
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant_types.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.hpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant_types.hpp"
           DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 
   install(TARGETS ${RANT_INSTALL_TARGETS} EXPORT rant-targets

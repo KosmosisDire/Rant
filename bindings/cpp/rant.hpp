@@ -53,6 +53,8 @@
 #error "include rant.hpp instead of rant.h (do not include rant.h before rant.hpp)"
 #endif
 
+#include "rant_types.hpp"   /* @RANT_EMBED@ */
+
 namespace rant {
 namespace detail {
 
@@ -1088,29 +1090,6 @@ template <class T> struct reflect;              /* specialized by RANT_SCHEMA */
 template <class E> struct reflect_enum;         /* specialized by RANT_ENUM */
 template <class U> struct field_tag {};         /* visitor dispatch tag */
 
-/* The capped string wire slot, [u16 live length][N bytes]. assign() refuses over capacity
- * rather than truncating, view() clamps a hostile length. */
-template <uint16_t N> struct String {
-    uint16_t len = 0;
-    char     data[N] = {};
-
-    String() = default;
-    template <size_t M> String(const char (&lit)[M]) {
-        static_assert(M - 1 <= N, "string literal exceeds rant::String capacity");
-        len = static_cast<uint16_t>(M - 1);
-        std::memcpy(data, lit, M - 1);
-    }
-    bool assign(std::string_view s) {
-        if (s.size() > N) return false;
-        len = static_cast<uint16_t>(s.size());
-        if (s.size()) std::memcpy(data, s.data(), s.size());
-        if (s.size() < N) std::memset(data + s.size(), 0, N - s.size());
-        return true;
-    }
-    std::string_view view() const { return { data, len <= N ? len : N }; }
-    bool operator==(std::string_view s) const { return view() == s; }
-};
-
 /* The standard types, the same names and wire in every language. A name rides the schema
  * and narrows matching. Each fixed mirror is identical to its wire, so it copies as is. */
 
@@ -1118,226 +1097,8 @@ template <uint16_t N> struct String {
  * representation type for an alias. Unspecialized means an ordinary anonymous type. */
 template <class T> struct std_type { static constexpr const char* name = nullptr; using repr = void; };
 
-/* Apart from the root so Color or Quaternion never clashes with an engine type under a
- * using directive. */
 namespace types {
 
-struct Float2  { float x, y; };
-struct Float3  { float x, y, z; };
-struct Float4  { float x, y, z, w; };
-struct Double2 { double x, y; };
-struct Double3 { double x, y, z; };
-struct Double4 { double x, y, z, w; };
-struct Int2    { int32_t x, y; };
-struct Int3    { int32_t x, y, z; };
-struct Int4    { int32_t x, y, z, w; };
-struct Quaternion { double x, y, z, w; };            /* stored x, y, z, w */
-struct Color   { uint8_t r, g, b, a; };              /* sRGB, straight alpha */
-struct Pose    { Double3 position; Quaternion orientation; };
-struct Pose2D  { Double2 position; double angle; };            /* radians, from +x toward +y */
-/* parent "" = unstated, the cap keeps the packed 88 bytes 8 aligned */
-struct Transform { Pose pose; String<30> parent; };
-struct Transform2D { Pose2D pose; String<30> parent; };
-struct Twist   { Double3 linear, angular; };                    /* m/s, rad/s */
-struct Twist2D { Double2 linear; double angular; };
-struct Wrench  { Double3 force, torque; };                      /* N, N m about the frame origin */
-struct Wrench2D{ Double2 force; double torque; };
-struct Accel   { Double3 linear, angular; };                    /* m/s^2, rad/s^2 */
-struct Accel2D { Double2 linear; double angular; };
-struct GeoPoint{ double lat, lon, alt; };                       /* degrees, degrees, meters */
-/* The shapes, in the units of their frame. */
-struct AlignedBox    { Double3 min, max; };                     /* min <= max on every axis */
-struct AlignedBox2D  { Double2 min, max; };
-struct OrientedBox   { Pose pose; Double3 size; };              /* full edge lengths */
-struct OrientedBox2D { Pose2D pose; Double2 size; };
-struct Plane    { Double3 position, normal; };                  /* any point on it, unit normal */
-struct Segment  { Double3 a, b; };
-struct Ray      { Double3 origin, direction; };                 /* unit direction, away from origin */
-struct Sphere   { Double3 center; double radius; };
-struct Capsule  { Segment axis; double radius; };
-struct Cylinder { Segment axis; double radius; };               /* axis ends are the cap centers */
-struct Cone     { Double3 base, tip; double radius; };          /* radius at the base */
-struct Polygon  { std::vector<Double3> points; };               /* closed, planar */
-struct Plane2D  { Double2 position, normal; };                  /* a line: any point on it, unit normal */
-struct Segment2D{ Double2 a, b; };
-struct Ray2D    { Double2 origin, direction; };
-struct Circle   { Double2 center; double radius; };
-struct Capsule2D{ Segment2D axis; double radius; };
-struct Polygon2D{ std::vector<Double2> points; };               /* closed */
-struct Prism    { Pose pose; Polygon2D base; double height; };  /* base in the xy plane of pose */
-struct Polyline { std::vector<Double3> points; };               /* open */
-struct Polyline2D { std::vector<Double2> points; };
-struct Path     { std::vector<Pose> poses; };
-struct Path2D   { std::vector<Pose2D> poses; };
-/* kg, the center of mass in the body frame, and kg m^2 about that center */
-struct Inertia  { double mass; Double3 center; double ixx, ixy, ixz, iyy, iyz, izz; };
-struct Empty    {};                                             /* zero bytes on the wire */
-struct Uuid    { uint8_t bytes[16]; };                          /* RFC 4122 byte order */
-struct Matrix3x3 { float m[3][3]; };                            /* m[row][column] */
-struct Matrix4x4 { float m[4][4]; };
-struct Covariance3 { double m[3][3]; };
-struct Covariance6 { double m[6][6]; };                         /* x, y, z, then the turn about each */
-struct PoseWithCovariance  { Pose pose; Covariance6 covariance; };
-struct TwistWithCovariance { Twist twist; Covariance6 covariance; };
-/* pose in the parent frame, twist in the body's own frame */
-struct Odometry { PoseWithCovariance pose; TwistWithCovariance twist; String<30> parent; };
-struct Uri     { String<256> value; };
-/* microseconds since the Unix epoch, UTC, the clock MessageView::written_us() uses */
-struct Timestamp { int64_t us = 0; };
-struct Duration  { int64_t us = 0; };
-
-/* The video family. The enum values are the wire values, and VideoCodec::Unknown is the
- * unstated codec hint. */
-enum class ImageFormat : uint8_t { Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32,
-                                   Jpeg = 16, Png = 17 };
-enum class VideoCodec : uint8_t { Unknown, Mjpeg, H264, H265, Av1 };
-enum class VideoStreamKind : uint8_t { Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg,
-                                       Other = 15 };
-struct Image {   /* stride = bytes per row, data laid out per format */
-    uint32_t width = 0, height = 0, stride = 0;
-    ImageFormat format = ImageFormat::Mono8;
-    std::vector<uint8_t> data;
-};
-struct VideoFrame {               /* width/height 0 = unstated (the bitstream rules) */
-    VideoCodec codec = VideoCodec::Unknown;
-    uint32_t   width = 0, height = 0;
-    bool       keyframe = false;
-    Timestamp  pts;               /* presentation time, the Timestamp clock */
-    std::vector<uint8_t> data;
-};
-/* Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. codec,
- * width and height are hints for pickers, the stream stays authoritative once connected. */
-struct ExternalVideoStream {
-    uint32_t        width = 0, height = 0;
-    VideoStreamKind kind = VideoStreamKind::Rtsp;
-    VideoCodec      codec = VideoCodec::Unknown;
-    Uri             url;
-    String<30>      name;
-};
-/* NoDistortion rather than None: X11 defines None as a macro. */
-enum class DistortionModel : uint64_t { NoDistortion, BrownConrady, Fisheye, Rational };
-/* The pinhole model and its lens distortion. coeffs is zero filled past the model's count. */
-struct CameraIntrinsics {
-    uint32_t width = 0, height = 0;      /* the resolution these numbers are valid for */
-    double   fx = 0, fy = 0, cx = 0, cy = 0;
-    double   coeffs[8] = { 0 };
-    DistortionModel model = DistortionModel::NoDistortion;
-};
-/* SI: radians or meters, per second, and newtons or newton meters. velocity and effort
- * may be empty. The names ride a JointNames variable, not every sample. */
-struct JointState {
-    std::vector<double> position, velocity, effort;
-};
-/* Published once as a variable. The order every JointState array follows. */
-struct JointNames {
-    std::vector<std::string> name;
-};
-/* time from the start of the trajectory. velocity, acceleration and effort may be empty. */
-struct JointTrajectoryPoint {
-    Duration time;
-    std::vector<double> position, velocity, acceleration, effort;
-};
-struct JointTrajectory { std::vector<JointTrajectoryPoint> points; };
-
-/* In its own frame. A covariance with -1 first means that value is not measured. */
-struct Imu {
-    Quaternion orientation;       Covariance3 orientation_covariance;
-    Double3 angular_velocity;     Covariance3 angular_velocity_covariance;
-    Double3 linear_acceleration;  Covariance3 linear_acceleration_covariance;
-};
-/* ranges holds each beam's echoes together, +inf when nothing returns. echoes 0 reads as 1. */
-struct LaserScan {
-    float angle_min = 0, angle_step = 0, time_step = 0, range_min = 0, range_max = 0;
-    uint8_t echoes = 0;
-    std::vector<float> ranges, intensities;
-};
-enum class RangeKind : uint64_t { Unknown, Ultrasound, Infrared, Laser, Radar };
-struct RangeReading {             /* distance +inf when nothing is in range */
-    double distance = 0, min = 0, max = 0, field_of_view = 0;
-    RangeKind kind = RangeKind::Unknown;
-};
-enum class GnssStatus : uint64_t { NoFix, Fix, Differential, RtkFloat, RtkFixed };
-struct GnssFix { GeoPoint position; Covariance3 covariance; GnssStatus status = GnssStatus::NoFix; };
-
-/* The number kinds of raw data blocks, numbered as in PCL. */
-enum class ScalarKind : uint8_t { I8 = 1, U8, I16, U16, I32, U32, F32, F64, I64, U64 };
-struct PointField {
-    std::string name;
-    uint32_t    offset = 0;           /* bytes from the start of the point */
-    ScalarKind  kind = ScalarKind::F32;
-    uint32_t    count = 0;            /* numbers in a row, 1 for a single number */
-};
-/* The PCL layout: point_step bytes per point, little endian. width 0 when it has no rows. */
-struct PointCloud {
-    Transform   origin{};
-    uint32_t    width = 0;
-    std::vector<PointField> fields;
-    uint32_t    point_step = 0;
-    bool        dense = false;
-    std::vector<uint8_t> data;
-};
-/* three vertex indices per triangle, counterclockwise seen from outside */
-struct Mesh { PointCloud vertices; std::vector<uint32_t> triangles; };
-/* one number per cell, x fastest, then y, then z */
-struct GridField { std::string name; ScalarKind kind = ScalarKind::F32; std::vector<uint8_t> data; };
-/* origin is the outer corner of cell 0. cells_z is 1 for a 2D grid. */
-struct Grid {
-    Transform   origin{};
-    double      resolution = 0;
-    uint32_t    cells_x = 0, cells_y = 0, cells_z = 0;
-    std::vector<GridField> fields;
-};
-struct Tensor { ScalarKind kind = ScalarKind::F32; std::vector<uint32_t> shape; std::vector<uint8_t> data; };
-struct File { std::string name; String<64> media_type; std::vector<uint8_t> data; };
-/* score 0 to 1, track 0 when not tracked */
-struct Detection2D { OrientedBox2D bounds; std::string label; float score = 0; uint32_t track = 0; };
-struct Detection3D { OrientedBox bounds; std::string label; float score = 0; uint32_t track = 0; };
-
-inline bool operator==(Timestamp a, Timestamp b) { return a.us == b.us; }
-inline bool operator<(Timestamp a, Timestamp b) { return a.us < b.us; }
-inline Duration  operator-(Timestamp a, Timestamp b) { return Duration{ a.us - b.us }; }
-inline Timestamp operator+(Timestamp t, Duration d) { return Timestamp{ t.us + d.us }; }
-inline bool operator==(Duration a, Duration b) { return a.us == b.us; }
-/* 0xRRGGBBAA both ways, the order you read in CSS */
-inline Color color_from_hex(uint32_t rgba) {
-    return Color{ (uint8_t)(rgba >> 24), (uint8_t)(rgba >> 16), (uint8_t)(rgba >> 8), (uint8_t)rgba };
-}
-inline uint32_t color_to_hex(Color c) {
-    return ((uint32_t)c.r << 24) | ((uint32_t)c.g << 16) | ((uint32_t)c.b << 8) | c.a;
-}
-inline Double3 operator+(Double3 a, Double3 b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
-inline Double3 operator-(Double3 a, Double3 b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
-inline Double3 operator*(Double3 a, double k)  { return { a.x * k, a.y * k, a.z * k }; }
-inline double  dot(Double3 a, Double3 b)  { return a.x * b.x + a.y * b.y + a.z * b.z; }
-inline Double3 cross(Double3 a, Double3 b) {
-    return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
-}
-inline double  length(Double3 a) { return std::sqrt(dot(a, a)); }
-inline Double3 normalize(Double3 a) {
-    double n = length(a);
-    return n > 0.0 ? a * (1.0 / n) : a;
-}
-inline Quaternion identity_rotation() { return { 0.0, 0.0, 0.0, 1.0 }; }
-inline Quaternion conjugate(Quaternion q) { return { -q.x, -q.y, -q.z, q.w }; }
-/* a then b: the rotation b applied after a */
-inline Quaternion operator*(Quaternion a, Quaternion b) {
-    return { b.w * a.x + b.x * a.w + b.y * a.z - b.z * a.y,
-             b.w * a.y - b.x * a.z + b.y * a.w + b.z * a.x,
-             b.w * a.z + b.x * a.y - b.y * a.x + b.z * a.w,
-             b.w * a.w - b.x * a.x - b.y * a.y - b.z * a.z };
-}
-/* v + 2 u x (u x v + w v), u the vector part */
-inline Double3 rotate(Quaternion q, Double3 v) {
-    Double3 u{ q.x, q.y, q.z };
-    return v + cross(u, cross(u, v) + v * q.w) * 2.0;
-}
-inline Transform identity_transform() {
-    return { { { 0.0, 0.0, 0.0 }, identity_rotation() }, {} };
-}
-inline bool is_nil(const Uuid& u) {
-    for (int i = 0; i < 16; i++) if (u.bytes[i]) return false;
-    return true;
-}
 /* The two values that need a platform (the node runtime provides them). */
 inline Timestamp now() { return Timestamp{ detail::rant_timestamp_now() }; }
 inline Uuid      new_uuid() { Uuid u; detail::rant_uuid_new((detail::RantUuid*)&u); return u; }
@@ -1353,125 +1114,6 @@ inline Uuid      new_uuid() { Uuid u; detail::rant_uuid_new((detail::RantUuid*)&
 #define RANT_OFFSETOF_BEGIN
 #define RANT_OFFSETOF_END
 #endif
-
-/* Give a struct-shaped type a wire name: reflect its members, then name it. */
-#define RANT_STD_STRUCT(T, ...) \
-    template <> struct rant::reflect<rant::types::T> { \
-        using is_rant_schema = void; \
-        static constexpr const char* type_name = #T; \
-        template <class V> static void visit(V&& v) { \
-            (void)v; RANT_OFFSETOF_BEGIN RANT_STD_MEMBERS_##T(v) RANT_OFFSETOF_END \
-        } \
-    }; \
-    template <> struct rant::std_type<rant::types::T> { \
-        static constexpr const char* name = #T; using repr = void; }
-/* Give an ALIAS-shaped type a wire name: it copies as R (`Uuid = u8[16]`, R = uint8_t[16]). */
-#define RANT_STD_ALIAS(T, R) \
-    template <> struct rant::std_type<rant::types::T> { \
-        static constexpr const char* name = #T; using repr = R; }
-
-#define RANT_STD_F(T, f) v(::rant::field_tag<decltype(::rant::types::T::f)>{}, #f, offsetof(::rant::types::T, f));
-#define RANT_STD_MEMBERS_Float2(v)    RANT_STD_F(Float2,x)    RANT_STD_F(Float2,y)
-#define RANT_STD_MEMBERS_Float3(v)    RANT_STD_F(Float3,x)    RANT_STD_F(Float3,y)    RANT_STD_F(Float3,z)
-#define RANT_STD_MEMBERS_Float4(v)    RANT_STD_F(Float4,x)    RANT_STD_F(Float4,y)    RANT_STD_F(Float4,z)    RANT_STD_F(Float4,w)
-#define RANT_STD_MEMBERS_Double2(v) RANT_STD_F(Double2,x) RANT_STD_F(Double2,y)
-#define RANT_STD_MEMBERS_Double3(v) RANT_STD_F(Double3,x) RANT_STD_F(Double3,y) RANT_STD_F(Double3,z)
-#define RANT_STD_MEMBERS_Double4(v) RANT_STD_F(Double4,x) RANT_STD_F(Double4,y) RANT_STD_F(Double4,z) RANT_STD_F(Double4,w)
-#define RANT_STD_MEMBERS_Int2(v)      RANT_STD_F(Int2,x)      RANT_STD_F(Int2,y)
-#define RANT_STD_MEMBERS_Int3(v)      RANT_STD_F(Int3,x)      RANT_STD_F(Int3,y)      RANT_STD_F(Int3,z)
-#define RANT_STD_MEMBERS_Int4(v)      RANT_STD_F(Int4,x)      RANT_STD_F(Int4,y)      RANT_STD_F(Int4,z)      RANT_STD_F(Int4,w)
-#define RANT_STD_MEMBERS_Quaternion(v) RANT_STD_F(Quaternion,x) RANT_STD_F(Quaternion,y) RANT_STD_F(Quaternion,z) RANT_STD_F(Quaternion,w)
-#define RANT_STD_MEMBERS_Color(v)     RANT_STD_F(Color,r)     RANT_STD_F(Color,g)     RANT_STD_F(Color,b)     RANT_STD_F(Color,a)
-#define RANT_STD_MEMBERS_Pose(v)      RANT_STD_F(Pose,position) RANT_STD_F(Pose,orientation)
-#define RANT_STD_MEMBERS_Pose2D(v)    RANT_STD_F(Pose2D,position) RANT_STD_F(Pose2D,angle)
-#define RANT_STD_MEMBERS_Transform(v) RANT_STD_F(Transform,pose) RANT_STD_F(Transform,parent)
-#define RANT_STD_MEMBERS_Transform2D(v) RANT_STD_F(Transform2D,pose) RANT_STD_F(Transform2D,parent)
-#define RANT_STD_MEMBERS_Twist(v)     RANT_STD_F(Twist,linear) RANT_STD_F(Twist,angular)
-#define RANT_STD_MEMBERS_Twist2D(v)   RANT_STD_F(Twist2D,linear) RANT_STD_F(Twist2D,angular)
-#define RANT_STD_MEMBERS_Wrench(v)    RANT_STD_F(Wrench,force) RANT_STD_F(Wrench,torque)
-#define RANT_STD_MEMBERS_Wrench2D(v)  RANT_STD_F(Wrench2D,force) RANT_STD_F(Wrench2D,torque)
-#define RANT_STD_MEMBERS_Accel(v)     RANT_STD_F(Accel,linear) RANT_STD_F(Accel,angular)
-#define RANT_STD_MEMBERS_Accel2D(v)   RANT_STD_F(Accel2D,linear) RANT_STD_F(Accel2D,angular)
-#define RANT_STD_MEMBERS_PoseWithCovariance(v)  RANT_STD_F(PoseWithCovariance,pose) RANT_STD_F(PoseWithCovariance,covariance)
-#define RANT_STD_MEMBERS_TwistWithCovariance(v) RANT_STD_F(TwistWithCovariance,twist) RANT_STD_F(TwistWithCovariance,covariance)
-#define RANT_STD_MEMBERS_Odometry(v)  RANT_STD_F(Odometry,pose) RANT_STD_F(Odometry,twist) RANT_STD_F(Odometry,parent)
-#define RANT_STD_MEMBERS_GeoPoint(v) RANT_STD_F(GeoPoint,lat) RANT_STD_F(GeoPoint,lon) RANT_STD_F(GeoPoint,alt)
-#define RANT_STD_MEMBERS_AlignedBox(v)    RANT_STD_F(AlignedBox,min) RANT_STD_F(AlignedBox,max)
-#define RANT_STD_MEMBERS_AlignedBox2D(v)  RANT_STD_F(AlignedBox2D,min) RANT_STD_F(AlignedBox2D,max)
-#define RANT_STD_MEMBERS_OrientedBox(v)   RANT_STD_F(OrientedBox,pose) RANT_STD_F(OrientedBox,size)
-#define RANT_STD_MEMBERS_OrientedBox2D(v) RANT_STD_F(OrientedBox2D,pose) RANT_STD_F(OrientedBox2D,size)
-#define RANT_STD_MEMBERS_Plane(v)     RANT_STD_F(Plane,position) RANT_STD_F(Plane,normal)
-#define RANT_STD_MEMBERS_Segment(v)   RANT_STD_F(Segment,a) RANT_STD_F(Segment,b)
-#define RANT_STD_MEMBERS_Sphere(v)    RANT_STD_F(Sphere,center) RANT_STD_F(Sphere,radius)
-#define RANT_STD_MEMBERS_Capsule(v)   RANT_STD_F(Capsule,axis) RANT_STD_F(Capsule,radius)
-#define RANT_STD_MEMBERS_Cylinder(v)  RANT_STD_F(Cylinder,axis) RANT_STD_F(Cylinder,radius)
-#define RANT_STD_MEMBERS_Cone(v)      RANT_STD_F(Cone,base) RANT_STD_F(Cone,tip) RANT_STD_F(Cone,radius)
-#define RANT_STD_MEMBERS_Polygon(v)   RANT_STD_F(Polygon,points)
-#define RANT_STD_MEMBERS_Plane2D(v)   RANT_STD_F(Plane2D,position) RANT_STD_F(Plane2D,normal)
-#define RANT_STD_MEMBERS_Segment2D(v) RANT_STD_F(Segment2D,a) RANT_STD_F(Segment2D,b)
-#define RANT_STD_MEMBERS_Ray(v)       RANT_STD_F(Ray,origin) RANT_STD_F(Ray,direction)
-#define RANT_STD_MEMBERS_Ray2D(v)     RANT_STD_F(Ray2D,origin) RANT_STD_F(Ray2D,direction)
-#define RANT_STD_MEMBERS_Circle(v)    RANT_STD_F(Circle,center) RANT_STD_F(Circle,radius)
-#define RANT_STD_MEMBERS_Capsule2D(v) RANT_STD_F(Capsule2D,axis) RANT_STD_F(Capsule2D,radius)
-#define RANT_STD_MEMBERS_Polygon2D(v) RANT_STD_F(Polygon2D,points)
-#define RANT_STD_MEMBERS_Prism(v)     RANT_STD_F(Prism,pose) RANT_STD_F(Prism,base) RANT_STD_F(Prism,height)
-#define RANT_STD_MEMBERS_Polyline(v)  RANT_STD_F(Polyline,points)
-#define RANT_STD_MEMBERS_Polyline2D(v) RANT_STD_F(Polyline2D,points)
-#define RANT_STD_MEMBERS_Path(v)      RANT_STD_F(Path,poses)
-#define RANT_STD_MEMBERS_Path2D(v)    RANT_STD_F(Path2D,poses)
-#define RANT_STD_MEMBERS_Inertia(v)   RANT_STD_F(Inertia,mass) RANT_STD_F(Inertia,center) \
-                                      RANT_STD_F(Inertia,ixx) RANT_STD_F(Inertia,ixy) RANT_STD_F(Inertia,ixz) \
-                                      RANT_STD_F(Inertia,iyy) RANT_STD_F(Inertia,iyz) RANT_STD_F(Inertia,izz)
-#define RANT_STD_MEMBERS_Empty(v)
-#define RANT_STD_MEMBERS_Image(v)        RANT_STD_F(Image,width) RANT_STD_F(Image,height) \
-                                       RANT_STD_F(Image,stride) RANT_STD_F(Image,format) RANT_STD_F(Image,data)
-#define RANT_STD_MEMBERS_VideoFrame(v) RANT_STD_F(VideoFrame,codec) \
-                                       RANT_STD_F(VideoFrame,width) RANT_STD_F(VideoFrame,height) \
-                                       RANT_STD_F(VideoFrame,keyframe) \
-                                       RANT_STD_F(VideoFrame,pts) RANT_STD_F(VideoFrame,data)
-#define RANT_STD_MEMBERS_ExternalVideoStream(v) RANT_STD_F(ExternalVideoStream,width) \
-                                       RANT_STD_F(ExternalVideoStream,height) \
-                                       RANT_STD_F(ExternalVideoStream,kind) RANT_STD_F(ExternalVideoStream,codec) \
-                                       RANT_STD_F(ExternalVideoStream,url) RANT_STD_F(ExternalVideoStream,name)
-#define RANT_STD_MEMBERS_CameraIntrinsics(v) RANT_STD_F(CameraIntrinsics,width) RANT_STD_F(CameraIntrinsics,height) \
-                                       RANT_STD_F(CameraIntrinsics,fx) RANT_STD_F(CameraIntrinsics,fy) \
-                                       RANT_STD_F(CameraIntrinsics,cx) RANT_STD_F(CameraIntrinsics,cy) \
-                                       RANT_STD_F(CameraIntrinsics,coeffs) RANT_STD_F(CameraIntrinsics,model)
-#define RANT_STD_MEMBERS_JointState(v) RANT_STD_F(JointState,position) \
-                                       RANT_STD_F(JointState,velocity) RANT_STD_F(JointState,effort)
-#define RANT_STD_MEMBERS_JointNames(v) RANT_STD_F(JointNames,name)
-#define RANT_STD_MEMBERS_JointTrajectoryPoint(v) RANT_STD_F(JointTrajectoryPoint,time) \
-                                       RANT_STD_F(JointTrajectoryPoint,position) RANT_STD_F(JointTrajectoryPoint,velocity) \
-                                       RANT_STD_F(JointTrajectoryPoint,acceleration) RANT_STD_F(JointTrajectoryPoint,effort)
-#define RANT_STD_MEMBERS_JointTrajectory(v) RANT_STD_F(JointTrajectory,points)
-#define RANT_STD_MEMBERS_Imu(v)        RANT_STD_F(Imu,orientation) RANT_STD_F(Imu,orientation_covariance) \
-                                       RANT_STD_F(Imu,angular_velocity) RANT_STD_F(Imu,angular_velocity_covariance) \
-                                       RANT_STD_F(Imu,linear_acceleration) RANT_STD_F(Imu,linear_acceleration_covariance)
-#define RANT_STD_MEMBERS_LaserScan(v)  RANT_STD_F(LaserScan,angle_min) RANT_STD_F(LaserScan,angle_step) \
-                                       RANT_STD_F(LaserScan,time_step) RANT_STD_F(LaserScan,range_min) \
-                                       RANT_STD_F(LaserScan,range_max) RANT_STD_F(LaserScan,echoes) \
-                                       RANT_STD_F(LaserScan,ranges) RANT_STD_F(LaserScan,intensities)
-#define RANT_STD_MEMBERS_RangeReading(v) RANT_STD_F(RangeReading,distance) RANT_STD_F(RangeReading,min) \
-                                       RANT_STD_F(RangeReading,max) RANT_STD_F(RangeReading,field_of_view) \
-                                       RANT_STD_F(RangeReading,kind)
-#define RANT_STD_MEMBERS_GnssFix(v)    RANT_STD_F(GnssFix,position) RANT_STD_F(GnssFix,covariance) \
-                                       RANT_STD_F(GnssFix,status)
-#define RANT_STD_MEMBERS_PointField(v) RANT_STD_F(PointField,name) RANT_STD_F(PointField,offset) \
-                                       RANT_STD_F(PointField,kind) RANT_STD_F(PointField,count)
-#define RANT_STD_MEMBERS_PointCloud(v) RANT_STD_F(PointCloud,origin) RANT_STD_F(PointCloud,width) \
-                                       RANT_STD_F(PointCloud,fields) RANT_STD_F(PointCloud,point_step) \
-                                       RANT_STD_F(PointCloud,dense) RANT_STD_F(PointCloud,data)
-#define RANT_STD_MEMBERS_Mesh(v)       RANT_STD_F(Mesh,vertices) RANT_STD_F(Mesh,triangles)
-#define RANT_STD_MEMBERS_GridField(v)  RANT_STD_F(GridField,name) RANT_STD_F(GridField,kind) RANT_STD_F(GridField,data)
-#define RANT_STD_MEMBERS_Grid(v)       RANT_STD_F(Grid,origin) RANT_STD_F(Grid,resolution) \
-                                       RANT_STD_F(Grid,cells_x) RANT_STD_F(Grid,cells_y) RANT_STD_F(Grid,cells_z) \
-                                       RANT_STD_F(Grid,fields)
-#define RANT_STD_MEMBERS_Tensor(v)     RANT_STD_F(Tensor,kind) RANT_STD_F(Tensor,shape) RANT_STD_F(Tensor,data)
-#define RANT_STD_MEMBERS_File(v)       RANT_STD_F(File,name) RANT_STD_F(File,media_type) RANT_STD_F(File,data)
-#define RANT_STD_MEMBERS_Detection2D(v) RANT_STD_F(Detection2D,bounds) RANT_STD_F(Detection2D,label) \
-                                       RANT_STD_F(Detection2D,score) RANT_STD_F(Detection2D,track)
-#define RANT_STD_MEMBERS_Detection3D(v) RANT_STD_F(Detection3D,bounds) RANT_STD_F(Detection3D,label) \
-                                       RANT_STD_F(Detection3D,score) RANT_STD_F(Detection3D,track)
 
 namespace priv {
 
@@ -5778,56 +5420,35 @@ RemoteVariable<T> Node::remote_variable(std::string_view name, const VariableOpt
 
 /* The standard type registrations at global scope: each mirror gets its wire name here,
  * so a member spells as at: Transform and matches only a Transform. */
-RANT_STD_STRUCT(Float2);     RANT_STD_STRUCT(Float3);     RANT_STD_STRUCT(Float4);
-RANT_STD_STRUCT(Double2);    RANT_STD_STRUCT(Double3);    RANT_STD_STRUCT(Double4);
-RANT_STD_STRUCT(Int2);       RANT_STD_STRUCT(Int3);       RANT_STD_STRUCT(Int4);
-RANT_STD_STRUCT(Quaternion);
-RANT_STD_STRUCT(Color);
-RANT_STD_STRUCT(Pose);       RANT_STD_STRUCT(Pose2D);
-RANT_STD_STRUCT(Transform);  RANT_STD_STRUCT(Transform2D);
-RANT_STD_STRUCT(Twist);      RANT_STD_STRUCT(Twist2D);
-RANT_STD_STRUCT(Wrench);     RANT_STD_STRUCT(Wrench2D);   RANT_STD_STRUCT(GeoPoint);
-RANT_STD_STRUCT(Accel);      RANT_STD_STRUCT(Accel2D);
-RANT_STD_STRUCT(AlignedBox); RANT_STD_STRUCT(AlignedBox2D);
-RANT_STD_STRUCT(OrientedBox); RANT_STD_STRUCT(OrientedBox2D);
-RANT_STD_STRUCT(Plane);      RANT_STD_STRUCT(Segment);    RANT_STD_STRUCT(Sphere);
-RANT_STD_STRUCT(Capsule);    RANT_STD_STRUCT(Cylinder);   RANT_STD_STRUCT(Cone);
-RANT_STD_STRUCT(Polygon);    RANT_STD_STRUCT(Plane2D);    RANT_STD_STRUCT(Segment2D);
-RANT_STD_STRUCT(Circle);     RANT_STD_STRUCT(Capsule2D);  RANT_STD_STRUCT(Polygon2D);
-RANT_STD_STRUCT(Ray);        RANT_STD_STRUCT(Ray2D);
-RANT_STD_STRUCT(Prism);      RANT_STD_STRUCT(Polyline);   RANT_STD_STRUCT(Polyline2D);
-RANT_STD_STRUCT(Path);       RANT_STD_STRUCT(Path2D);     RANT_STD_STRUCT(Inertia);
-RANT_STD_STRUCT(Empty);
-RANT_STD_ALIAS(Uuid,        uint8_t[16]);
-RANT_STD_ALIAS(Timestamp, int64_t);
-RANT_STD_ALIAS(Duration,    int64_t);
-RANT_STD_ALIAS(Matrix3x3,   float[3][3]);
-RANT_STD_ALIAS(Matrix4x4,   float[4][4]);
-RANT_STD_ALIAS(Covariance3, double[3][3]);
-RANT_STD_ALIAS(Covariance6, double[6][6]);
-RANT_STD_ALIAS(Uri,         rant::String<256>);
-RANT_STD_STRUCT(PoseWithCovariance); RANT_STD_STRUCT(TwistWithCovariance); RANT_STD_STRUCT(Odometry);
-/* The standard enums: each spells as its standard name and carries a registered enum's
- * leaf, so a member of one in a user struct ships as that name too. */
-#define RANT_STD_ENUM(T, ...) RANT_ENUM(rant::types::T, __VA_ARGS__); RANT_STD_ALIAS(T, rant::types::T)
-RANT_STD_ENUM(ImageFormat, Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32, Jpeg, Png);
-RANT_STD_ENUM(VideoCodec, Unknown, Mjpeg, H264, H265, Av1);
-RANT_STD_ENUM(VideoStreamKind, Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other);
-RANT_STD_STRUCT(Image); RANT_STD_STRUCT(VideoFrame); RANT_STD_STRUCT(ExternalVideoStream);
-RANT_STD_ENUM(DistortionModel, NoDistortion, BrownConrady, Fisheye, Rational);
-RANT_STD_STRUCT(CameraIntrinsics);
-RANT_STD_STRUCT(JointState); RANT_STD_STRUCT(JointNames);
-RANT_STD_STRUCT(JointTrajectoryPoint); RANT_STD_STRUCT(JointTrajectory);
-RANT_STD_STRUCT(Imu);        RANT_STD_STRUCT(LaserScan);
-RANT_STD_ENUM(RangeKind, Unknown, Ultrasound, Infrared, Laser, Radar);
-RANT_STD_STRUCT(RangeReading);
-RANT_STD_ENUM(GnssStatus, NoFix, Fix, Differential, RtkFloat, RtkFixed);
-RANT_STD_STRUCT(GnssFix);
-RANT_STD_ENUM(ScalarKind, I8, U8, I16, U16, I32, U32, F32, F64, I64, U64);
-RANT_STD_STRUCT(PointField); RANT_STD_STRUCT(PointCloud); RANT_STD_STRUCT(Mesh);
-RANT_STD_STRUCT(GridField);  RANT_STD_STRUCT(Grid);
-RANT_STD_STRUCT(Tensor);     RANT_STD_STRUCT(File);
-RANT_STD_STRUCT(Detection2D); RANT_STD_STRUCT(Detection3D);
+#define RANT_STD_F(T, f, wire) \
+    v(::rant::field_tag<decltype(::rant::types::T::f)>{}, wire, offsetof(::rant::types::T, f));
+#define RANT_STD_O(T, o, wire) v((int64_t)::rant::types::T::o, wire);
+/* Give a struct-shaped type a wire name: reflect its members, then name it. */
+#define RANT_STD_STRUCT(T, ...) \
+    template <> struct rant::reflect<rant::types::T> { \
+        using is_rant_schema = void; \
+        static constexpr const char* type_name = #T; \
+        template <class V> static void visit(V&& v) { \
+            (void)v; RANT_OFFSETOF_BEGIN __VA_ARGS__ RANT_OFFSETOF_END \
+        } \
+    }; \
+    template <> struct rant::std_type<rant::types::T> { \
+        static constexpr const char* name = #T; using repr = void; }
+/* Give an ALIAS-shaped type a wire name: it copies as R (`Uuid = u8[16]`, R = uint8_t[16]). */
+#define RANT_STD_ALIAS(T, R) \
+    template <> struct rant::std_type<rant::types::T> { \
+        static constexpr const char* name = #T; using repr = R; }
+/* An enum spells as its standard name and carries a registered enum's leaf, so a member of one
+ * in a user struct ships as that name too. */
+#define RANT_STD_ENUM(T, ...) \
+    template <> struct rant::reflect_enum<rant::types::T> { \
+        using is_rant_enum = void; \
+        static constexpr const char* type_name = #T; \
+        template <class V> static void visit(V&& v) { __VA_ARGS__ } \
+    }; \
+    RANT_STD_ALIAS(T, rant::types::T)
+
+#include "rant_reflect.inc"   /* @RANT_EMBED@ */
 
 #endif /* C++ consumer (not the implementation anchor) */
 #endif /* RANT_HPP_INCLUDED */

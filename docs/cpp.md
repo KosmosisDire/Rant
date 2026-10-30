@@ -108,7 +108,13 @@ A value that does not fit its type, such as a `String<N>` longer than N, is refu
 cut short.
 
 The standard types of docs/stdtypes.md are in `rant::types`: `rant::types::Transform`,
-`rant::types::OrientedBox`, `rant::types::Empty` and the rest.
+`rant::types::OrientedBox`, `rant::types::Empty` and the rest. A new value is all zeros, so a
+rotation starts from `rant::types::identity_rotation()`. An enum option named after an X11 macro
+takes a trailing underscore, as in `DistortionModel::None_`. Everything that computes on the types
+is Rant Math.
+
+`rant_types.hpp` holds them alone, with no middleware, and shares its guard with the copy in
+`rant.hpp`, so a library built on the types alone and Rant compile into one program in either order.
 
 ### Raw messages
 

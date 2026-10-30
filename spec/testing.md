@@ -83,7 +83,7 @@ program in this order.
 | `e2e.timestamps` | timestamps |
 | `e2e.threads` | threads |
 | `bench.memscale` | `rant_bench memscale`, a steady state send never allocates, with a bulk pool too |
-| `bindings.cpp`, `.python`, `.csharp` | the binding suites, below |
+| `bindings.cpp`, `.cpp.types`, `.cpp.types_after`, `.python`, `.csharp` | the binding suites, below |
 | `fuzz.receive`, `.schema`, `.message` | the target's seeds and saved crashes, below |
 | `interop.<pub>_to_<sub>` | one language publishing to another, below |
 | `build.strict` | the compile checks, below |

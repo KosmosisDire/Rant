@@ -224,6 +224,18 @@ if(CMAKE_CXX_COMPILER)
     RANT_TEST_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/schemas.txt")
   add_test(NAME bindings.cpp COMMAND rant_cpp_test)
   rant_binding_test(bindings.cpp)
+
+  # The standard types with no middleware, then the same checks after rant.hpp.
+  add_executable(rant_cpp_types "${PROJECT_SOURCE_DIR}/bindings/cpp/test_types.cpp")
+  target_compile_features(rant_cpp_types PRIVATE cxx_std_17)
+  target_include_directories(rant_cpp_types PRIVATE "${PROJECT_SOURCE_DIR}/dist")
+  add_dependencies(rant_cpp_types rant_dist)
+  add_test(NAME bindings.cpp.types COMMAND rant_cpp_types)
+  rant_binding_test(bindings.cpp.types)
+  rant_cpp_program(rant_cpp_types_after "${PROJECT_SOURCE_DIR}/bindings/cpp/test_types.cpp")
+  target_compile_definitions(rant_cpp_types_after PRIVATE RANT_TEST_AFTER_RANT)
+  add_test(NAME bindings.cpp.types_after COMMAND rant_cpp_types_after)
+  rant_binding_test(bindings.cpp.types_after)
 endif()
 
 # cargo builds the Rust suite only when ctest runs, into a target folder of this build tree,
