@@ -248,11 +248,12 @@ if(CARGO_EXECUTABLE)
   set_property(TEST bindings.rust APPEND PROPERTY ENVIRONMENT "CARGO_TARGET_DIR=${RANT_CARGO_TARGET}")
   set_tests_properties(bindings.rust PROPERTIES RESOURCE_LOCK cargo)
   rant_binding_test(bindings.rust)
-  # The checked in FFI against a fresh bindgen of dist/rant.h. Skipped without libclang.
+  # The checked in FFI against a fresh bindgen of dist/rant.h. Skipped without libclang. Compiling
+  # bindgen from nothing has taken a slow Windows runner over 270 s, and the check itself a second.
   add_test(NAME bindings.rust.ffi
-           COMMAND "${CARGO_EXECUTABLE}" run --quiet --manifest-path "${_rust_manifest}" -p rant-ffigen -- --check)
+           COMMAND "${CARGO_EXECUTABLE}" run --manifest-path "${_rust_manifest}" -p rant-ffigen -- --check)
   set_tests_properties(bindings.rust.ffi PROPERTIES ENVIRONMENT "CARGO_TARGET_DIR=${RANT_CARGO_TARGET}"
-                       RESOURCE_LOCK cargo SKIP_RETURN_CODE 77 LABELS bindings TIMEOUT 300)
+                       RESOURCE_LOCK cargo SKIP_RETURN_CODE 77 LABELS bindings TIMEOUT 600)
 endif()
 
 # Python and C# load the shared library the build copies into dist/native.
