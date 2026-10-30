@@ -27,6 +27,11 @@ const SKIPPED: &[(&str, &str)] = &[
     ("rant_std_text", "as rant_std_by_name"),
     ("rant_std_recognize", "as rant_std_by_name"),
     ("rant_std_recognize_field", "as rant_std_by_name"),
+    ("rant_schema_doc_parse", "a code generator's API, rant_codegen calls the C"),
+    ("rant_schema_doc_count", "as rant_schema_doc_parse"),
+    ("rant_schema_doc_at", "as rant_schema_doc_parse"),
+    ("rant_schema_doc_note", "as rant_schema_doc_parse"),
+    ("rant_schema_doc_free", "as rant_schema_doc_parse"),
 ];
 
 fn source(name: &str) -> String {

@@ -162,6 +162,33 @@ Gotcha: a `--` comment inside concatenated C string literals eats the rest of th
 unless the literal ends with a newline, and a definition's last token needs a trailing
 newline for the same reason.
 
+## Docs
+
+`rant_schema_doc_parse` reads a text for a tool such as a code generator: every definition
+in order, each as a schema by its name, and its comments. It needs no node, only an
+allocator, which it copies and resets at free. It is the DSL compiler itself with a recorder
+(`i_RantDocRec`, serialize/internal.h): the whitespace skip keeps each comment and the
+parser marks where each definition, its body and each member starts. A plain compile passes
+no recorder and records nothing. `doc.c` then attaches the comments by line.
+
+- A definition's description is the run of comments on lines of their own right above its
+  name. A blank line or a line of code ends the run, so a file header stays apart.
+- A member is a struct's field, an enum's option, or the type of an alias. Its comment is
+  the run of own line comments right above it inside the body, then the comment after it on
+  its line. That comment goes to the last member starting on the line, so in `x: f32, y: f32
+  -- [px]` it is y's.
+- A comment after the last member, or anywhere else, belongs to nothing.
+- `[unit] text` is the convention: a comment that opens with brackets gives the unit, the
+  rest the text.
+
+A text checks the wire rules on its last statement alone, so a definition nothing there uses
+can break one (`Nest { f: Pair[2] }` with `Pair { }` empty) and still compile. The doc parse
+compiles each definition by name, so it refuses such a text at that definition's name.
+
+`i_rant_schema_doc_parse` with standalone set resolves only names the text defines, with no
+standard library. That is for a text that defines the standard names itself, as the roster
+does, since it may change a type the compiled table still holds in its old shape.
+
 ## Access
 
 Access is by name, nested members by dotted path, array elements by index

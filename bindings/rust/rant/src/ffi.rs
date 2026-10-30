@@ -381,6 +381,59 @@ impl Default for RantSchemaFieldInfo {
     }
 }
 #[repr(C)]
+#[derive(Debug)]
+pub struct RantSchemaDoc {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RantSchemaError {
+    pub why: *const ::std::os::raw::c_char,
+    pub line: u32,
+    pub column: u32,
+}
+impl Default for RantSchemaError {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RantSchemaDef {
+    pub schema: *const RantSchema,
+    pub kind: u8,
+    pub about: RantString,
+    pub line: u32,
+}
+impl Default for RantSchemaDef {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RantSchemaNote {
+    pub unit: RantString,
+    pub text: RantString,
+}
+impl Default for RantSchemaNote {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
 #[derive(Copy, Clone)]
 pub struct RantValue {
     pub kind: u8,
@@ -1341,6 +1394,23 @@ unsafe extern "C" {
         name: *const ::std::os::raw::c_char,
         out: *mut i64,
     ) -> ::std::os::raw::c_int;
+    pub fn rant_schema_doc_parse(
+        alloc: *mut RantAllocator,
+        text: *const ::std::os::raw::c_char,
+        err: *mut RantSchemaError,
+    ) -> *mut RantSchemaDoc;
+    pub fn rant_schema_doc_count(d: *const RantSchemaDoc) -> u32;
+    pub fn rant_schema_doc_at(
+        d: *const RantSchemaDoc,
+        i: u32,
+        out: *mut RantSchemaDef,
+    ) -> ::std::os::raw::c_int;
+    pub fn rant_schema_doc_note(
+        d: *const RantSchemaDoc,
+        def: u32,
+        member: u16,
+    ) -> RantSchemaNote;
+    pub fn rant_schema_doc_free(d: *mut RantSchemaDoc);
     pub fn rant_schema_validate(
         s: *const RantSchema,
         msg: RantBytes,

@@ -89,6 +89,7 @@ typedef struct {
     i_RantDef   *defs; uint32_t n_defs, cap_defs;
     RantSchema **owned; uint32_t n_owned, cap_owned;
     uint16_t     rec;                            /* standard type expansion depth */
+    uint8_t      standalone;                     /* 1 resolves only names a text defines */
 } i_RantRegistry;
 
 /* schema.c */
@@ -110,13 +111,35 @@ const i_Field *i_rant_schema_field_by_path(const RantSchema *s, const char *path
 /* why a text was refused and the character it was refused at, or the text's end */
 typedef struct { const char *why; const char *at; } i_RantSchemaErr;
 
+/* What a doc parse records as the DSL reads (doc.c): each comment, and where each definition,
+ * its body and its members start. A plain compile records nothing. */
+enum { I_RANT_DOC_DEF, I_RANT_DOC_BODY, I_RANT_DOC_MEMBER };
+typedef struct { const char *at; uint8_t what; } i_RantDocMark;
+typedef struct { const char *text, *end; } i_RantDocComment;   /* text is just past the -- */
+typedef struct {
+    RantAllocFn alloc; void *user;
+    i_RantDocMark    *marks;    uint32_t n_marks, cap_marks;
+    i_RantDocComment *comments; uint32_t n_comments, cap_comments;
+    int err;                                    /* out of memory, latched */
+} i_RantDocRec;
+
 /* text.c */
 const char *i_rant_why_kind(uint8_t k);
 size_t i_rant_name_normalize(const char *in, char *out, size_t cap, int as_type);
+/* the length of the identifier at p, 0 when none starts there */
+size_t i_rant_ident_len(const char *p);
 void i_rant_registry_init(i_RantRegistry *r, RantAllocFn alloc, void *user);
 /* Compiles text against the registry's definitions and keeps the new ones. NULL with err
  * filled in and the registry as it was. */
 RantSchema *i_rant_registry_compile(i_RantRegistry *r, const char *text, i_RantSchemaErr *err);
+/* The same, recording into rec for a doc parse. */
+RantSchema *i_rant_registry_compile_rec(i_RantRegistry *r, const char *text, i_RantSchemaErr *err,
+                                        i_RantDocRec *rec);
+
+/* doc.c: rant_schema_doc_parse, where standalone resolves only the names the text defines,
+ * for a text that defines the standard names itself */
+RantSchemaDoc *i_rant_schema_doc_parse(RantAllocator *alloc, const char *text, int standalone,
+                                       RantSchemaError *err);
 /* The schema the registry holds for these wire bytes, parsed on first sight. */
 RantSchema *i_rant_registry_parse(i_RantRegistry *r, const void *wire, size_t wire_len);
 /* A name's compiled type in the arena, a standard name expanded on first use. The view

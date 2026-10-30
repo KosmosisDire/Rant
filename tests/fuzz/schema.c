@@ -66,6 +66,23 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size){
         text[size - 1] = 0;
         s = i_rant_registry_compile(&reg, text, &err);
         if (!s) FUZZ_REQUIRE(err.why != NULL);
+        {   /* the doc parse is the same compiler, and also compiles each definition alone */
+            RantAllocator da = rant_allocator_heap(0);
+            RantSchemaError derr; RantSchemaDef def; uint32_t i; uint16_t m;
+            RantSchemaDoc *doc = rant_schema_doc_parse(&da, text, &derr);
+            FUZZ_REQUIRE(!doc || s);
+            if (!doc) FUZZ_REQUIRE(derr.why != NULL && derr.line >= 1);
+            for (i = 0; i < rant_schema_doc_count(doc); i++){
+                FUZZ_REQUIRE(rant_schema_doc_at(doc, i, &def) && def.schema && def.line >= 1);
+                fuzz_touch(def.about.data, def.about.len);
+                for (m = 0; m < 64; m++){
+                    RantSchemaNote n = rant_schema_doc_note(doc, i, m);
+                    fuzz_touch(n.unit.data, n.unit.len);
+                    fuzz_touch(n.text.data, n.text.len);
+                }
+            }
+            rant_schema_doc_free(doc);
+        }
         free(text);
     } else {
         (void)i_rant_schema_wire_why(data + 1, size - 1);
@@ -104,14 +121,20 @@ static void emit_wire(FuzzEmit emit, const char *text){
 void fuzz_seeds(FuzzEmit emit){
     size_t i;
     int t;
+    /* every place a doc parse attaches a comment: above a type, after and above a member */
+    emit_text(emit, "-- a header\n\n-- the kind\nKind = enum<u8> {\n  A = 1   -- one\n  B\n}\n"
+                    "Stamp = i64   -- [us] the time\n-- a reading\nReading {\n  d: f64   -- [m] far\n"
+                    "  -- where\n  at: Pose\n  x: f32, y: f32   -- [px]\n  k: Kind\n  -- trailing\n}\n");
     for (i = 0; i < FUZZ_SCHEMA_TEXTS; i++){
         emit_text(emit, fuzz_schema_texts[i]);
         emit_wire(emit, fuzz_schema_texts[i]);
     }
     for (t = 1; t < (int)RANT_STD_COUNT; t++){
         const char *name = rant_std_name((RantStdType)t);
+        char def[1024];
         if (!name) continue;
         emit_text(emit, name);
         emit_wire(emit, name);
+        if (test_std_def((RantStdType)t, def, sizeof def)) emit_text(emit, def);   /* comments too */
     }
 }

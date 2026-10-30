@@ -1299,8 +1299,155 @@ static void schema_misuse_checks(void){
     rant_allocator_reset(&ma);
 }
 
+/* a doc string against a C string, {NULL,0} equal to "" */
+static int doc_is(RantString s, const char *want){
+    return s.len == strlen(want) && (!s.len || memcmp(s.data, want, s.len) == 0);
+}
+
+/* The doc parse: every definition in order with its schema, kind, line and comments, the
+   rules that attach a comment, the [unit] split, refusals with a place, standalone reading,
+   and the whole standard roster read back as one file. */
+static void schema_doc_checks(void){
+    static const char TEXT[] =
+        "-- A file header, kept apart from the first type by a blank line\n"   /* 1 */
+        "\n"
+        "-- What measured it\n"
+        "Kind = enum<u8> {\n"                                                   /* 4 */
+        "  Sonar = 1          -- sound\n"
+        "  Laser              -- light\n"
+        "}\n"
+        "-- When, in microseconds\n"
+        "Stamp = i64          -- [us] since the epoch\n"                        /* 9 */
+        "-- A reading of a range sensor\n"
+        "-- on two lines\n"
+        "reading {\n"                                                            /* 12 */
+        "  distance: f64      -- [m or px] +inf when nothing is in range\n"
+        "  -- the place it was read\n"
+        "  -- in the parent frame\n"
+        "  at: Pose\n"
+        "  kind: Kind\n"
+        "  x: f32, y: f32     -- [px]\n"
+        "  frameId: Stamp\n"
+        "  -- a comment after the last field belongs to nothing\n"
+        "}\n"
+        "Empty2 { }\n";                                                          /* 22 */
+    RantAllocator ma = rant_allocator_heap(0), da = rant_allocator_heap(0);
+    RantSchemaError err; RantSchemaDef def; RantSchemaNote n; RantSchemaDoc *doc;
+    int64_t v; RantString on;
+
+    doc = rant_schema_doc_parse(&da, TEXT, &err);
+    CHECK(doc && err.why == NULL, "doc: the text reads (%s)", err.why ? err.why : "");
+    CHECK(rant_schema_doc_count(doc) == 4, "doc: four definitions, Pose is only used (%u)",
+          rant_schema_doc_count(doc));
+    CHECK(rant_schema_doc_at(doc, 0, &def) && def.kind == RANT_ENUM && def.line == 4
+          && doc_is(rant_schema_name(def.schema), "Kind") && doc_is(def.about, "What measured it"),
+          "doc: an enum, the header above the blank line is not its description");
+    CHECK(rant_schema_enum_count(def.schema, 0) == 2
+          && rant_schema_enum_variant(def.schema, 0, 1, &v, &on) && v == 2 && doc_is(on, "Laser"),
+          "doc: the schema is the compiled enum, Laser counts on to 2");
+    n = rant_schema_doc_note(doc, 0, 0);
+    CHECK(doc_is(n.text, "sound") && n.unit.len == 0, "doc: an option's comment, with no unit");
+    CHECK(doc_is(rant_schema_doc_note(doc, 0, 1).text, "light"), "doc: the second option's comment");
+    CHECK(rant_schema_doc_at(doc, 1, &def) && def.kind == RANT_I64 && def.line == 9
+          && doc_is(def.about, "When, in microseconds"), "doc: an alias names its kind");
+    n = rant_schema_doc_note(doc, 1, 0);
+    CHECK(doc_is(n.unit, "us") && doc_is(n.text, "since the epoch"), "doc: an alias's own comment, split");
+    CHECK(rant_schema_doc_at(doc, 2, &def) && def.kind == RANT_STRUCT && def.line == 12
+          && doc_is(rant_schema_name(def.schema), "Reading")
+          && doc_is(def.about, "A reading of a range sensor\non two lines"),
+          "doc: a struct by its wire name, a description of two lines");
+    {   RantSchema *whole = test_compile(&ma, "Kind = enum<u8> { Sonar = 1, Laser }\nStamp = i64\n"
+            "Reading { distance: f64, at: Pose, kind: Kind, x: f32, y: f32, frame_id: Stamp }", NULL);
+        CHECK(whole && rant_schema_hash(whole) == rant_schema_hash(def.schema),
+              "doc: the struct hashes as the same text without comments");
+    }
+    n = rant_schema_doc_note(doc, 2, 0);
+    CHECK(doc_is(n.unit, "m or px") && doc_is(n.text, "+inf when nothing is in range"),
+          "doc: a field's unit and text");
+    n = rant_schema_doc_note(doc, 2, 1);
+    CHECK(n.unit.len == 0 && doc_is(n.text, "the place it was read\nin the parent frame"),
+          "doc: the lines above a field are its comment");
+    CHECK(rant_schema_doc_note(doc, 2, 2).text.len == 0, "doc: a field with no comment");
+    CHECK(rant_schema_doc_note(doc, 2, 3).text.len == 0 && rant_schema_doc_note(doc, 2, 3).unit.len == 0
+          && doc_is(rant_schema_doc_note(doc, 2, 4).unit, "px"),
+          "doc: a comment goes to the last field on its line");
+    CHECK(rant_schema_doc_note(doc, 2, 5).text.len == 0 && rant_schema_doc_note(doc, 2, 6).text.len == 0,
+          "doc: the comment after the last field belongs to nothing, and no seventh member");
+    CHECK(rant_schema_doc_at(doc, 3, &def) && def.kind == RANT_STRUCT && def.about.len == 0
+          && rant_schema_field_count(def.schema) == 0 && !rant_schema_doc_at(doc, 4, &def),
+          "doc: an empty struct, then nothing past the end");
+    rant_schema_doc_free(doc);
+
+    doc = rant_schema_doc_parse(&da, "Robot {\n  at: Pse\n}\n", &err);
+    CHECK(!doc && err.why && strcmp(err.why, "unknown type") == 0 && err.line == 2 && err.column == 7,
+          "doc: a refusal says why and where (%s at %u:%u)", err.why ? err.why : "", err.line, err.column);
+    doc = rant_schema_doc_parse(&da, "Pair { }\nNest { f: Pair[2] }\nf32", &err);
+    CHECK(!doc && err.why && strcmp(err.why, "an array element cannot be empty") == 0
+          && err.line == 2 && err.column == 1,
+          "doc: a definition the last statement leaves unchecked is refused at its name (%s at %u:%u)",
+          err.why ? err.why : "", err.line, err.column);
+    doc = rant_schema_doc_parse(&da, "-- nothing but a comment\n", &err);
+    CHECK(!doc && err.why && err.line == 2 && err.column == 1, "doc: an empty text is refused at its end");
+    CHECK(!rant_schema_doc_parse(NULL, "A { }", &err) && err.why && err.line == 0,
+          "doc: no allocator is refused with no place");
+    CHECK(rant_schema_doc_count(NULL) == 0 && rant_schema_doc_note(NULL, 0, 0).text.len == 0,
+          "doc: a NULL doc reads as empty");
+    rant_schema_doc_free(NULL);
+
+    doc = rant_schema_doc_parse(&da, "Pose { x: f32 }", &err);
+    CHECK(!doc && err.why, "doc: a standard name with another shape is refused");
+    doc = i_rant_schema_doc_parse(&da, "Pose { x: f32 }", 1, &err);
+    CHECK(doc && rant_schema_doc_at(doc, 0, &def) && rant_schema_field_count(def.schema) == 1,
+          "doc: standalone reads a standard name as the text defines it");
+    rant_schema_doc_free(doc);
+    doc = i_rant_schema_doc_parse(&da, "Track { at: Double3 }", 1, &err);
+    CHECK(!doc && err.why && strcmp(err.why, "unknown type") == 0,
+          "doc: standalone knows no standard type the text does not define");
+
+    /* the roster as one file, the description lines above each name: every type reads back
+       with the table's shape, its description and its comments */
+    {   size_t cap = 1, len = 0; char *all; int t, ok = 1, about = 1;
+        for (t = 1; t < (int)RANT_STD_COUNT; t++)
+            cap += strlen(rant_std_name((RantStdType)t)) + strlen(rant_std_text((RantStdType)t)) + 8u;
+        all = (char *)malloc(cap);
+        for (t = 1; all && t < (int)RANT_STD_COUNT; t++)
+            len += test_std_def((RantStdType)t, all + len, cap - len);
+        doc = all ? rant_schema_doc_parse(&da, all, &err) : NULL;
+        CHECK(doc && rant_schema_doc_count(doc) == (uint32_t)RANT_STD_COUNT - 1u,
+              "doc: the roster reads as one file (%s at %u)", err.why ? err.why : "", err.line);
+        for (t = 1; doc && t < (int)RANT_STD_COUNT; t++){
+            RantSchema *alone = test_compile(&ma, rant_std_name((RantStdType)t), NULL);
+            if (!rant_schema_doc_at(doc, (uint32_t)t - 1u, &def) || !alone
+                || rant_schema_hash(def.schema) != rant_schema_hash(alone)) ok = 0;
+            if (!def.about.len) about = 0;
+        }
+        CHECK(ok, "doc: every standard type keeps the table's shape");
+        CHECK(about, "doc: every standard type has its description");
+        if (doc){
+            rant_schema_doc_at(doc, (uint32_t)RANT_STD_POSE - 1u, &def);
+            CHECK(doc_is(rant_schema_doc_note(doc, (uint32_t)RANT_STD_POSE - 1u, 0).unit, "m")
+                  && doc_is(def.about, "A position and orientation in a 3D frame"),
+                  "doc: Pose's description and position unit");
+            rant_schema_doc_at(doc, (uint32_t)RANT_STD_COVARIANCE6 - 1u, &def);
+            CHECK(def.kind == RANT_ARR && strchr(def.about.data, '\n') != NULL,
+                  "doc: Covariance6 is an array with two description lines");
+            n = rant_schema_doc_note(doc, (uint32_t)RANT_STD_IMAGEFORMAT - 1u, 8);
+            CHECK(doc_is(n.text, "data is a JPEG file"), "doc: ImageFormat's ninth option comment");
+            n = rant_schema_doc_note(doc, (uint32_t)RANT_STD_UUID - 1u, 0);
+            CHECK(doc_is(n.text, "RFC 4122 byte order"), "doc: Uuid's alias comment");
+            n = rant_schema_doc_note(doc, (uint32_t)RANT_STD_IMAGE - 1u, 2);
+            CHECK(doc_is(n.unit, "bytes") && doc_is(n.text, "from one row to the next, 0 when rows are packed"),
+                  "doc: Image stride's unit and note");
+        }
+        rant_schema_doc_free(doc);
+        free(all);
+    }
+    rant_allocator_reset(&ma);
+}
+
 static const TestCase cases[] = {
     { "dsl", schema_dsl_checks },
+    { "doc", schema_doc_checks },
     { "wire", schema_v8_checks },
     { "nested", schema_nested_checks },
     { "writes", schema_write_checks },

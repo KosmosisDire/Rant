@@ -363,18 +363,48 @@ const char *i_rant_std_lookup(const char *name);     /* serialize/stdtypes.c */
 #define i_rant_std_lookup(name) ((const char *)0)
 #endif
 
-/* body is set while a definition's body is read, the one place a struct or an enum is spelled */
-typedef struct { const char *p; const char *err; const char *why; int body; } i_RantDsl;
+/* body is set while a definition's body is read, the one place a struct or an enum is spelled.
+ * rec is set for a doc parse only. */
+typedef struct { const char *p; const char *err; const char *why; int body; i_RantDocRec *rec; } i_RantDsl;
 
 void i_rant_registry_init(i_RantRegistry *r, RantAllocFn alloc, void *user){
     memset(r, 0, sizeof *r);
     r->arena = i_rant_schema_builder_begin(alloc, user);
 }
 
+/* one more slot in a doc recording's array, doubling through its hook */
+static void *i_rant_doc_slot(i_RantDocRec *rec, void **arr, uint32_t *n, uint32_t *cap, size_t elem){
+    if (rec->err) return NULL;
+    if (*n == *cap){
+        uint32_t want = *cap ? *cap * 2u : 64u;
+        void *na = rec->alloc(rec->user, *arr, (size_t)want * elem);
+        if (!na){ rec->err = 1; return NULL; }
+        *arr = na; *cap = want;
+    }
+    return (char *)*arr + (size_t)(*n)++ * elem;
+}
+static void i_rant_doc_mark(i_RantDsl *d, const char *at, uint8_t what){
+    i_RantDocMark *m;
+    if (!d->rec) return;
+    m = (i_RantDocMark *)i_rant_doc_slot(d->rec, (void **)&d->rec->marks, &d->rec->n_marks,
+                                         &d->rec->cap_marks, sizeof *m);
+    if (m){ m->at = at; m->what = what; }
+}
+
 static void i_rant_dsl_ws(i_RantDsl *d){
     for (;;){
         while (*d->p==' ' || *d->p=='\t' || *d->p=='\r' || *d->p=='\n') d->p++;
-        if (d->p[0]=='-' && d->p[1]=='-'){ while (*d->p && *d->p!='\n') d->p++; continue; }
+        if (d->p[0]=='-' && d->p[1]=='-'){
+            const char *text = d->p + 2;
+            while (*d->p && *d->p!='\n') d->p++;
+            /* a text read twice, as a bare root is, records each comment once */
+            if (d->rec && (!d->rec->n_comments || d->rec->comments[d->rec->n_comments - 1].text < text)){
+                i_RantDocComment *c = (i_RantDocComment *)i_rant_doc_slot(d->rec,
+                    (void **)&d->rec->comments, &d->rec->n_comments, &d->rec->cap_comments, sizeof *c);
+                if (c){ c->text = text; c->end = d->p; }
+            }
+            continue;
+        }
         return;
     }
 }
@@ -442,15 +472,19 @@ static const char *i_rant_builder_why(int err){
     default: return "out of memory";
     }
 }
+size_t i_rant_ident_len(const char *p){
+    const char *q = p;
+    if (!((*q>='A'&&*q<='Z') || (*q>='a'&&*q<='z') || *q=='_')) return 0;
+    while ((*q>='A'&&*q<='Z') || (*q>='a'&&*q<='z') || (*q>='0'&&*q<='9') || *q=='_') q++;
+    return (size_t)(q - p);
+}
 /* an identifier into out[256], NUL terminated. 0 and err when missing or overlong */
 static int i_rant_dsl_ident(i_RantDsl *d, char out[256]){
-    const char *q = d->p; size_t n;
-    if (!((*q>='A'&&*q<='Z') || (*q>='a'&&*q<='z') || *q=='_')){ i_rant_dsl_fail(d, q, "expected a name"); return 0; }
-    while ((*q>='A'&&*q<='Z') || (*q>='a'&&*q<='z') || (*q>='0'&&*q<='9') || *q=='_') q++;
-    n = (size_t)(q - d->p);
+    size_t n = i_rant_ident_len(d->p);
+    if (!n){ i_rant_dsl_fail(d, d->p, "expected a name"); return 0; }
     if (n > 255){ i_rant_dsl_fail(d, d->p, i_rant_builder_why(-4)); return 0; }
     memcpy(out, d->p, n); out[n] = '\0';
-    d->p = q;
+    d->p += n;
     return 1;
 }
 static int i_rant_dsl_expect(i_RantDsl *d, char c){
@@ -536,6 +570,7 @@ static void i_rant_dsl_enum(i_RantDsl *d, i_RantSchemaBuilder *b){
                                                vwire, strlen(vwire))){
             i_rant_dsl_fail(d, vat, "two options of one enum spell the same wire name"); return;
         }
+        i_rant_doc_mark(d, vat, I_RANT_DOC_MEMBER);
         i_rant_dsl_ws(d);
         if (*d->p == '='){   /* an explicit value, else auto increment */
             d->p++; i_rant_dsl_ws(d);
@@ -603,7 +638,7 @@ static int i_rant_defs_add_text(i_RantRegistry *defs, const char *name, const ch
     if (defs->rec >= 8u) return 0;                       /* the roster is acyclic, but be sure */
     defs->rec++;
     sb = i_rant_schema_builder_begin(defs->arena.alloc, defs->arena.user);
-    sd.p = text; sd.err = NULL; sd.why = NULL; sd.body = 1;
+    sd.p = text; sd.err = NULL; sd.why = NULL; sd.body = 1; sd.rec = NULL;
     i_rant_dsl_field_type(&sd, &sb, defs, "");
     i_rant_dsl_ws(&sd);
     if (*sd.p) i_rant_dsl_fail(&sd, sd.p, "a type on its own ends the text");
@@ -619,7 +654,7 @@ static int i_rant_defs_add_text(i_RantRegistry *defs, const char *name, const ch
 static int i_rant_dsl_ref(i_RantRegistry *defs, const char *name, uint32_t *toff, uint32_t *tlen){
     const char *std;
     if (i_rant_defs_find(defs, name, toff, tlen)) return 1;
-    std = i_rant_std_lookup(name);
+    std = defs->standalone ? NULL : i_rant_std_lookup(name);
     if (std && i_rant_defs_add_text(defs, name, std))
         return i_rant_defs_find(defs, name, toff, tlen);
     return 0;
@@ -761,6 +796,7 @@ static void i_rant_dsl_fields(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegist
         if (!i_rant_name_normalize(name, wire, sizeof wire, 0)){
             i_rant_dsl_fail(d, at, "a field name needs a letter"); return;
         }
+        i_rant_doc_mark(d, at, I_RANT_DOC_MEMBER);
         i_rant_dsl_ws(d);
         if (!i_rant_dsl_expect(d, ':')) return;
         first = b->count_pos[b->depth - 1] + 1u;
@@ -785,6 +821,7 @@ static void i_rant_dsl_def(i_RantDsl *d, i_RantRegistry *defs, const char *name,
     exists = i_rant_dsl_ref(defs, name, toff, tlen);
     sb = i_rant_schema_builder_begin(defs->arena.alloc, defs->arena.user);
     d->p++;
+    i_rant_doc_mark(d, d->p, I_RANT_DOC_BODY);
     i_rant_dsl_ws(d);
     at = d->p;
     if (is_struct){
@@ -798,6 +835,8 @@ static void i_rant_dsl_def(i_RantDsl *d, i_RantRegistry *defs, const char *name,
             i_rant_dsl_fail(d, at, "a struct is defined as Name { }");
         if (!d->err && !sb.err && sb.len && sb.buf[0] == RANT_NAMED)
             i_rant_dsl_fail(d, at, "a name cannot stand for another name");
+        if (!d->err && !sb.err && sb.len && sb.buf[0] != RANT_ENUM)
+            i_rant_doc_mark(d, at, I_RANT_DOC_MEMBER);  /* an alias is its own one member */
     }
     if (!d->err && sb.err) i_rant_dsl_fail(d, at, i_rant_builder_why(sb.err));
     if (!d->err && sb.len){
@@ -833,6 +872,11 @@ RantSchema *i_rant_registry_parse(i_RantRegistry *r, const void *wire, size_t wi
  * by more statements. A type on its own (bool, f32[3], Pose) ends the text. A failed text
  * leaves no definition behind, so nothing is half kept. */
 RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, i_RantSchemaErr *err){
+    return i_rant_registry_compile_rec(defs, text, err, NULL);
+}
+
+RantSchema *i_rant_registry_compile_rec(i_RantRegistry *defs, const char *text, i_RantSchemaErr *err,
+                                        i_RantDocRec *rec){
     i_RantDsl d; i_RantSchemaBuilder root;
     RantSchema *s = NULL;
     char word[256];
@@ -846,7 +890,7 @@ RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, i_Ra
     if (!defs || !text) return NULL;
     kept_len = defs->arena.len; kept_defs = defs->n_defs;
     root = i_rant_schema_builder_begin(defs->arena.alloc, defs->arena.user);
-    d.p = text; d.err = NULL; d.why = NULL; d.body = 0;
+    d.p = text; d.err = NULL; d.why = NULL; d.body = 0; d.rec = rec;
     if (defs->arena.err) i_rant_dsl_fail(&d, text, i_rant_builder_why(defs->arena.err));
     if (root.err) i_rant_dsl_fail(&d, text, i_rant_builder_why(root.err));
 
@@ -865,6 +909,7 @@ RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, i_Ra
                     i_rant_dsl_fail(&d, at, "a type name needs a letter"); break;
                 }
                 memcpy(word, twire, tn + 1);
+                i_rant_doc_mark(&d, at, I_RANT_DOC_DEF);
                 i_rant_dsl_def(&d, defs, word, at, &toff, &tlen);
                 have_def = 1;
                 continue;

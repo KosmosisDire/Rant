@@ -101,6 +101,38 @@ RANT_API int           rant_schema_enum_variant(const RantSchema *s, uint16_t fi
 RANT_API RantString      rant_enum_name_of (const RantSchema *s, uint16_t field, int64_t value);
 RANT_API int             rant_enum_value_of(const RantSchema *s, uint16_t field, const char *name, int64_t *out);
 
+/* A schema text read for a tool such as a code generator: every type it defines, in order,
+ * with its comments, and no node needed. spec/schema.md, Docs, says where a comment goes. */
+typedef struct RantSchemaDoc RantSchemaDoc;
+
+/* Why a text was refused and where, line and column from 1. 0 when there is no place, as
+ * when memory ran out. */
+typedef struct { const char *why; uint32_t line, column; } RantSchemaError;
+
+/* One definition. Name { } is a struct, Name = enum<u8> { } an enum, any other Name = type
+ * an alias. */
+typedef struct {
+    const RantSchema *schema;   /* the type by its name, for the whole reflection API */
+    uint8_t           kind;     /* RANT_STRUCT, RANT_ENUM, or the kind an alias names */
+    RantString        about;    /* the comment lines right above it, joined by newlines */
+    uint32_t          line;     /* where its name is */
+} RantSchemaDef;
+
+/* A member's comment split by the convention [unit] text: "[m] any point" is unit "m". */
+typedef struct { RantString unit, text; } RantSchemaNote;
+
+/* Reads text into a doc on alloc, which it copies and resets at free, so use one per doc.
+ * NULL with err filled in when the text is refused. */
+RANT_API RantSchemaDoc *rant_schema_doc_parse(RantAllocator *alloc, const char *text,
+                                              RantSchemaError *err);
+RANT_API uint32_t       rant_schema_doc_count(const RantSchemaDoc *d);
+/* 1 and fills out, else 0 */
+RANT_API int            rant_schema_doc_at(const RantSchemaDoc *d, uint32_t i, RantSchemaDef *out);
+/* member counts as written: a struct's field, an enum's option, or 0 for an alias. Empty
+ * when it has no comment or does not exist. */
+RANT_API RantSchemaNote rant_schema_doc_note(const RantSchemaDoc *d, uint32_t def, uint16_t member);
+RANT_API void           rant_schema_doc_free(RantSchemaDoc *d);
+
 /* 1 if msg is exactly one message of this schema. */
 RANT_API int         rant_schema_validate(const RantSchema *s, RantBytes msg);
 

@@ -20,6 +20,19 @@ static inline RantSchema *test_compile(RantAllocator *a, const char *text, i_Ran
     return i_rant_registry_compile(&r, text, err);
 }
 
+#ifndef RANT_NO_STDTYPES
+/* a standard type as a schema file spells it, its description lines above Name and its body.
+   The length written, 0 when it does not fit. */
+static inline size_t test_std_def(RantStdType t, char *out, size_t cap){
+    const char *txt = rant_std_text(t), *body = txt, *name = rant_std_name(t);
+    int n;
+    if (!txt || !name) return 0;
+    while (body[0] == '-' && body[1] == '-'){ body = strchr(body, '\n'); body = body ? body + 1 : ""; }
+    n = snprintf(out, cap, "%.*s%s%s%s\n", (int)(body - txt), txt, name, body[0] == '{' ? " " : " = ", body);
+    return n > 0 && (size_t)n < cap ? (size_t)n : 0;
+}
+#endif
+
 /* the slotted peers behind a node with the blobs they hold, for raw announce checks. Every
    known peer is the public walk rant_node_peers_next */
 static inline const i_RantDiscoveryPeerView *test_peers(RantNode *n, uint16_t *count){
