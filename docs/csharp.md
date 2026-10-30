@@ -1,0 +1,276 @@
+# C#
+
+`bindings/csharp/Rant.cs` is a P/Invoke layer over the native library `rant`, bundled per
+platform in the NuGet package and in the Unity package. bindings/csharp/README.md has the
+build and the install, and docs/unity.md the Unity component. The semantics are the C
+ones, so docs/node.md, docs/topics.md, docs/patterns.md and docs/tasks.md apply. This page
+says what is different in C#. Every public type and member carries a summary, and the
+package ships them as `Rant.xml`, so an editor shows them as tooltips.
+
+```csharp
+using Rant;
+using Rant.Types;
+
+public record Conveyor(double Speed, bool Running, [property: RantString(16)] string Part);
+
+var robot = new RantNode("robot", new NodeOptions { Domain = 7 });
+var pub = robot.Publisher<Conveyor>("Line1/Conveyor", new Qos { Reliability = Reliability.Reliable });
+robot.FunctionDefinition<(double, double), double>("Add", r => r.Item1 + r.Item2);
+
+var viewer = new RantNode("viewer", new NodeOptions { Domain = 7 });   // usually another process
+viewer.OnEvent += e => Console.Error.WriteLine(e);
+viewer.Subscriber<Conveyor>("Line1/Conveyor", c => Console.WriteLine(c.Speed));
+double sum = viewer.RemoteFunction<(double, double), double>("Add").Call((2, 3));
+pub.Send(new Conveyor(0.5, true, "bracket"));
+```
+
+## A node
+
+`new RantNode(name, options)` opens a node, both arguments optional. `NodeOptions` holds
+the C node options under C# names, where 0, false or null means the C default: `Domain`,
+`Prefix`, `MaxTopics`, `MulticastInterface`, `MatchWaitMs`, `FetchDetails`, the discovery options of
+docs/discovery.md (`SeedPeers` as "ip" or "ip:port" strings, `Bridge` with
+`BridgePassphrase`) and the rest. `node.OnEvent` carries peer lifecycle, loss and error
+events. It is optional: with no handler attached, error events print to stderr, and
+`LastError` records the last error either way, null before any. `Stats` reads the node's memory, backpressure and evicted unsent counters.
+The static `RantNode.Version` is the native library's version, such as "0.0.17".
+
+Every handle comes from the node method named after it: `Publisher<T>`, `Subscriber<T>`,
+`FunctionDefinition<TReq, TRsp>`, `RemoteFunction<TReq, TRsp>`,
+`TaskDefinition<TReq, TPrg, TRsp>`, `RemoteTask<TReq, TPrg, TRsp>`,
+`VariableDefinition<T>` and `RemoteVariable<T>`. A topic takes a `Qos`, a pattern handle
+its options object, `FunctionOptions`, `TaskOptions` or `VariableOptions`. Every handle is
+`IDisposable`: `Dispose()` retires it and releases the name. Closing the node invalidates
+every handle it gave out, so a call on one that outlived its node returns `NoTopic`
+rather than reading freed memory. `Close()` first waits until the calls other threads are
+making on the node return, and a pattern handle's `Dispose()` until those on it return.
+
+Every call is thread safe. `NodeOptions.Threading` says where every callback runs:
+subscriber handlers, OnEvent, OnLog, OnStatus, function and task handlers, progress, OnChange,
+OnWrite and awaited call results.
+
+- `ServiceThread`, the default: the service thread runs the loop from construction and
+  every callback fires on it, one at a time. From inside one, `Send` and read only
+  queries work, while `Poll`, handle creation and `Dispose` are refused with
+  `SendStatus.State` or an exception. `Close()` there runs once the callback returns.
+- `Manual`: your thread calls `Poll()` and callbacks fire there, under the same rules.
+- `Dispatch`: the service thread runs the loop, every callback waits, and `Dispatch()`
+  runs the waiting ones on the calling thread with the whole API available. Call it once
+  per frame. `Dispatch(maxCallbacks, timeoutMs)` caps a burst and can wait for the first
+  one. A build without threads makes `Dispatch()` poll as well.
+
+A handle that wants its own thread takes a queue from `node.CreateQueue()` as the `Queue`
+of its options, `Qos.Queue` on a subscriber, and that thread calls `queue.Dispatch()`.
+One thread drains a queue at a time, and same name handles share their slot's queue.
+State applies at receipt either way: a variable holds its newest value before its
+`OnChange` runs, and `Call()` completes without a dispatch.
+
+Everything the wrapper throws is a `RantException`. A failed create, of the node or of a
+handle, carries the C reason as a `RantEvent` in `Error` and in the message. A refused
+action, such as a `Dispose` from a service thread callback, carries its `SendStatus`.
+`SchemaException` and `CallException` derive from it. The data path never throws: `Send`
+and `Set` return a `SendStatus`. A build without threads refuses the service thread, and
+`Threading.Manual` or `Threading.Dispatch` is the way in.
+
+## Schemas
+
+A struct, class or record is a message type: its public fields and auto properties are
+the members, in the order written. `{ get; set; }`, `{ get; init; }` and a positional
+record's parameters all count. A property with a body of its own is computed from the
+others and is not sent. A decoded message is built with no arguments and its setters, or
+through the constructor whose parameters name the members, and a getter only member that
+neither fills is refused at `node.Schema`. An anonymous object encodes by name against any
+schema. `node.Schema(typeof(T)).Dsl` prints the reflected DSL.
+
+A member's wire name is its own name in the wire spelling, snake_case: `FrameId` is
+`frame_id`, the same field a Python `frame_id` or a C `frame_id` names (docs/stdtypes.md).
+The type name is the class name. Attributes change the defaults, and on a record parameter
+one is written `[property: RantField("w")] double Omega`.
+
+- `[RantArray(n)]` fixes an array at n elements. A plain array or `List<T>` is a variable
+  one. An array of arrays takes a count per level, outermost first, and 0 leaves a level
+  variable: `[RantArray(2, 3)] float[][]` is `f32[3][2]`, `[RantArray(0, 3)] float[][]` is
+  `f32[3][]`.
+- `[RantString(cap)]` caps a string at cap bytes. A plain string is unbounded. On an array
+  of strings it caps each one.
+- `[RantField("name")]` gives a member another wire name.
+- `[RantSchema("Name")]` gives the type another wire name.
+- `[RantTypeName("Timestamp")]` spells a plain member's type as a standard type, and the
+  shape must be the canonical one or compiling fails.
+
+A struct member of another struct, or an array of structs (`Corner[]`,
+`[RantArray(4)] Corner[]`, `Float3[]`), takes that type's name on the wire. The reflected
+text defines the nested type once, as `Corner { x: f32, y: f32 }`, and each use is the
+name, so a C or Python peer spells `Corner` too. A name has one shape per node, so a
+nested type called `Twist` with fields of its own is refused, as the standard `Twist`
+already is. An element may be any type and arrays nest to any depth: `List<List<float>>` is
+`f32[][]`, `string[]` is `string[]`, and a struct whose members hold arrays of their own
+works as an element too. An enum field takes its enum's name the same way, defined once as
+`Lane = enum<u8> { Left=0, Right=1 }`. `[RantSchema]` names a struct, class or enum when its
+own name will not do.
+
+A bare type as a handle's type is the whole schema: `Publisher<bool>`,
+`Subscriber<float[]>`, `VariableDefinition<string>`,
+`Publisher<Dictionary<string, object>>`, an enum, or a struct array such as
+`Publisher<Corner[]>`, whose element or enum is defined above it. Such a root is
+anonymous, so it is the same bytes and hash in every language.
+
+A tuple such as `(double, double)` has no name of its own, so the handle names it after
+itself in PascalCase: `AddReq` and `AddRsp` on function `Add`, `AddPrg` on a task,
+`MotorSpeed` on a topic or variable named `Motor/Speed`. Every run of letters and digits
+is a word and everything else is dropped. Its fields are `item1`, `item2` and so on. Both
+ends of a C# pair derive the same name, and another language must spell it.
+`node.Schema(typeof((double, double)))` on its own throws.
+
+A `Dictionary<string, object>` encodes against any compiled schema by field name, the keys
+in any spelling, nested structs as nested dictionaries and a struct array as a list of
+them. A numeric array of another element type converts to the field's, as an `int[]` for an
+`f32[]` field. Without a C# type a message decodes the same way, the keys in wire spelling:
+a scalar array as a typed array, a string array as `string[]`, an array of structs or maps
+as a `List<Dictionary<string, object>>` and any other array as a `List<object>` of its
+elements.
+
+Every typed handle also takes its schema as an optional argument: `schema:` on a topic or
+variable, `requestSchema:`, `responseSchema:` and `progressSchema:` on a function or task.
+The type argument is then only the C# shape the values pass through, and the wire type is
+exactly the given schema: `Subscriber<string[]>` with `node.Schema("string<128>[]")` reads
+a bare capped string array. A `byte[]` type carries the encoded message bytes as they are,
+so `Subscriber<byte[]>` with no schema is a raw topic and `RemoteFunction<byte[], byte[]>`
+with explicit schemas is the untyped form.
+
+`node.Schema(text)` compiles DSL text in the node's registry. Every definition stays in
+scope for the node's later compiles, and a name on its own is a schema. The node owns
+every `Schema` for its life, one handle per shape, so there is nothing to dispose, and a
+read after `Close` throws.
+
+The standard types of docs/stdtypes.md are mirror structs in the `Rant.Types` namespace,
+apart from the root so `Color` or `Quaternion` never clashes with a Unity or
+`System.Numerics` type under `using Rant;`. `Rant.Types.Timestamp.Now()` is the Timestamp
+clock, and the video enums carry the wire values.
+
+## QoS and messages
+
+A topic's QoS is one `Qos` object, and a null one means every default. The fields are the
+C ones of docs/topics.md under C# names, and a `Us` suffix means microseconds.
+
+```csharp
+var qos = new Qos { Reliability = Reliability.Reliable, KeepLast = 8 };
+var sub = node.Subscriber<Conveyor>("Line1/Conveyor", (c, msg) => Console.WriteLine($"{c.Speed} from {msg.PublisherName}"), qos);
+
+var belt = node.Subscriber<Conveyor>("Line1/Conveyor");   // no handler: pulled
+if (belt.TryTakeLatest(out Conveyor newest)) Show(newest);
+```
+
+A subscriber's handler is given at creation and takes the value alone, or the value and the
+`RantMessage` envelope. Without a handler the subscriber is pulled: `TryTake(out v,
+timeoutMs)` reads the oldest waiting message and `TryTakeLatest` the newest, dropping the
+older ones, on whatever thread calls. A pulled subscriber takes no `Qos.Queue` and never
+parks on the node's Dispatch queue. The envelope copies
+its payload out, so `Data` outlives the callback. Its `Value` decodes on the first read and
+never if not read, so a handler that only wants the bytes pays nothing for the schema.
+Read one message from one thread, as a handler does. `RecvUs` is this node's monotonic
+clock at receipt, `WrittenUs` the sender's wall clock, 0 when it opted out, and
+`CaptureUs` when the publisher says the data was true, 0 when it gave none.
+`Send(value, captureUs)` sets that last one.
+
+`Qos.QueueBytes` caps a queued subscriber's ring, 0 meaning 1 MB, and `QueueStats()` reads
+it. Same name handles on one node share the topic slot: `Dispose()` on one leaves its
+siblings receiving, and the last one retires the slot so the name can carry another
+schema. `Ready` on a publisher is true when a send would not wait, `Drain(timeoutMs)` waits
+until every reliable subscriber acknowledged what was sent, the flush before `Dispose`, and
+`MatchCount` counts its matched subscribers. A subscriber has no count, since the C gives none on that side.
+
+`Qos.ReflectFromMesh`, and the same field on the pattern options, is not a QoS field: a
+null schema and a best effort reliability then follow the mesh. Every handle that can
+carry it has `Refresh()`, which re types it in place when the mesh moved and returns true
+when it did. docs/reflection.md says what gets adopted. Every handle reports `Name` and the
+schema it uses now, the adopted one on a reflect handle: `Schema` on a topic or a variable,
+`RequestSchema`, `ResponseSchema` and, on a task, `ProgressSchema` on a function or task
+handle, null while untyped.
+
+## Functions and tasks
+
+A function handler returns the reply, and a thrown exception answers AppError with its
+message. The full form takes a `RantRequest<TRsp>`, valid only inside the callback, which
+replies, fails or defers. `Defer()` returns a `Deferred<TRsp>` that completes from any
+thread. An async handler answers when its Task completes and runs on the loop thread until
+its first await, so CPU bound work belongs in `Task.Run`. A null handler answers
+NoHandler.
+
+A task handler is an async delegate taking the request and a `TaskContext<TPrg>`. The call
+is deferred and RUNNING sent before it runs. Its result answers Ok,
+`OperationCanceledException` answers Cancelled, `CancelledException<TRsp>(partial,
+message)` answers Cancelled with a partial result, and any other exception AppError. The
+context streams `Progress` and exposes a real `CancellationToken`. A completion after
+`Dispose` or `Close` is refused by the C and dropped.
+
+A call is loud. `Call(req)` blocks and returns the response, `await CallAsync(req)` does the
+same without blocking, and both throw `CallException` when the call did not end Ok. The
+exception names the call and carries `Status`, `SendStatus`, `Provider` and the provider's
+text, for a handler that threw its exception message. `TryCall` and `TryCallAsync` are the
+quiet forms for an expected failure: they return a `RantResponse<TRsp>` and never throw.
+Its `Value` reads whatever payload came back, a partial result or failure data too, and
+`HasValue` says whether one did. `Value` throws the same `CallException` only when the call
+did not end Ok and nothing came back. A payload that does not decode as the handle's type
+raises an Error event of kind `SchemaMismatch` naming the topic, and the handler does not
+run. `Call()` waits on the
+service thread or drives a Manual node's loop, and is refused from a service thread
+callback. On a task, `CallAsync(req, progress, cancellationToken)` reports each progress
+update, skipping the valueless RUNNING. Cancelling the token asks for a cooperative
+cancel, and a task that honors it ends the awaited call with
+`OperationCanceledException`, or with status Cancelled from `TryCallAsync`. `Call(req,
+progress, timeoutMs, cancellationToken)` and `TryCall` are the blocking task forms, with
+progress reported where the node's callbacks run. Use them where awaiting would deadlock,
+such as the thread that calls `Dispatch` or the Unity main thread.
+
+`MatchCount` on a pattern handle counts the other side: definitions on a remote, callers
+or remotes on a definition.
+
+## Variables
+
+`TryGet` reads a copy of the value, `Set` returns the status, `Force` needs `AllowForce`
+in the definition's options and `Unforce` ends it, and `Wait` blocks until a value exists.
+The `Value` getter throws while no value exists and its setter throws `RantException` on a
+refused set.
+
+`OnChange` and `OnWrite` are events whose handlers take the value and the
+`VariableUpdate` envelope, on the thread the node's threading gives every callback.
+`OnChange` fires on every state change and replays the current value to a handler as it is
+added. `OnWrite` fires on every applied write, identical bytes or not, with no replay.
+
+## Reflection, log and status
+
+The walks of docs/reflection.md live on `node.Reflection` and return copied snapshots, so
+they outlive the loop and need no lock. `Peers()` lists every discovered peer as a
+`RantPeer`, dropped ones included, so check `Active`. `Entities(peer)` lists what one node
+offers, peer 0 for this one, and `Mesh()` folds the whole mesh into one `RantEntity` per
+kind and name. `Find(kind, name)` returns one or null, and `Epoch` moves whenever the
+folded view changed. A walk right after open is partial: names and schemas arrive as
+details, so walk again when `Epoch` moved. The schemas on a `RantEntity` are owned copies,
+null when untyped or not fetched, and `FetchDetails` on the node makes them arrive.
+`MetaAsync(peer, sections)` decodes a peer's snapshot into a `RantMetaSnapshot` and throws
+`CallException` when the peer did not answer. `Meta(peer, sections, timeoutMs)` is the
+blocking form.
+
+`Schema.Fields` is the flat depth first field table as `SchemaField` rows, and
+`Schema.EnumVariants(field)` the options of an enum field, for a tool that renders a
+schema it has never seen.
+
+`node.Log(level, text)` publishes a line at a `Level`, and a level below
+`NodeOptions.LogLevel` sends nothing. The `node.OnLog` event delivers every other node's
+lines as a `RantLogLine` (`Level`, `Origin`, `Node`, `NodeId`, `WallUs`, `RecvUs`, `Text`),
+at `Dispatch()` under `Threading.Dispatch` like every other handler. It throws on a node
+opened with `DisableLogs`.
+
+```csharp
+node.SetStatus("drive2", Level.Error, "drive 2 tripped", clearable: true);
+node.ClearStatus("drive2");
+node.OnStatus += u => Console.WriteLine($"{u.Node}: {u.Conditions.Count} active");
+```
+
+- `SetStatus` raises or updates a condition, `ClearStatus` clears it.
+- `OnStatus` delivers each node's whole set as a `RantStatusUpdate` of `RantCondition`
+  rows on every change, and an empty set when a node goes away. It throws on a node opened
+  with `DisableStatus`.
+- `ClearPeerStatus(u.NodeId, c.Key, c.SinceUs)` asks another node to clear a clearable
+  condition. Its app sees `EventKind.StatusCleared` with the key in `Detail`.
