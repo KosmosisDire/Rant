@@ -197,7 +197,7 @@ if(RANT_BUILD_TOOLS)
 
     # Writes each language's standard types from types/stdtypes.schema, on Rant's own compiler.
     add_executable(rant_codegen tools/codegen/main.cpp tools/codegen/model.cpp tools/codegen/c.cpp
-                   tools/codegen/cpp.cpp
+                   tools/codegen/cpp.cpp tools/codegen/csharp.cpp
                    tools/codegen/json.cpp "${PROJECT_SOURCE_DIR}/dist/rant.c")
     target_compile_features(rant_codegen PRIVATE cxx_std_17)
     target_link_libraries(rant_codegen PRIVATE rant rant_platform)
@@ -231,6 +231,8 @@ if(RANT_IS_TOP_LEVEL AND TARGET rant_shared)
   find_program(DOTNET_EXECUTABLE dotnet)
   if(DOTNET_EXECUTABLE)
     add_custom_target(nuget_package
+      COMMAND "${DOTNET_EXECUTABLE}" pack "${CMAKE_CURRENT_SOURCE_DIR}/bindings/csharp/types/Rant.Types.csproj"
+              -c Release --nologo -o "${CMAKE_CURRENT_SOURCE_DIR}/dist"
       COMMAND "${DOTNET_EXECUTABLE}" pack "${CMAKE_CURRENT_SOURCE_DIR}/bindings/csharp/Rant.csproj"
               -c Release --nologo -o "${CMAKE_CURRENT_SOURCE_DIR}/dist" VERBATIM)
     add_dependencies(nuget_package rant_shared)

@@ -236,6 +236,11 @@ static class Program
                 Normals = new[] { new Rant.Types.Float3 { X = 0, Y = 0, Z = 1 } },
                 Origin = new Corner { X = 9, Y = 10 },
             };
+            var typesAssembly = typeof(Rant.Types.Pose).Assembly;
+            Check("the standard types are their own assembly", typesAssembly.GetName().Name == "Rant.Types"
+                  && typesAssembly != typeof(Rant.Types.Timestamp).Assembly);
+            Check("and it takes nothing from the middleware",
+                  !Array.Exists(typesAssembly.GetReferencedAssemblies(), r => r.Name == "Rant" || r.Name == "rant_csharp_test"));
             var cams = node.Schema(typeof(Rant.Types.CameraIntrinsics));
             var cam = (Rant.Types.CameraIntrinsics)cams.Decode(cams.Encode(new Rant.Types.CameraIntrinsics
             {

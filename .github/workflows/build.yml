@@ -90,7 +90,9 @@ jobs:
         run: ls -l dist/native/*/
 
       - name: NuGet package
-        run: dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
+        run: |
+          dotnet pack bindings/csharp/types/Rant.Types.csproj -c Release -o dist
+          dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
 
       - name: Python wheel
         run: python -m pip wheel . --no-deps -w dist
@@ -280,7 +282,9 @@ jobs:
           ls -R dist/native wheelhouse
 
       - name: NuGet package
-        run: dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
+        run: |
+          dotnet pack bindings/csharp/types/Rant.Types.csproj -c Release -o dist
+          dotnet pack bindings/csharp/Rant.csproj -c Release -o dist
 
       # The web package carries the binding's wasm, so it builds with Emscripten. It comes before
       # the Unity package, whose WebGL plugin takes the binding's tunnel script.
@@ -329,6 +333,20 @@ jobs:
           git add -A
           git commit -q -m "upm $(cat "$GITHUB_WORKSPACE/VERSION")"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" upm
+
+      # The types package beside it: https://github.com/OWNER/REPO.git#upm-types
+      - name: Publish the upm-types branch
+        run: |
+          pkg="$RUNNER_TEMP/upm-types"
+          rm -rf "$pkg"
+          cp -r dist/com.rant.types "$pkg"
+          cd "$pkg"
+          git init -q -b upm-types
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "upm-types $(cat "$GITHUB_WORKSPACE/VERSION")"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" upm-types
 
       # The Rust crate as a git dependency, tag = "crate-vVERSION": the release tree plus the
       # packed C in csrc/, as a commit with no parents so cargo fetches one snapshot. Never moved.

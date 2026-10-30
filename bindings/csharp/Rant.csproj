@@ -31,6 +31,11 @@
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
+  <!-- The standard types are their own package, so a library can take them with no middleware. -->
+  <ItemGroup>
+    <ProjectReference Include="types/Rant.Types.csproj" />
+  </ItemGroup>
+
   <!-- Globbed, so a platform that was not built is left out rather than failing the pack. -->
   <ItemGroup>
     <None Include="../../dist/native/**" Pack="true" PackagePath="runtimes/%(RecursiveDir)native/%(Filename)%(Extension)" />

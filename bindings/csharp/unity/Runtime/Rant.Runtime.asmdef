@@ -1,7 +1,7 @@
 {
   "name": "Rant.Runtime",
   "rootNamespace": "Rant",
-  "references": [],
+  "references": ["Rant.Types"],
   "includePlatforms": [],
   "excludePlatforms": [],
   "allowUnsafeCode": true,

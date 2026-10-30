@@ -1,6 +1,6 @@
-# The Unity package. Assembles dist/com.rant.rant/, which Unity adds from disk and the
-# release pushes to the upm branch, and dist/rant-<version>.unitypackage, from
-# bindings/csharp/Rant.cs, bindings/csharp/unity/Runtime/ and the libraries in dist/native/. Unity's
+# The Unity packages. Assembles dist/com.rant.types/ and dist/com.rant.rant/, which Unity adds from
+# disk and the release pushes to the upm-types and upm branches, and dist/rant-<version>.unitypackage,
+# from bindings/csharp/, bindings/csharp/unity/Runtime/ and the libraries in dist/native/. Unity's
 # immutable package cache synthesizes no .meta files, so every entry gets one here, with a
 # GUID that is the md5 of its path so an upgrade keeps references (spec/bindings.md).
 #   cmake -P tools/unity.cmake        (or the unity_package target)
@@ -12,6 +12,8 @@ file(STRINGS "${ROOT}/VERSION" VERSION LIMIT_COUNT 1)
 set(PKG com.rant.rant)
 set(OUT "${ROOT}/dist/${PKG}")
 set(SRC "${ROOT}/bindings/csharp/unity")
+set(TYPES_PKG com.rant.types)
+set(TYPES_OUT "${ROOT}/dist/${TYPES_PKG}")
 
 # LF whatever the host, so the upm branch is identical from every machine.
 function(write_lf f text)
@@ -166,7 +168,29 @@ function(meta_body out rel)
   set(${out} "${body}" PARENT_SCOPE)
 endfunction()
 
-# 1. The package tree.
+# 1. The types package, with no native code, so Rant and a library such as Rant Math share one
+#    definition of each type.
+file(REMOVE_RECURSE "${TYPES_OUT}")
+file(MAKE_DIRECTORY "${TYPES_OUT}/Runtime")
+write_lf("${TYPES_OUT}/package.json" "{
+  \"name\": \"${TYPES_PKG}\",
+  \"version\": \"${VERSION}\",
+  \"displayName\": \"Rant Types\",
+  \"description\": \"The standard types of Rant, such as Pose, Image and PointCloud, with no middleware.\",
+  \"unity\": \"2021.3\",
+  \"keywords\": [\"robotics\", \"types\", \"rant\"],
+  \"author\": { \"name\": \"Nathan George\" }
+}
+")
+file(COPY "${ROOT}/bindings/csharp/types/Types.cs" DESTINATION "${TYPES_OUT}/Runtime")
+write_lf("${TYPES_OUT}/Runtime/Rant.Types.asmdef" "{
+  \"name\": \"Rant.Types\",
+  \"rootNamespace\": \"Rant.Types\",
+  \"noEngineReferences\": true
+}
+")
+
+# 2. The Rant package tree.
 file(REMOVE_RECURSE "${OUT}")
 file(MAKE_DIRECTORY "${OUT}/Runtime/Plugins")
 write_lf("${OUT}/package.json" "{
@@ -176,7 +200,8 @@ write_lf("${OUT}/package.json" "{
   \"description\": \"Peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages. Desktop standalone (Windows, macOS, Linux), the Editor, and WebGL through a Rant bridge.\",
   \"unity\": \"2021.3\",
   \"keywords\": [\"networking\", \"pubsub\", \"udp\", \"discovery\", \"realtime\", \"middleware\", \"rant\"],
-  \"author\": { \"name\": \"Nathan George\" }
+  \"author\": { \"name\": \"Nathan George\" },
+  \"dependencies\": { \"${TYPES_PKG}\": \"${VERSION}\" }
 }
 ")
 file(COPY "${SRC}/README.md" DESTINATION "${OUT}")
@@ -233,36 +258,44 @@ else()
   message(STATUS "unity: no bindings/web/dist (build Rant's web preset), so WebGL gets no plugin")
 endif()
 
-# 2. A .meta beside every file and folder. The package root needs none.
-file(GLOB_RECURSE entries LIST_DIRECTORIES true RELATIVE "${OUT}" "${OUT}/*")
-foreach(rel IN LISTS entries)
-  string(MD5 guid "${PKG}/${rel}")
-  meta_body(body "${rel}")
-  write_lf("${OUT}/${rel}.meta" "fileFormatVersion: 2\nguid: ${guid}\n${body}")
-endforeach()
-message(STATUS "wrote ${OUT}")
+# 3. A .meta beside every file and folder. A package root needs none. meta_body reads OUT.
+function(write_metas OUT pkg)
+  file(GLOB_RECURSE entries LIST_DIRECTORIES true RELATIVE "${OUT}" "${OUT}/*")
+  foreach(rel IN LISTS entries)
+    string(MD5 guid "${pkg}/${rel}")
+    meta_body(body "${rel}")
+    write_lf("${OUT}/${rel}.meta" "fileFormatVersion: 2\nguid: ${guid}\n${body}")
+  endforeach()
+  message(STATUS "wrote ${OUT}")
+endfunction()
+write_metas("${TYPES_OUT}" "${TYPES_PKG}")
+write_metas("${OUT}" "${PKG}")
 
-# 3. The .unitypackage: a gzipped tar of one folder per asset holding its path, its
+# 4. The .unitypackage: a gzipped tar of one folder per asset holding its path, its
 #    bytes and its .meta, imported under Assets/Rant.
 set(WORK "${ROOT}/build/unitypackage")
 file(REMOVE_RECURSE "${WORK}")
-file(GLOB_RECURSE assets LIST_DIRECTORIES true RELATIVE "${OUT}/Runtime" "${OUT}/Runtime/*")
-list(FILTER assets EXCLUDE REGEX "[.]meta$")
-set(paths "Assets/Rant")
-foreach(rel IN LISTS assets)
-  list(APPEND paths "Assets/Rant/${rel}")
-endforeach()
-foreach(apath IN LISTS paths)
-  string(REGEX REPLACE "^Assets/Rant" "Runtime" rel "${apath}")
-  string(MD5 guid "${apath}")
-  file(MAKE_DIRECTORY "${WORK}/${guid}")
-  file(WRITE "${WORK}/${guid}/pathname" "${apath}")
-  if(NOT IS_DIRECTORY "${OUT}/${rel}")
-    configure_file("${OUT}/${rel}" "${WORK}/${guid}/asset" COPYONLY)
-  endif()
-  meta_body(body "${rel}")
-  write_lf("${WORK}/${guid}/asset.meta" "fileFormatVersion: 2\nguid: ${guid}\n${body}")
-endforeach()
+function(pack_assets under OUT)
+  file(GLOB_RECURSE assets LIST_DIRECTORIES true RELATIVE "${OUT}/Runtime" "${OUT}/Runtime/*")
+  list(FILTER assets EXCLUDE REGEX "[.]meta$")
+  set(paths "${under}")
+  foreach(rel IN LISTS assets)
+    list(APPEND paths "${under}/${rel}")
+  endforeach()
+  foreach(apath IN LISTS paths)
+    string(REPLACE "${under}" "Runtime" rel "${apath}")
+    string(MD5 guid "${apath}")
+    file(MAKE_DIRECTORY "${WORK}/${guid}")
+    file(WRITE "${WORK}/${guid}/pathname" "${apath}")
+    if(NOT IS_DIRECTORY "${OUT}/${rel}")
+      configure_file("${OUT}/${rel}" "${WORK}/${guid}/asset" COPYONLY)
+    endif()
+    meta_body(body "${rel}")
+    write_lf("${WORK}/${guid}/asset.meta" "fileFormatVersion: 2\nguid: ${guid}\n${body}")
+  endforeach()
+endfunction()
+pack_assets("Assets/Rant" "${OUT}")
+pack_assets("Assets/Rant/Types" "${TYPES_OUT}")
 file(GLOB guid_dirs RELATIVE "${WORK}" "${WORK}/*")
 set(UNITYPACKAGE "${ROOT}/dist/rant-${VERSION}.unitypackage")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E tar czf "${UNITYPACKAGE}" ${guid_dirs}

@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <Compile Include="../Rant.cs" />
+    <ProjectReference Include="../types/Rant.Types.csproj" />
     <None Include="../../../dist/native/**/*" Link="%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

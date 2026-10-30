@@ -11,18 +11,22 @@ keeps one copy of the code and no binaries.
 
 ## Install
 
-Add it in the Package Manager (`+`, then "Add package from git URL"):
+Add both in the Package Manager (`+`, then "Add package from git URL"), the types first, since
+Unity fetches no git dependency by itself:
 ```
+https://github.com/KosmosisDire/Rant.git#upm-types
 https://github.com/KosmosisDire/Rant.git#upm
 ```
-The `upm` branch is published by CI on each release: it carries the assembled `Rant.cs` +
-native plugins (`main` stays binary-free). Or download `rant-<version>.unitypackage` from
-the release and import it via `Assets > Import Package > Custom Package`.
+The `upm` and `upm-types` branches are published by CI on each release: they carry the assembled
+`Rant.cs` + native plugins and the standard types (`main` stays binary-free). Or download
+`rant-<version>.unitypackage` from the release, which holds both, and import it via
+`Assets > Import Package > Custom Package`.
 
 ## Building the package locally (maintainers)
 
-`tools/unity.cmake` assembles `dist/com.rant.rant/` and `dist/rant-<version>.unitypackage`
-from `bindings/csharp/Rant.cs`, this folder's `Runtime/`, the libraries in `dist/native/` and,
+`tools/unity.cmake` assembles `dist/com.rant.types/`, `dist/com.rant.rant/` and
+`dist/rant-<version>.unitypackage` from `bindings/csharp/types/Types.cs`,
+`bindings/csharp/Rant.cs`, this folder's `Runtime/`, the libraries in `dist/native/` and,
 for WebGL, the web build in `bindings/web/dist/` (`cmake --preset web`). It
 writes `package.json` with the version from `VERSION` and a `.meta` for every entry, each
 plugin enabled for exactly its platform. Nothing generated lives in this folder.

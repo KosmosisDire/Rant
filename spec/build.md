@@ -29,6 +29,7 @@ Rant as a subproject or finds the installed package.
   (`tools/codegen`) reads it with Rant's own compiler, standalone so it never needs the table
   it writes, and writes `src/common/stdtypes.h` with `types/extras.h` pasted at its end,
   `bindings/cpp/rant_types.hpp` inside `types/extras.hpp` at its marker, `bindings/cpp/rant_reflect.inc`,
+  `bindings/csharp/types/Types.cs` under `types/extras.cs`,
   `src/serialize/stdroster.h`, `src/serialize/stdtable.c` and `types/stdtypes.json`. The
   outputs are committed so a build needs no generator, and ctest `codegen.current` fails when
   one is stale. A definition sees only those above it, and file order is `RantStdType`'s.

@@ -62,6 +62,7 @@ static int run(const std::string &root, bool check) {
 
     std::vector<Output> outputs = write_c(model, must_read(root + "/types/extras.h"));
     for (Output &o : write_cpp(model, must_read(root + "/types/extras.hpp"))) outputs.push_back(o);
+    for (Output &o : write_csharp(model, must_read(root + "/types/extras.cs"))) outputs.push_back(o);
     for (Output &o : write_json(model)) outputs.push_back(o);
 
     int stale = 0;
