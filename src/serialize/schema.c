@@ -77,11 +77,14 @@ static uint64_t i_rant_arr_dmin(uint8_t kind, uint16_t count, uint8_t elem_var, 
 typedef struct { uint64_t size, frames, body; uint8_t var; } i_TypeLen;
 
 /* Measures the type at r->pos into *out, advancing past it, and counts every row it
- * flattens to into *rows. Fails on any rule break. */
-static void i_rant_rd_type(i_Rd *r, uint32_t *rows, uint16_t depth, i_TypeLen *out){
+ * flattens to into *rows. Fails on any rule break. named says a name wraps it, which a
+ * struct and an enum require. */
+static void i_rant_rd_type(i_Rd *r, uint32_t *rows, uint16_t depth, int named, i_TypeLen *out){
     uint8_t k = i_rant_rd_u8(r);
     memset(out, 0, sizeof *out);
     if (r->fail) return;
+    if (!named && k == RANT_STRUCT){ i_rant_rd_refuse(r, "a struct needs a name"); return; }
+    if (!named && k == RANT_ENUM){ i_rant_rd_refuse(r, "an enum needs a name"); return; }
     switch (k){
         case RANT_U8: case RANT_I8: case RANT_BOOL: out->size = 1; return;
         case RANT_U16: case RANT_I16:               out->size = 2; return;
@@ -97,7 +100,7 @@ static void i_rant_rd_type(i_Rd *r, uint32_t *rows, uint16_t depth, i_TypeLen *o
             if (r->fail) return;
             if (i_rant_peek_kind(r) == 0xFFu){ r->fail = 1; return; }
             if (rows) (*rows)++;                                   /* the element row */
-            i_rant_rd_type(r, rows, (uint16_t)(depth + 1), &e);
+            i_rant_rd_type(r, rows, (uint16_t)(depth + 1), 0, &e);
             if (r->fail) return;
             if (!e.var && e.size == 0){ i_rant_rd_refuse(r, "an array element cannot be empty"); return; }
             if (k == RANT_ARR && !e.var){
@@ -138,7 +141,7 @@ static void i_rant_rd_type(i_Rd *r, uint32_t *rows, uint16_t depth, i_TypeLen *o
                 uint8_t fnl = i_rant_rd_u8(r); i_TypeLen m;
                 i_rant_rd_skip(r, fnl);
                 if (rows) (*rows)++;
-                i_rant_rd_type(r, rows, (uint16_t)(depth + 1), &m);
+                i_rant_rd_type(r, rows, (uint16_t)(depth + 1), 0, &m);
                 out->size += m.size; out->frames += m.frames; out->var |= m.var;
             }
             if (out->size > 0xFFFFFFFFu){ i_rant_rd_refuse(r, "a struct is too large"); return; }
@@ -154,7 +157,7 @@ static void i_rant_rd_type(i_Rd *r, uint32_t *rows, uint16_t depth, i_TypeLen *o
             if (r->pos < r->n && r->w[r->pos] == RANT_NAMED){
                 i_rant_rd_refuse(r, "a name cannot stand for another name"); return;
             }
-            i_rant_rd_type(r, rows, depth, out);
+            i_rant_rd_type(r, rows, depth, 1, out);
             return;
         }
         default: i_rant_rd_refuse(r, "an unknown type kind"); return;
@@ -180,10 +183,10 @@ static int i_rant_schema_wire_fields(const void *wire, size_t wire_len, uint32_t
     if (r.fail || (size_t)r.pos >= r.n) return 0;
     if (r.w[r.pos] == RANT_NAMED){ *why = "a root's name rides the header"; return 0; }
     if (r.w[r.pos] == RANT_STRUCT){
-        i_rant_rd_type(&r, n, 0, &t);
+        i_rant_rd_type(&r, n, 0, rl != 0, &t);
     } else {
         uint32_t sub = 0;
-        i_rant_rd_type(&r, &sub, 0, &t);
+        i_rant_rd_type(&r, &sub, 0, rl != 0, &t);
         *n = 1u + sub;                                 /* the root is the first field */
     }
     if (r.fail){ if (r.why) *why = r.why; return 0; }

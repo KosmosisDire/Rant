@@ -106,6 +106,7 @@ standard! {
 /// Image.format. 16 and up is a compressed container.
 #[derive(Enum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[rant(standard)]
 #[allow(missing_docs)]
 pub enum ImageFormat {
     #[default]
@@ -124,6 +125,7 @@ pub enum ImageFormat {
 /// VideoFrame.codec, Unknown = unstated.
 #[derive(Enum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[rant(standard)]
 #[allow(missing_docs)]
 pub enum VideoCodec {
     #[default]
@@ -137,6 +139,7 @@ pub enum VideoCodec {
 /// ExternalVideoStream.kind.
 #[derive(Enum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[rant(standard)]
 #[allow(missing_docs)]
 pub enum VideoStreamKind {
     #[default]
@@ -152,6 +155,7 @@ pub enum VideoStreamKind {
 /// CameraIntrinsics.model.
 #[derive(Enum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[rant(standard)]
 #[allow(missing_docs)]
 pub enum DistortionModel {
     #[default]

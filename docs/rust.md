@@ -68,7 +68,8 @@ Supported fields:
 - `rant::String<N>` (a string of at most N bytes) and `String`
 - `[T; N]` and `Vec<T>` of any supported type, nested: `Vec<Vec<String>>` is `string[][]`
 - other `rant::Message` structs
-- enums with `#[derive(rant::Enum)]` and an integer `#[repr]`
+- enums with `#[derive(rant::Enum)]` and an integer `#[repr]`, named as the enum or by
+  `#[rant(name = "Other")]`
 
 Not supported: `Option`, maps and references.
 

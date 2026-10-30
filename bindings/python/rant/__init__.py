@@ -589,9 +589,11 @@ def _field_spec(name, ann, g):
     if ann is bool:
         return _FieldSpec(name, _BOOL, token="bool")
     if isinstance(ann, _Enum):                                  # rant.enum(cls[, backing])
-        return _FieldSpec(name, _ENUM, backing=ann.kind, enum_cls=ann.cls)
+        return _FieldSpec(name, _ENUM, backing=ann.kind, enum_cls=ann.cls,
+                          type_name=getattr(ann.cls, "__rant_std__", None))
     if isinstance(ann, type) and issubclass(ann, _pyenum.Enum):   # a bare enum
-        return _FieldSpec(name, _ENUM, backing=_infer_enum_backing(ann), enum_cls=ann)
+        return _FieldSpec(name, _ENUM, backing=_infer_enum_backing(ann), enum_cls=ann,
+                          type_name=getattr(ann, "__rant_std__", None))
     if isinstance(ann, type):                                    # a nested schema class,
         return _FieldSpec(name, _STRUCT, nested=_spec_of(ann),    # or a standard composite
                           type_name=getattr(ann, "__rant_std__", None))
@@ -628,15 +630,21 @@ def _value_spec(ann):
     return None
 
 
+def _enum_name(cls):
+    return getattr(cls, "__rant_name__", None) or cls.__name__
+
+
 def _spec_text(spec):
     """The schema DSL text a spec compiles to, the members in their wire spelling. Every
-    nested class is a definition of its own first, dependencies before their users and
-    each name once, then the root. A standard type is its name alone."""
+    nested class and enum is a definition of its own first, dependencies before their users
+    and each name once, then the root. A standard type is its name alone."""
     def type_text(f):
         if f.type_name:               # a standard type: the name IS the spelling
             return f.type_name
         if f.kind == _STRUCT:
             return f.nested.name
+        if f.kind == _ENUM:
+            return _enum_name(f.enum_cls)
         if f.kind == _ARR:
             return "%s[%d]" % (type_text(f.elem), f.count)
         if f.kind == _VARR:
@@ -647,19 +655,22 @@ def _spec_text(spec):
             return "string"
         if f.kind == _MAP:
             return "map"
-        if f.kind == _ENUM:
-            opts = ", ".join("%s=%d" % (m.name, int(m.value)) for m in f.enum_cls)
-            return "enum<%s> { %s }" % (_TOKEN[f.backing], opts)
         return f.token
     def line(f):
         return "%s: %s" % (f.wire, type_text(f))
     def define(s):
         return s.name + "\n{\n" + ",\n".join("    " + line(f) for f in s.fields) + "\n}\n"
+    def define_enum(f):
+        opts = ", ".join("%s=%d" % (m.name, int(m.value)) for m in f.enum_cls)
+        return "%s = enum<%s> { %s }\n" % (_enum_name(f.enum_cls), _TOKEN[f.backing], opts)
     defs, seen = [], {spec.cls}
     def hoist(s):
         for f in s.fields:
             while f.elem is not None and not f.type_name:
                 f = f.elem                    # an array's definitions are its element's
+            if f.kind == _ENUM and not f.type_name and f.enum_cls not in seen:
+                seen.add(f.enum_cls)
+                defs.append(define_enum(f))
             n = f.nested
             if n is None or f.type_name or n.cls in seen:
                 continue

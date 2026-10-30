@@ -90,16 +90,16 @@ Capsule2D     { axis: Segment2D, radius: f64 }
 Polygon2D     { points: Double2[] }                     -- closed
 ```
 
-A pixel region is an `AlignedBox2D` in image coordinates. `Polygon` and `Polygon2D` carry a
-variable member, so they cannot be array elements. A scene of mixed shapes is a struct of
-per kind arrays: `Scene { boxes: OrientedBox[], spheres: Sphere[] }`.
+A pixel region is an `AlignedBox2D` in image coordinates. A scene of mixed shapes is a
+struct of per kind arrays: `Scene { boxes: OrientedBox[], zones: Polygon[] }`.
 
 Sensing and robots:
 
 ```
+DistortionModel = enum<u8> { None, BrownConrady, Fisheye, Rational }
 CameraIntrinsics { width: u32, height: u32,             -- the resolution these hold for
                    fx: f64, fy: f64, cx: f64, cy: f64,
-                   model: enum<u8> { None, BrownConrady, Fisheye, Rational },
+                   model: DistortionModel,
                    coeffs: f64[8] }                     -- zero filled past the model's count
 JointState { position: f64[], velocity: f64[], effort: f64[] }
 JointNames { name: string<32>[] }
@@ -116,16 +116,14 @@ Empty { }                               -- zero bytes, for a signal that carries
 Media:
 
 ```
-Image { width: u32, height: u32, stride: u32,
-        format: enum<u8> { Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32,
-                           Jpeg = 16, Png = 17 },
-        data: u8[] }
-VideoFrame { codec: enum<u8> { Unknown, Mjpeg, H264, H265, Av1 },
-             width: u32, height: u32,
+ImageFormat = enum<u8> { Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32,
+                         Jpeg = 16, Png = 17 }
+Image { width: u32, height: u32, stride: u32, format: ImageFormat, data: u8[] }
+VideoCodec = enum<u8> { Unknown, Mjpeg, H264, H265, Av1 }
+VideoFrame { codec: VideoCodec, width: u32, height: u32,
              keyframe: bool, pts: Timestamp, data: u8[] }
-ExternalVideoStream { kind: enum<u8> { Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg,
-                                       Other = 15 },
-                      codec: enum<u8> { Unknown, Mjpeg, H264, H265, Av1 },
+VideoStreamKind = enum<u8> { Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other = 15 }
+ExternalVideoStream { kind: VideoStreamKind, codec: VideoCodec,
                       width: u32, height: u32,
                       url: Uri, name: string<32> }
 ```
@@ -138,9 +136,7 @@ describes it, and a comment after a field gives its unit in brackets, then a not
 
 Raw `Image.data` starts with the top row, as the image frame's origin is its top left
 corner. `Image.stride` 0 means tightly packed rows. A `format` of 16 or more is a compressed
-container, so `data` holds the file bytes rather than pixels. `Image` and `VideoFrame`
-carry a variable member, which makes them topic or root types: they can nest as a struct
-member (the frame is hoisted to the message tail) but they cannot be array elements.
+container, so `data` holds the file bytes rather than pixels.
 
 `VideoFrame.width` and `height` are the coded frame size in pixels. Compressed bitstreams
 carry it in band (the H.264 SPS, say), which is why some schemas omit it, but a consumer
@@ -278,23 +274,25 @@ statement:
 
 ```
 Celsius = f32
+Mode    = enum<u8> { Idle, Run, Fault }
 Probe   { id: string<16>, where: Float3 }
-Reading { probe: Probe, t: Celsius, when: Timestamp }
+Reading { probe: Probe, t: Celsius, mode: Mode, when: Timestamp }
 ```
 
-`Name { fields }` defines a struct. `Name = type` names any other type, so an alias
-(`Celsius = f32`, `Uuid = u8[16]`) is just as much a named type as a struct. A struct is
-never written `Name = { ... }`, and an alias of another name (`A = Probe`) is refused,
-since a name never wraps a name on the wire. A text of one statement is the usual case:
+`Name { fields }` defines a struct. `Name = enum<u8> { ... }` defines an enum. `Name = type`
+names any other type, so an alias (`Celsius = f32`, `Uuid = u8[16]`) is just as much a
+named type as a struct. Every struct and enum has a name: a field never spells one out in
+place. A struct is never written `Name = { ... }`, and an alias of another name
+(`A = Probe`) is refused, since a name never wraps a name on the wire. A text of one
+statement is the usual case:
 
 ```
 Uuid = u8[16]       -- a topic whose whole payload is a Uuid
 ```
 
 The last statement may also be a type on its own: a name defined above or a standard
-name (`Probe`, `Transform`), a bare type (`bool`, `f32[3]`) or an anonymous struct
-(`{ x: f32 }`). A definition taken by its name is the same schema, with the same hash, as
-its struct written out.
+name (`Probe`, `Transform`), or a bare type (`bool`, `f32[3]`). A definition taken by its
+name is the same schema, with the same hash, as its definition written out.
 
 Every compile goes through a node (`rant_node_schema`, C# `node.Schema`, C++
 `node.schema`, Python `node.schema`) and the node keeps every definition: a name defined

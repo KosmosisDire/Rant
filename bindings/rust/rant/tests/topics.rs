@@ -104,7 +104,7 @@ fn same_name_handles_share_one_slot() {
 #[test]
 fn schemas_reflect_the_c_field_table() {
     let a = Node::new("schemas", options(13, Threading::Manual)).unwrap();
-    let s = a.schema("Shape { mode: enum<u8> { Idle=0, Run=2 }, corners: Float2[4], name: string<8>, tags: string, pts: Double2[] }").unwrap();
+    let s = a.schema("Mode = enum<u8> { Idle=0, Run=2 }\nShape { mode: Mode, corners: Float2[4], name: string<8>, tags: string, pts: Double2[] }").unwrap();
     assert_eq!(s.name(), "Shape");
     let mode = s.field_index("mode").unwrap();
     let variants: Vec<(i64, String)> = s.enum_variants(mode).into_iter().map(|v| (v.value, v.name)).collect();

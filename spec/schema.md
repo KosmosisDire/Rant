@@ -26,8 +26,8 @@ An array's payload:
 - a body is the element's payload, or for a struct its record
 - an ARR of variable elements is framed like a VARR, its count must equal the schema's
 
-Example, `Path { id: u32, segments: { speed: f32, pts: Float2[] }[] }` with two segments of
-2 and 1 points, 60 bytes:
+Example, `Route { id: u32, segments: Stretch[] }` with `Stretch { speed: f32, pts: Float2[] }`
+and two segments of 2 and 1 points, 60 bytes:
 
 ```
 id u32
@@ -76,18 +76,21 @@ type :=
 ```
 
 A root name with a non STRUCT type is a named alias root. The root name never encodes as
-NAMED, so there is exactly one spelling and the hash stays canonical. The bounds checked
-parser enforces every rule against hostile wire: NAMED never double wraps, an array
-element is never an empty fixed type, and `RANT_SCHEMA_MAX_DEPTH` caps the nesting of
-structs and arrays alike. Any type may be an array element. An older wire version is
-refused at parse.
+NAMED, so there is exactly one spelling and the hash stays canonical. Every STRUCT and ENUM
+has a name: the root's rides the header, and anywhere else a NAMED wraps it. The bounds
+checked parser enforces every rule against hostile wire: a struct or an enum is never
+unnamed, NAMED never double wraps, an array element is never an empty fixed type, and
+`RANT_SCHEMA_MAX_DEPTH` caps the nesting of structs and arrays alike. Any type may be an
+array element. An older wire version is refused at parse.
 
 Settled calls: distinct kind bytes rather than a cap of 0 as a sentinel, so a C switch
 fails loudly. VSTR and VARR share the frame mechanism but stay distinct so text intent
 survives. Variable elements sit behind an end table rather than a frame each, so element k
 costs O(1) and a frame hop is always bounded by the schema. Roots may be any kind: a bool
-topic's schema is just `bool`. Non struct roots are anonymous unless named, so the same
-bare type in every language gives byte identical wire and the same hash.
+topic's schema is just `bool`. A root that is not a struct or an enum is anonymous unless
+named, so the same bare type in every language gives byte identical wire and the same
+hash. A struct or an enum always has a name, so a tool can always say which type a value
+is, and two programs that mean different things by the same shape never match.
 
 ## Enum
 
@@ -133,7 +136,7 @@ validator API.
 
 ## DSL
 
-`rant_node_schema` takes name first IDL text: `Odom { stamp: u64, velocity: { dx: f32 } }`.
+`rant_node_schema` takes name first IDL text: `Odom { stamp: Timestamp, velocity: Twist }`.
 Commas are optional and `--` comments run to the end of the line. The text is the cross
 language interchange: reflecting languages generate it, others paste it, and identical
 text gives identical wire and hash. `rant_schema_print` is the exact inverse. It always
@@ -187,8 +190,8 @@ schema at once. Build a schema from the same allocator the node opens with and d
 it explicitly, because the node copies the pool by value and close frees the page.
 
 Canonical hashes pinned across languages: `bool` ee90234f61d2520b, `f32[]`
-314844e3386a1fc4, `Float3` 04aa9469cd08b1dd, `Image` 489841f99f392b85, `VideoFrame`
-f677bd147b513fbc, `ExternalVideoStream` aae502077016ac13.
+314844e3386a1fc4, `Float3` 04aa9469cd08b1dd, `Image` 9492b746eb9f64c8, `VideoFrame`
+8361df477b9db68d, `ExternalVideoStream` 807561581dfea720.
 
 ## Not done
 
@@ -199,10 +202,12 @@ A standalone `dist/rant_serialize.h`. Eigen, GLM, numpy and Unity converters.
 ```
 schema := def* type?              the text compiles to its last statement
 def    := IDENT '{' fields '}'    a struct
+        | IDENT '=' enum          an enum
         | IDENT '=' type          any other type, never a struct and never another name
 field  := name ':' type (',')?    fields self delimit, commas are optional
-type   := base | base '[' count ']' | base '[' ']' | '{' fields '}' ('[' count? ']')?
-base   := scalar | 'string' ('<' cap '>')? | 'map' | 'enum' '<' scalar '>' '{' options '}' | NAME
+type   := base ('[' count? ']')*  each suffix wraps the type before it
+base   := scalar | 'string' ('<' cap '>')? | 'map' | NAME
+enum   := 'enum' '<' scalar '>' '{' options '}'
 ```
 
 Every IDENT and NAME is normalized as it is read, fields to snake_case and types and enum
@@ -228,7 +233,8 @@ definition as the last statement gives a root that carries its name with no NAME
 and a bare reference as the last statement (`Uuid`, `Pose`) gives the same root, so a
 definition taken by name hashes like its struct written out. A type on its own ends the
 text. `Name = { ... }` and `A = W` for a name `W` are refused at the type, since a struct
-has one spelling and a name never wraps a name. The parser keeps the first refusal as a
+has one spelling and a name never wraps a name. A struct body or an enum anywhere else, a
+field, an element or the root, is refused as unnamed. The parser keeps the first refusal as a
 reason and a position, and the node prints both in `detail`. A rule the wire check
 enforces names itself too: the reader keeps the first broken rule in `i_Rd.why`, and
 `i_rant_schema_wire_why` hands it to the compiler.
@@ -237,8 +243,8 @@ enforces names itself too: the reader keeps the first broken rule in `i_Rd.why`,
 
 The compiled schema flattens every type at every depth into one depth first table, one
 row per type. An array's next row is its element, named "", and a struct's members follow
-it, so `segments: { speed: f32, pts: Float2[] }[]` is `segments`, its element, `speed`,
-`pts`, its element, `x` and `y`. A fixed row's offset counts from the start of its nearest
+it, so `segments: Stretch[]` is `segments`, its element, `speed`, `pts`, its element, `x`
+and `y`. A fixed row's offset counts from the start of its nearest
 enclosing element, or the message, and a framed row has none. `arr_parent` names the
 nearest enclosing array and `arr_depth` counts them, so a row takes one index per level.
 An access walks from the message: at each array it locates the array in the current

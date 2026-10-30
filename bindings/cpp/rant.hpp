@@ -1521,22 +1521,26 @@ template <class U> std::string Speller::members() {
 template <class U> std::string Speller::spell() {
     if constexpr (scalar_kind_of<U>() >= 0) {
         return scalar_kind_name(scalar_kind_of<U>());
+    } else if constexpr (std_type<U>::name != nullptr) {
+        return std_type<U>::name;
     } else if constexpr (std::is_enum_v<U>) {
         using Backing = std::underlying_type_t<U>;
         if constexpr (is_reg_enum<U>::value) {
             constexpr int k = scalar_kind_of<Backing>();
             static_assert(k >= 0 && k <= (int)detail::RANT_I64,
                           "RANT_ENUM: backing must be an integer type (u8..i64)");
-            std::string out = "enum<";
-            out += scalar_kind_name(k);
-            out += "> { ";
-            bool first = true;
-            reflect_enum<U>::visit([&](int64_t value, const char* vn) {
-                if (!first) out += ", ";
-                first = false;
-                out += vn; out += "="; out += std::to_string(value);
-            });
-            return out + " }";
+            std::string name = strip_namespaces(reflect_enum<U>::type_name);
+            if (defined.insert(&type_key<U>::id).second) {
+                std::string body = name + " = enum<" + scalar_kind_name(k) + "> { ";
+                bool first = true;
+                reflect_enum<U>::visit([&](int64_t value, const char* vn) {
+                    if (!first) body += ", ";
+                    first = false;
+                    body += vn; body += "="; body += std::to_string(value);
+                });
+                defs += body + " }\n";
+            }
+            return name;
         } else {
             return spell<Backing>();                     /* a plain enum is its integer */
         }
@@ -1544,8 +1548,6 @@ template <class U> std::string Speller::spell() {
         return "string<" + std::to_string(is_rant_string<U>::cap) + ">";
     } else if constexpr (fixed_array<U>::value) {
         return spell<typename fixed_array<U>::elem>() + "[" + std::to_string(fixed_array<U>::count) + "]";
-    } else if constexpr (std_type<U>::name != nullptr) {
-        return std_type<U>::name;
     } else if constexpr (is_reflected<U>::value) {
         std::string name = strip_namespaces(reflect<U>::type_name);
         if (defined.insert(&type_key<U>::id).second) {
@@ -5635,8 +5637,8 @@ RemoteVariable<T> Node::remote_variable(std::string_view name, const VariableOpt
         } \
     }
 
-/* RANT_ENUM(E, options...): register an enum class so a member ships as a named enum<uN>
- * with these enumerators. An unregistered enum ships as its backing integer. */
+/* RANT_ENUM(E, options...): register an enum class so a member ships as the enum named E,
+ * defined once with these enumerators. An unregistered enum ships as its backing integer. */
 #define RANT_ENUM_ITEM(E, x) rant_v((int64_t)(E::x), #x);
 #define RANT_ENUM(E, ...) \
     template <> struct rant::reflect_enum<E> { \
@@ -5672,13 +5674,14 @@ RANT_STD_ALIAS(Duration,    int64_t);
 RANT_STD_ALIAS(Matrix3x3, float[9]);
 RANT_STD_ALIAS(Matrix4x4, float[16]);
 RANT_STD_ALIAS(Uri,         rant::String<256>);
-/* the video family: the enums are RANT_ENUM-registered so a member of one (in these
- * mirrors or in a user struct) ships as the canonical named integer */
-RANT_ENUM(rant::types::ImageFormat, Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32, Jpeg, Png);
-RANT_ENUM(rant::types::VideoCodec, Unknown, Mjpeg, H264, H265, Av1);
-RANT_ENUM(rant::types::VideoStreamKind, Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other);
+/* The standard enums: each spells as its standard name and carries a registered enum's
+ * leaf, so a member of one in a user struct ships as that name too. */
+#define RANT_STD_ENUM(T, ...) RANT_ENUM(rant::types::T, __VA_ARGS__); RANT_STD_ALIAS(T, rant::types::T)
+RANT_STD_ENUM(ImageFormat, Mono8, Mono16, Rgb8, Rgba8, Bgr8, Yuyv, Nv12, Monof32, Jpeg, Png);
+RANT_STD_ENUM(VideoCodec, Unknown, Mjpeg, H264, H265, Av1);
+RANT_STD_ENUM(VideoStreamKind, Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other);
 RANT_STD_STRUCT(Image); RANT_STD_STRUCT(VideoFrame); RANT_STD_STRUCT(ExternalVideoStream);
-RANT_ENUM(rant::types::DistortionModel, NoDistortion, BrownConrady, Fisheye, Rational);
+RANT_STD_ENUM(DistortionModel, NoDistortion, BrownConrady, Fisheye, Rational);
 RANT_STD_STRUCT(CameraIntrinsics);
 RANT_STD_STRUCT(JointState); RANT_STD_STRUCT(JointNames);
 

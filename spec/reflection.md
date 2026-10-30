@@ -38,8 +38,8 @@ whether a set channel exists, and the kind.
 `reflect_from_mesh` picks per channel and per role. A reader (a subscriber, a caller's
 `@rsp`, an accessor's value) takes the provider's exact declaration. A writer (a
 publisher, a caller's `@req`) takes the WIDEST live declaration, since named types narrow
-one way (an anonymous struct reads a `Color` writer, but a `Color` reader refuses an
-anonymous writer) and the widest is what every reader accepts. Untyped when nobody
+one way (an `f32` reader reads a `Celsius` writer, but a `Celsius` reader refuses an `f32`
+writer) and the widest is what every reader accepts. Untyped when nobody
 advertises one. A value you pass always wins, and a zero reliability follows the mesh.
 
 `refresh` re reads the mesh and, when the generation moved, re types the handle in place:
@@ -63,5 +63,5 @@ There is no public subscriber side match count. `rant_topic_match_count` is publ
 side, so a sub only topic reads 0, and the bridge's `match` push reports the same. The
 entity name is a placeholder until details arrive, and `incomplete` says so. The old per
 name schema ranking (`rant_node_mesh_schema`) is gone: the provider rule plus writer side
-width covers the case that forced it, a caller adopting a fellow caller's anonymous struct
-over the definition's `Color`.
+width covers the case that forced it, a caller adopting a fellow caller's plain `f32`
+over the definition's `Celsius`.

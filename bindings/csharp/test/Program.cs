@@ -707,18 +707,16 @@ static class Program
             Check("the mirror struct IS that type", mirror.Hash == HashFloat3);
             Check("the same text is the same handle", a.Schema("Float3").Handle == f3.Handle);
         }
-        // a name narrows: an anonymous field of the same shape reads a Transform field, never
-        // the reverse, and Transform/Twist are distinct names never mistaken for each other.
+        // every struct has a name, so the same shape under another name never reads a Transform
+        // field, and Transform/Twist are distinct names never mistaken for each other.
         // Two shapes of W, so each goes on its own node
         {
             var named = a.Schema("W { at: Transform }");
-            var bare = b.Schema("W { at: { pose: { position: { x: f64, y: f64, z: f64 }," +
-                                "                  orientation: { x: f64, y: f64, z: f64, w: f64 } }," +
-                                "         parent: string<30> } }");
+            var other = b.Schema("Frame { pose: Pose, parent: string<30> }\nW { at: Frame }");
             var xform = a.Schema("Transform");
             var twist = a.Schema("Twist");
-            Check("an anonymous field of the same shape reads a Transform field",
-                  bare.CanRead(named) && !named.CanRead(bare));
+            Check("the same shape under another name never reads a Transform field",
+                  !other.CanRead(named) && !named.CanRead(other));
             Check("Transform and Twist never cross-wire", !twist.CanRead(xform));
             try { a.Schema("W { at: Twist }"); Check("a second shape of W on one node is refused", false); }
             catch (SchemaException e) { Check("a second shape of W on one node is refused: " + e.Message, true); }
@@ -985,9 +983,9 @@ static class Program
         }
         {
             var ls = node.Schema(typeof(Layers));
-            var same = node.Schema("Stretch { speed: f32, pts: Float2[] }\n"
+            var same = node.Schema("Stretch { speed: f32, pts: Float2[] }\nLane = enum<u8> { Left=0, Right=1 }\n"
                 + "Layers { grid: f32[][], rows: f32[3][], names: string[], pair: string[2], legs: Stretch[2], "
-                + "m: f32[3][2], areas: Polygon2D[], lanes: enum<u8> { Left=0, Right=1 }[], words: string[][], "
+                + "m: f32[3][2], areas: Polygon2D[], lanes: Lane[], words: string[][], "
                 + "tags: string<8>[2][], flags: bool[], notes: map[] }");
             Check("every nesting spells as the DSL does", ls.Hash == same.Hash);
             var layers = new Layers

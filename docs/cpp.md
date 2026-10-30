@@ -98,7 +98,7 @@ Supported members:
   `std::vector<std::string>`, `std::vector<std::vector<float>>`, a vector of structs
   that hold vectors
 - other `RANT_SCHEMA` structs
-- `enum class`, named with `RANT_ENUM(E, values...)`
+- `enum class` registered with `RANT_ENUM(E, values...)`, which ships as the enum named `E`
 
 Not supported: pointers, maps and `std::vector<bool>`.
 

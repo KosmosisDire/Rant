@@ -13,8 +13,8 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
     message(&input).unwrap_or_else(Error::into_compile_error).into()
 }
 
-/// Makes a field-less enum with an integer `#[repr]` a Rant enum: a named integer whose
-/// options keep the variants' names and values.
+/// Makes a field-less enum with an integer `#[repr]` a Rant enum: a named integer, named as
+/// the enum or by `#[rant(name = "Other")]`, whose options keep the variants' names and values.
 #[proc_macro_derive(Enum, attributes(rant))]
 pub fn derive_enum(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -129,10 +129,17 @@ fn enumeration(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             if *v < 0 { quote!(-#abs) } else { quote!(#abs) }
         })
         .collect();
+    let a = attrs(input)?;
+    let name = a.name.unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
+    let spell = if a.standard {
+        quote! { s.standard_enum(#name, ::rant::__private::kind::#kind) }
+    } else {
+        quote! { s.enumeration(::std::any::TypeId::of::<Self>(), #name, ::rant::__private::kind::#kind, &[ #( (#names, #values) ),* ]) }
+    };
     Ok(quote! {
         impl ::rant::Message for #ident {
             fn __spell(s: &mut ::rant::__private::Spell) {
-                s.enumeration(::rant::__private::kind::#kind, &[ #( (#names, #values) ),* ])
+                #spell
             }
             fn __encode(&self, e: &mut ::rant::__private::Encoder<'_>) -> ::std::result::Result<(), ::std::string::String> {
                 let v: #backing = match self { #( Self::#variants => #as_backing, )* };

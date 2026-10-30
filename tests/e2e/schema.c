@@ -203,9 +203,9 @@ static void be_on_message(const RantMsg *msg){
 }
 static RantSchema *be_build_schema(RantAllocator *a){
     static char text[64 + BE_N * 10];
-    int i, at = sprintf(text, "Jobs { id: u32, job: enum<u16> {");
+    int i, at = sprintf(text, "Job = enum<u16> {");
     for (i=0;i<BE_N;i++) at += sprintf(text + at, " job_%04d,", i);
-    sprintf(text + at, " } }");
+    sprintf(text + at, " }%cJobs { id: u32, job: Job }", 10);
     return test_compile(a, text, NULL);
 }
 static void schema_bigenum_checks(void){
@@ -390,14 +390,13 @@ static void schema_root_checks(void){
     sr_root_case(&ma, "f32[]",  RANT_VARR, 0, 4);
     sr_root_case(&ma, "string<8>[]", RANT_VARR, 0, 4);
     sr_root_case(&ma, "map",    RANT_MAP,    0, 4);
-    sr_root_case(&ma, "enum<u8> { Idle = 0, Run = 1, Fault = 2 }", RANT_ENUM, 1, 1);
 
     sb    = test_compile(&ma, "bool", NULL);
     su8   = test_compile(&ma, "u8", NULL);
     sstr  = test_compile(&ma, "string", NULL);
     sarr  = test_compile(&ma, "f32[]", NULL);
     smap  = test_compile(&ma, "map", NULL);
-    senum = test_compile(&ma, "enum<u8> { Idle, Run, Fault }", NULL);
+    senum = test_compile(&ma, "Mode = enum<u8> { Idle, Run, Fault }", NULL);
     swrap = test_compile(&ma, "Wrap { v: bool }", NULL);
     CHECK(sb && su8 && sstr && sarr && smap && senum && swrap,
              "schema-root: the e2e schemas compile");

@@ -1193,10 +1193,10 @@ namespace Rant
         };
     }
 
-    /// <summary>Name the wire type of a message struct or class. Without it the class name is
-    /// the wire name. A type nested in another is defined once under its name and every use,
-    /// as a field or an array element, takes the name, so peers spell the same name.</summary>
-    [AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class)]
+    /// <summary>Name the wire type of a message struct, class or enum. Without it the type's
+    /// own name is the wire name. A type nested in another is defined once under its name and
+    /// every use, as a field or an array element, takes the name, so peers spell the same name.</summary>
+    [AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class | AttributeTargets.Enum)]
     public sealed class RantSchemaAttribute : Attribute
     {
         /// <summary>The wire type name, in any spelling. The wire keeps PascalCase.</summary>
@@ -1568,7 +1568,7 @@ namespace Rant
 
         /// <summary>How an Image's data is laid out. A value of 16 or more is a compressed
         /// container, so data holds the file bytes rather than pixels.</summary>
-        public enum ImageFormat : byte
+        [RantSchema("ImageFormat")] public enum ImageFormat : byte
         {
             /// <summary>One byte of gray per pixel.</summary>
             Mono8 = 0,
@@ -1592,7 +1592,7 @@ namespace Rant
             Png = 17
         }
         /// <summary>The codec a VideoFrame's data is encoded with.</summary>
-        public enum VideoCodec : byte
+        [RantSchema("VideoCodec")] public enum VideoCodec : byte
         {
             /// <summary>Unstated.</summary>
             Unknown = 0,
@@ -1606,7 +1606,7 @@ namespace Rant
             Av1 = 4
         }
         /// <summary>The protocol an ExternalVideoStream's url speaks.</summary>
-        public enum VideoStreamKind : byte
+        [RantSchema("VideoStreamKind")] public enum VideoStreamKind : byte
         {
             /// <summary>RTSP.</summary>
             Rtsp = 0,
@@ -1672,7 +1672,7 @@ namespace Rant
         }
 
         /// <summary>A lens distortion model.</summary>
-        public enum DistortionModel : byte
+        [RantSchema("DistortionModel")] public enum DistortionModel : byte
         {
             /// <summary>An ideal pinhole.</summary>
             None = 0,
@@ -5957,6 +5957,13 @@ namespace Rant
         {
             if (sh.TypeName != null) return;
             if (sh.Elem != null) { HoistShape(sh.Elem, at, sb, done); return; }
+            if (sh.Kind == ENUM)
+            {
+                if (done.Add(sh.EnumType))
+                    sb.Append(EnumName(sh.EnumType)).Append(" = enum<").Append(Token[sh.Backing]).Append("> ")
+                      .Append(EnumBody(sh.EnumType)).Append('\n');
+                return;
+            }
             if (sh.Nested == null || !done.Add(sh.Nested)) return;
             var inner = Spec(sh.Nested);
             if (inner.Name.Length == 0)
@@ -5992,9 +5999,16 @@ namespace Rant
                 case STR: return "string<" + sh.StrCap + ">";
                 case VSTR: return "string";
                 case MAP: return "map";
-                case ENUM: return "enum<" + Token[sh.Backing] + "> " + EnumBody(sh.EnumType);
+                case ENUM: return EnumName(sh.EnumType);
                 default: return Token[sh.Kind];
             }
+        }
+
+        // An enum's wire name, from [RantSchema] or else its own name. Its definition is hoisted.
+        private static string EnumName(Type enumType)
+        {
+            var attr = (RantSchemaAttribute)Attribute.GetCustomAttribute(enumType, typeof(RantSchemaAttribute));
+            return attr != null && !string.IsNullOrEmpty(attr.Name) ? attr.Name : enumType.Name;
         }
 
         // `{ Name=value, ... }` from a C# enum's members in DECLARATION order (GetFields, not

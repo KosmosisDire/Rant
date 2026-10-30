@@ -36,7 +36,7 @@ const until = (f, ms = 5000) => new Promise((res, rej) => {
 
 const Point = struct("Point", { x: f32, y: f32 });
 const Conveyor = struct("Conveyor", {
-    speed: f64, running: bool, partNumber: string(16), count: u64, mode: enumOf({ Idle: 0, Run: 1, Fault: 7 }),
+    speed: f64, running: bool, partNumber: string(16), count: u64, mode: enumOf("Mode", { Idle: 0, Run: 1, Fault: 7 }),
     gains: array(f32, 3), labels: array(string(8)), note: string(), origin: Point, path: array(Point), extra: map,
 });
 const sample = {
@@ -253,13 +253,14 @@ await check("any type nests as an array element", async () => {
     const Layers = struct("Layers", {
         grid: array(array(f32)), rows: array(array(f32, 3)), names: array(string()), pair: array(string(), 2),
         legs: array(Stretch, 2), m: array(array(f32, 3), 2), areas: array(types.Polygon2D),
-        lanes: array(enumOf({ Left: 0, Right: 1 })), words: array(array(string())), tags: array(array(string(8), 2)),
+        lanes: array(enumOf("Lane", { Left: 0, Right: 1 })), words: array(array(string())), tags: array(array(string(8), 2)),
         flags: array(bool), notes: array(map),
     });
     assert.equal(a.schema(Route).hash, b.schema("Stretch { speed: f32, top_speed: f32, pts: Float2[] }\n" +
         "Route { id: u32, segments: Stretch[], name: string }").hash);
-    assert.equal(a.schema(Layers).hash, b.schema("Layers { grid: f32[][], rows: f32[3][], names: string[], " +
-        "pair: string[2], legs: Stretch[2], m: f32[3][2], areas: Polygon2D[], lanes: enum<u8> { Left=0, Right=1 }[], " +
+    assert.equal(a.schema(Layers).hash, b.schema("Lane = enum<u8> { Left=0, Right=1 }\n" +
+        "Layers { grid: f32[][], rows: f32[3][], names: string[], " +
+        "pair: string[2], legs: Stretch[2], m: f32[3][2], areas: Polygon2D[], lanes: Lane[], " +
         "words: string[][], tags: string<8>[2][], flags: bool[], notes: map[] }").hash);
 
     const got = [];

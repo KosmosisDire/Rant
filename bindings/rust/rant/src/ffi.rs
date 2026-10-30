@@ -478,13 +478,17 @@ pub const RANT_STD_DURATION: RantStdType = 40;
 pub const RANT_STD_MATRIX3X3: RantStdType = 41;
 pub const RANT_STD_MATRIX4X4: RantStdType = 42;
 pub const RANT_STD_URI: RantStdType = 43;
-pub const RANT_STD_IMAGE: RantStdType = 44;
-pub const RANT_STD_VIDEOFRAME: RantStdType = 45;
-pub const RANT_STD_EXTERNALVIDEOSTREAM: RantStdType = 46;
-pub const RANT_STD_CAMERAINTRINSICS: RantStdType = 47;
-pub const RANT_STD_JOINTSTATE: RantStdType = 48;
-pub const RANT_STD_JOINTNAMES: RantStdType = 49;
-pub const RANT_STD_COUNT: RantStdType = 50;
+pub const RANT_STD_IMAGEFORMAT: RantStdType = 44;
+pub const RANT_STD_IMAGE: RantStdType = 45;
+pub const RANT_STD_VIDEOCODEC: RantStdType = 46;
+pub const RANT_STD_VIDEOFRAME: RantStdType = 47;
+pub const RANT_STD_VIDEOSTREAMKIND: RantStdType = 48;
+pub const RANT_STD_EXTERNALVIDEOSTREAM: RantStdType = 49;
+pub const RANT_STD_DISTORTIONMODEL: RantStdType = 50;
+pub const RANT_STD_CAMERAINTRINSICS: RantStdType = 51;
+pub const RANT_STD_JOINTSTATE: RantStdType = 52;
+pub const RANT_STD_JOINTNAMES: RantStdType = 53;
+pub const RANT_STD_COUNT: RantStdType = 54;
 pub type RantStdType = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Default, Copy, Clone)]

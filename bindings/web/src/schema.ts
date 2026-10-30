@@ -7,7 +7,7 @@ export type Shape =
     | { k: "scalar"; t: Scalar }
     | { k: "string"; cap?: number }
     | { k: "array"; elem: Shape; n?: number }
-    | { k: "enum"; backing: Scalar; options: Record<string, number> }
+    | { k: "enum"; name: string; backing: Scalar; options: Record<string, number> }
     | { k: "map" }
     | { k: "struct"; name: string; fields: Record<string, Shape> }
     | { k: "named"; name: string };            /* a standard type, in scope by name */
@@ -57,11 +57,12 @@ export function array<S extends Schema<any>>(elem: S, n?: number):
     return make({ k: "array", elem: elem.shape, n });
 }
 
-/* An integer with named values, read and written as the names. */
-export function enumOf<const O extends Record<string, number>>(options: O, backing: Schema<number> = u8): Schema<keyof O & string> {
+/* A named integer with named values, read and written as the names. */
+export function enumOf<const O extends Record<string, number>>(name: string, options: O, backing: Schema<number> = u8):
+    Schema<keyof O & string> {
     const s = backing.shape;
     if (s.k !== "scalar") throw new TypeError("an enum is backed by an integer");
-    return make({ k: "enum", backing: s.t, options });
+    return make({ k: "enum", name, backing: s.t, options });
 }
 
 /* A named struct. Member names are yours, the wire spells them in snake_case. */
@@ -72,7 +73,7 @@ export function struct<const F extends Record<string, Schema<any>>>(name: string
     return make({ k: "struct", name, fields: shapes });
 }
 
-/* DSL text for a schema: named structs as leading definitions, the root last. */
+/* DSL text for a schema: named structs and enums as leading definitions, the root last. */
 export function dsl(s: Schema<any> | string): string {
     if (typeof s === "string") return s;
     const defs = new Map<string, string>();
@@ -81,7 +82,12 @@ export function dsl(s: Schema<any> | string): string {
         case "scalar": return sh.t;
         case "string": return sh.cap === undefined ? "string" : `string<${sh.cap}>`;
         case "array": return `${spell(sh.elem)}[${sh.n ?? ""}]`;
-        case "enum": return `enum<${sh.backing}> { ${Object.entries(sh.options).map(([k, v]) => `${k} = ${v}`).join(", ")} }`;
+        case "enum":
+            if (!defs.has(sh.name)) {
+                const body = Object.entries(sh.options).map(([k, v]) => `${k} = ${v}`).join(", ");
+                defs.set(sh.name, `${sh.name} = enum<${sh.backing}> { ${body} }`);
+            }
+            return sh.name;
         case "map": return "map";
         case "named": return sh.name;
         case "struct": {
@@ -100,18 +106,19 @@ export function dsl(s: Schema<any> | string): string {
     return [...defs.values(), root].join("\n");
 }
 
+export type ImageFormat = "Mono8" | "Mono16" | "Rgb8" | "Rgba8" | "Bgr8" | "Yuyv" | "Nv12" | "Monof32" | "Jpeg" | "Png";
+export type VideoCodec = "Unknown" | "Mjpeg" | "H264" | "H265" | "Av1";
+export type VideoStreamKind = "Rtsp" | "WebrtcWhep" | "Hls" | "Srt" | "Rtp" | "HttpMjpeg" | "Other";
+export type DistortionModel = "None" | "BrownConrady" | "Fisheye" | "Rational";
 export interface VideoFrameValue {
-    codec: "Unknown" | "Mjpeg" | "H264" | "H265" | "Av1";
+    codec: VideoCodec;
     width: number; height: number; keyframe: boolean; pts: bigint; data: Uint8Array;
 }
 export interface ImageValue {
-    width: number; height: number; stride: number;
-    format: "Mono8" | "Mono16" | "Rgb8" | "Rgba8" | "Bgr8" | "Yuyv" | "Nv12" | "Monof32" | "Jpeg" | "Png";
-    data: Uint8Array;
+    width: number; height: number; stride: number; format: ImageFormat; data: Uint8Array;
 }
 export interface ExternalVideoStreamValue {
-    kind: "Rtsp" | "WebrtcWhep" | "Hls" | "Srt" | "Rtp" | "HttpMjpeg" | "Other";
-    codec: "Unknown" | "Mjpeg" | "H264" | "H265" | "Av1";
+    kind: VideoStreamKind; codec: VideoCodec;
     width: number; height: number; url: string; name: string;
 }
 
@@ -147,12 +154,15 @@ export const types = {
     Plane2D: named<{ position: D2; normal: D2 }>("Plane2D"), Segment2D: named<Seg2>("Segment2D"),
     Circle: named<{ center: D2; radius: number }>("Circle"), Capsule2D: named<{ axis: Seg2; radius: number }>("Capsule2D"),
     Polygon2D: named<{ points: D2[] }>("Polygon2D"),
+    DistortionModel: named<DistortionModel>("DistortionModel"),
     CameraIntrinsics: named<{ width: number; height: number; fx: number; fy: number; cx: number; cy: number;
-                              model: "None" | "BrownConrady" | "Fisheye" | "Rational"; coeffs: Float64Array }>("CameraIntrinsics"),
+                              model: DistortionModel; coeffs: Float64Array }>("CameraIntrinsics"),
     JointState: named<{ position: Float64Array; velocity: Float64Array; effort: Float64Array }>("JointState"),
     JointNames: named<{ name: string[] }>("JointNames"),
     Color: named<{ r: number; g: number; b: number; a: number }>("Color"),
     Uri: named<string>("Uri"), Empty: named<Record<string, never>>("Empty"),
+    ImageFormat: named<ImageFormat>("ImageFormat"), VideoCodec: named<VideoCodec>("VideoCodec"),
+    VideoStreamKind: named<VideoStreamKind>("VideoStreamKind"),
     Image: named<ImageValue>("Image"), VideoFrame: named<VideoFrameValue>("VideoFrame"),
     ExternalVideoStream: named<ExternalVideoStreamValue>("ExternalVideoStream"),
 } as const;

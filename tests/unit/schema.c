@@ -22,6 +22,7 @@ static void schema_print_roundtrip(RantAllocator *ma, RantSchema *s, const char 
 static void schema_dsl_checks(void){
     RantAllocator ma = rant_allocator_heap(0);
     static const char POSE[] =
+        "Velocity { dx: f32, dy: f32 }\n"
         "Reading\n"
         "{\n"
         "    stamp:    u64,\n"
@@ -29,13 +30,13 @@ static void schema_dsl_checks(void){
         "    y:        f64,\n"
         "    uuid:     u8[16],   -- fixed array\n"
         "    tagCount: u8,\n"
-        "    velocity: { dx: f32, dy: f32 }\n"
+        "    velocity: Velocity\n"
         "}";
     RantSchema *txt;
     txt = test_compile(&ma, POSE, NULL);
     CHECK(txt != NULL, "schema-dsl: compiles");
     /* pinned: the wire of a nested struct plus a fixed array must never drift */
-    CHECK(txt && rant_schema_hash(txt) == 0xb8157f3bb2e197e7ULL,
+    CHECK(txt && rant_schema_hash(txt) == 0x7131bec6ff403802ULL,
              "schema-dsl: Reading canonical hash %016llx", (unsigned long long)(txt ? rant_schema_hash(txt) : 0));
     schema_print_roundtrip(&ma, txt, "Reading (nested struct + array)");
     if (txt){
@@ -97,11 +98,12 @@ static void schema_dsl_checks(void){
     }
     {   /* strings: string<cap> and string<cap>[N] are fixed slots of [u16 len][cap bytes] */
         static const char TAGGED[] =
-            "Tagged { id: u32, name: string<12>, labels: string<8>[3], meta: { note: string<4> } }";
+            "Meta { note: string<4> }\n"
+            "Tagged { id: u32, name: string<12>, labels: string<8>[3], meta: Meta }";
         RantSchema *ts;
         ts = test_compile(&ma, TAGGED, NULL);
         CHECK(ts != NULL, "schema-dsl: strings compile");
-        CHECK(ts && rant_schema_hash(ts) == 0x36a9acceb68c37c9ULL,
+        CHECK(ts && rant_schema_hash(ts) == 0x5611367a61ef1cdeULL,
                  "schema-dsl: Tagged canonical hash %016llx", (unsigned long long)(ts ? rant_schema_hash(ts) : 0));
         schema_print_roundtrip(&ma, ts, "Tagged (capped strings + string array)");
         if (ts){
@@ -312,7 +314,8 @@ static void schema_dsl_checks(void){
     }
     {   /* schema-print: two struct levels deep, and a struct followed by more top-level fields */
         RantSchema *deep = test_compile(&ma,
-            "Deep { a: u32, g: { b: u16, inner: { c: i8, d: f64 }, e: u8 }, z: string<5>, arr: i32[3] }", NULL);
+            "Inner { c: i8, d: f64 }\nG { b: u16, inner: Inner, e: u8 }\n"
+            "Deep { a: u32, g: G, z: string<5>, arr: i32[3] }", NULL);
         schema_print_roundtrip(&ma, deep, "Deep (two nesting levels)");
     }
     {   /* errors: NULL + err points into the text at the offending spot */
@@ -327,11 +330,17 @@ static void schema_dsl_checks(void){
             "Reading { x: f64 }[2]",           /* a definition takes no array suffix */
             "Reading { x: string<0> }",        /* zero cap */
             "Reading { x: string<12 }",        /* missing '>' */
-            "Reading { v: {}[2] }",            /* an empty element */
-            "Reading { m: enum<u8> { A=300 } }",  /* value out of the backing range */
-            "Reading { m: enum<f32> { A=0 } }",   /* non-integer backing */
-            "Reading { m: enum<u8> A=0 }",        /* missing '{' */
-            "Reading { m: enum { A } }"           /* missing <backing> */
+            "E {}\nReading { v: E[2] }",       /* an empty element */
+            "M = enum<u8> { A=300 }",          /* value out of the backing range */
+            "M = enum<f32> { A=0 }",           /* non-integer backing */
+            "M = enum<u8> A=0",                /* missing '{' */
+            "M = enum { A }",                  /* missing <backing> */
+            "Reading { v: { x: u8 } }",        /* a struct with no name */
+            "Reading { m: enum<u8> { A } }",   /* an enum with no name */
+            "Reading { v: { x: u8 }[2] }",     /* an unnamed struct element */
+            "M = enum<u8> { A }[]",            /* an unnamed enum element */
+            "{ x: f64 }",                      /* an unnamed struct root */
+            "enum<u8> { A }"                   /* an unnamed enum root */
         };
         unsigned i, ok = 1;
         for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
@@ -343,7 +352,7 @@ static void schema_dsl_checks(void){
     }
     {   /* a shape rule the wire check enforces says which rule, never out of memory */
         static const struct { const char *text, *why; } rules[] = {
-            { "Reading { v: {}[] }",               "an array element cannot be empty" },
+            { "E {}\nReading { v: E[] }",          "an array element cannot be empty" },
             { "Reading { v: u8[][][][][][][][] }", "arrays nest too deep" },
         };
         unsigned i, ok = 1;
@@ -354,16 +363,21 @@ static void schema_dsl_checks(void){
         }
         CHECK(ok, "schema-dsl: a broken shape rule is named in the refusal");
     }
-    {   RantSchema *anon = test_compile(&ma, "{ x: f64 }", NULL);
-        CHECK(anon && rant_schema_name(anon).len == 0 && rant_schema_field_index(anon, "x") == 0,
-                 "schema-dsl: a struct body on its own is an anonymous struct");
+    {   /* the parser refuses unnamed wire as well, so a peer cannot send it */
+        static const uint8_t anon_struct[] = { RANT_SCHEMA_WIRE_VERSION, 0, RANT_STRUCT, 1, 1, 'x', RANT_U8 };
+        static const uint8_t anon_enum[] = { RANT_SCHEMA_WIRE_VERSION, 1, 'A', RANT_STRUCT, 1, 1, 'm',
+                                             RANT_ENUM, RANT_U8, 1, 0, 0, 1, 'P' };
+        const char *ws = i_rant_schema_wire_why(anon_struct, sizeof anon_struct);
+        const char *we = i_rant_schema_wire_why(anon_enum, sizeof anon_enum);
+        CHECK(ws && strcmp(ws, "a struct needs a name") == 0 && we && strcmp(we, "an enum needs a name") == 0,
+                 "schema-dsl: the wire refuses an unnamed struct or enum (%s, %s)", ws ? ws : "-", we ? we : "-");
     }
     {   /* schema enum: a named integer is a fixed field carrying its backing scalar. The name
            table is schema only, so an unknown value stays readable and subset compares the width. */
         static const char *EDSL =
-            "Robot { id: u32,"
-            " mode: enum<u8> { Idle=0, Running=1, Charging=2, Fault=3 },"
-            " step: enum<i8> { Back=-1, Hold, Fwd } }";   /* auto: Hold=0, Fwd=1 */
+            "Mode = enum<u8> { Idle=0, Running=1, Charging=2, Fault=3 }\n"
+            "Step = enum<i8> { Back=-1, Hold, Fwd }\n"   /* auto: Hold=0, Fwd=1 */
+            "Robot { id: u32, mode: Mode, step: Step }";
         RantSchema *es = test_compile(&ma, EDSL, NULL);
         CHECK(es != NULL, "schema-enum: compiles");
         if (es){
@@ -412,11 +426,14 @@ static void schema_dsl_checks(void){
             {   /* subset: the same width is compatible despite a different option table, a width
                    mismatch is refused */
                 RantSchema *rd = test_compile(&ma,
-                    "Robot { mode: enum<u8> { Idle=0, Down=7 } }", NULL);   /* fewer options */
+                    "Mode = enum<u8> { Idle=0, Down=7 }\nRobot { mode: Mode }", NULL);   /* fewer options */
                 RantSchema *bw = test_compile(&ma,
-                    "Robot { mode: enum<u16> { Idle=0 } }", NULL);            /* wrong width */
+                    "Mode = enum<u16> { Idle=0 }\nRobot { mode: Mode }", NULL);          /* wrong width */
+                RantSchema *bn = test_compile(&ma,
+                    "Gear = enum<u8> { Idle=0, Running=1, Charging=2, Fault=3 }\nRobot { mode: Gear }", NULL);
                 CHECK(rd && rant_schema_subset(rd, es), "schema-enum: same-width subset (names advisory)");
                 CHECK(bw && !rant_schema_subset(bw, es), "schema-enum: backing-width mismatch refused");
+                CHECK(bn && !rant_schema_subset(bn, es), "schema-enum: another enum name is refused");
             }
         }
     }
@@ -473,16 +490,16 @@ static void schema_v8_checks(void){
              "schema-v8: two different names over one shape never cross-wire");
     CHECK(sv_sub("Celsius = f32\nA { t: Celsius }", "Celsius = f32\nA { t: Celsius, u: u8 }") == 1,
              "schema-v8: subset stays top-level under named fields");
-    CHECK(sv_sub("A { v: { a: f32 } }", "A { v: { a: f32, b: f32 } }") == 0,
+    CHECK(sv_sub("V { a: f32 }\nA { v: V }", "V { a: f32, b: f32 }\nA { v: V }") == 0,
              "schema-v8: a nested struct still compares exactly");
-    CHECK(sv_sub("A { m: enum<u8> { P } }", "A { m: enum<u8> { Q, R } }") == 1
-             && sv_sub("A { m: enum<u8> { P } }", "A { m: enum<u16> { P } }") == 0,
+    CHECK(sv_sub("M = enum<u8> { P }\nA { m: M }", "M = enum<u8> { Q, R }\nA { m: M }") == 1
+             && sv_sub("M = enum<u8> { P }\nA { m: M }", "M = enum<u16> { P }\nA { m: M }") == 0,
              "schema-v8: enum option names stay advisory, the backing width gates");
     CHECK(sv_sub("A { x: f32 }", "B { x: f32 }") == 0,
              "schema-v8: struct root names stay strict-equal");
 
     /* struct-element arrays: one element-0 template, indexed paths */
-    {   RantSchema *s = sv("A { p: Float3[3], q: { m: i16 }[] }");
+    {   RantSchema *s = sv("Q { m: i16 }\nA { p: Float3[3], q: Q[] }");
         RantSchemaFieldInfo fi, fx;
         uint8_t m[256]; RantBytes b; int xi;
         CHECK(s != NULL, "schema-v8: struct arrays compile");
@@ -534,7 +551,7 @@ static void schema_v8_checks(void){
     }
 
     /* a struct array inside a struct array's element, one index per level */
-    {   RantSchema *s = sv("T { rows: { cells: { v: i32 }[3], n: u8 }[2] }");
+    {   RantSchema *s = sv("Cell { v: i32 }\nRow { cells: Cell[3], n: u8 }\nT { rows: Row[2] }");
         RantSchemaFieldInfo fi; uint8_t m[128]; RantBytes b; int vi;
         CHECK(s != NULL, "schema-nest: a fixed struct array nests in a fixed one");
         if (s){
@@ -568,7 +585,7 @@ static void schema_v8_checks(void){
         }
         sv_free(s);
     }
-    {   RantSchema *s = sv("Shape { corners: { x: f32, y: f32 }[4], id: u16 }\n"
+    {   RantSchema *s = sv("Shape { corners: Float2[4], id: u16 }\n"
                            "S { tag: u8, shapes: Shape[], note: string }");
         uint8_t m[512]; RantBytes b;
         CHECK(s != NULL, "schema-nest: a fixed struct array nests in a variable one");
@@ -595,7 +612,7 @@ static void schema_v8_checks(void){
     }
 
     /* variable members at depth: declaration nests, storage does not */
-    {   RantSchema *s = sv("A { hdr: { n: u32, note: string, k: u32 }, tail: u8[] }");
+    {   RantSchema *s = sv("Hdr { n: u32, note: string, k: u32 }\nA { hdr: Hdr, tail: u8[] }");
         RantSchemaFieldInfo fi; uint8_t m[256]; RantBytes b;
         CHECK(s != NULL, "schema-v8: a variable member inside a struct compiles");
         if (s){
@@ -616,7 +633,7 @@ static void schema_v8_checks(void){
         }
         sv_free(s);
     }
-    {   RantSchema *s = sv("A { a: string, g: { b: string, c: string }, d: string }");
+    {   RantSchema *s = sv("G { b: string, c: string }\nA { a: string, g: G, d: string }");
         uint8_t m[256]; RantBytes b;
         CHECK(s != NULL, "schema-v8: frames at mixed depths compile");
         if (s){
@@ -634,8 +651,8 @@ static void schema_v8_checks(void){
     }
 
     /* rebase across nested frames and struct arrays */
-    {   RantSchema *pub = sv("A { pad: u64, v: { a: f32, note: string }, p: Float3[2], t: string }");
-        RantSchema *sub = sv("A { v: { a: f32, note: string }, t: string }");
+    {   RantSchema *pub = sv("V { a: f32, note: string }\nA { pad: u64, v: V, p: Float3[2], t: string }");
+        RantSchema *sub = sv("V { a: f32, note: string }\nA { v: V, t: string }");
         RantSchema *rb = NULL; uint8_t m[256]; RantBytes b;
         if (pub && sub) rb = i_rant_schema_rebase(sub, pub, rant_allocator_alloc, &sv_ma);
         CHECK(rb != NULL, "schema-v8: rebase of a nested/array subset");
@@ -700,7 +717,7 @@ static void schema_v8_checks(void){
     }
 
     /* hostile wire */
-    {   uint8_t w[8]; RantSchema *s;
+    {   uint8_t w[10]; RantSchema *s;
         w[0] = (uint8_t)RANT_SCHEMA_WIRE_VERSION; w[1] = 0;
         w[2] = (uint8_t)RANT_NAMED; w[3] = 1; w[4] = 'A'; w[5] = (uint8_t)RANT_NAMED;
         w[6] = 1; w[7] = 'B';
@@ -709,8 +726,10 @@ static void schema_v8_checks(void){
         w[2] = (uint8_t)RANT_NAMED; w[3] = 0; w[4] = (uint8_t)RANT_BOOL;
         CHECK(i_rant_schema_parse(w, 5, rant_allocator_alloc, &sv_ma) == NULL,
                  "schema-v8: a NAMED with an empty name is refused");
-        w[2] = (uint8_t)RANT_ARR; w[3] = 2; w[4] = 0; w[5] = (uint8_t)RANT_STRUCT; w[6] = 0;
-        CHECK(i_rant_schema_parse(w, 7, rant_allocator_alloc, &sv_ma) == NULL,
+        w[2] = (uint8_t)RANT_ARR; w[3] = 2; w[4] = 0; w[5] = (uint8_t)RANT_NAMED; w[6] = 1; w[7] = 'E';
+        w[8] = (uint8_t)RANT_STRUCT; w[9] = 0;
+        CHECK(i_rant_schema_parse(w, 10, rant_allocator_alloc, &sv_ma) == NULL
+                 && strcmp(i_rant_schema_wire_why(w, 10), "an array element cannot be empty") == 0,
                  "schema-v8: an empty array element is refused on the wire");
         w[5] = (uint8_t)RANT_NAMED; w[6] = 1; w[7] = 'A';
         s = i_rant_schema_parse(w, 8, rant_allocator_alloc, &sv_ma);
@@ -721,8 +740,8 @@ static void schema_v8_checks(void){
     /* print: named definitions hoist, dependencies first, and recompile exactly */
     CHECK(sv_roundtrip("Uuid = u8[16]") && sv_roundtrip("Transform") && sv_roundtrip("Image"),
              "schema-v8: alias, composite and variable standard roots round-trip");
-    CHECK(sv_roundtrip("A { x: f32, v: { a: u8, b: string<4> }, p: Float3[3],"
-                          "    q: { m: i16 }[2], s: string, e: enum<i16> { N = -1, Z } }"),
+    CHECK(sv_roundtrip("V { a: u8, b: string<4> }\nQ { m: i16 }\nE = enum<i16> { N = -1, Z }\n"
+                       "A { x: f32, v: V, p: Float3[3], q: Q[2], s: string, e: E }"),
              "schema-v8: a mixed schema round-trips through print");
     CHECK(sv_roundtrip("Cloud { at: Transform, when: Timestamp, pts: Float3[], meta: map }"),
              "schema-v8: nested standard types round-trip");
@@ -738,17 +757,19 @@ static void schema_v8_checks(void){
     }
 
     /* names: one wire spelling, whatever was written */
-    {   RantSchema *s = sv("robot_pose { frame_id: u8, HTTPServer: u8, Imu9Dof: u8, MONO8: u8,\n"
-                           "  mode: enum<u8> { IDLE, running_fast } }\nRobotPose");
-        RantSchema *same = sv("RobotPose { frameId: u8, httpServer: u8, imu9Dof: u8, mono8: u8,\n"
-                              "  mode: enum<u8> { Idle, RunningFast } }");
+    {   RantSchema *s = sv("robot_mode = enum<u8> { IDLE, running_fast }\n"
+                           "robot_pose { frame_id: u8, HTTPServer: u8, Imu9Dof: u8, MONO8: u8,\n"
+                           "  mode: robot_mode }\nRobotPose");
+        RantSchema *same = sv("RobotMode = enum<u8> { Idle, RunningFast }\n"
+                              "RobotPose { frameId: u8, httpServer: u8, imu9Dof: u8, mono8: u8,\n"
+                              "  mode: ROBOT_MODE }");
         char buf[512], w[64];
         CHECK(s && same, "names: a text of mixed spellings compiles");
         if (s && same){
             rant_schema_print(s, buf, sizeof buf);
             CHECK(strstr(buf, "RobotPose {") && strstr(buf, "frame_id:") && strstr(buf, "http_server:")
                      && strstr(buf, "imu9_dof:") && strstr(buf, "mono8:") && strstr(buf, "Idle")
-                     && strstr(buf, "RunningFast"),
+                     && strstr(buf, "RunningFast") && strstr(buf, "RobotMode ="),
                      "names: fields spell snake_case, types and options PascalCase (%s)", buf);
             CHECK(rant_schema_field_index(s, "FrameId") == 0 && rant_schema_field_index(s, "frame_id") == 0
                      && rant_schema_field_index(s, "http_server") == 1,
@@ -794,13 +815,13 @@ static void schema_v8_checks(void){
             CHECK(bad == 0, "names: every spelling normalizes to a fixed point (%d do not)", bad);
         }
         CHECK(sv("A { x: u8, X: u8 }") == NULL && sv("A { frame_id: u8, frameId: u8 }") == NULL
-                 && sv("A { a: { x: u8, X: u8 } }") == NULL && sv("A { x: u8, b: { x: u8 } }") != NULL,
+                 && sv("B { x: u8, X: u8 }\nA { a: B }") == NULL && sv("B { x: u8 }\nA { x: u8, b: B }") != NULL,
                  "names: two fields of one struct with one wire name are refused");
         {   i_RantSchemaErr ep = { NULL, NULL };
             CHECK(test_compile(&sv_ma, "M = enum<u8> { Idle, Busy, IDLE }", &ep) == NULL
                      && ep.why && strstr(ep.why, "same wire name") && ep.at && strncmp(ep.at, "IDLE", 4) == 0
                      && sv("M = enum<u8> { RX, R_X }") == NULL
-                     && sv("A { m: enum<u8> { running_fast = 2, RunningFast = 3 } }") == NULL
+                     && sv("M = enum<u8> { running_fast = 2, RunningFast = 3 }") == NULL
                      && sv("M = enum<u8> { Idle, Busy, IdleNot }") != NULL,
                      "names: two options of one enum with one wire name are refused (%s)",
                      ep.why ? ep.why : "null"); }
@@ -850,7 +871,7 @@ static float getf(RantBytes a, size_t i){                     /* element i of pa
 static void schema_nested_checks(void){
     RantAllocator ma = rant_allocator_heap(0);
     sv_ma = rant_allocator_heap(0);
-    {   RantSchema *s = test_compile(&ma, "Path { id: u32, segments: { speed: f32, pts: Float2[] }[] }", NULL);
+    {   RantSchema *s = test_compile(&ma, "Seg { speed: f32, pts: Float2[] }\nRoute { id: u32, segments: Seg[] }", NULL);
         RantSchemaFieldInfo fi; uint8_t m[64]; size_t at = 0; RantBytes b; RantValue v;
         uint32_t ix[2] = { 1, 0 };
         CHECK(s != NULL, "nested: a variable struct element compiles");
@@ -948,8 +969,8 @@ static void schema_nested_checks(void){
         }
     }
     {   RantSchema *s = test_compile(&ma,
-            "D { fixed: string[2], recs: { s: string, n: u8 }[2], trip: f32[3][],"
-            "    modes: enum<u8> { A, B }[], id: Uuid[] }", NULL);
+            "Rec { s: string, n: u8 }\nMode = enum<u8> { A, B }\n"
+            "D { fixed: string[2], recs: Rec[2], trip: f32[3][], modes: Mode[], id: Uuid[] }", NULL);
         uint8_t m[256], fl[24], ids[32], modes[3] = { 1, 0, 1 }; RantBytes b; int i, ok;
         RantSchemaFieldInfo fi;
         CHECK(s != NULL, "nested: every other element kind compiles");
@@ -983,10 +1004,10 @@ static void schema_nested_checks(void){
                      "nested: a named element row carries its name");
         }
     }
-    CHECK(sv_roundtrip("A { s: string[], g: f32[][], t: f32[3][], m: map[], e: enum<u8> { X, Y }[2],"
-                       "    u: Uuid[], i: Image[2], p: { q: { r: f32 }[] }[2] }"),
+    CHECK(sv_roundtrip("E = enum<u8> { X, Y }\nR { r: f32 }\nP { q: R[] }\n"
+                       "A { s: string[], g: f32[][], t: f32[3][], m: map[], e: E[2], u: Uuid[], i: Image[2], p: P[2] }"),
              "nested: every element kind round-trips through print");
-    CHECK(sv("A { v: u8[][][][][][][] }") != NULL && sv("A { a: { b: { c: f32[] }[] }[4] }") != NULL,
+    CHECK(sv("A { v: u8[][][][][][][] }") != NULL && sv("C { c: f32[] }\nB { b: C[] }\nA { a: B[4] }") != NULL,
              "nested: arrays nest up to the depth cap");
     CHECK(sv_sub("A { g: f32[][] }", "A { x: u8, g: f32[][] }") == 1
              && sv_sub("A { g: f32[] }", "A { g: f32[][] }") == 0
@@ -1004,8 +1025,8 @@ static void schema_nested_checks(void){
                  "nested: a default message past 4 GB is refused (%s)", ep.why ? ep.why : "null");
     }
     {   /* the reader's own fields over the writer's layout, through a nested record */
-        RantSchema *pub = sv("A { pad: u64, segs: { n: u8, s: string }[], t: string }");
-        RantSchema *sub = sv("A { t: string, segs: { n: u8, s: string }[] }");
+        RantSchema *pub = sv("Seg { n: u8, s: string }\nA { pad: u64, segs: Seg[], t: string }");
+        RantSchema *sub = sv("Seg { n: u8, s: string }\nA { t: string, segs: Seg[] }");
         RantSchema *rb = NULL; uint8_t m[64]; size_t at = 8; RantBytes b;
         memset(m, 0, 8);
         at = put32(m, at, 15);
@@ -1042,7 +1063,7 @@ static size_t path_example(uint8_t *m){
    message as it was. */
 static void schema_write_checks(void){
     RantAllocator ma = rant_allocator_heap(0);
-    {   RantSchema *s = test_compile(&ma, "Path { id: u32, segments: { speed: f32, pts: Float2[] }[] }", NULL);
+    {   RantSchema *s = test_compile(&ma, "Seg { speed: f32, pts: Float2[] }\nRoute { id: u32, segments: Seg[] }", NULL);
         uint8_t want[64], m[128], back[128], c[128]; float p0[4] = { 1, 2, 3, 4 }, p1[2] = { 5, 6 };
         size_t wl = path_example(want); RantBytes b; RantValue v; int ok;
         if (s){
@@ -1134,7 +1155,7 @@ static void schema_write_checks(void){
                      "writes: inner arrays size and fill on their own");
         }
     }
-    {   RantSchema *s = test_compile(&ma, "D { a: { b: { c: string }[] }[], t: string }", NULL);
+    {   RantSchema *s = test_compile(&ma, "C { c: string }\nB { b: C[] }\nD { a: B[], t: string }", NULL);
         uint8_t m[256]; RantBytes b; int ok, valid = 1;
         if (s){
             ok = rant_schema_message_default(s, m, sizeof m);
@@ -1160,7 +1181,7 @@ static void schema_write_checks(void){
 #undef STEP
         }
     }
-    {   RantSchema *s = test_compile(&ma, "F { recs: { s: string, n: u8 }[2], ms: map[], t: string }", NULL);
+    {   RantSchema *s = test_compile(&ma, "Rec { s: string, n: u8 }\nF { recs: Rec[2], ms: map[], t: string }", NULL);
         uint8_t m[256], body[64]; uint32_t bl; RantBytes b; int ok;
         RantMapWriter w = rant_map_begin(body, sizeof body);
         rant_map_put_uint(&w, "k", 3);
@@ -1193,8 +1214,8 @@ static void schema_write_checks(void){
  * it was. The garbage loop proves nothing alone, it is there for the sanitizer builds. */
 static void schema_misuse_checks(void){
     RantAllocator ma = rant_allocator_heap(0);
-    RantSchema *s = test_compile(&ma, "M { id: u32, segs: { speed: f32, pts: Float2[] }[], names: string[], "
-                                      "tags: string<4>[2], e: enum<u8> { A=0, B=1 } }", NULL);
+    RantSchema *s = test_compile(&ma, "Seg { speed: f32, pts: Float2[] }\nE = enum<u8> { A=0, B=1 }\n"
+                                      "M { id: u32, segs: Seg[], names: string[], tags: string<4>[2], e: E }", NULL);
     uint8_t m[256], c[256]; RantBytes b; RantValue v; uint32_t ix[3] = { 0, 0, 0 }; size_t len; int ok;
     int seg, pts, x, names;
     CHECK(s != NULL, "misuse: the schema compiles");

@@ -175,8 +175,8 @@ fn the_derived_schema_is_the_dsl_every_binding_spells() {
     let conveyor = a.publisher::<Conveyor>("c", Qos::new()).unwrap().schema().unwrap();
     assert_eq!(conveyor.hash(), b.schema("Conveyor { speed: f64, running: bool, part: string<16> }").unwrap().hash());
     let shape = a.publisher::<Shape>("s", Qos::new()).unwrap().schema().unwrap();
-    let text = "Corner { x: f32, y: f32 }\n\
-                Shape { mode: enum<u8> { Idle=0, Run=2, Fault=3 }, bounds: Corner[2], corners: Corner[], \
+    let text = "Corner { x: f32, y: f32 }\nMode = enum<u8> { Idle=0, Run=2, Fault=3 }\n\
+                Shape { mode: Mode, bounds: Corner[2], corners: Corner[], \
                 weights: f32[], label: string, tags: string<8>[2], names: string<8>[], at: Transform, \
                 when: Timestamp, id: Uuid, scale: f64[3], origin: Corner }";
     assert_eq!(shape.hash(), b.schema(text).unwrap().hash(), "Shape spells as\n{}", shape.to_dsl());
@@ -230,8 +230,9 @@ fn any_type_as_an_element_spells_as_the_dsl_does() {
     let text = "Stretch { speed: f32, pts: Float2[] }\nRoute { id: u32, segments: Stretch[], name: string }";
     assert_eq!(route.hash(), b.schema(text).unwrap().hash(), "Route spells as\n{}", route.to_dsl());
     let layers = a.publisher::<Layers>("l", Qos::new()).unwrap().schema().unwrap();
-    let text = "Layers { grid: f32[][], rows: f32[3][], names: string[], pair: string[2], legs: Stretch[2], \
-                m: f32[3][2], areas: Polygon2D[], lanes: enum<u8> { Left=0, Right=1 }[], words: string[][], \
+    let text = "Lane = enum<u8> { Left=0, Right=1 }\n\
+                Layers { grid: f32[][], rows: f32[3][], names: string[], pair: string[2], legs: Stretch[2], \
+                m: f32[3][2], areas: Polygon2D[], lanes: Lane[], words: string[][], \
                 tags: string<8>[2][], flags: bool[], ids: Uuid[] }";
     assert_eq!(layers.hash(), b.schema(text).unwrap().hash(), "Layers spells as\n{}", layers.to_dsl());
     let words = a.publisher::<Vec<Vec<String>>>("w", Qos::new()).unwrap().schema().unwrap();
@@ -340,7 +341,7 @@ fn shapes_the_wire_cannot_carry_are_refused_at_creation() {
     let a = Node::new("refuser", options(34, Threading::Manual)).unwrap();
     let e = a.publisher::<Unwired>("u", Qos::new()).err().unwrap();
     assert_eq!(e.kind(), ErrorKind::BadSchema, "{e}");
-    let s = a.schema("{ v: f64 }").unwrap();
+    let s = a.schema("V { v: f64 }").unwrap();
     let e = a.publisher::<f64>("t", Qos::new().schema(&s)).err().unwrap();
     assert_eq!(e.kind(), ErrorKind::State, "a typed handle refuses a schema: {e}");
     let e = a.subscriber::<f64>("t", Qos::new().reflect_from_mesh(true), |_| {}).err().unwrap();

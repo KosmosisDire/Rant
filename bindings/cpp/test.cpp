@@ -473,16 +473,12 @@ static bool stdtypes_leg() {
         rant::Schema twist = a.schema("Twist");
         chk("std: Transform and Twist are distinct names, never mistaken for each other",
             tf && twist && !twist.can_read(tf) && !tf.can_read(twist));
-        /* the name NARROWS: an anonymous field of the same shape reads a Transform field,
-           never the reverse (a struct ROOT's name stays strict-equal, as before). Two
-           shapes of W, so each goes on its own node */
+        /* every struct has a name, so the same shape under another name never reads a
+           Transform field. Two shapes of W, so each goes on its own node */
         rant::Schema named_f = a.schema("W { at: Transform }");
-        rant::Schema bare_f  = b.schema(
-            "W { at: { pose: { position: { x: f64, y: f64, z: f64 },"
-            "                  orientation: { x: f64, y: f64, z: f64, w: f64 } },"
-            "          parent: string<30> } }");
-        chk("std: an anonymous field of the same shape reads a Transform field",
-            named_f && bare_f && bare_f.can_read(named_f) && !named_f.can_read(bare_f));
+        rant::Schema other_f = b.schema("Frame { pose: Pose, parent: string<30> }\nW { at: Frame }");
+        chk("std: the same shape under another name never reads a Transform field",
+            named_f && other_f && !other_f.can_read(named_f) && !named_f.can_read(other_f));
         if (tf) {
             rant::Schema::Field f;
             int i = tf.field_index("pose.position");
@@ -891,10 +887,10 @@ static bool nested_leg() {
     }
     {   auto sc = rant::priv::schema_of<Layers>(a);
         rant::Schema same = a.schema(
-            "Stretch { speed: f32, pts: Float2[] }\n"
+            "Stretch { speed: f32, pts: Float2[] }\nLane = enum<u8> { Left=0, Right=1 }\n"
             "Layers { grid: f32[][], rows: f32[3][], names: string[], pair: string[2], "
             "legs: Stretch[2], m: f32[3][2], ids: Uuid[], areas: Polygon2D[], "
-            "lanes: enum<u8> { Left=0, Right=1 }[], words: string[][] }");
+            "lanes: Lane[], words: string[][] }");
         chk("nest: every nesting spells as the DSL does", sc && same && sc->hash() == same.hash());
         Layers in, out;
         in.grid = { { 1.0f, 2.0f }, {}, { 3.0f } };
@@ -1943,7 +1939,7 @@ static bool factory_leg() {
         try { make(); } catch (const rant::Error&) { return true; }
         return false;
     };
-    rant::Schema s = a.schema("{ v: i32 }");
+    rant::Schema s = a.schema("V { v: i32 }");
     chk("factory: a typed handle refuses a schema",
         refuses([&] { (void)a.publisher<Speed>("f/typed", {}, s); }));
     chk("factory: a typed handle refuses reflect_from_mesh",

@@ -39,7 +39,7 @@ node.subscriber("Line1/Conveyor", Conveyor, (c) => console.log(c.speed));
 
 ## Schemas
 
-- `u8` to `f64`, `bool`, `string(cap?)`, `array(elem, n?)`, `enumOf({ Idle: 0, Run: 1 },
+- `u8` to `f64`, `bool`, `string(cap?)`, `array(elem, n?)`, `enumOf(name, { Idle: 0, Run: 1 },
   backing?)`, `map`, `struct(name, fields)` and the standard types of docs/stdtypes.md as
   `types.Pose` and the rest. A handle takes its value type from the schema, and
   `Infer<typeof S>` names it.

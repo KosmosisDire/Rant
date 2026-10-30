@@ -442,10 +442,19 @@ impl Spell {
         self.push_op(Shape::VarString);
     }
 
-    /// A named integer `enum<k> { A=0, B=1 }`, spelled inline as C++ does.
-    pub fn enumeration(&mut self, backing: u8, options: &[(&str, i64)]) {
-        let body: Vec<String> = options.iter().map(|(n, v)| format!("{n}={v}")).collect();
-        self.base(&format!("enum<{}> {{ {} }}", kind::name(backing), body.join(", ")));
+    /// A named integer: its name, defined once above as `Name = enum<k> { A=0, B=1 }`.
+    pub fn enumeration(&mut self, id: TypeId, name: &str, backing: u8, options: &[(&str, i64)]) {
+        if self.defined.insert(id) {
+            let body: Vec<String> = options.iter().map(|(n, v)| format!("{n}={v}")).collect();
+            self.defs.push_str(&format!("{name} = enum<{}> {{ {} }}\n", kind::name(backing), body.join(", ")));
+        }
+        self.base(name);
+        self.push_op(Shape::fixed(backing, 1, 0, true, false));
+    }
+
+    /// A standard enum: always in scope by name, so it is never defined.
+    pub fn standard_enum(&mut self, name: &str, backing: u8) {
+        self.base(name);
         self.push_op(Shape::fixed(backing, 1, 0, true, false));
     }
 

@@ -105,13 +105,15 @@ name, so a C or Python peer spells `Corner` too. A name has one shape per node, 
 nested type called `Twist` with fields of its own is refused, as the standard `Twist`
 already is. An element may be any type and arrays nest to any depth: `List<List<float>>` is
 `f32[][]`, `string[]` is `string[]`, and a struct whose members hold arrays of their own
-works as an element too.
+works as an element too. An enum field takes its enum's name the same way, defined once as
+`Lane = enum<u8> { Left=0, Right=1 }`. `[RantSchema]` names a struct, class or enum when its
+own name will not do.
 
 A bare type as a handle's type is the whole schema: `Publisher<bool>`,
 `Subscriber<float[]>`, `VariableDefinition<string>`,
 `Publisher<Dictionary<string, object>>`, an enum, or a struct array such as
-`Publisher<Corner[]>`, whose element is defined above it. Such a root is anonymous, so it
-is the same bytes and hash in every language.
+`Publisher<Corner[]>`, whose element or enum is defined above it. Such a root is
+anonymous, so it is the same bytes and hash in every language.
 
 A tuple such as `(double, double)` has no name of its own, so the handle names it after
 itself in PascalCase: `AddReq` and `AddRsp` on function `Add`, `AddPrg` on a task,

@@ -252,11 +252,12 @@ class Empty:
 
 
 # The video family. Each member value IS the wire value, so the names and numbers
-# below are the same in every binding.
+# below are the same in every binding. A field of one spells as its standard name.
 
 class ImageFormat(_pyenum.IntEnum):
     """How an Image's data is laid out. A value >= 16 is a compressed container, so
     `data` holds the file bytes rather than pixels."""
+    __rant_std__ = "ImageFormat"
     Mono8 = 0
     Mono16 = 1
     Rgb8 = 2
@@ -272,6 +273,7 @@ class ImageFormat(_pyenum.IntEnum):
 class VideoCodec(_pyenum.IntEnum):
     """The codec a VideoFrame's data is encoded with. Unknown is the unstated
     codec hint (an ExternalVideoStream that does not state one)."""
+    __rant_std__ = "VideoCodec"
     Unknown = 0
     Mjpeg = 1
     H264 = 2
@@ -281,6 +283,7 @@ class VideoCodec(_pyenum.IntEnum):
 
 class VideoStreamKind(_pyenum.IntEnum):
     """The protocol an ExternalVideoStream's url speaks."""
+    __rant_std__ = "VideoStreamKind"
     Rtsp = 0
     WebrtcWhep = 1
     Hls = 2
@@ -323,6 +326,7 @@ class ExternalVideoStream:
 
 class DistortionModel(_pyenum.IntEnum):
     """A lens distortion model. None_ is an ideal pinhole, spelled None on the wire."""
+    __rant_std__ = "DistortionModel"
     None_ = 0
     BrownConrady = 1
     Fisheye = 2

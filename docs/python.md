@@ -75,7 +75,7 @@ gives a constructor. Field types are `rant.u8` to `rant.f64`,
 `rant.string(cap)` for a capped string, `rant.<scalar>[n]` or `rant.string(cap)[n]` for a
 fixed array, a nested annotated class, plain `int`, `float` and `bool`, `str` for an
 unbounded string, `list[...]` of any field type for a variable array, `dict` for a map, and
-an `IntEnum` or `rant.enum(cls, backing)` for a named integer. Arrays nest to any depth and
+an `IntEnum` or `rant.enum(cls, backing)` for an enum named after its class. Arrays nest to any depth and
 read as the DSL does: `rant.f32[3][2]` is two arrays of three, `list[list[str]]` is
 `string[][]`. A member's wire name is its own name in
 the wire spelling, snake_case (docs/stdtypes.md): `frame_id` stays `frame_id`, the same

@@ -100,8 +100,7 @@ Where anything else disagrees about a wrapper API, this file wins.
 - A reflected field table mirrors the C `RantSchemaFieldInfo` exactly, everywhere,
   including `type_name`, `backing`, `arr_parent` and `arr_depth`, and every array's element
   row. A dropped `type_name`
-  turns `color: Color` into an anonymous struct and every named reader then refuses the
-  sender. Only `rant_schema_print` spells DSL text.
+  turns `color: Color` into an unnamed struct, which the wire refuses. Only `rant_schema_print` spells DSL text.
 - A public feature lands in every binding. Nothing lists the exports: a declaration
   carrying `RANT_API` in a public header is exported and nothing else is, so a new entry
   point is reachable from every binding the moment it is declared. Bindings format log
@@ -187,7 +186,7 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   end. Any element nests, roots included. Still refused at compile time: `vector<bool>`,
   maps, pointers.
 - `rant::std_type<T>` names a user type the way the standard roster is named. `RANT_ENUM`
-  registers an `enum class`. Unregistered enums ship as their backing integer.
+  registers an `enum class` under its name. Unregistered enums ship as their backing integer.
 - Callbacks never unwind into C. `priv::guarded` wraps every app callback run from a C
   trampoline and turns a throw into stderr text plus an Error event of kind `None`.
   `priv::answered` wraps a function or task handler and turns a throw into an AppError

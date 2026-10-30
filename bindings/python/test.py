@@ -182,15 +182,13 @@ def std_types():
     check("Float3 is 12 message bytes", len(f3.encode({})) == 12)
     check("the mirror dataclass IS that type", a.schema(rant.types.Float3).hash == HASH_FLOAT3)
 
-    # a name narrows: an anonymous field of the same shape reads a Transform field, never
-    # the reverse, and Transform/Twist are distinct names never mistaken for each other.
+    # every struct has a name, so the same shape under another name never reads a Transform
+    # field, and Transform/Twist are distinct names never mistaken for each other.
     # Two shapes of W, so each goes on its own node
     named = a.schema("W { at: Transform }")
-    bare = b.schema("W { at: { pose: { position: { x: f64, y: f64, z: f64 },"
-                    "                  orientation: { x: f64, y: f64, z: f64, w: f64 } },"
-                    "         parent: string<30> } }")
-    check("an anonymous field of the same shape reads a Transform field",
-          bare.can_read(named) and not named.can_read(bare))
+    other = b.schema("Frame { pose: Pose, parent: string<30> }\nW { at: Frame }")
+    check("the same shape under another name never reads a Transform field",
+          not other.can_read(named) and not named.can_read(other))
     check("Transform and Twist never cross-wire",
           not a.schema("Twist").can_read(a.schema("Transform")))
     try:
@@ -382,8 +380,9 @@ def struct_arrays():
     check("empty array round-trips empty", sch.decode(sch.encode(Detections())).codes == [])
 
     # the same wire from DSL text, and the whole of one element's kinds
-    text = node.schema("D { rows: { a: u8, b: i16, c: f64, d: bool, e: string<4>, "
-                       "f: f32[2], g: enum<u8> { OFF=0, ON=1 } }[], n: u8 }")
+    text = node.schema("Power = enum<u8> { OFF=0, ON=1 }\n"
+                       "Row { a: u8, b: i16, c: f64, d: bool, e: string<4>, f: f32[2], g: Power }\n"
+                       "D { rows: Row[], n: u8 }")
     rows = [{"a": 1, "b": -2, "c": 0.5, "d": True, "e": "hi", "f": [1.0, 2.0], "g": 1},
             {"a": 255, "b": -32768, "c": -1.5, "d": False, "e": "", "f": [0.0, 0.0], "g": 0}]
     want = [dict(r, f=array.array("f", r["f"])) for r in rows]   # a numeric array decodes as array.array
@@ -392,7 +391,7 @@ def struct_arrays():
     check("an enum element member takes its option name",
           text.decode(text.encode({"rows": [dict(rows[0], g="OFF")]}))["rows"][0]["g"] == 0)
 
-    fixed = node.schema("P { pts: { x: f32, y: f32 }[3] }")
+    fixed = node.schema("P { pts: Float2[3] }")
     short = fixed.decode(fixed.encode({"pts": [{"x": 1.0, "y": 2.0}]}))
     check("a fixed struct array zero fills to its count",
           len(fixed.encode({"pts": []})) == 24 and len(short["pts"]) == 3
@@ -428,7 +427,7 @@ def struct_arrays():
     check("a fixed struct array nests in a struct array's element",
           len(back) == 2 and back[0].corners[0].y == 2.0 and len(back[1].corners) == 4
           and back[1].marks[0].dy == 5.0)
-    grid = node.schema("G { rows: { cells: { v: i32 }[3], n: u8 }[2] }")
+    grid = node.schema("Cell { v: i32 }\nTier { cells: Cell[3], n: u8 }\nG { rows: Tier[2] }")
     got = grid.decode(grid.encode({"rows": [{"cells": [{"v": 1}], "n": 4},
                                             {"cells": [{"v": 7}, {"v": 8}, {"v": 9}]}]}))
     check("nested struct arrays from dicts read back per level",
@@ -531,10 +530,10 @@ def nested():
           and wd["name"] == "wide")
 
     ls = node.schema(Layers)
-    same = node.schema("Stretch { speed: f32, pts: Float2[] }\n"
+    same = node.schema("Stretch { speed: f32, pts: Float2[] }\nLane = enum<u8> { Left=0, Right=1 }\n"
                        "Layers { grid: f32[][], rows: f32[3][], names: string[], pair: string[2], "
                        "legs: Stretch[2], m: f32[3][2], areas: Polygon2D[], "
-                       "lanes: enum<u8> { Left=0, Right=1 }[], words: string[][], "
+                       "lanes: Lane[], words: string[][], "
                        "tags: string<8>[2][], flags: bool[], notes: map[] }")
     check("every nesting spells as the DSL does", ls.hash == same.hash)
     src = Layers(grid=[[1.0, 2.0], [], [3.0]], rows=[[1, 2, 3], [4, 5, 6]], names=["abc", "", "hello"],

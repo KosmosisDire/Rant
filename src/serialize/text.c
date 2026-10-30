@@ -363,7 +363,8 @@ const char *i_rant_std_lookup(const char *name);     /* serialize/stdtypes.c */
 #define i_rant_std_lookup(name) ((const char *)0)
 #endif
 
-typedef struct { const char *p; const char *err; const char *why; } i_RantDsl;
+/* body is set while a definition's body is read, the one place a struct or an enum is spelled */
+typedef struct { const char *p; const char *err; const char *why; int body; } i_RantDsl;
 
 void i_rant_registry_init(i_RantRegistry *r, RantAllocFn alloc, void *user){
     memset(r, 0, sizeof *r);
@@ -602,7 +603,7 @@ static int i_rant_defs_add_text(i_RantRegistry *defs, const char *name, const ch
     if (defs->rec >= 8u) return 0;                       /* the roster is acyclic, but be sure */
     defs->rec++;
     sb = i_rant_schema_builder_begin(defs->arena.alloc, defs->arena.user);
-    sd.p = text; sd.err = NULL; sd.why = NULL;
+    sd.p = text; sd.err = NULL; sd.why = NULL; sd.body = 1;
     i_rant_dsl_field_type(&sd, &sb, defs, "");
     i_rant_dsl_ws(&sd);
     if (*sd.p) i_rant_dsl_fail(&sd, sd.p, "a type on its own ends the text");
@@ -665,13 +666,14 @@ static int i_rant_dsl_suffix(i_RantDsl *d, uint16_t *count, int *variable){
 
 /* The type whose leading word is in tname, with at pointing at it for errors */
 static void i_rant_dsl_word_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegistry *defs,
-                                 const char *tname, const char *at){
+                                 const char *tname, const char *at, int body){
     RantSchemaTypeKind k; uint16_t cap; uint32_t toff, tlen; size_t nlen; char twire[256];
     if (strcmp(tname, "map") == 0){
         i_rant_schema_builder_put(b, (uint8_t)RANT_MAP);
         return;
     }
     if (strcmp(tname, "enum") == 0){
+        if (!body){ i_rant_dsl_fail(d, at, "an enum needs a name: define it as Name = enum<u8> { }"); return; }
         i_rant_dsl_enum(d, b);
         return;
     }
@@ -706,13 +708,15 @@ static void i_rant_dsl_word_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantReg
  * array suffix wraps what was written before it. A type on its own passes name "". */
 static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRegistry *defs,
                                   const char *name){
-    char tname[256]; const char *at; size_t head; uint16_t cnt; int variable;
+    char tname[256]; const char *at; size_t head; uint16_t cnt; int variable, body = d->body;
+    d->body = 0;                                         /* the fields inside are not the body */
     i_rant_dsl_ws(d);
     at = d->p;
     i_rant_schema_builder_count(b);
     i_rant_schema_builder_put_name(b, name);
     head = b->len;
     if (*d->p == '{'){
+        if (!body){ i_rant_dsl_fail(d, at, "a struct needs a name: define it as Name { }"); return; }
         d->p++;
         i_rant_schema_builder_open_struct(b);
         i_rant_dsl_fields(d, b, defs);
@@ -720,11 +724,17 @@ static void i_rant_dsl_field_type(i_RantDsl *d, i_RantSchemaBuilder *b, i_RantRe
         i_rant_schema_builder_close_struct(b);
     } else {
         if (!i_rant_dsl_ident(d, tname)) return;
-        i_rant_dsl_word_type(d, b, defs, tname, at);
+        i_rant_dsl_word_type(d, b, defs, tname, at, body);
     }
     if (d->err || b->err || head >= b->len) return;
-    while (i_rant_dsl_suffix(d, &cnt, &variable) && !d->err)
+    while (i_rant_dsl_suffix(d, &cnt, &variable) && !d->err){
+        if (b->buf[head] == RANT_STRUCT || b->buf[head] == RANT_ENUM){   /* the element would be unnamed */
+            i_rant_dsl_fail(d, at, b->buf[head] == RANT_ENUM ? "an enum needs a name: define it as Name = enum<u8> { }"
+                                                              : "a struct needs a name: define it as Name { }");
+            return;
+        }
         i_rant_dsl_splice_array(b, head, cnt, variable);
+    }
 }
 
 /* whether the field name written at b->buf[mine] already names an earlier field of the
@@ -782,6 +792,7 @@ static void i_rant_dsl_def(i_RantDsl *d, i_RantRegistry *defs, const char *name,
         i_rant_dsl_fields(d, &sb, defs);
         if (i_rant_dsl_expect(d, '}')) i_rant_schema_builder_close_struct(&sb);
     } else {
+        d->body = 1;
         i_rant_dsl_field_type(d, &sb, defs, "");
         if (!d->err && !sb.err && sb.len && sb.buf[0] == RANT_STRUCT)
             i_rant_dsl_fail(d, at, "a struct is defined as Name { }");
@@ -819,8 +830,8 @@ RantSchema *i_rant_registry_parse(i_RantRegistry *r, const void *wire, size_t wi
 }
 
 /* A text is a run of statements and compiles to its last one. A definition may be followed
- * by more statements. A type on its own (bool, f32[3], Pose, { x: f32 }) ends the text. A
- * failed text leaves no definition behind, so nothing is half kept. */
+ * by more statements. A type on its own (bool, f32[3], Pose) ends the text. A failed text
+ * leaves no definition behind, so nothing is half kept. */
 RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, i_RantSchemaErr *err){
     i_RantDsl d; i_RantSchemaBuilder root;
     RantSchema *s = NULL;
@@ -835,7 +846,7 @@ RantSchema *i_rant_registry_compile(i_RantRegistry *defs, const char *text, i_Ra
     if (!defs || !text) return NULL;
     kept_len = defs->arena.len; kept_defs = defs->n_defs;
     root = i_rant_schema_builder_begin(defs->arena.alloc, defs->arena.user);
-    d.p = text; d.err = NULL; d.why = NULL;
+    d.p = text; d.err = NULL; d.why = NULL; d.body = 0;
     if (defs->arena.err) i_rant_dsl_fail(&d, text, i_rant_builder_why(defs->arena.err));
     if (root.err) i_rant_dsl_fail(&d, text, i_rant_builder_why(root.err));
 
