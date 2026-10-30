@@ -82,7 +82,7 @@ int  i_rant_plat_send(i_RantSock s, const void *buf, size_t len,
 int  i_rant_plat_recv(i_RantSock s, void *buf, size_t cap,
                     uint8_t src_ip[4], uint16_t *src_port);
 int  i_rant_plat_would_block(void);
-/* Positive when ready, 0 on timeout, negative on error. */
+/* Positive when ready, 0 on timeout or a signal, negative on error. */
 int  i_rant_plat_poll(i_RantPollfd *fds, int n, int timeout_ms);
 /* The OS's last socket error on the calling thread, for diagnostics. Keeps no state. */
 int  i_rant_plat_last_socket_error(void);

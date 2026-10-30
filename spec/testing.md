@@ -69,7 +69,7 @@ program in this order.
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
 | `unit.tunnel` | hash, handshake, frame, json, batch |
 | `e2e.stream` | stream, scale, named, collision |
-| `e2e.node` | open_fail, bye_marks, bulk_pools, bulk_queued, bulk_shm, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups |
+| `e2e.node` | open_fail, bye_marks, bulk_pools, bulk_queued, bulk_shm, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups, poll_signal |
 | `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema, nested |
 | `e2e.detail` | detail_live, interest_external, interest_bulk, filter_fetch |
 | `e2e.shm` | shm_node |
@@ -244,6 +244,8 @@ What each phase pins, grouped by layer.
 - Domain groups: two domains on one host each discover themselves, and no announce of the
   other domain reaches either discovery socket. On Linux this fails without
   `IP_MULTICAST_ALL` off. Other programs' unicast seeds to the discovery port are not counted.
+- Poll signal: a signal ends a long platform poll early and reads as a timeout, and a stream
+  of them never raises `RANT_E_POLL` on a node. POSIX only, Windows skips it.
 - Open failure paths: a forced failure at each staged cleanup label returns NULL and
   leaves the platform balanced. A join the wire tap fails (`fail_join`) unwinds the node
   and `rant_last_error(NULL)` names MCAST_JOIN. An occupied data port collides, since the

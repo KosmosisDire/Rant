@@ -2,6 +2,10 @@
  * data, growth past the topic reserve, and the launcher's environment variables.
  * spec/testing.md says what each case pins. */
 #include "support/test.h"
+#ifndef _WIN32
+  #include <signal.h>
+  #include <sys/time.h>
+#endif
 
 /* Exercise the staged cleanup paths of rant_node_open: force a failure at a different
  * stage each time, assert NULL, then confirm a normal open still works. */
@@ -659,6 +663,52 @@ done:
           "bulk shm: every page goes back to its own source (foreign %lld)", test_page_foreign);
 }
 
+#ifndef _WIN32
+static volatile sig_atomic_t ps_signals;
+static int ps_poll_errors;
+static void ps_on_signal(int sig){ (void)sig; ps_signals++; }
+static void ps_on_event(const RantEvent *ev){ if (ev->kind == RANT_ERROR && ev->error == RANT_E_POLL) ps_poll_errors++; }
+#endif
+
+/* The poll signal phase: a signal in the wait ends it early and is no fault. */
+static void poll_signal_checks(void){
+#ifdef _WIN32
+    test_skip("no POSIX signals");
+#else
+    struct sigaction sa;
+    struct itimerval once = { {0, 0}, {0, 20000} }, every = { {0, 2000}, {0, 2000} }, off = { {0, 0}, {0, 0} };
+    RantAllocator a = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *n; i_RantPollfd p; uint64_t t0, end; int r, seen;
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = ps_on_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGALRM, &sa, NULL);   /* stays set: a shot still in flight must not end the program */
+
+    p.fd = i_rant_plat_udp_open(); p.events = RANT_POLLIN; p.revents = 0;
+    CHECK(p.fd != RANT_SOCK_BAD, "poll_signal: a socket to wait on");
+    setitimer(ITIMER_REAL, &once, NULL);
+    t0 = i_rant_plat_now_us();
+    r = i_rant_plat_poll(&p, 1, 5000);
+    CHECK(r == 0 && p.revents == 0, "poll_signal: a signal reads as a timeout (%d)", r);
+    CHECK(ps_signals == 1 && i_rant_plat_now_us() - t0 < 2500000u,
+          "poll_signal: the wait ends at the signal, not at its timeout (%d signals)", (int)ps_signals);
+    i_rant_plat_close(p.fd);
+
+    memset(&o, 0, sizeof o); o.domain = TEST_DOMAIN+46; o.net.multicast_interface = "127.0.0.1";
+    n = rant_node_open(&a, "ps", NULL, ps_on_event, &o);
+    CHECK(n != NULL, "poll_signal: the node opens");
+    if (!n) return;
+    ps_signals = 0;
+    setitimer(ITIMER_REAL, &every, NULL);
+    for (end = i_rant_plat_now_us() + 200000u; i_rant_plat_now_us() < end; ) rant_node_poll(n, 50);
+    setitimer(ITIMER_REAL, &off, NULL);
+    seen = ps_signals;
+    CHECK(seen > 1 && ps_poll_errors == 0, "poll_signal: no RANT_E_POLL from %d signals (%d)", seen, ps_poll_errors);
+    rant_node_close(n, 0);
+#endif
+}
+
 static const TestCase cases[] = {
     { "open_fail", open_fail_checks },
     { "bye_marks", bye_marks_checks },
@@ -672,6 +722,7 @@ static const TestCase cases[] = {
     { "launch_log_level", launchloglevel_checks },
     { "prefix", prefix_checks },
     { "domain_groups", domaingroup_checks },
+    { "poll_signal", poll_signal_checks },
 };
 
 TEST_MAIN(cases)

@@ -525,6 +525,7 @@ int i_rant_plat_poll(i_RantPollfd *fds, int n, int timeout_ms){
     r = WSAPoll(p, (ULONG)n, timeout_ms);
 #else
     r = poll(p, (nfds_t)n, timeout_ms);
+    if (r < 0 && errno == EINTR) r = 0;   /* a signal ended the wait early, nothing failed */
 #endif
     for (i = 0; i < n; i++)
         fds[i].revents = (short)(((p[i].revents & POLLIN) ? RANT_POLLIN : 0)

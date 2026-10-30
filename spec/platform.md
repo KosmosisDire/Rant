@@ -54,7 +54,9 @@ cannot measure implements nothing. The SHM and THREADS detection blocks are mirr
   frees). A target with a custom heap overrides just this.
 - Poll. `RANT_POLLOUT` asks for writable, and `RANT_POLLERR` reports a hang up or an error
   whatever was asked. A poll of no sockets sleeps, which WSAPoll refuses, so Windows
-  sleeps instead.
+  sleeps instead. A signal that ends the wait on POSIX reads as a timeout, not as
+  `RANT_E_POLL`. It does not wait out the rest, so a loop whose handler sets a stop flag
+  sees the flag at once.
 - Process stats are per process, not per node, so several nodes in one process report the
   same numbers and consumers dedup by pid. Any out pointer may be NULL. A platform may fill
   peak RSS but not current, which then reads 0. On ESP the firmware image is the process:
