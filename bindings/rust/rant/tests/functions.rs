@@ -50,7 +50,8 @@ fn a_return_value_is_the_answer() {
     let boom = b.remote_function::<AddReq, i32>("Boom", FunctionOptions::new()).unwrap();
     let who = b.remote_function::<AddReq, rant::String<32>>("Who", FunctionOptions::new()).unwrap();
     assert!(wait_for(4000, None, || add.match_count() > 0 && div.match_count() > 0 && boom.match_count() > 0 && who.match_count() > 0));
-    assert_eq!(caller.match_count(), 1, "a definition counts its callers");
+    // the definer judges the caller on its own clock, after the caller may have matched
+    assert!(wait_for(4000, None, || caller.match_count() == 1), "a definition counts its callers");
 
     let r = add.call(&AddReq { a: 1, b: 2 }, CallOptions::new()).unwrap();
     assert_eq!((r.status(), r.value().copied()), (CallStatus::Ok, Some(3)));
