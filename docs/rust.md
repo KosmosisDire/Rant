@@ -8,7 +8,7 @@ docs/patterns.md and docs/tasks.md apply. This page covers what is different in 
 
 ```toml
 [dependencies]
-rant-middleware = { git = "https://github.com/KosmosisDire/Rant.git", tag = "crate-v0.0.36" }
+rant-middleware = { git = "https://github.com/KosmosisDire/Rant.git", tag = "crate-v0.0.37" }
 ```
 
 - Every release tags the crate `crate-v<version>` with the C sources packed in, so a build
@@ -30,7 +30,7 @@ let node = Node::new("robot", NodeOptions::new().domain(7))?;
 - `close()` or drop shuts the node down. It first waits until the calls other threads are
   making on the node return. Inside one of the node's own callbacks it runs once that
   callback returns.
-- `rant::version()` is the library's version, such as `"0.0.36"`.
+- `rant::version()` is the library's version, such as `"0.0.37"`.
 
 Durations are `std::time::Duration`. `rant::FOREVER` waits with no end.
 
