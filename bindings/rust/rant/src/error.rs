@@ -192,6 +192,12 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<rant_types::StringTooLong> for Error {
+    fn from(e: rant_types::StringTooLong) -> Error {
+        Error::new(ErrorKind::None, e.to_string())
+    }
+}
+
 impl From<SendError> for Error {
     fn from(e: SendError) -> Error {
         let kind = if e == SendError::Schema { ErrorKind::SchemaMismatch } else { ErrorKind::State };

@@ -1,0 +1,11 @@
+[package]
+name = "rant-types"
+description = "The standard types of Rant, such as Pose, Image and PointCloud, with no middleware"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "rant_types"

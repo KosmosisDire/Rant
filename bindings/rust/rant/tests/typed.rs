@@ -234,10 +234,27 @@ fn point_clouds_grids_and_covariances_round_trip() {
     let mut odom = Odometry { parent: "odom".parse().unwrap(), ..Default::default() };
     odom.pose.covariance.m[5][4] = 7.0;
     odom.twist.twist.angular.z = 0.5;
-    assert_eq!(round_trip(42, "odom", odom.clone()), odom);
+    assert_eq!(round_trip(42, "odom", odom), odom);
     let mut m = Matrix3x3::default();
     m.m[2][1] = 4.0;
     assert_eq!(round_trip(43, "m", m), m);
+}
+
+#[test]
+fn the_types_crate_is_rant_types() {
+    use rant::types::{Pose, Quaternion, new_uuid};
+    let pose: rant_types::Pose = Pose::default();
+    assert_eq!(pose.orientation.w, 0.0, "a default value is zero");
+    assert_eq!(Quaternion::IDENTITY.w, 1.0);
+    let name: rant::String<4> = rant_types::String::new();
+    assert_eq!(name, "");
+
+    let long: Result<rant::String<2>, _> = "abc".parse();
+    let refused: rant::Error = long.unwrap_err().into();
+    assert!(refused.to_string().contains("over 2"), "{refused}");
+
+    let (a, b) = (new_uuid(), new_uuid());
+    assert!(!a.is_nil() && a != b && a.bytes[6] & 0xF0 == 0x40, "version 4 and random");
 }
 
 #[test]
@@ -245,9 +262,9 @@ fn wide_enums_round_trip() {
     use rant::types::{CameraIntrinsics, DistortionModel, RangeKind, RangeReading};
     let mut cam = CameraIntrinsics { fx: 500.0, model: DistortionModel::Rational, ..Default::default() };
     cam.coeffs[7] = -0.5;
-    assert_eq!(round_trip(44, "cam", cam.clone()), cam);
+    assert_eq!(round_trip(44, "cam", cam), cam);
     let range = RangeReading { distance: 2.5, kind: RangeKind::Radar, ..Default::default() };
-    assert_eq!(round_trip(45, "range", range.clone()), range);
+    assert_eq!(round_trip(45, "range", range), range);
 }
 
 #[test]

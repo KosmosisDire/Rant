@@ -353,7 +353,8 @@ platform serves every interpreter.
 ## Rust
 
 `bindings/rust/` is a Cargo workspace: `rant-middleware` (imported as `rant`, since `rant` on
-crates.io is taken), `rant-macros` (the derives), `ffigen` (the FFI generator) and the
+crates.io is taken), `rant-types` (the generated standard types, no middleware, with the crate's
+`Message` impls of them generated into `rant/src/types/standard.rs`), `rant-macros` (the derives), `ffigen` (the FFI generator) and the
 interop tick. `build.rs` compiles the amalgamated C into the crate with `cc`, so a program
 needs no DLL and no cmake.
 

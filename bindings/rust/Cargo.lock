@@ -171,6 +171,7 @@ version = "0.0.40"
 dependencies = [
  "cc",
  "rant-macros",
+ "rant-types",
 ]
 
 [[package]]
@@ -179,6 +180,10 @@ version = "0.0.0"
 dependencies = [
  "rant-middleware",
 ]
+
+[[package]]
+name = "rant-types"
+version = "0.0.40"
 
 [[package]]
 name = "regex"

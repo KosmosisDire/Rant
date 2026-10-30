@@ -78,7 +78,10 @@ Not supported: `Option`, maps and references.
 - A value that does not fit its type, such as a `rant::String<N>` longer than N, is
   refused, never cut short.
 - The standard types of docs/stdtypes.md are in `rant::types`: `Pose`, `Transform`,
-  `Empty` and the rest.
+  `Empty` and the rest. They are the `rant-types` crate, which holds no middleware, so a library
+  such as Rant Math shares them with Rant. A new value is all zeros, so a rotation starts from
+  `Quaternion::IDENTITY`. Everything that computes on them is Rant Math, and `rant::types::new_uuid()`
+  makes a random `Uuid`.
 
 ### Raw messages
 

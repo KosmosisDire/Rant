@@ -65,6 +65,7 @@ static int run(const std::string &root, bool check) {
     for (Output &o : write_csharp(model, must_read(root + "/types/extras.cs"))) outputs.push_back(o);
     for (Output &o : write_python(model, must_read(root + "/types/extras.py"), must_read(root + "/types/extras.pyi")))
         outputs.push_back(o);
+    for (Output &o : write_rust(model, must_read(root + "/types/extras.rs"))) outputs.push_back(o);
     for (Output &o : write_json(model)) outputs.push_back(o);
 
     int stale = 0;

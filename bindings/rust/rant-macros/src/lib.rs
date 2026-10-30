@@ -23,18 +23,14 @@ pub fn derive_enum(input: TokenStream) -> TokenStream {
 
 struct Attrs {
     name: Option<LitStr>,
-    standard: bool,
 }
 
 fn attrs(input: &DeriveInput) -> syn::Result<Attrs> {
-    let mut out = Attrs { name: None, standard: false };
+    let mut out = Attrs { name: None };
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("rant")) {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("name") {
                 out.name = Some(meta.value()?.parse()?);
-                Ok(())
-            } else if meta.path.is_ident("standard") {
-                out.standard = true;
                 Ok(())
             } else {
                 Err(meta.error("rant: the attribute takes name = \"TypeName\""))
@@ -62,11 +58,7 @@ fn message(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let idents: Vec<_> = fields.iter().map(|f| f.ident.clone().unwrap()).collect();
     let names: Vec<_> = idents.iter().map(|i| LitStr::new(i.to_string().trim_start_matches("r#"), i.span())).collect();
     let types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
-    let spell = if a.standard {
-        quote! { s.standard(#name, |s| { #( s.member::<#types>(#names); )* }) }
-    } else {
-        quote! { s.structure(::std::any::TypeId::of::<Self>(), #name, |s| { #( s.member::<#types>(#names); )* }) }
-    };
+    let spell = quote! { s.structure(::std::any::TypeId::of::<Self>(), #name, |s| { #( s.member::<#types>(#names); )* }) };
     Ok(quote! {
         impl ::rant::Message for #ident {
             fn __spell(s: &mut ::rant::__private::Spell) {
@@ -131,11 +123,7 @@ fn enumeration(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         .collect();
     let a = attrs(input)?;
     let name = a.name.unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
-    let spell = if a.standard {
-        quote! { s.standard_enum(#name, ::rant::__private::kind::#kind) }
-    } else {
-        quote! { s.enumeration(::std::any::TypeId::of::<Self>(), #name, ::rant::__private::kind::#kind, &[ #( (#names, #values) ),* ]) }
-    };
+    let spell = quote! { s.enumeration(::std::any::TypeId::of::<Self>(), #name, ::rant::__private::kind::#kind, &[ #( (#names, #values) ),* ]) };
     Ok(quote! {
         impl ::rant::Message for #ident {
             fn __spell(s: &mut ::rant::__private::Spell) {
