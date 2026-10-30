@@ -59,9 +59,8 @@ The crate compiles the C library into your program and is used as `rant`. See
 [docs/rust.md](docs/rust.md).
 
 ### Unity
-Add both in the Package Manager (`+`, then "Add package from git URL"), the types first:
+Add it in the Package Manager (`+`, then "Add package from git URL"):
 ```
-https://github.com/KosmosisDire/Rant.git#upm-types
 https://github.com/KosmosisDire/Rant.git#upm
 ```
 Or download `rant-<version>.unitypackage` from the release and use `Assets > Import Package

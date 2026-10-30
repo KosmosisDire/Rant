@@ -1,5 +1,5 @@
-# The Unity packages. Assembles dist/com.rant.types/ and dist/com.rant.rant/, which Unity adds from
-# disk and the release pushes to the upm-types and upm branches, and dist/rant-<version>.unitypackage,
+# The Unity packages. Assembles dist/com.rant.rant/ and dist/com.rant.types/, which Unity adds from
+# disk and the release pushes to the upm and upm-types branches, and dist/rant-<version>.unitypackage,
 # from bindings/csharp/, bindings/csharp/unity/Runtime/ and the libraries in dist/native/. Unity's
 # immutable package cache synthesizes no .meta files, so every entry gets one here, with a
 # GUID that is the md5 of its path so an upgrade keeps references (spec/bindings.md).
@@ -168,8 +168,18 @@ function(meta_body out rel)
   set(${out} "${body}" PARENT_SCOPE)
 endfunction()
 
-# 1. The types package, with no native code, so Rant and a library such as Rant Math share one
-#    definition of each type.
+# The Rant.Types assembly, with no native code, in the folder a package gives it.
+function(write_types dir)
+  file(COPY "${ROOT}/bindings/csharp/types/Types.cs" DESTINATION "${dir}")
+  write_lf("${dir}/Rant.Types.asmdef" "{
+  \"name\": \"Rant.Types\",
+  \"rootNamespace\": \"Rant.Types\",
+  \"noEngineReferences\": true
+}
+")
+endfunction()
+
+# 1. The types package, for a library used with no Rant. The Rant package carries its own copy.
 file(REMOVE_RECURSE "${TYPES_OUT}")
 file(MAKE_DIRECTORY "${TYPES_OUT}/Runtime")
 write_lf("${TYPES_OUT}/package.json" "{
@@ -182,13 +192,7 @@ write_lf("${TYPES_OUT}/package.json" "{
   \"author\": { \"name\": \"Nathan George\" }
 }
 ")
-file(COPY "${ROOT}/bindings/csharp/types/Types.cs" DESTINATION "${TYPES_OUT}/Runtime")
-write_lf("${TYPES_OUT}/Runtime/Rant.Types.asmdef" "{
-  \"name\": \"Rant.Types\",
-  \"rootNamespace\": \"Rant.Types\",
-  \"noEngineReferences\": true
-}
-")
+write_types("${TYPES_OUT}/Runtime")
 
 # 2. The Rant package tree.
 file(REMOVE_RECURSE "${OUT}")
@@ -200,13 +204,13 @@ write_lf("${OUT}/package.json" "{
   \"description\": \"Peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages. Desktop standalone (Windows, macOS, Linux), the Editor, and WebGL through a Rant bridge.\",
   \"unity\": \"2021.3\",
   \"keywords\": [\"networking\", \"pubsub\", \"udp\", \"discovery\", \"realtime\", \"middleware\", \"rant\"],
-  \"author\": { \"name\": \"Nathan George\" },
-  \"dependencies\": { \"${TYPES_PKG}\": \"${VERSION}\" }
+  \"author\": { \"name\": \"Nathan George\" }
 }
 ")
 file(COPY "${SRC}/README.md" DESTINATION "${OUT}")
 file(GLOB runtime_files "${SRC}/Runtime/*")
 file(COPY "${ROOT}/bindings/csharp/Rant.cs" ${runtime_files} DESTINATION "${OUT}/Runtime")
+write_types("${OUT}/Runtime/Types")
 
 # Unity targets these three desktops. win-arm64 and linux-arm64 would collide on the
 # library name, and no standalone player exists for them.
@@ -295,7 +299,6 @@ function(pack_assets under OUT)
   endforeach()
 endfunction()
 pack_assets("Assets/Rant" "${OUT}")
-pack_assets("Assets/Rant/Types" "${TYPES_OUT}")
 file(GLOB guid_dirs RELATIVE "${WORK}" "${WORK}/*")
 set(UNITYPACKAGE "${ROOT}/dist/rant-${VERSION}.unitypackage")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E tar czf "${UNITYPACKAGE}" ${guid_dirs}
