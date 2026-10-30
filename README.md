@@ -19,7 +19,7 @@ platform libraries:
 ```cmake
 CPMAddPackage(NAME rant
               GIT_REPOSITORY https://github.com/KosmosisDire/Rant.git
-              GIT_TAG v0.0.39)
+              GIT_TAG v0.0.40)
 
 target_link_libraries(app PRIVATE rant::rant_host)
 ```
@@ -53,7 +53,7 @@ its folder first: `dotnet nuget add source <folder> -n rant`.
 ### Rust
 ```toml
 [dependencies]
-rant-middleware = { git = "https://github.com/KosmosisDire/Rant.git", tag = "crate-v0.0.39" }
+rant-middleware = { git = "https://github.com/KosmosisDire/Rant.git", tag = "crate-v0.0.40" }
 ```
 The crate compiles the C library into your program and is used as `rant`. See
 [docs/rust.md](docs/rust.md).
@@ -68,7 +68,7 @@ Or download `rant-<version>.unitypackage` from the release and use `Assets > Imp
 
 ### TypeScript and JavaScript
 ```sh
-npm install https://github.com/KosmosisDire/Rant/releases/download/v0.0.39/rant-middleware-0.0.39.tgz
+npm install https://github.com/KosmosisDire/Rant/releases/download/v0.0.40/rant-middleware-0.0.40.tgz
 ```
 Rant built to wasm with its binding, for Node.js and pages. See
 [docs/javascript.md](docs/javascript.md).
