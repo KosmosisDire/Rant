@@ -198,6 +198,7 @@ if(RANT_BUILD_TOOLS)
     # Writes each language's standard types from types/stdtypes.schema, on Rant's own compiler.
     add_executable(rant_codegen tools/codegen/main.cpp tools/codegen/model.cpp tools/codegen/c.cpp
                    tools/codegen/cpp.cpp tools/codegen/csharp.cpp tools/codegen/python.cpp tools/codegen/rust.cpp
+                   tools/codegen/typescript.cpp
                    tools/codegen/json.cpp "${PROJECT_SOURCE_DIR}/dist/rant.c")
     target_compile_features(rant_codegen PRIVATE cxx_std_17)
     target_link_libraries(rant_codegen PRIVATE rant rant_platform)

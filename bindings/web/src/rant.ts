@@ -12,9 +12,10 @@ export {
 } from "./node.js";
 
 export {
-    u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, bool, map, string, array, enumOf, struct, dsl, types,
-    type Schema, type Infer, type Scalar, type Shape, type VideoFrameValue, type ImageValue, type ExternalVideoStreamValue,
+    u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, bool, map, string, array, enumOf, struct, dsl,
+    type Schema, type Infer, type Scalar, type Shape,
 } from "./schema.js";
+export * from "./stdtypes.js";
 
 export { SchemaError, type FieldInfo, type FieldKind } from "./codec.js";
 export type { NetObject } from "./net.js";
