@@ -790,15 +790,12 @@ static void stdtypes_checks(void){
         if (e)   i_rant_schema_free(e,   rant_allocator_alloc, &ma);
     }
     {   RantColor c = rant_color_from_hex(0x11223344u);
-        RantDouble3 v = rant_quaternion_rotate(rant_quaternion(0.0, 0.0, 1.0, 0.0),
-                                               rant_double3(1.0, 0.0, 0.0));
-        double len = rant_double3_length(rant_double3(3.0, 4.0, 0.0));
+        RantPose p = rant_pose_identity();
         CHECK(c.r == 0x11 && c.g == 0x22 && c.b == 0x33 && c.a == 0x44
                  && rant_color_to_hex(c) == 0x11223344u,
                  "stdtypes: Color hex round-trips as 0xRRGGBBAA");
-        CHECK(len == 5.0, "stdtypes: vector length without libm (%g)", len);
-        CHECK(v.x < -0.999 && v.x > -1.001 && v.y < 1e-9 && v.y > -1e-9,
-                 "stdtypes: a 180 degree rotation about z flips x (%g, %g)", v.x, v.y);
+        CHECK(p.orientation.w == 1.0 && p.position.x == 0.0,
+                 "stdtypes: the identity pose turns nothing");
     }
     {   /* the two values that need a platform, hence the node runtime */
         RantTimestamp t0 = rant_timestamp_now();

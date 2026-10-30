@@ -367,25 +367,16 @@ impl Color {
     }
 }
 
-fn to_c3(v: &Double3) -> crate::ffi::RantDouble3 {
-    crate::ffi::RantDouble3 { x: v.x, y: v.y, z: v.z }
-}
-
-fn from_c3(v: crate::ffi::RantDouble3) -> Double3 {
-    Double3 { x: v.x, y: v.y, z: v.z }
-}
-
 impl Double3 {
     /// The length.
     pub fn length(&self) -> f64 {
-        // SAFETY: plain arithmetic
-        unsafe { crate::ffi::rant_double3_length(to_c3(self)) }
+        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
     }
 
     /// The unit vector of the same direction. The zero vector stays zero.
     pub fn normalized(&self) -> Double3 {
-        // SAFETY: plain arithmetic
-        from_c3(unsafe { crate::ffi::rant_double3_normalize(to_c3(self)) })
+        let n = self.length();
+        if n > 0.0 { Double3 { x: self.x / n, y: self.y / n, z: self.z / n } } else { self.clone() }
     }
 }
 
@@ -393,19 +384,28 @@ impl Quaternion {
     /// No rotation.
     pub const IDENTITY: Quaternion = Quaternion { x: 0.0, y: 0.0, z: 0.0, w: 1.0 };
 
-    /// The unit quaternion of the same rotation.
+    /// The unit quaternion of the same rotation. The zero quaternion becomes the identity.
     pub fn normalized(&self) -> Quaternion {
-        let q = crate::ffi::RantQuaternion { x: self.x, y: self.y, z: self.z, w: self.w };
-        // SAFETY: plain arithmetic
-        let n = unsafe { crate::ffi::rant_quaternion_normalize(q) };
-        Quaternion { x: n.x, y: n.y, z: n.z, w: n.w }
+        let n = (self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w).sqrt();
+        if n > 0.0 {
+            Quaternion { x: self.x / n, y: self.y / n, z: self.z / n, w: self.w / n }
+        } else {
+            Quaternion::IDENTITY
+        }
     }
 
     /// `v` rotated by this rotation.
     pub fn rotate(&self, v: &Double3) -> Double3 {
-        let q = crate::ffi::RantQuaternion { x: self.x, y: self.y, z: self.z, w: self.w };
-        // SAFETY: plain arithmetic
-        from_c3(unsafe { crate::ffi::rant_quaternion_rotate(q, to_c3(v)) })
+        // v + 2 u x (u x v + w v), u the vector part
+        let (ux, uy, uz) = (self.x, self.y, self.z);
+        let tx = uy * v.z - uz * v.y + self.w * v.x;
+        let ty = uz * v.x - ux * v.z + self.w * v.y;
+        let tz = ux * v.y - uy * v.x + self.w * v.z;
+        Double3 {
+            x: v.x + 2.0 * (uy * tz - uz * ty),
+            y: v.y + 2.0 * (uz * tx - ux * tz),
+            z: v.z + 2.0 * (ux * ty - uy * tx),
+        }
     }
 }
 

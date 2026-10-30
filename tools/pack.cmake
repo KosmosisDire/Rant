@@ -80,6 +80,7 @@ function(build_header f)
   rant_emit("${f}" transport/core.h)
   rant_emit("${f}" serialize/schema.h)
   file(APPEND "${f}" "#ifndef RANT_NO_STDTYPES\n")
+  rant_emit("${f}" common/stdtypes.h)
   rant_emit("${f}" serialize/stdtypes.h)
   file(APPEND "${f}" "#endif /* !RANT_NO_STDTYPES */\n")
   rant_emit("${f}" node/core.h)
@@ -156,10 +157,21 @@ function(build_anchor f header)
   message(STATUS "wrote ${f}")
 endfunction()
 
+# rant_types.h: the standard types alone, under the same guard as their copy in rant.h, so a
+# library built on the types alone and Rant both compile into one program.
+function(build_types f)
+  file(READ "${SRC}/common/stdtypes.h" c)
+  string(REGEX REPLACE "\r" "" c "${c}")   # normalize CRLF -> LF, deterministic output
+  string(REPLACE "Rant, the core library of RANT" "The standard types of Rant, the core library of RANT" b "${BANNER}")
+  file(WRITE "${f}" "${b}${c}")
+  message(STATUS "wrote ${f}")
+endfunction()
+
 # The C# wrapper is a hand written P/Invoke layer over the prebuilt native library, so
 # nothing is generated for it.
 
 build_header("${OUT}/rant.h")
+build_types("${OUT}/rant_types.h")
 build_cpp("${OUT}/rant.hpp" "${OUT}/rant.h")
 build_anchor("${OUT}/rant.c" "rant.h")
 build_anchor("${OUT}/rant.cpp" "rant.hpp")

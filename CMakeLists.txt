@@ -60,6 +60,7 @@ file(GLOB_RECURSE RANT_SRC CONFIGURE_DEPENDS
 
 set(RANT_DIST
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant_types.h" # the standard types alone
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.hpp"     # C++ wrapper with rant.h embedded
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.c"       # the C implementation anchor
     "${CMAKE_CURRENT_SOURCE_DIR}/dist/rant.cpp")    # the C++ implementation anchor

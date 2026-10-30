@@ -507,39 +507,3 @@ RantStdType i_rant_std_recognize_field(i_RantRegistry *r, const RantSchema *s, u
     if (!i_rant_std_peel(type, &name, &inner)) return RANT_STD_NONE;
     return i_rant_std_check(r, name, inner);
 }
-
-/* No math.h, so a consumer's build line never grows an -lm. Newton from the halved
- * exponent seed converges to full double precision within five steps. */
-static double i_rant_sqrt(double x){
-    uint64_t b; double r; int i;
-    if (!(x > 0.0)) return 0.0;                       /* 0, negatives and NaN alike */
-    memcpy(&b, &x, 8);
-    b = (b >> 1) + 0x1FF8000000000000ull;
-    memcpy(&r, &b, 8);
-    for (i = 0; i < 5; i++) r = 0.5 * (r + x / r);
-    return r;
-}
-
-double rant_double3_length(RantDouble3 a){
-    return i_rant_sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
-}
-
-RantDouble3 rant_double3_normalize(RantDouble3 a){
-    double n = rant_double3_length(a);
-    return n > 0.0 ? rant_double3_scale(a, 1.0 / n) : a;
-}
-
-RantQuaternion rant_quaternion_normalize(RantQuaternion q){
-    double n = i_rant_sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-    if (n <= 0.0) return rant_quaternion_identity();
-    n = 1.0 / n;
-    return rant_quaternion(q.x * n, q.y * n, q.z * n, q.w * n);
-}
-
-/* v' = v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v), the branch free rotation form */
-RantDouble3 rant_quaternion_rotate(RantQuaternion q, RantDouble3 v){
-    RantDouble3 u = rant_double3(q.x, q.y, q.z);
-    RantDouble3 t = rant_double3_cross(u, v);
-    t = rant_double3_add(t, rant_double3_scale(v, q.w));
-    return rant_double3_add(v, rant_double3_scale(rant_double3_cross(u, t), 2.0));
-}

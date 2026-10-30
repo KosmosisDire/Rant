@@ -248,7 +248,8 @@ this:
 - Positions and shapes are in the units of their frame: meters in a physical frame,
   pixels in an image frame.
 - Every frame is right handed, and an angle turns from +x toward +y.
-- A physical 3D frame has z up.
+- A physical 3D frame has z up. A body's own frame has x forward and y left, as in ROS, so
+  a `Pose2D` at angle 0 faces +x.
 - A physical 2D frame is the top view of that 3D frame: x right, y up, z toward the viewer.
   Its angles turn counterclockwise seen from above.
 - An image or screen frame has its origin at the top left corner: x right, y down, z away
@@ -259,8 +260,7 @@ this:
   comparisons are only as good as the hosts' clock sync. Never mix a `Timestamp` with the
   monotonic `RantMsg.recv_us`.
 - Quaternions are stored x, y, z, w, in that order.
-- `rant_quaternion_mul(a, b)` is the rotation a followed by b, the Hamilton product b times
-  a. `rant_color_from_hex` and `rant_color_to_hex` use 0xRRGGBBAA, the CSS order.
+- `rant_color_from_hex` and `rant_color_to_hex` use 0xRRGGBBAA, the CSS order.
 - Matrices and covariances are indexed row then column, `m[row][column]`.
 - Color is RGBA bytes in sRGB, straight alpha.
 - Uuid holds the 16 bytes in RFC 4122 order, not a platform GUID's mixed endian layout.
@@ -318,11 +318,13 @@ with a variable member, such as `Image`, `Polygon` or `PointCloud`, have none: t
 gain padding, carry a variable member, or are empty. The other bindings reflect field by
 field, so they mirror every type either way.
 
-The operations are deliberately thin: construction, add, sub, scale, dot, cross, length,
-normalize, quaternion multiply, conjugate and rotate, `Color` hex conversion, and
-timestamp arithmetic. Real linear algebra belongs in Eigen, numpy or your engine's math
-library. Convert at the edge. `rant_double3_length` and friends compute their square root
-inline rather than pulling in `<math.h>`, so a consumer's build line never grows an `-lm`.
+Beside the types sit only constructors (`rant_double3`, `rant_pose_identity`,
+`rant_transform_identity`), `Color` hex conversion and timestamp arithmetic. Everything that
+computes on them, from vector math to frames, shapes and images, is Rant Math.
+
+`rant_types.h` in a release holds the mirrors and constructors alone, with no middleware. It
+shares its include guard with the copy inside `rant.h`, so a library built on the types
+alone and Rant compile into one program in either order.
 
 Two values need a platform, so they live in the node runtime rather than beside the type:
 

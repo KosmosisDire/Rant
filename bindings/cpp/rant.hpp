@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdio>
@@ -1311,10 +1312,10 @@ inline double  dot(Double3 a, Double3 b)  { return a.x * b.x + a.y * b.y + a.z *
 inline Double3 cross(Double3 a, Double3 b) {
     return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
 }
-inline double  length(Double3 a) { return detail::rant_double3_length({ a.x, a.y, a.z }); }
+inline double  length(Double3 a) { return std::sqrt(dot(a, a)); }
 inline Double3 normalize(Double3 a) {
-    detail::RantDouble3 n = detail::rant_double3_normalize({ a.x, a.y, a.z });
-    return { n.x, n.y, n.z };
+    double n = length(a);
+    return n > 0.0 ? a * (1.0 / n) : a;
 }
 inline Quaternion identity_rotation() { return { 0.0, 0.0, 0.0, 1.0 }; }
 inline Quaternion conjugate(Quaternion q) { return { -q.x, -q.y, -q.z, q.w }; }
@@ -1325,9 +1326,10 @@ inline Quaternion operator*(Quaternion a, Quaternion b) {
              b.w * a.z + b.x * a.y - b.y * a.x + b.z * a.w,
              b.w * a.w - b.x * a.x - b.y * a.y - b.z * a.z };
 }
+/* v + 2 u x (u x v + w v), u the vector part */
 inline Double3 rotate(Quaternion q, Double3 v) {
-    detail::RantDouble3 r = detail::rant_quaternion_rotate({ q.x, q.y, q.z, q.w }, { v.x, v.y, v.z });
-    return { r.x, r.y, r.z };
+    Double3 u{ q.x, q.y, q.z };
+    return v + cross(u, cross(u, v) + v * q.w) * 2.0;
 }
 inline Transform identity_transform() {
     return { { { 0.0, 0.0, 0.0 }, identity_rotation() }, {} };
