@@ -850,8 +850,10 @@ static void i_rant_discovery_judge(i_RantDiscoveryState *st, uint16_t ri, RantBy
     rec->meta_version = version;
     if (verdict == I_RANT_ADMIT_YES) slot->loan = 0;     /* a held match judged a loan stays a match */
     *up = 1;
-    /* ONE: the sender holds our blob or asks for it. ALL: an observer never assumes */
-    if (verdict == I_RANT_ADMIT_YES && (!was_match || skipped)
+    /* ONE: the sender holds our blob or asks for it. ALL: an observer never assumes. An observer
+       asks at every version too: it meets every peer, so a peer that judged it no match on the
+       version before (its topics not made yet) may meet it now and would wait for an ask */
+    if (verdict == I_RANT_ADMIT_YES && (!was_match || skipped || st->cfg.observer)
         && !(flags & (RANT_DISCOVERY_FLAG_ONE | RANT_DISCOVERY_FLAG_ALL)))
         i_rant_discovery_ask(st, ri, I_RANT_OWE_MATCH, st->now_us);
 }
