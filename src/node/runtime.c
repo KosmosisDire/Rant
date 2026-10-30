@@ -3078,13 +3078,13 @@ void i_rant_node_sys_error(RantNode *n, RantErrorKind error, RantTopic *topic, u
     i_rant_node_emit(n, &e);
 }
 
-/* Matched subscribers excluding dormant peers, since rant_topic_match_count keeps counting
- * a dropped but resumable peer. */
-int i_rant_topic_live_match_count(RantTopic *topic){
+/* Matched subscribers with dropped peers included, since what is sent to one replays when it
+ * resumes. rant_topic_match_count leaves them out. */
+int i_rant_topic_all_match_count(RantTopic *topic){
     int acquired, r;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = i_rant_transport_publisher_live_matches(topic->n->transport, topic->index);
+    r = i_rant_transport_publisher_match_count(topic->n->transport, topic->index);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
@@ -3704,7 +3704,7 @@ int rant_topic_match_count(RantTopic *topic){
     int r, acquired;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = i_rant_transport_publisher_match_count(topic->n->transport, topic->index);
+    r = i_rant_transport_publisher_live_matches(topic->n->transport, topic->index);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }

@@ -259,7 +259,7 @@ us is matched again this way).
 | state | meaning |
 |---|---|
 | ACTIVE | heard within `peer_timeout_us` (12 s). Flow controlled, its slot never taken |
-| DROPPED | silent past the timeout. The record, any slot and `local_id` are kept, `on_peer_seen` fires down and, for a slotted peer, `on_peer_down` with reason `RANT_DISCOVERY_DROP`. The node marks it dormant: out of flow control, proxies and delivery position kept, inbound still processed |
+| DROPPED | silent past the timeout. The record, any slot and `local_id` are kept, `on_peer_seen` fires down and, for a slotted peer, `on_peer_down` with reason `RANT_DISCOVERY_DROP`. The node marks it dormant: out of flow control and the public match counts, proxies and delivery position kept, inbound still processed |
 | GONE | freed. A DROPPED peer silent past `gone_timeout_us` (2 min, 0 = never) is promoted on its own. A `BYE` is GONE at once |
 
 The same uuid returning resumes under the same `local_id`: `on_peer_up` fires again and

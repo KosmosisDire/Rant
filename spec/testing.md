@@ -74,7 +74,7 @@ program in this order.
 | `e2e.detail` | detail_live, interest_external, interest_bulk, filter_fetch |
 | `e2e.shm` | shm_node |
 | `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
-| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate, refresh_live |
+| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate, refresh_live, dropped_peer |
 | `e2e.tasks` | task, task_matrix |
 | `e2e.entities` | reflect_dropped, churn, republish, log_and_meta, status, rant_conditions, rant_refused, rant_partial, rant_cap |
 | `e2e.matchwait` | matchwait |
@@ -705,8 +705,8 @@ datagrams grow as N squared times the rate. Idle topics cost nothing.
 Threaded (`rant_bench threadbench`): flat out 688k msg/s UDP and 452k SHM on loopback with
 zero evictions. Queued delivery (`queuebench`) costs 14% at 1 KB up to 35% at 1 MB.
 Reliable same host SHM at keep_last 4 went from 92 to 2300 msg/s with the immediate in
-order ack. A zero subscriber send costs 52 ns. `rant_topic_match_count` costs 11 ns, so an
-app that builds an expensive payload should gate on it.
+order ack. A zero subscriber send costs 52 ns. `rant_topic_match_count` costs 8 ns with one
+subscriber and 31 ns with 16, so an app that builds an expensive payload should gate on it.
 
 ## Live debugging
 

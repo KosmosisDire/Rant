@@ -1300,6 +1300,71 @@ static void refresh_live_checks(void){
 #endif
 }
 
+/* A silent peer leaves every match count at the drop and returns with them. Routing still
+ * counts it: a write stays OK and a call made meanwhile is answered on the return. */
+static int dp_downs;
+static void dp_on_event(const RantEvent *ev){ if (ev->kind == RANT_PEER_DOWN) dp_downs++; }
+static int dp_matched(RantTopic *t, RantFunction *def, RantFunction *rem, RantVariable *own, RantVariable *acc){
+    return rant_topic_match_count(t) + rant_function_match_count(def) + rant_function_match_count(rem)
+         + rant_variable_match_count(own) + rant_variable_match_count(acc);
+}
+static void dropped_peer_checks(void){
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *A, *B; uint8_t v[4] = { 1, 0, 0, 0 }; uint64_t end; int r;
+    RantTopic *t = NULL; RantFunction *def = NULL, *rem = NULL; RantVariable *own = NULL, *acc = NULL;
+    memset(&o, 0, sizeof o);
+    o.domain = TEST_DOMAIN+42; o.disable_shm = 1; o.discovery.max_peers = 4;
+    o.discovery.announce_interval_us = 100000; o.discovery.peer_timeout_us = 500000;
+    o.net.multicast_interface = "127.0.0.1";
+    dp_downs = 0;
+    A = rant_node_open(&aa, "dp-a", NULL, dp_on_event, &o);
+    B = rant_node_open(&ba, "dp-b", NULL, NULL, &o);
+    CHECK(A && B, "dropped_peer: nodes open");
+    if (A && B){
+        t = rant_node_create_topic(A, "dp/t", RANT_PUB_ONLY, NULL, NULL);
+        rant_node_create_topic(B, "dp/t", RANT_SUB_ONLY, NULL, NULL);
+        def = rant_node_create_function_definition(A, "dp/callers", NULL, NULL, pf_add_handler, NULL, NULL);
+        rant_node_create_remote_function(B, "dp/callers", NULL, NULL, NULL);
+        rem = rant_node_create_remote_function(A, "dp/providers", NULL, NULL, NULL);
+        rant_node_create_function_definition(B, "dp/providers", NULL, NULL, pf_add_handler, NULL, NULL);
+        own = rant_node_create_variable_definition(A, "dp/remotes", NULL, NULL);
+        rant_node_create_remote_variable(B, "dp/remotes", NULL, NULL);
+        acc = rant_node_create_remote_variable(A, "dp/owners", NULL, NULL);
+        rant_node_create_variable_definition(B, "dp/owners", NULL, NULL);
+    }
+    CHECK(t && def && rem && own && acc, "dropped_peer: handles created");
+    if (t && def && rem && own && acc){
+        PUMP_UNTIL(A, B, 5000, dp_matched(t, def, rem, own, acc) == 5);
+        CHECK(dp_matched(t, def, rem, own, acc) == 5, "dropped_peer: every handle matched (%d)",
+              dp_matched(t, def, rem, own, acc));
+        test_pump(A, B, 200);     /* the variable's value channel forms too */
+        r = rant_variable_set(acc, rant_bytes(v, 4));
+        CHECK(r == RANT_OK, "dropped_peer: a write goes while the owner is here (%d)", r);
+
+        end = i_rant_plat_now_us() + 5000000u;     /* B stops polling, so it falls silent */
+        while (!dp_downs && i_rant_plat_now_us() < end) rant_node_poll(A, 5);
+        CHECK(dp_downs > 0, "dropped_peer: the silent peer drops");
+        CHECK(dp_matched(t, def, rem, own, acc) == 0, "dropped_peer: no count holds it (%d %d %d %d %d)",
+              rant_topic_match_count(t), rant_function_match_count(def), rant_function_match_count(rem),
+              rant_variable_match_count(own), rant_variable_match_count(acc));
+        CHECK(rant_topic_ready(t), "dropped_peer: a send still would not wait");
+        r = rant_variable_set(acc, rant_bytes(v, 4));
+        CHECK(r == RANT_OK, "dropped_peer: a write to the dropped owner is not refused (%d)", r);
+        pf_reply_done = 0;
+        r = rant_function_call_async(rem, rant_bytes(v, 4), pf_on_reply, NULL, NULL);
+        CHECK(r == RANT_OK, "dropped_peer: a call to the dropped provider launches (%d)", r);
+
+        PUMP_UNTIL(A, B, 5000, pf_reply_done && dp_matched(t, def, rem, own, acc) == 5);
+        CHECK(pf_reply_done && pf_reply_status == RANT_CALL_OK,
+              "dropped_peer: that call is answered on the return (%d, %d)", pf_reply_done, (int)pf_reply_status);
+        CHECK(dp_matched(t, def, rem, own, acc) == 5, "dropped_peer: every count returns (%d)",
+              dp_matched(t, def, rem, own, acc));
+    }
+    if (A) rant_node_close(A, 0);
+    if (B) rant_node_close(B, 0);
+    rant_allocator_reset(&aa); rant_allocator_reset(&ba);
+}
+
 static const TestCase cases[] = {
     { "patterns", patterns_checks },
     { "variable_wait", varwait_checks },
@@ -1311,6 +1376,7 @@ static const TestCase cases[] = {
     { "one_announce", one_announce_checks },
     { "handle_gate", handle_gate_checks },
     { "refresh_live", refresh_live_checks },
+    { "dropped_peer", dropped_peer_checks },
 };
 
 TEST_MAIN(cases)

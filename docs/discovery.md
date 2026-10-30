@@ -17,6 +17,7 @@ Every node of the domain that this node hears is a peer, whatever its topics.
 - If the same node returns it resumes where it left off: the subscriber keeps its
   position and the writer fills only the gap. A restarted node is a new peer and gets
   `catch_up`.
+- A dropped peer is in no match count until it returns.
 - A dropped peer silent for 2 minutes, or one that closed, is GONE.
 - A node that forgets a peer for room (Matched peers below) fires `RANT_PEER_DOWN` for it
   though it still runs, and `RANT_PEER_UP` once it keeps it again. The peer list shows the

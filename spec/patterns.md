@@ -287,6 +287,10 @@ PEER_LOST and leaves the queued ones alone, since a peer that never provided can
 their loss. A call still queued when its deadline passes ends NO_PROVIDER instead of
 TIMEOUT, and a call directed at the dropped peer fails PEER_LOST regardless.
 
+Matched in that routing, and in a variable write's, includes a dropped peer, since what is
+sent to it replays when it resumes, and a write to a dropped owner is not a read only owner.
+The public match counts leave it out, so a killed peer shows there at the drop, not at GONE.
+
 ## Retire and shadowing
 
 Retire parks the channels (`RANT_INACTIVE`, re advertised), answers every outstanding

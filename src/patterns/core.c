@@ -409,7 +409,7 @@ static void i_rant_func_free_pending(RantFunction *fn, i_RantPending *p){
  * reentrantly, fine on a fresh lane with empty history. */
 static void i_rant_func_flush_queued(RantFunction *fn){
     if (fn->is_provider || !fn->pending) return;
-    if (rant_topic_match_count(fn->req) == 0) return;     /* still no provider */
+    if (i_rant_topic_all_match_count(fn->req) == 0) return;     /* still no provider */
     for (;;){
         i_RantPending *pick = NULL, *p;
         uint8_t hdr[RANT__FN_PREFIX];
@@ -836,7 +836,7 @@ static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponse
     if (sync_entry) *sync_entry = p;
     if (id_out) *id_out = id;
     if (opts && opts->id_out) *opts->id_out = id;   /* set before the send */
-    if (dest ? !i_rant_topic_peer_matched(fn->req, dest) : rant_topic_match_count(fn->req) == 0){
+    if (dest ? !i_rant_topic_peer_matched(fn->req, dest) : i_rant_topic_all_match_count(fn->req) == 0){
         /* its provider not matched yet: the transport would drop an unmatched send, so queue
            the request and flush the instant the match forms. See spec/patterns.md */
         p->queued_req = (uint8_t*)i_rant_node_sys_bulk(fn->n, NULL, req.len ? req.len : 1u);
@@ -1597,7 +1597,7 @@ int rant_variable_get(RantVariable *var, RantBytes *out){
 /* accessor write routing: no owner at all versus a read only owner */
 static int i_rant_var_accessor_route(RantVariable *var){
     if (i_rant_topic_source_match_count(var->value) == 0) return RANT_ERR_NO_TOPIC;
-    if (!var->set || rant_topic_match_count(var->set) == 0) return RANT_ERR_ROLE;
+    if (!var->set || i_rant_topic_all_match_count(var->set) == 0) return RANT_ERR_ROLE;
     return RANT_OK;
 }
 
@@ -2109,7 +2109,7 @@ static void i_rant_patterns_on_event(void *user, const RantEvent *ev){
     for (fn = pm->funcs; fn; fn = fn->next){
         if (fn->is_provider || !fn->pending) continue;
         (void)i_rant_func_reap(fn, 0, RANT_CALL_PEER_LOST, RANT__REAP_EXPIRED, ev->peer, 1);   /* directed at it */
-        if (fn->pending && i_rant_topic_live_match_count(fn->req) == 0)
+        if (fn->pending && rant_topic_match_count(fn->req) == 0)
             i_rant_func_reap(fn, 0, RANT_CALL_PEER_LOST, RANT__REAP_SENT, 0, 1);
     }
 }

@@ -257,7 +257,7 @@ RANT_API int        rant_topic_subscriber_progress(RantTopic *topic, uint32_t pe
 /* Waits until every subscriber acked everything, or timeout_ms. 1 drained, 0 on timeout
  * or from a callback. Call before close so a burst is not cut by the BYE. */
 RANT_API int        rant_topic_drain(RantTopic *topic, int timeout_ms);
-/* Subscribers matched now. */
+/* Subscribers matched now. A dropped peer counts again only when it returns. */
 RANT_API int        rant_topic_match_count(RantTopic *topic);
 
 /* The send path match wait: a send that would reach nobody while a match is still
@@ -454,8 +454,8 @@ void     i_rant_node_problem       (i_RantProblems *ps, uint32_t id, RantLevel l
 void     i_rant_node_problems_end  (i_RantProblems *ps);
 /* An id for a problem from the bytes that name it, never 0. */
 uint32_t i_rant_node_problem_id(const void *bytes, size_t len);
-/* Matched subscribers excluding dormant peers, the provider liveness query. */
-int      i_rant_topic_live_match_count(RantTopic *topic);
+/* Matched subscribers with dropped peers included, the routing query. */
+int      i_rant_topic_all_match_count(RantTopic *topic);
 /* Is peer a matched subscriber of this PUB topic. The directed call severed lane backstop. */
 int      i_rant_topic_peer_matched(RantTopic *topic, uint32_t peer);
 /* Matched publishers feeding this topic's subscription side. */
