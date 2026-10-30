@@ -65,8 +65,34 @@ static void shm_node_checks(void){
     }
 }
 
+/* A reader lets go of a publisher's segment when the publisher goes, so one that restarts
+   leaves nothing mapped behind it. */
+static void shm_gone_checks(void){
+    static unsigned char buf[300*1024];
+    uint16_t domain=(uint16_t)(TEST_DOMAIN+41);
+    RantNode *S=shmn_open(0,1,domain);
+    int round, t;
+    CHECK(S!=NULL, "shm-gone: the reader opens");
+    for (round=0; S && round<3; round++){
+        RantNode *P=shmn_open(1,1,domain);
+        int before=shmn_recv;
+        CHECK(P!=NULL, "shm-gone: the publisher opens");
+        if (!P) break;
+        PUMP_UNTIL(P, S, 6400, test_match_count(P,0)!=0);
+        test_send(P,0,buf,sizeof buf);
+        PUMP_UNTIL(P, S, 4000, shmn_recv!=before);
+        CHECK(shmn_recv==before+1, "shm-gone: delivered");
+        CHECK(S->shm_reader_count==1, "shm-gone: one segment attached (%u)", (unsigned)S->shm_reader_count);
+        rant_node_close(P,1);
+        for (t=0; t<400 && S->shm_reader_count!=0; t++) rant_node_poll(S,10);
+        CHECK(S->shm_reader_count==0, "shm-gone: none attached once it went (%u)", (unsigned)S->shm_reader_count);
+    }
+    if (S) rant_node_close(S,1);
+}
+
 static const TestCase cases[] = {
     { "shm_node", shm_node_checks },
+    { "shm_gone", shm_gone_checks },
 };
 
 TEST_MAIN(cases)

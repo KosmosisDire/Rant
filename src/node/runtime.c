@@ -251,6 +251,7 @@ struct RantNode {
     /* the reader attach cache, grown by segments actually attached */
     uint64_t      *shm_reader_segments;  /* [shm_reader_cap] attached segment ids */
     void         **shm_reader_states;    /* [shm_reader_cap] their pool states */
+    uint32_t      *shm_reader_peers;     /* [shm_reader_cap] the peer each came from */
     uint16_t       shm_reader_cap, shm_reader_count;
     uint32_t       shm_tx, shm_rx;/* messages published and delivered via SHM */
 #endif
@@ -430,6 +431,23 @@ static void i_rant_node_keep_str(char *buf, size_t cap, const char *src, const c
     *field = buf;
 }
 
+#ifdef RANT_SHM
+/* Unmaps what was attached for a peer that went, else each restart of a publisher stays mapped
+ * for the reader's life. Only a delivery reads one, and a peer that returns attaches again. */
+static void i_rant_node_shm_forget_peer(RantNode *n, uint32_t peer){
+    uint16_t i = 0;
+    while (i < n->shm_reader_count){
+        if (n->shm_reader_peers[i] != peer){ i++; continue; }
+        i_rant_shm_detach((i_RantShmPool*)n->shm_reader_states[i]);
+        i_rant_node_alloc(n, n->shm_reader_states[i], 0);
+        n->shm_reader_count--;
+        n->shm_reader_segments[i] = n->shm_reader_segments[n->shm_reader_count];
+        n->shm_reader_states[i] = n->shm_reader_states[n->shm_reader_count];
+        n->shm_reader_peers[i] = n->shm_reader_peers[n->shm_reader_count];
+    }
+}
+#endif
+
 static void i_rant_node_park_event(RantNode *n, const RantEvent *e);   /* with the ring below */
 static void i_rant_node_emit(RantNode *n, RantEvent *e){
     e->user = n->user_data;
@@ -449,6 +467,9 @@ static void i_rant_node_emit(RantNode *n, RantEvent *e){
         && !(e->topic_name && i_rant_node_is_log_topic(n, e->topic)))
         i_rant_node_note(n, RANT_LEVEL_ERROR, e, NULL);
     if (e->kind == RANT_ERROR) n->problems_dirty = 1;     /* a cause of a Rant condition may have changed */
+#ifdef RANT_SHM
+    if (e->kind == RANT_PEER_DOWN) i_rant_node_shm_forget_peer(n, e->peer);
+#endif
     if (e->kind == RANT_PEER_UP || e->kind == RANT_PEER_DOWN || e->kind == RANT_PEER_INTEREST){
         n->problems_dirty = 1;
         n->match_epoch++;                                 /* stale the topics' converged memos */
@@ -960,15 +981,15 @@ static i_RantShmPool *i_rant_node_shm_topic_pool(RantNode *n, uint16_t topic_ind
     if (!n->shm_pool[idx]) i_rant_node_alloc(n, mem, 0);
     return (i_RantShmPool*)n->shm_pool[idx];
 }
-/* Lazily attaches a peer's segment by id and caches it. The cache grows with segments
- * actually attached, so a node with no same host peer holds none. */
-static i_RantShmPool *i_rant_node_shm_reader_pool(RantNode *n, uint64_t seg){
+/* Lazily attaches a peer's segment by id and caches it until the peer goes. The cache grows
+ * with segments actually attached, so a node with no same host peer holds none. */
+static i_RantShmPool *i_rant_node_shm_reader_pool(RantNode *n, uint64_t seg, uint32_t peer){
     uint16_t i; i_RantShmConfig c; uint8_t *mem;
     for (i=0;i<n->shm_reader_count;i++)
         if (n->shm_reader_segments[i]==seg) return (i_RantShmPool*)n->shm_reader_states[i];
     if (n->shm_reader_count == n->shm_reader_cap){        /* grow the id and state arrays */
         uint16_t ncap = n->shm_reader_cap ? (uint16_t)(n->shm_reader_cap*2u) : 8u;
-        uint64_t *nseg; void **nst;
+        uint64_t *nseg; void **nst; uint32_t *npeers;
         if (ncap <= n->shm_reader_cap) return NULL;       /* u16 wrap: an absurd segment count */
         nseg = (uint64_t*)i_rant_node_alloc(n, n->shm_reader_segments, (size_t)ncap*sizeof(uint64_t));
         if (!nseg) return NULL;
@@ -976,6 +997,9 @@ static i_RantShmPool *i_rant_node_shm_reader_pool(RantNode *n, uint64_t seg){
         nst = (void**)i_rant_node_alloc(n, n->shm_reader_states, (size_t)ncap*sizeof(void*));
         if (!nst) return NULL;
         n->shm_reader_states = nst;
+        npeers = (uint32_t*)i_rant_node_alloc(n, n->shm_reader_peers, (size_t)ncap*sizeof(uint32_t));
+        if (!npeers) return NULL;
+        n->shm_reader_peers = npeers;
         n->shm_reader_cap = ncap;
     }
     memset(&c, 0, sizeof c);
@@ -985,13 +1009,14 @@ static i_RantShmPool *i_rant_node_shm_reader_pool(RantNode *n, uint64_t seg){
     if (!i_rant_shm_attach(mem, &c)){ i_rant_node_alloc(n, mem, 0); return NULL; }
     n->shm_reader_segments[n->shm_reader_count] = seg;
     n->shm_reader_states[n->shm_reader_count] = mem;
+    n->shm_reader_peers[n->shm_reader_count] = peer;
     n->shm_reader_count++;
     return (i_RantShmPool*)mem;
 }
 static int i_rant_node_on_shm(void *u, uint16_t topic_index, uint32_t from, const uint8_t *desc){
     RantNode *n = (RantNode*)u; i_RantShmDesc d; i_RantShmPool *reader_pool; const void *p; uint32_t len;
     if (!i_rant_shm_desc_decode(&d, desc, RANT_SHM_DESC_WIRE)) return 0;
-    reader_pool = i_rant_node_shm_reader_pool(n, d.segment_id);
+    reader_pool = i_rant_node_shm_reader_pool(n, d.segment_id, from);
     if (!reader_pool) return 0;                                     /* cannot attach: NACK */
     p = i_rant_shm_read(reader_pool, &d, &len);                         /* the seqlock head */
     if (!p) return 0;                                      /* recycled: NACK, then repair or skip */
@@ -1268,6 +1293,7 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
         n->shm_pool = (void**)blocks.shm_pool;
         for (i=0;i<n_segments;i++) n->shm_pool[i]=NULL;
         n->shm_reader_segments = NULL; n->shm_reader_states = NULL;   /* lazy */
+        n->shm_reader_peers = NULL;
         n->shm_reader_cap = 0; n->shm_reader_count = 0;
     }
 #endif

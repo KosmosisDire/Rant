@@ -59,7 +59,8 @@ The low 3 bits of the segment id are the class and the next 16 bits are the topi
 The rest is a per node base with the pid folded in. The OS object name is `/rant.shm.`
 plus the id in hex, valid on POSIX and Windows. The reader attaches the segment on first
 use and reads its geometry from the header the writer stamped, after checking the magic,
-version and host id.
+version and host id. It detaches when `RANT_PEER_DOWN` says the writer went, and attaches
+again if it returns, so a publisher that restarts leaves nothing mapped in a long lived reader.
 
 ## Chunk lifecycle
 
