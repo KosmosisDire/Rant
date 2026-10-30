@@ -245,8 +245,6 @@ if(RANT_IS_TOP_LEVEL AND TARGET rant_shared)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
     set(RANT_WHEEL_COMMANDS
-      COMMAND "${Python3_EXECUTABLE}" -m pip wheel "${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/types" --no-deps
-              -w "${CMAKE_CURRENT_SOURCE_DIR}/dist"
       COMMAND "${Python3_EXECUTABLE}" -m pip wheel "${CMAKE_CURRENT_SOURCE_DIR}" --no-deps
               -w "${CMAKE_CURRENT_SOURCE_DIR}/dist")
     # Off Linux the manylinux wheel builds in Docker as the release does. cibuildwheel takes

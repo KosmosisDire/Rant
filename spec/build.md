@@ -16,7 +16,9 @@ Rant as a subproject or finds the installed package.
   name.
 - `pyproject.toml` builds the Python wheel through scikit-build-core, which runs this same
   CMake with `SKBUILD` set. The one rule keyed on it installs `rant_shared` next to the
-  package. The wheel is tagged `py3-none`, since ctypes needs no Python ABI, so one wheel
+  package. It carries `rant_types` at its top level and depends on nothing, so a library
+  with its own copy of the types can take Rant's classes when they can be imported. The
+  wheel is tagged `py3-none`, since ctypes needs no Python ABI, so one wheel
   per platform serves every interpreter. Linux wheels are built inside manylinux, which
   is what gives the shipped Linux library its glibc 2.28 floor.
 - CMake `file(WRITE)` turns `\n` into CRLF on Windows while `file(READ)` strips CR. The

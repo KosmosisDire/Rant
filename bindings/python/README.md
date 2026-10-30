@@ -5,7 +5,7 @@ multicast plus reliable realtime UDP pub/sub, with typed messages. The wheel car
 native library, so nothing compiles on your machine.
 
 ```sh
-pip install rant-middleware   # brings rant-types, the standard types alone
+pip install rant-middleware
 ```
 
 ```python

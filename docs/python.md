@@ -2,7 +2,7 @@
 
 `pip install rant-middleware` installs the `rant` package: the wrapper in `bindings/python/rant`
 plus the shared library for your platform, bound through ctypes, so nothing compiles on
-your machine. It brings `rant-types` along, the standard types alone. In a source checkout, the CMake target `python_install` builds the wheel
+your machine. In a source checkout, the CMake target `python_install` builds the wheel
 and installs it, or build `rant_shared` and put `bindings/python/` on `sys.path`. `RANT_LIBRARY` points the wrapper at any other copy of the
 library. The semantics are the C ones, so docs/node.md, docs/topics.md, docs/patterns.md
 and docs/tasks.md apply. This page says what is different in Python.
@@ -133,7 +133,8 @@ by the C setter. The standard types in docs/stdtypes.md live in `rant.types` as 
 dataclasses and aliases: `rant.types.Transform`, `rant.types.Color`,
 `rant.types.Timestamp` and the rest, and `rant.types.now()` is the Timestamp clock. A new value
 is all zeros, so a rotation starts from `rant.types.identity_rotation()`. They are the `rant_types`
-package, which holds no native code, so a library such as Rant Math shares them with Rant.
+package inside the wheel, which holds no native code, so a library such as Rant Math uses the same
+classes when Rant is installed.
 
 ## Topics
 
