@@ -71,9 +71,9 @@ Rant as a subproject or finds the installed package.
   package answers a version request with `SameMinorVersion` compatibility, `Rant.csproj`
   reads it through an MSBuild property function, `pyproject.toml` through the
   scikit-build-core regex provider, and the Unity packer stamps it into `package.json`.
-  A release is a tag `v` plus that number, and the workflow refuses any other tag. Cargo
-  cannot read a file, so `bindings/rust/Cargo.toml` repeats the number, and both the Rust
-  suite and the workflow refuse a mismatch.
+  A release is a tag `v` plus that number, which the release job makes. Cargo cannot read
+  a file, so `bindings/rust/Cargo.toml` repeats the number, and both the Rust suite and the
+  workflow refuse a mismatch.
 - The packer reads `VERSION` too and writes `#define RANT_VERSION` at the top of
   `dist/rant.h`, so a consumer that compiles the header gets the version with no build
   define. `VERSION` is a dependency of the pack command, so a bump re packs.
@@ -119,21 +119,21 @@ Rant as a subproject or finds the installed package.
   sdist in Docker, so Docker must be running. `python_install` is apart from `packages`:
   it force reinstalls the fresh wheel, and `Python3_FIND_REGISTRY LAST` makes that the
   PATH Python.
-- CI is two workflows. `build.yml` runs on every push to main and every pull request, on
-  linux, windows and macos: configure and build the library and its programs, build
-  `tools/consumer` from the source tree and from an install, pack the NuGet and build the
-  wheel of that platform. No test suite runs yet: that waits on the test rework, so a red build means
-  a build broke.
-- `release.yml` runs on a tag `v*` and refuses one that differs from `VERSION`. Two jobs
-  per platform, then one release job. `native` runs cibuildwheel, which builds the wheel
+- CI is one workflow, `build.yml`, on every push to main and every pull request. On linux,
+  windows and macos it builds the library and its programs, runs the tests, builds
+  `tools/consumer` from the source tree and from an install, packs the NuGet and builds the
+  wheel of that platform. `web` builds and tests Rant in wasm.
+- A run on main whose `VERSION` has no tag yet also releases it, so the run that checks a
+  release commit is the one that publishes it. Two more jobs per platform, then one release
+  job after every check. `native` runs cibuildwheel, which builds the wheel
   and, inside it, the library the NuGet and Unity packages bundle, so the Linux libraries
   come out of the manylinux container, aarch64 under QEMU since no arm runner is free on
   a private repo. `programs` builds the tools into one zip per platform, Linux on
-  ubuntu-22.04 for a glibc 2.35 floor. `release` builds the sdist from the clean checkout,
-  packs the `dist/` headers, merges the libraries, packs the NuGet, assembles the Unity
-  package, attaches
-  everything to a GitHub Release, pushes the upm branch, and publishes to nuget.org and
-  PyPI when the `NUGET_API_KEY` and `PYPI_API_TOKEN` secrets exist.
+  ubuntu-22.04 for a glibc 2.35 floor. `release` stops when another commit holds the
+  version, then builds the sdist from the clean checkout, packs the `dist/` headers, merges
+  the libraries, packs the NuGet, assembles the Unity package, attaches everything to a
+  GitHub Release, which tags this commit, pushes the upm branch, and publishes to nuget.org
+  and PyPI when the `NUGET_API_KEY` and `PYPI_API_TOKEN` secrets exist.
 - The Rust crate ships as a git dependency on the tag `crate-v<VERSION>`: a parentless
   commit of the release tree plus `bindings/rust/rant/csrc/`, the packed `rant.h` and
   `rant.c`, so cargo fetches one snapshot and never needs cmake. `build.rs` compiles
