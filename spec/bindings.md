@@ -329,12 +329,12 @@ platform serves every interpreter.
   `rant.f64`, `rant.string(cap)`, a nested class, plain int, float and bool, `str`
   (VSTR), `dict` (MAP), a bare `IntEnum`, and `rant.<t>[N]` (ARR) or `list[...]` (VARR) of
   any of them, nested. `__rant_name__` overrides the type name. `rant.dsl(cls)` computes
-  DSL with no library load. The standard types are tagged dataclasses in
-  `bindings/python/rant/types.py`, reached as `rant.types.*`. Encode and decode walk the
+  DSL with no library load. The standard types are tagged dataclasses in the package
+  `bindings/python/rant_types`, generated but for `_vocab.py`, reached as `rant.types.*`. Encode and decode walk the
   compiled flat table as C# does, so a peer's schema works the same. A numeric buffer of
   the field's own type is read in place, a send views the encoded buffer where it was
   built, and a numeric array decodes into an `array.array` by one copy from the message.
-- `__init__.pyi` and `types.pyi` are the checker's view, hand maintained beside the runtime
+- `__init__.pyi`, hand maintained beside the runtime, and the generated `rant_types/__init__.pyi` are the checker's view,
   and checked by running pyright over `bindings/python/test.py`. Handles are `Generic[T]` there
   while the runtime subscripts through `__class_getitem__`. The scalars are `int` and
   `float` aliases in the stub, so a capped string or array field is spelled

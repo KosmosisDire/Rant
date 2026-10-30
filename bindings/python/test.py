@@ -204,7 +204,8 @@ def std_types():
     check("its message is the sum of the wire shapes (88+8+4+16+12)",
           len(sch.encode(Track())) == 128)
 
-    t = Track(at=rant.types.Transform(rant.types.Pose(position=rant.types.Double3(4.5, -1.25, 9.0))),
+    t = Track(at=rant.types.Transform(rant.types.Pose(position=rant.types.Double3(4.5, -1.25, 9.0),
+                                                      orientation=rant.types.identity_rotation())),
               when=rant.types.now(), tag=rant.types.Color(0x11, 0x22, 0x33, 0xFF),
               id=bytes(range(16)), velocity=rant.types.Float3(1.0, 2.0, 3.0))
     back = sch.decode(sch.encode(t))
@@ -213,6 +214,21 @@ def std_types():
           and back.when == t.when and back.tag.r == 0x11 and back.tag.a == 0xFF
           and bytes(back.id) == bytes(range(16)) and back.velocity.z == 3.0)
     check("types.now is Unix-epoch microseconds", rant.types.now() > 1600000000000000)
+
+    import rant_types
+    check("rant.types is the rant_types package", rant.types.Pose is rant_types.Pose
+          and rant.types.ScalarKind is rant_types.ScalarKind and rant.types.Uri is rant_types.Uri)
+    check("and the markers are one", rant.f64 is rant_types._vocab.f64)
+    alone = subprocess.run([sys.executable, "-c",
+                            "import sys, rant_types; print('rant' in sys.modules, rant_types.Pose().position.x)"],
+                           capture_output=True, text=True,
+                           env=dict(os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(rant_types.__file__))))
+    check("rant_types imports with no middleware", alone.stdout.split() == ["False", "0.0"])
+    check("a default value is zero", rant.types.Quaternion().w == 0.0 and rant.types.Color().a == 0)
+    check("an enum starts on its 0 option", rant.types.CameraIntrinsics().model == rant.types.DistortionModel.None_)
+    check("an enum with no 0 option starts on its first", rant.types.PointField().kind == rant.types.ScalarKind.I8)
+    check("the identities", rant.types.identity_rotation().w == 1.0
+          and rant.types.identity_transform().pose.orientation.w == 1.0)
 
     cams = a.schema(rant.types.CameraIntrinsics)
     cam = cams.decode(cams.encode(rant.types.CameraIntrinsics(

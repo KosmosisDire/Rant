@@ -2,12 +2,12 @@
 # rant_shared builds. scikit-build-core runs that CMake, so pip install . works from a
 # checkout and the release workflow builds one wheel per platform (spec/build.md).
 [build-system]
-requires = ["scikit-build-core>=0.10"]
+requires = ["scikit-build-core>=0.11"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "rant-middleware"
-dynamic = ["version"]
+dynamic = ["version", "dependencies"]
 description = "Rant: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed messages."
 readme = "bindings/python/README.md"
 requires-python = ">=3.8"
@@ -26,6 +26,11 @@ wheel.packages = ["bindings/python/rant"]
 wheel.py-api = "py3"
 cmake.build-type = "Release"
 sdist.exclude = [".github", "artifacts", "bin", "bindings/csharp", "release", "tests", "wheelhouse", "Logo.ai", "Logo.svg"]
+
+# The standard types are their own package, exactly this version since the wire is one.
+[tool.scikit-build.metadata.dependencies]
+provider = "scikit_build_core.metadata.template"
+result = ["rant-types=={project[version]}"]
 
 [tool.scikit-build.cmake.define]
 RANT_BUILD_TOOLS = "OFF"

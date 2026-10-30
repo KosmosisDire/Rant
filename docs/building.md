@@ -39,7 +39,7 @@ cmake --build build --config Release --target packages
 
 `unity_package` assembles `dist/com.rant.types/`, `dist/com.rant.rant/` and `dist/rant-<version>.unitypackage`,
 `nuget_package` runs `dotnet pack` for `dist/Rant.<version>.nupkg`, and `python_wheel`
-runs `pip wheel` for this platform's wheel. Each bundles the native libraries in
+runs `pip wheel` for this platform's wheel and the `rant-types` one. Each bundles the native libraries in
 `dist/native/`, so a local package covers this machine and the release workflow covers
 every platform. The Unity package gets its WebGL files once the `web` preset has built.
 The version is the `VERSION` file at the root.

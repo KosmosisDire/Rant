@@ -70,7 +70,7 @@ def main(argv):
                 angle = seq * 0.01
                 topic.send(Tick(seq=seq, when=rant.types.now(), value=math.sin(angle),
                                 at=rant.types.Transform(rant.types.Pose(rant.types.Double3(
-                                    math.cos(angle), math.sin(angle), 0.0))),
+                                    math.cos(angle), math.sin(angle), 0.0), rant.types.identity_rotation())),
                                 hops=[Hop("h%d" % seq, [rant.types.Float2(seq % 1000, 0.5)])]))
                 seq += 1
             node.poll(0.002)
