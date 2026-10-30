@@ -13,7 +13,7 @@ Uri: TypeAlias = str
 Uuid: TypeAlias = bytes
 
 class DistortionModel(IntEnum):
-    NoDistortion = 0
+    None_ = 0
     BrownConrady = 1
     Fisheye = 2
     Rational = 3
@@ -64,7 +64,7 @@ class CameraIntrinsics:
     fy: float = 0.0
     cx: float = 0.0
     cy: float = 0.0
-    model: DistortionModel = DistortionModel.NoDistortion
+    model: DistortionModel = DistortionModel.None_
     coeffs: list[float] = ...
 
 @dataclass

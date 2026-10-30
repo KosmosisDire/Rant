@@ -1675,7 +1675,7 @@ namespace Rant
         public enum DistortionModel : byte
         {
             /// <summary>An ideal pinhole.</summary>
-            NoDistortion = 0,
+            None = 0,
             /// <summary>Brown Conrady radial and tangential distortion.</summary>
             BrownConrady = 1,
             /// <summary>The fisheye model.</summary>

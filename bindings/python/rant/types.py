@@ -322,8 +322,8 @@ class ExternalVideoStream:
 
 
 class DistortionModel(_pyenum.IntEnum):
-    """A lens distortion model. NoDistortion is an ideal pinhole."""
-    NoDistortion = 0
+    """A lens distortion model. None_ is an ideal pinhole, spelled None on the wire."""
+    None_ = 0
     BrownConrady = 1
     Fisheye = 2
     Rational = 3
@@ -338,7 +338,7 @@ class CameraIntrinsics:
     fy: f64 = 0.0
     cx: f64 = 0.0
     cy: f64 = 0.0
-    model: enum(DistortionModel, u8) = DistortionModel.NoDistortion
+    model: enum(DistortionModel, u8) = DistortionModel.None_
     coeffs: f64[8] = _dataclasses.field(default_factory=lambda: [0.0] * 8)
 
 

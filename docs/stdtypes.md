@@ -99,7 +99,7 @@ Sensing and robots:
 ```
 CameraIntrinsics { width: u32, height: u32,             -- the resolution these hold for
                    fx: f64, fy: f64, cx: f64, cy: f64,
-                   model: enum<u8> { NoDistortion, BrownConrady, Fisheye, Rational },
+                   model: enum<u8> { None, BrownConrady, Fisheye, Rational },
                    coeffs: f64[8] }                     -- zero filled past the model's count
 JointState { position: f64[], velocity: f64[], effort: f64[] }
 JointNames { name: string<32>[] }
