@@ -25,6 +25,14 @@ Rant as a subproject or finds the installed package.
 - The packer strips local `#include "..."` lines with a newline anchored regex, so an
   include inside a comment or string is never touched. Each source file is wrapped in
   `#pragma region` markers so editors fold it, with `-Wunknown-pragmas` silenced on GCC.
+- The standard types have one definition, `types/stdtypes.schema`. `rant_codegen --standard`
+  (`tools/codegen`) reads it with Rant's own compiler, standalone so it never needs the table
+  it writes, and writes `src/common/stdtypes.h` with `types/extras.h` pasted at its end,
+  `src/serialize/stdroster.h`, `src/serialize/stdtable.c` and `types/stdtypes.json`. The
+  outputs are committed so a build needs no generator, and ctest `codegen.current` fails when
+  one is stale. A definition sees only those above it, and file order is `RantStdType`'s.
+- The guard `RANT_STDTYPES_H` holds a revision made from every type's name and wire, so two
+  different copies of the types in one program stop at an `#error` instead of missing a type.
 - `tools/static_runtime.cmake` links the C and C++ runtime statically so a copied binary
   runs with no redistributable. MSVC's default `/MD` needs VCRUNTIME140.dll and the debug
   runtime ships only with Visual Studio, which is the "vcruntime dll not found" a copied

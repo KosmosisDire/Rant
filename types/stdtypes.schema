@@ -1,0 +1,576 @@
+-- The standard types of Rant, each in scope by name in every schema. A comment above a type
+-- describes it, and one after a field or an option gives its [unit] and then a note. rant_codegen
+-- makes every language's copy from this file, so a change here is a change everywhere.
+
+-- Vectors
+
+-- A 2D vector of f32
+Float2 { x: f32, y: f32 }
+
+-- A 3D vector of f32
+Float3 { x: f32, y: f32, z: f32 }
+
+-- A 4D vector of f32
+Float4 { x: f32, y: f32, z: f32, w: f32 }
+
+-- A 2D vector of f64
+Double2 { x: f64, y: f64 }
+
+-- A 3D vector of f64
+Double3 { x: f64, y: f64, z: f64 }
+
+-- A 4D vector of f64
+Double4 { x: f64, y: f64, z: f64, w: f64 }
+
+-- A 2D vector of i32, such as a pixel or a grid cell
+Int2 { x: i32, y: i32 }
+
+-- A 3D vector of i32
+Int3 { x: i32, y: i32, z: i32 }
+
+-- A 4D vector of i32
+Int4 { x: i32, y: i32, z: i32, w: i32 }
+
+-- Rotation and color
+
+-- A 3D rotation as a unit quaternion, stored x, y, z, w
+Quaternion { x: f64, y: f64, z: f64, w: f64 }
+
+-- An sRGB color with straight alpha, not premultiplied
+Color {
+  r: u8
+  g: u8
+  b: u8
+  a: u8  -- 255 is opaque
+}
+
+-- Signals, ids, time and matrices
+
+-- No data, for a signal such as a trigger
+Empty { }
+
+-- A 16 byte unique id
+Uuid = u8[16]  -- RFC 4122 byte order
+
+-- A moment in time, counted from the Unix epoch in UTC
+Timestamp = i64  -- [us]
+
+-- A length of time
+Duration = i64  -- [us]
+
+-- A 3 by 3 matrix, indexed row then column
+Matrix3x3 = f32[3][3]
+
+-- A 4 by 4 matrix, indexed row then column
+Matrix4x4 = f32[4][4]
+
+-- The covariance of three values, indexed row then column, in their units squared
+Covariance3 = f64[3][3]
+
+-- The covariance of a 3D pose or twist, indexed row then column
+-- The order is x, y and z, then the turn about x, y and z
+Covariance6 = f64[6][6]
+
+-- A URL or other URI
+Uri = string<256>
+
+-- Placement and motion
+
+-- A position and orientation in a 3D frame
+Pose {
+  position: Double3        -- [m]
+  orientation: Quaternion
+}
+
+-- A position and heading in a 2D frame, the top view of a Pose
+Pose2D {
+  position: Double2  -- [m or px]
+  angle: f64         -- [rad] from +x toward +y
+}
+
+-- A Pose and the frame it is measured in
+Transform {
+  pose: Pose
+  parent: string<30>  -- the parent frame, empty when unstated
+}
+
+-- A Pose2D and the frame it is measured in
+Transform2D {
+  pose: Pose2D
+  parent: string<30>  -- the parent frame, empty when unstated
+}
+
+-- Linear and angular velocity in 3D
+Twist {
+  linear: Double3   -- [m/s]
+  angular: Double3  -- [rad/s] about each axis
+}
+
+-- Linear and angular velocity in 2D
+Twist2D {
+  linear: Double2  -- [m/s]
+  angular: f64     -- [rad/s] from +x toward +y
+}
+
+-- A force and a torque in 3D
+Wrench {
+  force: Double3   -- [N]
+  torque: Double3  -- [N m] about the frame origin
+}
+
+-- A force and a torque in 2D
+Wrench2D {
+  force: Double2  -- [N]
+  torque: f64     -- [N m] from +x toward +y
+}
+
+-- Linear and angular acceleration in 3D
+Accel {
+  linear: Double3   -- [m/s^2]
+  angular: Double3  -- [rad/s^2] about each axis
+}
+
+-- Linear and angular acceleration in 2D
+Accel2D {
+  linear: Double2  -- [m/s^2]
+  angular: f64     -- [rad/s^2] from +x toward +y
+}
+
+-- A Pose and how uncertain it is
+PoseWithCovariance {
+  pose: Pose
+  covariance: Covariance6  -- [m^2 and rad^2] the position, then the rotation about x, y and z
+}
+
+-- A Twist and how uncertain it is
+TwistWithCovariance {
+  twist: Twist
+  covariance: Covariance6  -- [m^2/s^2 and rad^2/s^2] the linear part, then the angular
+}
+
+-- Where a moving body is and how fast it moves, as dead reckoning estimates it
+Odometry {
+  pose: PoseWithCovariance    -- the body in the parent frame
+  twist: TwistWithCovariance  -- in the body's own frame
+  parent: string<30>          -- the frame pose is measured in, empty when unstated
+}
+
+-- Places on the Earth
+
+-- A point on the Earth
+GeoPoint {
+  lat: f64  -- [deg] latitude
+  lon: f64  -- [deg] longitude
+  alt: f64  -- [m] altitude
+}
+
+-- Shapes in 3D
+
+-- A box along the frame axes
+AlignedBox {
+  min: Double3  -- [m] the corner with the lowest x, y and z
+  max: Double3  -- [m] the opposite corner
+}
+
+-- A rectangle along the frame axes, also a region of an image
+AlignedBox2D {
+  min: Double2  -- [m or px] the corner with the lowest x and y
+  max: Double2  -- [m or px] the opposite corner
+}
+
+-- A box at any orientation
+OrientedBox {
+  pose: Pose     -- the center and orientation
+  size: Double3  -- [m] the full edge lengths
+}
+
+-- A rectangle at any angle
+OrientedBox2D {
+  pose: Pose2D   -- the center and angle
+  size: Double2  -- [m or px] the full edge lengths
+}
+
+-- An endless flat plane
+Plane {
+  position: Double3  -- [m] any point on the plane
+  normal: Double3    -- unit length
+}
+
+-- A straight line between two points
+Segment {
+  a: Double3  -- [m]
+  b: Double3  -- [m]
+}
+
+-- A straight line from a point, endless in one direction
+Ray {
+  origin: Double3     -- [m]
+  direction: Double3  -- unit length, away from origin
+}
+
+-- A ball around a center point
+Sphere {
+  center: Double3  -- [m]
+  radius: f64      -- [m]
+}
+
+-- A cylinder with rounded ends
+Capsule {
+  axis: Segment  -- the centers of the rounded ends
+  radius: f64    -- [m]
+}
+
+-- A cylinder with flat ends
+Cylinder {
+  axis: Segment  -- the centers of the flat ends
+  radius: f64    -- [m]
+}
+
+-- A cone from a round base to a tip
+Cone {
+  base: Double3  -- [m] the center of the base
+  tip: Double3   -- [m]
+  radius: f64    -- [m] at the base
+}
+
+-- A closed flat polygon in 3D
+Polygon {
+  points: Double3[]  -- [m] the corners in order
+}
+
+-- Shapes in 2D
+
+-- An endless line, the 2D form of a Plane
+Plane2D {
+  position: Double2  -- [m or px] any point on the line
+  normal: Double2    -- unit length
+}
+
+-- A straight line between two points in 2D
+Segment2D {
+  a: Double2  -- [m or px]
+  b: Double2  -- [m or px]
+}
+
+-- A straight line from a point, endless in one direction, in 2D
+Ray2D {
+  origin: Double2     -- [m or px]
+  direction: Double2  -- unit length, away from origin
+}
+
+-- A circle around a center point
+Circle {
+  center: Double2  -- [m or px]
+  radius: f64      -- [m or px]
+}
+
+-- A rectangle with rounded ends
+Capsule2D {
+  axis: Segment2D  -- the centers of the rounded ends
+  radius: f64      -- [m or px]
+}
+
+-- A closed polygon in 2D
+Polygon2D {
+  points: Double2[]  -- [m or px] the corners in order
+}
+
+-- Solids and routes
+
+-- A flat polygon raised to a height, such as a zone of a floor
+Prism {
+  pose: Pose       -- the frame the base lies in
+  base: Polygon2D  -- [m] in the xy plane of pose
+  height: f64      -- [m] along +z of pose
+}
+
+-- An open line through points in order
+Polyline {
+  points: Double3[]  -- [m]
+}
+
+-- An open line through points in order in 2D
+Polyline2D {
+  points: Double2[]  -- [m or px]
+}
+
+-- A route of poses to follow in order
+Path { poses: Pose[] }
+
+-- A route of 2D poses to follow in order
+Path2D { poses: Pose2D[] }
+
+-- Bodies
+
+-- The mass of a rigid body and how it resists turning
+Inertia {
+  mass: f64        -- [kg]
+  center: Double3  -- [m] the center of mass in the body frame
+  ixx: f64         -- [kg m^2] about the center of mass
+  ixy: f64         -- [kg m^2]
+  ixz: f64         -- [kg m^2]
+  iyy: f64         -- [kg m^2]
+  iyz: f64         -- [kg m^2]
+  izz: f64         -- [kg m^2]
+}
+
+-- Images and video
+
+-- How the data of an Image is laid out, 16 and up a compressed file
+ImageFormat = enum<u8> {
+  Mono8 = 0    -- one 8 bit channel
+  Mono16 = 1   -- one 16 bit channel
+  Rgb8 = 2     -- red, green and blue, 8 bits each
+  Rgba8 = 3    -- red, green, blue and alpha, 8 bits each
+  Bgr8 = 4     -- blue, green and red, 8 bits each
+  Yuyv = 5     -- YUV 4:2:2, two pixels in four bytes
+  Nv12 = 6     -- YUV 4:2:0, a Y plane then interleaved U and V
+  Monof32 = 7  -- one 32 bit float channel
+  Jpeg = 16    -- data is a JPEG file
+  Png = 17     -- data is a PNG file
+}
+
+-- A picture, as raw pixels or a compressed file
+Image {
+  width: u32           -- [px]
+  height: u32          -- [px]
+  stride: u32          -- [bytes] from one row to the next, 0 when rows are packed
+  format: ImageFormat  -- how data is laid out
+  data: u8[]           -- the pixels from the top row, or the file
+}
+
+-- The format of a video bitstream
+VideoCodec = enum<u8> {
+  Unknown = 0  -- unstated
+  Mjpeg = 1
+  H264 = 2
+  H265 = 3
+  Av1 = 4
+}
+
+-- One encoded frame of a video stream
+VideoFrame {
+  codec: VideoCodec  -- the bitstream format
+  width: u32         -- [px] the coded size, 0 when unstated
+  height: u32        -- [px] the coded size, 0 when unstated
+  keyframe: bool     -- decodes without earlier frames
+  pts: Timestamp     -- [us] when to show the frame
+  data: u8[]         -- the encoded bitstream
+}
+
+-- The protocol a video stream is served over
+VideoStreamKind = enum<u8> {
+  Rtsp = 0
+  WebrtcWhep = 1  -- WebRTC set up over WHEP
+  Hls = 2
+  Srt = 3
+  Rtp = 4
+  HttpMjpeg = 5   -- MJPEG over HTTP
+  Other = 15
+}
+
+-- Where to watch a video stream, so a viewer connects to it directly
+ExternalVideoStream {
+  kind: VideoStreamKind  -- the protocol of url
+  codec: VideoCodec      -- a hint, Unknown when unstated
+  width: u32             -- [px] a hint, 0 when unstated
+  height: u32            -- [px] a hint, 0 when unstated
+  url: Uri               -- the stream address
+  name: string<32>       -- a label for the stream
+}
+
+-- Cameras
+
+-- A lens distortion model
+DistortionModel = enum<u8> {
+  None = 0          -- an ideal pinhole
+  BrownConrady = 1
+  Fisheye = 2
+  Rational = 3
+}
+
+-- The pinhole model of a camera and its lens distortion
+CameraIntrinsics {
+  width: u32              -- [px] the resolution these values hold for
+  height: u32             -- [px]
+  fx: f64                 -- [px] focal length along x
+  fy: f64                 -- [px] focal length along y
+  cx: f64                 -- [px] principal point x
+  cy: f64                 -- [px] principal point y
+  model: DistortionModel  -- the lens distortion model
+  coeffs: f64[8]          -- OpenCV's order: k1 k2 p1 p2 k3, then k4 k5 k6 for Rational, or k1 to k4 for Fisheye, 0 past that
+}
+
+-- Joints
+
+-- The joints of a robot, in the order of its JointNames
+JointState {
+  position: f64[]  -- [rad or m] rad for a turning joint, m for a sliding one
+  velocity: f64[]  -- [rad/s or m/s] may be empty
+  effort: f64[]    -- [N m or N] may be empty
+}
+
+-- The joint names a JointState follows, published once
+JointNames { name: string[] }
+
+-- Where the joints should be at one time, in the order of their JointNames
+JointTrajectoryPoint {
+  time: Duration       -- [us] from the start of the trajectory
+  position: f64[]      -- [rad or m]
+  velocity: f64[]      -- [rad/s or m/s] may be empty
+  acceleration: f64[]  -- [rad/s^2 or m/s^2] may be empty
+  effort: f64[]        -- [N m or N] may be empty
+}
+
+-- A motion of the joints over time
+JointTrajectory {
+  points: JointTrajectoryPoint[]  -- in time order
+}
+
+-- Sensors
+
+-- One reading of an inertial measurement unit, in its own frame
+-- A covariance with -1 first means that value is not measured
+Imu {
+  orientation: Quaternion
+  orientation_covariance: Covariance3          -- [rad^2] about x, y and z
+  angular_velocity: Double3                    -- [rad/s] about each axis
+  angular_velocity_covariance: Covariance3     -- [rad^2/s^2]
+  linear_acceleration: Double3                 -- [m/s^2] gravity included
+  linear_acceleration_covariance: Covariance3  -- [m^2/s^4]
+}
+
+-- One sweep of a planar range sensor, its beams turning from +x toward +y
+LaserScan {
+  angle_min: f32      -- [rad] the first beam
+  angle_step: f32     -- [rad] from one beam to the next
+  time_step: f32      -- [s] from one beam to the next, 0 when unstated
+  range_min: f32      -- [m] a shorter range is not valid
+  range_max: f32      -- [m] a longer range is not valid
+  echoes: u8          -- the ranges per beam, 0 reads as 1
+  ranges: f32[]       -- [m] each beam's echoes together, +inf when nothing returns
+  intensities: f32[]  -- in the order of ranges, may be empty
+}
+
+-- What a range sensor measures with
+RangeKind = enum<u8> {
+  Unknown = 0     -- unstated
+  Ultrasound = 1
+  Infrared = 2
+  Laser = 3
+  Radar = 4
+}
+
+-- One distance from a sensor with a single beam or cone along its +x
+RangeReading {
+  distance: f64       -- [m] +inf when nothing is in range
+  min: f64            -- [m] the shortest distance it reads
+  max: f64            -- [m] the longest distance it reads
+  field_of_view: f64  -- [rad] the full angle of the cone
+  kind: RangeKind
+}
+
+-- The quality of a satellite position fix
+GnssStatus = enum<u8> {
+  NoFix = 0         -- the position is not valid
+  Fix = 1           -- satellites alone
+  Differential = 2  -- corrected by SBAS or DGPS
+  RtkFloat = 3      -- RTK, ambiguities not yet resolved
+  RtkFixed = 4      -- RTK, centimeter level
+}
+
+-- A position from satellite navigation
+GnssFix {
+  position: GeoPoint
+  covariance: Covariance3  -- [m^2] east, north and up
+  status: GnssStatus
+}
+
+-- Raw data blocks
+
+-- The kind of number in a block of raw data, numbered as in PCL
+ScalarKind = enum<u8> {
+  I8 = 1
+  U8 = 2
+  I16 = 3
+  U16 = 4
+  I32 = 5
+  U32 = 6
+  F32 = 7
+  F64 = 8
+  I64 = 9
+  U64 = 10
+}
+
+-- One value that every point of a PointCloud holds
+PointField {
+  name: string      -- such as x, y, z, intensity or rgb
+  offset: u32       -- [bytes] from the start of the point
+  kind: ScalarKind
+  count: u32        -- the numbers in a row, 1 for a single number
+}
+
+-- Points with any values each, packed one point after another as in PCL
+PointCloud {
+  origin: Transform     -- the frame the points are in
+  width: u32            -- points per row when the cloud is an image, 0 when it has no rows
+  fields: PointField[]  -- what each point holds
+  point_step: u32       -- [bytes] from one point to the next
+  dense: bool           -- no point holds an invalid value
+  data: u8[]            -- the points, little endian
+}
+
+-- A surface of triangles
+Mesh {
+  vertices: PointCloud  -- the corners, with x, y and z among their fields
+  triangles: u32[]      -- three vertex indices each, counterclockwise seen from outside
+}
+
+-- One value that every cell of a Grid holds
+GridField {
+  name: string      -- such as occupancy, height or cost
+  kind: ScalarKind
+  data: u8[]        -- one number per cell, x fastest, then y, then z, little endian
+}
+
+-- A 2D or 3D grid of cells with any values each, such as a map
+Grid {
+  origin: Transform    -- the frame, and the pose of the outer corner of cell 0
+  resolution: f64      -- [m] the edge of a cell
+  cells_x: u32         -- cells along x
+  cells_y: u32         -- cells along y
+  cells_z: u32         -- cells along z, 1 for a 2D grid
+  fields: GridField[]  -- what each cell holds
+}
+
+-- An array of numbers with any number of dimensions
+Tensor {
+  kind: ScalarKind
+  shape: u32[]      -- the size of each dimension, outermost first
+  data: u8[]        -- the numbers, last dimension fastest, little endian
+}
+
+-- A whole file
+File {
+  name: string            -- the file name with its extension
+  media_type: string<64>  -- such as image/png, empty when unknown
+  data: u8[]              -- the file bytes
+}
+
+-- Detections
+
+-- An object found in an image or a 2D frame
+Detection2D {
+  bounds: OrientedBox2D  -- where it is
+  label: string          -- what it is
+  score: f32             -- the confidence, 0 to 1
+  track: u32             -- the same id in every frame, 0 when not tracked
+}
+
+-- An object found in a 3D frame
+Detection3D {
+  bounds: OrientedBox  -- where it is
+  label: string        -- what it is
+  score: f32           -- the confidence, 0 to 1
+  track: u32           -- the same id in every frame, 0 when not tracked
+}

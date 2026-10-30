@@ -87,6 +87,7 @@ program in this order.
 | `fuzz.receive`, `.schema`, `.message` | the target's seeds and saved crashes, below |
 | `interop.<pub>_to_<sub>` | one language publishing to another, below |
 | `build.strict` | the compile checks, below |
+| `codegen.current` | every checked in copy of the standard types against a fresh `rant_codegen` run |
 
 ## Phases
 

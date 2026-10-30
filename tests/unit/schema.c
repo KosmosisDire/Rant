@@ -1450,6 +1450,33 @@ static void schema_doc_checks(void){
         rant_schema_doc_free(doc);
         free(all);
     }
+
+    /* the file the table is generated from, read standalone: the same types with the same wire */
+    {   FILE *f = fopen(RANT_TEST_STDTYPES, "rb");
+        char *text = NULL; long n = 0; int ok = 1; uint32_t i;
+        if (f && fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0){
+            text = (char *)malloc((size_t)n + 1);
+            if (text && fread(text, 1, (size_t)n, f) == (size_t)n) text[n] = 0;
+            else { free(text); text = NULL; }
+        }
+        if (f) fclose(f);
+        CHECK(text != NULL, "doc: types/stdtypes.schema reads");
+        doc = text ? i_rant_schema_doc_parse(&da, text, 1, &err) : NULL;
+        CHECK(doc && rant_schema_doc_count(doc) == (uint32_t)RANT_STD_COUNT - 1u,
+              "doc: the schema file holds the whole roster standalone (%s at %u)", err.why ? err.why : "", err.line);
+        for (i = 0; i < rant_schema_doc_count(doc); i++){
+            RantSchema *table;
+            char name[64];
+            rant_schema_doc_at(doc, i, &def);
+            snprintf(name, sizeof name, "%.*s", (int)rant_schema_name(def.schema).len, rant_schema_name(def.schema).data);
+            table = test_compile(&ma, name, NULL);
+            if (!table || rant_schema_hash(table) != rant_schema_hash(def.schema)
+                || (int)rant_std_by_name(rant_schema_name(def.schema)) != (int)i + 1) ok = 0;
+        }
+        CHECK(ok, "doc: every type in the file has the table's wire and the roster's place");
+        rant_schema_doc_free(doc);
+        free(text);
+    }
     rant_allocator_reset(&ma);
 }
 

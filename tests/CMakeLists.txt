@@ -65,7 +65,8 @@ function(rant_test_program target)
   add_executable(${target} ${ARGN} support/harness.c)
   target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
   target_compile_definitions(${target} PRIVATE
-    RANT_TEST_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/schemas.txt")
+    RANT_TEST_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/schemas.txt"
+    RANT_TEST_STDTYPES="${PROJECT_SOURCE_DIR}/types/stdtypes.schema")
   target_link_libraries(${target} PRIVATE rant_wire_tap)
   add_dependencies(${target} rant_dist)
 endfunction()
@@ -186,6 +187,12 @@ endforeach()
 add_test(NAME build.strict COMMAND "${CMAKE_COMMAND}" --build "${CMAKE_BINARY_DIR}"
          --target ${_strict_targets} --config $<CONFIG>)
 set_tests_properties(build.strict PROPERTIES LABELS build TIMEOUT 600)
+
+# Every checked in copy of the standard types against a fresh run of the generator.
+if(TARGET rant_codegen)
+  add_test(NAME codegen.current COMMAND rant_codegen --standard --check --root "${PROJECT_SOURCE_DIR}")
+  set_tests_properties(codegen.current PROPERTIES LABELS build TIMEOUT 60)
+endif()
 
 # The steady state of a send must not allocate. memscale exits 1 when one did.
 add_test(NAME bench.memscale COMMAND rant_bench memscale)

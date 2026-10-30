@@ -306,17 +306,20 @@ rant_schema_message_default(s, msg, sizeof msg);
 memcpy(msg + /* the Transform field's offset */ 0, &p, sizeof p);  /* layout identical */
 ```
 
-The C mirror structs (`RantFloat3`, `RantTransform`, `RantOrientedBox`, `RantColor`,
-`RantUuid`, `RantMatrix4x4` and the rest) are layout identical to the wire on any little endian
-target, which the header static asserts, so a whole value memcpys in and out. Field at a
-time access through `rant_get_f64(msg, s, "at.pose.position.x")` works exactly as it does
-for any other nested struct.
+The C structs (`RantFloat3`, `RantTransform`, `RantOrientedBox`, `RantColor`, `RantUuid`,
+`RantMatrix4x4` and the rest) are layout identical to the wire on any little endian target,
+which the header static asserts, so a whole value memcpys in and out. Field at a time access
+through `rant_get_f64(msg, s, "at.pose.position.x")` works exactly as it does for any other
+nested struct.
 
-A type only gets a C mirror when its packed wire size already equals its natural C size.
-`ExternalVideoStream`, `CameraIntrinsics`, `RangeReading`, `GnssFix`, `Empty` and every type
-with a variable member, such as `Image`, `Polygon` or `PointCloud`, have none: they would
-gain padding, carry a variable member, or are empty. The other bindings reflect field by
-field, so they mirror every type either way.
+Every fixed type has a struct, and four of them gain padding in C: `ExternalVideoStream`,
+`CameraIntrinsics`, `RangeReading` and `GnssFix`. Their comments say so, and their fields go
+to the wire one at a time. `Empty` and every type with a variable member, such as `Image`,
+`Polygon` or `PointCloud`, have no struct. The other bindings reflect field by field, so they
+have every type either way.
+
+An enum's constants are `RANT_<TYPE>_<OPTION>`, such as `RANT_IMAGE_FORMAT_RGB8` and
+`RANT_VIDEO_CODEC_H264`.
 
 Beside the types sit only constructors (`rant_double3`, `rant_pose_identity`,
 `rant_transform_identity`), `Color` hex conversion and timestamp arithmetic. Everything that

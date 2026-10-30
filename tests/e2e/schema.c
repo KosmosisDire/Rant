@@ -877,7 +877,7 @@ static void stdtypes_checks(void){
     }
     CHECK(sd_pose_recv==1 && sd_px==4.5 && sd_qw==1.0,
              "stdtypes: Transform delivered (recv=%ld x=%g w=%g)", sd_pose_recv, sd_px, sd_qw);
-    CHECK(sd_img_recv==1 && sd_iw==64 && sd_ih==48 && sd_ifmt==(unsigned)RANT_IMAGE_RGB8
+    CHECK(sd_img_recv==1 && sd_iw==64 && sd_ih==48 && sd_ifmt==(unsigned)RANT_IMAGE_FORMAT_RGB8
              && sd_ilen==64u*48u*3u,
              "stdtypes: Image delivered whole (%ux%u fmt=%u %u bytes)",
              sd_iw, sd_ih, sd_ifmt, (unsigned)sd_ilen);
