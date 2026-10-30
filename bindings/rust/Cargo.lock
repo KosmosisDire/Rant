@@ -151,14 +151,14 @@ dependencies = [
 
 [[package]]
 name = "rant-ffigen"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "bindgen",
 ]
 
 [[package]]
 name = "rant-macros"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "rant-middleware"
-version = "0.0.40"
+version = "0.0.41"
 dependencies = [
  "cc",
  "rant-macros",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "rant-types"
-version = "0.0.40"
+version = "0.0.41"
 
 [[package]]
 name = "regex"
