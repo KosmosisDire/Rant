@@ -530,8 +530,10 @@ static void schema_root_checks(void){
     CHECK(pflag && pnote && psamples && pextras && pmode && pbad && pwrap,
              "schema-root: topics created");
 
-    for (t=0;t<1200 && (rant_topic_match_count(pflag)==0 || rant_topic_match_count(pmode)==0
-                        || rant_topic_match_count(pextras)==0);t++){
+    /* waits for every match and refusal the checks below read, the raw reader included */
+    for (t=0;t<1200 && (rant_topic_match_count(pflag)<2 || rant_topic_match_count(pnote)==0
+                        || rant_topic_match_count(psamples)==0 || rant_topic_match_count(pextras)==0
+                        || rant_topic_match_count(pmode)==0 || sr_mismatch_n<2);t++){
         rant_node_poll(P,2); rant_node_poll(S,2); rant_node_poll(Q,2);
     }
     CHECK(rant_topic_match_count(pflag)==2, "schema-root: bool topic matched typed + raw readers (%d)",
