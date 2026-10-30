@@ -1,6 +1,8 @@
 -- The standard types of Rant, each in scope by name in every schema. A comment above a type
 -- describes it, and one after a field or an option gives its [unit] and then a note. rant_codegen
 -- makes every language's copy from this file, so a change here is a change everywhere.
+-- A fixed type gains no padding in C, so its struct is its wire bytes: each member starts on a multiple
+-- of its size and an enum beside f64 values is enum<u64>. rant_codegen refuses a type that breaks this.
 
 -- Vectors
 
@@ -371,18 +373,18 @@ VideoStreamKind = enum<u8> {
 
 -- Where to watch a video stream, so a viewer connects to it directly
 ExternalVideoStream {
-  kind: VideoStreamKind  -- the protocol of url
-  codec: VideoCodec      -- a hint, Unknown when unstated
   width: u32             -- [px] a hint, 0 when unstated
   height: u32            -- [px] a hint, 0 when unstated
+  kind: VideoStreamKind  -- the protocol of url
+  codec: VideoCodec      -- a hint, Unknown when unstated
   url: Uri               -- the stream address
-  name: string<32>       -- a label for the stream
+  name: string<30>       -- a label for the stream
 }
 
 -- Cameras
 
 -- A lens distortion model
-DistortionModel = enum<u8> {
+DistortionModel = enum<u64> {
   None = 0          -- an ideal pinhole
   BrownConrady = 1
   Fisheye = 2
@@ -397,8 +399,8 @@ CameraIntrinsics {
   fy: f64                 -- [px] focal length along y
   cx: f64                 -- [px] principal point x
   cy: f64                 -- [px] principal point y
-  model: DistortionModel  -- the lens distortion model
   coeffs: f64[8]          -- OpenCV's order: k1 k2 p1 p2 k3, then k4 k5 k6 for Rational, or k1 to k4 for Fisheye, 0 past that
+  model: DistortionModel  -- the lens distortion model
 }
 
 -- Joints
@@ -453,7 +455,7 @@ LaserScan {
 }
 
 -- What a range sensor measures with
-RangeKind = enum<u8> {
+RangeKind = enum<u64> {
   Unknown = 0     -- unstated
   Ultrasound = 1
   Infrared = 2
@@ -471,7 +473,7 @@ RangeReading {
 }
 
 -- The quality of a satellite position fix
-GnssStatus = enum<u8> {
+GnssStatus = enum<u64> {
   NoFix = 0         -- the position is not valid
   Fix = 1           -- satellites alone
   Differential = 2  -- corrected by SBAS or DGPS

@@ -241,6 +241,16 @@ fn point_clouds_grids_and_covariances_round_trip() {
 }
 
 #[test]
+fn wide_enums_round_trip() {
+    use rant::types::{CameraIntrinsics, DistortionModel, RangeKind, RangeReading};
+    let mut cam = CameraIntrinsics { fx: 500.0, model: DistortionModel::Rational, ..Default::default() };
+    cam.coeffs[7] = -0.5;
+    assert_eq!(round_trip(44, "cam", cam.clone()), cam);
+    let range = RangeReading { distance: 2.5, kind: RangeKind::Radar, ..Default::default() };
+    assert_eq!(round_trip(45, "range", range.clone()), range);
+}
+
+#[test]
 fn bare_roots_round_trip() {
     assert_eq!(round_trip(27, "f", 2.5f32), 2.5);
     assert_eq!(round_trip(28, "s", "hello".to_owned()), "hello");

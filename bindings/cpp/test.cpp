@@ -754,6 +754,20 @@ static bool nested_leg() {
                 && rant::detail::rant_get_f32(mb, gc->raw, "mark[2].x") == -1.0f);
         }
     }
+    {   /* an enum as wide as the f64 values beside it */
+        rant::types::CameraIntrinsics cam, cam2;
+        cam.fx = 500.0; cam.coeffs[7] = -0.5; cam.model = rant::types::DistortionModel::Rational;
+        chk("wide enum: CameraIntrinsics round trips", round_trip(a, cam, cam2)
+            && cam2.fx == 500.0 && cam2.coeffs[7] == -0.5 && cam2.model == rant::types::DistortionModel::Rational);
+        rant::types::RangeReading range, range2;
+        range.distance = 2.5; range.kind = rant::types::RangeKind::Radar;
+        chk("wide enum: RangeReading round trips", round_trip(a, range, range2)
+            && range2.distance == 2.5 && range2.kind == rant::types::RangeKind::Radar);
+        rant::types::GnssFix fix, fix2;
+        fix.position.alt = 12.0; fix.status = rant::types::GnssStatus::RtkFixed;
+        chk("wide enum: GnssFix round trips", round_trip(a, fix, fix2)
+            && fix2.position.alt == 12.0 && fix2.status == rant::types::GnssStatus::RtkFixed);
+    }
     {   auto sc = rant::priv::schema_of<std::array<Corner, 3>>(a);
         std::string txt = sc ? sc->to_dsl() : std::string();
         chk("nest: a fixed struct array is a whole schema too",

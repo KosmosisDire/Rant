@@ -50,7 +50,7 @@ pub const RANT_INTEREST_RESP: u32 = 4;
 pub const RANT_INTEREST_RESP_HEAD: u32 = 24;
 pub const RANT_SCHEMA_WIRE_VERSION: u32 = 8;
 pub const RANT_SCHEMA_MAX_DEPTH: u32 = 8;
-pub const RANT_STDTYPES_H: u32 = 165751840;
+pub const RANT_STDTYPES_H: u32 = 2804007311;
 pub const RANT_SELF: u32 = 0;
 pub const RANT_MATCH_WAIT_MS: u32 = 1000;
 pub const RANT_QUEUE_CAP: u32 = 1048576;
@@ -835,13 +835,13 @@ pub type RantVideoStreamKind = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct RantExternalVideoStream {
-    pub kind: RantVideoStreamKind,
-    pub codec: RantVideoCodec,
     pub width: u32,
     pub height: u32,
+    pub kind: u8,
+    pub codec: u8,
     pub url: RantUri,
     pub name_len: u16,
-    pub name: [::std::os::raw::c_char; 32usize],
+    pub name: [::std::os::raw::c_char; 30usize],
 }
 impl Default for RantExternalVideoStream {
     fn default() -> Self {
@@ -858,7 +858,7 @@ pub const RANT_DISTORTION_MODEL_FISHEYE: RantDistortionModel = 2;
 pub const RANT_DISTORTION_MODEL_RATIONAL: RantDistortionModel = 3;
 pub type RantDistortionModel = ::std::os::raw::c_uint;
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Default, Copy, Clone)]
 pub struct RantCameraIntrinsics {
     pub width: u32,
     pub height: u32,
@@ -866,17 +866,8 @@ pub struct RantCameraIntrinsics {
     pub fy: f64,
     pub cx: f64,
     pub cy: f64,
-    pub model: RantDistortionModel,
     pub coeffs: [f64; 8usize],
-}
-impl Default for RantCameraIntrinsics {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
+    pub model: u64,
 }
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
@@ -895,22 +886,13 @@ pub const RANT_RANGE_KIND_LASER: RantRangeKind = 3;
 pub const RANT_RANGE_KIND_RADAR: RantRangeKind = 4;
 pub type RantRangeKind = ::std::os::raw::c_uint;
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Default, Copy, Clone)]
 pub struct RantRangeReading {
     pub distance: f64,
     pub min: f64,
     pub max: f64,
     pub field_of_view: f64,
-    pub kind: RantRangeKind,
-}
-impl Default for RantRangeReading {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
+    pub kind: u64,
 }
 pub const RANT_GNSS_STATUS_NO_FIX: RantGnssStatus = 0;
 pub const RANT_GNSS_STATUS_FIX: RantGnssStatus = 1;
@@ -919,20 +901,11 @@ pub const RANT_GNSS_STATUS_RTK_FLOAT: RantGnssStatus = 3;
 pub const RANT_GNSS_STATUS_RTK_FIXED: RantGnssStatus = 4;
 pub type RantGnssStatus = ::std::os::raw::c_uint;
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Default, Copy, Clone)]
 pub struct RantGnssFix {
     pub position: RantGeoPoint,
     pub covariance: RantCovariance3,
-    pub status: RantGnssStatus,
-}
-impl Default for RantGnssFix {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
+    pub status: u64,
 }
 pub const RANT_SCALAR_KIND_I8: RantScalarKind = 1;
 pub const RANT_SCALAR_KIND_U8: RantScalarKind = 2;

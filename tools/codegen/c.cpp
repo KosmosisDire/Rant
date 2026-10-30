@@ -51,11 +51,26 @@ static std::string c_scalar(const std::string &word) {
     return types.at(word);
 }
 
+// How a type lays out in C, and whether that is exactly its packed layout on the wire.
+struct Layout {
+    uint32_t size = 0, align = 1;
+    bool same = true;
+    std::string backing;    // an enum's integer kind
+};
+
+using Layouts = std::map<std::string, Layout>;
+
+// A C enum has the compiler's size, so a field holds its backing integer to keep the wire's.
+static std::string c_word(const Type &t, const Layouts &known) {
+    if (t.kind != Type::Named) return c_scalar(t.word);
+    const Layout &l = known.at(t.word);
+    return l.backing.empty() ? "Rant" + t.word : c_scalar(l.backing);
+}
+
 // The declaration of one member. A capped string is its live length then its bytes.
-static std::string c_decl(const Type &t, const std::string &name) {
+static std::string c_decl(const Type &t, const std::string &name, const Layouts &known) {
     switch (t.kind) {
-    case Type::Scalar: return c_scalar(t.word) + " " + name + ";";
-    case Type::Named: return "Rant" + t.word + " " + name + ";";
+    case Type::Scalar: case Type::Named: return c_word(t, known) + " " + name + ";";
     case Type::String:
         return "uint16_t " + name + "_len; char " + name + "[" + std::to_string(t.cap) + "];";
     case Type::Array: {
@@ -64,11 +79,20 @@ static std::string c_decl(const Type &t, const std::string &name) {
         for (; e->kind == Type::Array; e = e->elem.get()) dims += "[" + std::to_string(e->count) + "]";
         if (e->kind == Type::String)
             return "struct { uint16_t len; char data[" + std::to_string(e->cap) + "]; } " + name + dims + ";";
-        return (e->kind == Type::Named ? "Rant" + e->word : c_scalar(e->word)) + " " + name + dims + ";";
+        return c_word(*e, known) + " " + name + dims + ";";
     }
     case Type::Map: break;
     }
     throw std::runtime_error("a fixed type holds a map");
+}
+
+// A member's comment, which names the enum its integer holds.
+static std::string c_member_comment(const Member &m, const Layouts &known) {
+    const Type *e = &m.type;
+    while (e->kind == Type::Array) e = e->elem.get();
+    const std::string note = comment_of(m);
+    if (e->kind != Type::Named || known.at(e->word).backing.empty()) return note;
+    return "Rant" + e->word + (note.empty() ? "" : ", " + note);
 }
 
 // The one member a wrapper holds, since the schema has no place to name it: bytes are bytes and
@@ -82,20 +106,12 @@ static std::string alias_member(const Def &d) {
     return "value";
 }
 
-// How a type lays out in C, and whether that is exactly its packed layout on the wire.
-struct Layout {
-    uint32_t size = 0, align = 1;
-    bool same = true;
-};
-
 static uint32_t scalar_size(const std::string &word) {
     if (word == "u8" || word == "i8" || word == "bool") return 1;
     if (word == "u16" || word == "i16") return 2;
     if (word == "u32" || word == "i32" || word == "f32") return 4;
     return 8;
 }
-
-using Layouts = std::map<std::string, Layout>;
 
 static Layout layout_of(const Type &t, const Layouts &known) {
     Layout l;
@@ -114,9 +130,9 @@ static Layout layout_of(const Type &t, const Layouts &known) {
 
 static Layout layout_of(const Def &d, const Layouts &known) {
     Layout l;
-    if (d.kind == Def::Enum) {    // a C enum has the compiler's size, never the wire's promise
-        l.size = l.align = 4;
-        l.same = false;
+    if (d.kind == Def::Enum) {
+        l.size = l.align = scalar_size(d.backing);
+        l.backing = d.backing;
         return l;
     }
     uint32_t off = 0;
@@ -146,17 +162,16 @@ static std::string member_lines(const std::vector<std::pair<std::string, std::st
     return out;
 }
 
-static std::string c_struct(const Def &d, const Layout &l) {
+static std::string c_struct(const Def &d, const Layouts &known) {
     std::vector<std::pair<std::string, std::string>> rows;
     if (d.kind == Def::Struct) {
-        for (const Member &m : d.members) rows.push_back({ c_decl(m.type, c_name(m.name)), comment_of(m) });
+        for (const Member &m : d.members)
+            rows.push_back({ c_decl(m.type, c_name(m.name), known), c_member_comment(m, known) });
     } else {
         const Member &m = d.members[0];
-        rows.push_back({ c_decl(m.type, alias_member(d)), comment_of(m) });
+        rows.push_back({ c_decl(m.type, alias_member(d), known), c_member_comment(m, known) });
     }
-    std::string out = about_of(d);
-    if (!l.same) out += "/* Not the wire's layout, so set its fields by name. */\n";
-    return out + "typedef struct {\n" + member_lines(rows) + "} Rant" + d.name + ";\n";
+    return about_of(d) + "typedef struct {\n" + member_lines(rows) + "} Rant" + d.name + ";\n";
 }
 
 static std::string c_alias_number(const Def &d) {
@@ -212,13 +227,16 @@ static std::string structs_header(const Model &model, const std::string &extras)
     for (const Def &d : model.defs) {
         if (!d.fixed) continue;
         const Layout l = layout_of(d, layouts);
+        if (!l.same)
+            throw std::runtime_error(d.name + " gains padding in C: start each member on a multiple of its size and "
+                                     "keep the total a multiple of the widest");
         layouts[d.name] = l;
         if (d.kind == Def::Enum) out += c_enum(d);
         else if (d.kind == Def::Alias && d.members[0].type.kind == Type::Scalar) out += c_alias_number(d);
         else if (!d.packed) continue;     // no fields at all, which C cannot spell
-        else out += c_struct(d, l);
+        else out += c_struct(d, layouts);
         out += "\n";
-        if (l.same && d.kind != Def::Enum) pins.push_back("sizeof(Rant" + d.name + ") == " + std::to_string(l.size));
+        if (d.kind != Def::Enum) pins.push_back("sizeof(Rant" + d.name + ") == " + std::to_string(l.size));
     }
 
     out += "/* The layout pins: each of these copies straight to and from the wire on a little endian\n"

@@ -3,6 +3,10 @@
  * spec/testing.md says what each case pins. */
 #include "support/test.h"
 
+static int str_is(RantString s, const char *want){
+    return s.len == strlen(want) && memcmp(s.data, want, s.len) == 0;
+}
+
 /* rant_schema_print is the inverse of compile: print a schema back to DSL, recompile that
    text, and assert an exact wire round-trip plus that the (NULL,0) measure matches. */
 static void schema_print_roundtrip(RantAllocator *ma, RantSchema *s, const char *label){
@@ -1480,9 +1484,62 @@ static void schema_doc_checks(void){
     rant_allocator_reset(&ma);
 }
 
+/* A fixed type's C struct is its wire bytes: copied whole into a message, it reads back by name. */
+static void schema_struct_checks(void){
+    RantAllocator ma = rant_allocator_heap(0);
+    uint8_t m[512];
+    RantBytes b = rant_bytes(m, sizeof m);
+    RantSchema *s;
+
+    {   RantCameraIntrinsics v;
+        memset(&v, 0, sizeof v);
+        v.width = 640; v.height = 480; v.fx = 500.0; v.cy = 240.0;
+        v.coeffs[7] = -0.5; v.model = RANT_DISTORTION_MODEL_RATIONAL;
+        s = test_compile(&ma, "CameraIntrinsics", NULL);
+        CHECK(s && rant_schema_size(s) == sizeof v, "struct: CameraIntrinsics has the wire's size");
+        memcpy(m, &v, sizeof v);
+        CHECK(s && rant_get_uint(b, s, "height") == 480 && rant_get_f64(b, s, "cy") == 240.0
+              && rant_get_f64(b, s, "coeffs[7]") == -0.5 && str_is(rant_get_enum(b, s, "model"), "Rational"),
+              "struct: CameraIntrinsics reads back by name");
+    }
+    {   RantExternalVideoStream v;
+        memset(&v, 0, sizeof v);
+        v.height = 1080; v.kind = RANT_VIDEO_STREAM_KIND_HLS; v.codec = RANT_VIDEO_CODEC_H265;
+        v.url.value_len = 2; memcpy(v.url.value, "u:", 2);
+        v.name_len = 3; memcpy(v.name, "cam", 3);
+        s = test_compile(&ma, "ExternalVideoStream", NULL);
+        CHECK(s && rant_schema_size(s) == sizeof v, "struct: ExternalVideoStream has the wire's size");
+        memcpy(m, &v, sizeof v);
+        CHECK(s && rant_get_uint(b, s, "height") == 1080 && str_is(rant_get_enum(b, s, "kind"), "Hls")
+              && str_is(rant_get_enum(b, s, "codec"), "H265") && str_is(rant_get_string(b, s, "url"), "u:")
+              && str_is(rant_get_string(b, s, "name"), "cam"),
+              "struct: ExternalVideoStream reads back by name");
+    }
+    {   RantRangeReading v;
+        memset(&v, 0, sizeof v);
+        v.field_of_view = 0.25; v.kind = RANT_RANGE_KIND_RADAR;
+        s = test_compile(&ma, "RangeReading", NULL);
+        CHECK(s && rant_schema_size(s) == sizeof v, "struct: RangeReading has the wire's size");
+        memcpy(m, &v, sizeof v);
+        CHECK(s && rant_get_f64(b, s, "field_of_view") == 0.25 && str_is(rant_get_enum(b, s, "kind"), "Radar"),
+              "struct: RangeReading reads back by name");
+    }
+    {   RantGnssFix v;
+        memset(&v, 0, sizeof v);
+        v.covariance.m[2][2] = 9.0; v.status = RANT_GNSS_STATUS_RTK_FIXED;
+        s = test_compile(&ma, "GnssFix", NULL);
+        CHECK(s && rant_schema_size(s) == sizeof v, "struct: GnssFix has the wire's size");
+        memcpy(m, &v, sizeof v);
+        CHECK(s && rant_get_f64(b, s, "covariance[2][2]") == 9.0 && str_is(rant_get_enum(b, s, "status"), "RtkFixed"),
+              "struct: GnssFix reads back by name");
+    }
+    rant_allocator_reset(&ma);
+}
+
 static const TestCase cases[] = {
     { "dsl", schema_dsl_checks },
     { "doc", schema_doc_checks },
+    { "structs", schema_struct_checks },
     { "wire", schema_v8_checks },
     { "nested", schema_nested_checks },
     { "writes", schema_write_checks },

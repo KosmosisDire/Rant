@@ -1,5 +1,5 @@
 {
-  "revision": 165751840,
+  "revision": 2804007311,
   "types": [
     { "name": "Float2", "kind": "struct", "fixed": true, "size": 8,
       "about": ["A 2D vector of f32"],
@@ -408,17 +408,17 @@
         { "name": "HttpMjpeg", "value": 5, "unit": "", "note": "MJPEG over HTTP" },
         { "name": "Other", "value": 15, "unit": "", "note": "" }
       ] },
-    { "name": "ExternalVideoStream", "kind": "struct", "fixed": true, "size": 302,
+    { "name": "ExternalVideoStream", "kind": "struct", "fixed": true, "size": 300,
       "about": ["Where to watch a video stream, so a viewer connects to it directly"],
       "members": [
-        { "name": "kind", "type": "VideoStreamKind", "unit": "", "note": "the protocol of url" },
-        { "name": "codec", "type": "VideoCodec", "unit": "", "note": "a hint, Unknown when unstated" },
         { "name": "width", "type": "u32", "unit": "px", "note": "a hint, 0 when unstated" },
         { "name": "height", "type": "u32", "unit": "px", "note": "a hint, 0 when unstated" },
+        { "name": "kind", "type": "VideoStreamKind", "unit": "", "note": "the protocol of url" },
+        { "name": "codec", "type": "VideoCodec", "unit": "", "note": "a hint, Unknown when unstated" },
         { "name": "url", "type": "Uri", "unit": "", "note": "the stream address" },
-        { "name": "name", "type": "string<32>", "unit": "", "note": "a label for the stream" }
+        { "name": "name", "type": "string<30>", "unit": "", "note": "a label for the stream" }
       ] },
-    { "name": "DistortionModel", "kind": "enum", "backing": "u8", "fixed": true, "size": 1,
+    { "name": "DistortionModel", "kind": "enum", "backing": "u64", "fixed": true, "size": 8,
       "about": ["A lens distortion model"],
       "members": [
         { "name": "None", "value": 0, "unit": "", "note": "an ideal pinhole" },
@@ -426,7 +426,7 @@
         { "name": "Fisheye", "value": 2, "unit": "", "note": "" },
         { "name": "Rational", "value": 3, "unit": "", "note": "" }
       ] },
-    { "name": "CameraIntrinsics", "kind": "struct", "fixed": true, "size": 105,
+    { "name": "CameraIntrinsics", "kind": "struct", "fixed": true, "size": 112,
       "about": ["The pinhole model of a camera and its lens distortion"],
       "members": [
         { "name": "width", "type": "u32", "unit": "px", "note": "the resolution these values hold for" },
@@ -435,8 +435,8 @@
         { "name": "fy", "type": "f64", "unit": "px", "note": "focal length along y" },
         { "name": "cx", "type": "f64", "unit": "px", "note": "principal point x" },
         { "name": "cy", "type": "f64", "unit": "px", "note": "principal point y" },
-        { "name": "model", "type": "DistortionModel", "unit": "", "note": "the lens distortion model" },
-        { "name": "coeffs", "type": "f64[8]", "unit": "", "note": "OpenCV's order: k1 k2 p1 p2 k3, then k4 k5 k6 for Rational, or k1 to k4 for Fisheye, 0 past that" }
+        { "name": "coeffs", "type": "f64[8]", "unit": "", "note": "OpenCV's order: k1 k2 p1 p2 k3, then k4 k5 k6 for Rational, or k1 to k4 for Fisheye, 0 past that" },
+        { "name": "model", "type": "DistortionModel", "unit": "", "note": "the lens distortion model" }
       ] },
     { "name": "JointState", "kind": "struct", "fixed": false, "size": 0,
       "about": ["The joints of a robot, in the order of its JointNames"],
@@ -486,7 +486,7 @@
         { "name": "ranges", "type": "f32[]", "unit": "m", "note": "each beam's echoes together, +inf when nothing returns" },
         { "name": "intensities", "type": "f32[]", "unit": "", "note": "in the order of ranges, may be empty" }
       ] },
-    { "name": "RangeKind", "kind": "enum", "backing": "u8", "fixed": true, "size": 1,
+    { "name": "RangeKind", "kind": "enum", "backing": "u64", "fixed": true, "size": 8,
       "about": ["What a range sensor measures with"],
       "members": [
         { "name": "Unknown", "value": 0, "unit": "", "note": "unstated" },
@@ -495,7 +495,7 @@
         { "name": "Laser", "value": 3, "unit": "", "note": "" },
         { "name": "Radar", "value": 4, "unit": "", "note": "" }
       ] },
-    { "name": "RangeReading", "kind": "struct", "fixed": true, "size": 33,
+    { "name": "RangeReading", "kind": "struct", "fixed": true, "size": 40,
       "about": ["One distance from a sensor with a single beam or cone along its +x"],
       "members": [
         { "name": "distance", "type": "f64", "unit": "m", "note": "+inf when nothing is in range" },
@@ -504,7 +504,7 @@
         { "name": "field_of_view", "type": "f64", "unit": "rad", "note": "the full angle of the cone" },
         { "name": "kind", "type": "RangeKind", "unit": "", "note": "" }
       ] },
-    { "name": "GnssStatus", "kind": "enum", "backing": "u8", "fixed": true, "size": 1,
+    { "name": "GnssStatus", "kind": "enum", "backing": "u64", "fixed": true, "size": 8,
       "about": ["The quality of a satellite position fix"],
       "members": [
         { "name": "NoFix", "value": 0, "unit": "", "note": "the position is not valid" },
@@ -513,7 +513,7 @@
         { "name": "RtkFloat", "value": 3, "unit": "", "note": "RTK, ambiguities not yet resolved" },
         { "name": "RtkFixed", "value": 4, "unit": "", "note": "RTK, centimeter level" }
       ] },
-    { "name": "GnssFix", "kind": "struct", "fixed": true, "size": 97,
+    { "name": "GnssFix", "kind": "struct", "fixed": true, "size": 104,
       "about": ["A position from satellite navigation"],
       "members": [
         { "name": "position", "type": "GeoPoint", "unit": "", "note": "" },

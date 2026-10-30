@@ -4,7 +4,7 @@ spells as that type on the wire, so the same schema hashes the same in every lan
 import dataclasses as _dataclasses
 import enum as _pyenum
 from . import _native as _c
-from . import _StdAlias, _std, _String, u8, u32, i32, i64, f32, f64, string, enum
+from . import _StdAlias, _std, _String, u8, u32, u64, i32, i64, f32, f64, string, enum
 
 Timestamp = _StdAlias("Timestamp", i64)     # microseconds since the Unix epoch, UTC
 Duration  = _StdAlias("Duration", i64)      # microseconds
@@ -405,12 +405,12 @@ class VideoFrame:
 # width and height are hints for pickers, the stream stays authoritative once connected.
 @_std("ExternalVideoStream")
 class ExternalVideoStream:
-    kind: enum(VideoStreamKind, u8) = VideoStreamKind.Rtsp
-    codec: enum(VideoCodec, u8) = VideoCodec.Unknown
     width: u32 = 0
     height: u32 = 0
+    kind: enum(VideoStreamKind, u8) = VideoStreamKind.Rtsp
+    codec: enum(VideoCodec, u8) = VideoCodec.Unknown
     url: Uri = ""
-    name: string(32) = ""
+    name: string(30) = ""
 
 
 class DistortionModel(_pyenum.IntEnum):
@@ -431,8 +431,8 @@ class CameraIntrinsics:
     fy: f64 = 0.0
     cx: f64 = 0.0
     cy: f64 = 0.0
-    model: enum(DistortionModel, u8) = DistortionModel.None_
     coeffs: f64[8] = _dataclasses.field(default_factory=lambda: [0.0] * 8)
+    model: enum(DistortionModel, u64) = DistortionModel.None_
 
 
 # SI: radians or meters, per second, and newtons or newton meters. velocity and effort
@@ -505,7 +505,7 @@ class RangeReading:
     min: f64 = 0.0
     max: f64 = 0.0
     field_of_view: f64 = 0.0                    # rad, the full cone
-    kind: enum(RangeKind, u8) = RangeKind.Unknown
+    kind: enum(RangeKind, u64) = RangeKind.Unknown
 
 
 class GnssStatus(_pyenum.IntEnum):
@@ -522,7 +522,7 @@ class GnssStatus(_pyenum.IntEnum):
 class GnssFix:
     position: GeoPoint = _dataclasses.field(default_factory=GeoPoint)
     covariance: Covariance3 = _square(3)       # m^2, east, north and up
-    status: enum(GnssStatus, u8) = GnssStatus.NoFix
+    status: enum(GnssStatus, u64) = GnssStatus.NoFix
 
 
 class ScalarKind(_pyenum.IntEnum):
@@ -621,4 +621,4 @@ def now():
 
 
 # the vocabulary only built the roster, so it stays on rant. and not on rant.types.
-del _StdAlias, _std, _String, _square, u8, u32, i32, i64, f32, f64, string, enum
+del _StdAlias, _std, _String, _square, u8, u32, u64, i32, i64, f32, f64, string, enum

@@ -192,6 +192,8 @@ set_tests_properties(build.strict PROPERTIES LABELS build TIMEOUT 600)
 if(TARGET rant_codegen)
   add_test(NAME codegen.current COMMAND rant_codegen --standard --check --root "${PROJECT_SOURCE_DIR}")
   set_tests_properties(codegen.current PROPERTIES LABELS build TIMEOUT 60)
+  add_test(NAME codegen.padding COMMAND rant_codegen --standard --check --root "${CMAKE_CURRENT_SOURCE_DIR}/codegen/padded")
+  set_tests_properties(codegen.padding PROPERTIES LABELS build TIMEOUT 60 PASS_REGULAR_EXPRESSION "Padded gains padding in C")
 endif()
 
 # The steady state of a send must not allocate. memscale exits 1 when one did.

@@ -1208,20 +1208,20 @@ struct VideoFrame {               /* width/height 0 = unstated (the bitstream ru
 /* Fully fixed, so it works as a latched variable: hand a viewer a URL, not pixels. codec,
  * width and height are hints for pickers, the stream stays authoritative once connected. */
 struct ExternalVideoStream {
+    uint32_t        width = 0, height = 0;
     VideoStreamKind kind = VideoStreamKind::Rtsp;
     VideoCodec      codec = VideoCodec::Unknown;
-    uint32_t        width = 0, height = 0;
     Uri             url;
-    String<32>      name;
+    String<30>      name;
 };
 /* NoDistortion rather than None: X11 defines None as a macro. */
-enum class DistortionModel : uint8_t { NoDistortion, BrownConrady, Fisheye, Rational };
+enum class DistortionModel : uint64_t { NoDistortion, BrownConrady, Fisheye, Rational };
 /* The pinhole model and its lens distortion. coeffs is zero filled past the model's count. */
 struct CameraIntrinsics {
     uint32_t width = 0, height = 0;      /* the resolution these numbers are valid for */
     double   fx = 0, fy = 0, cx = 0, cy = 0;
-    DistortionModel model = DistortionModel::NoDistortion;
     double   coeffs[8] = { 0 };
+    DistortionModel model = DistortionModel::NoDistortion;
 };
 /* SI: radians or meters, per second, and newtons or newton meters. velocity and effort
  * may be empty. The names ride a JointNames variable, not every sample. */
@@ -1251,12 +1251,12 @@ struct LaserScan {
     uint8_t echoes = 0;
     std::vector<float> ranges, intensities;
 };
-enum class RangeKind : uint8_t { Unknown, Ultrasound, Infrared, Laser, Radar };
+enum class RangeKind : uint64_t { Unknown, Ultrasound, Infrared, Laser, Radar };
 struct RangeReading {             /* distance +inf when nothing is in range */
     double distance = 0, min = 0, max = 0, field_of_view = 0;
     RangeKind kind = RangeKind::Unknown;
 };
-enum class GnssStatus : uint8_t { NoFix, Fix, Differential, RtkFloat, RtkFixed };
+enum class GnssStatus : uint64_t { NoFix, Fix, Differential, RtkFloat, RtkFixed };
 struct GnssFix { GeoPoint position; Covariance3 covariance; GnssStatus status = GnssStatus::NoFix; };
 
 /* The number kinds of raw data blocks, numbered as in PCL. */
@@ -1429,14 +1429,14 @@ inline Uuid      new_uuid() { Uuid u; detail::rant_uuid_new((detail::RantUuid*)&
                                        RANT_STD_F(VideoFrame,width) RANT_STD_F(VideoFrame,height) \
                                        RANT_STD_F(VideoFrame,keyframe) \
                                        RANT_STD_F(VideoFrame,pts) RANT_STD_F(VideoFrame,data)
-#define RANT_STD_MEMBERS_ExternalVideoStream(v) RANT_STD_F(ExternalVideoStream,kind) \
-                                       RANT_STD_F(ExternalVideoStream,codec) \
-                                       RANT_STD_F(ExternalVideoStream,width) RANT_STD_F(ExternalVideoStream,height) \
+#define RANT_STD_MEMBERS_ExternalVideoStream(v) RANT_STD_F(ExternalVideoStream,width) \
+                                       RANT_STD_F(ExternalVideoStream,height) \
+                                       RANT_STD_F(ExternalVideoStream,kind) RANT_STD_F(ExternalVideoStream,codec) \
                                        RANT_STD_F(ExternalVideoStream,url) RANT_STD_F(ExternalVideoStream,name)
 #define RANT_STD_MEMBERS_CameraIntrinsics(v) RANT_STD_F(CameraIntrinsics,width) RANT_STD_F(CameraIntrinsics,height) \
                                        RANT_STD_F(CameraIntrinsics,fx) RANT_STD_F(CameraIntrinsics,fy) \
                                        RANT_STD_F(CameraIntrinsics,cx) RANT_STD_F(CameraIntrinsics,cy) \
-                                       RANT_STD_F(CameraIntrinsics,model) RANT_STD_F(CameraIntrinsics,coeffs)
+                                       RANT_STD_F(CameraIntrinsics,coeffs) RANT_STD_F(CameraIntrinsics,model)
 #define RANT_STD_MEMBERS_JointState(v) RANT_STD_F(JointState,position) \
                                        RANT_STD_F(JointState,velocity) RANT_STD_F(JointState,effort)
 #define RANT_STD_MEMBERS_JointNames(v) RANT_STD_F(JointNames,name)

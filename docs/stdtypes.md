@@ -112,11 +112,11 @@ struct of per kind arrays: `Scene { boxes: OrientedBox[], zones: Polygon[] }`.
 Sensing:
 
 ```
-DistortionModel = enum<u8> { None, BrownConrady, Fisheye, Rational }
+DistortionModel = enum<u64> { None, BrownConrady, Fisheye, Rational }
 CameraIntrinsics { width: u32, height: u32,             -- the resolution these hold for
                    fx: f64, fy: f64, cx: f64, cy: f64,
-                   model: DistortionModel,
-                   coeffs: f64[8] }                     -- zero filled past the model's count
+                   coeffs: f64[8],                      -- zero filled past the model's count
+                   model: DistortionModel }
 Imu { orientation: Quaternion, orientation_covariance: Covariance3,
       angular_velocity: Double3, angular_velocity_covariance: Covariance3,
       linear_acceleration: Double3, linear_acceleration_covariance: Covariance3 }
@@ -124,9 +124,9 @@ LaserScan { angle_min: f32, angle_step: f32, time_step: f32,
             range_min: f32, range_max: f32,
             echoes: u8,                                 -- ranges per beam, 0 reads as 1
             ranges: f32[], intensities: f32[] }
-RangeKind = enum<u8> { Unknown, Ultrasound, Infrared, Laser, Radar }
+RangeKind = enum<u64> { Unknown, Ultrasound, Infrared, Laser, Radar }
 RangeReading { distance: f64, min: f64, max: f64, field_of_view: f64, kind: RangeKind }
-GnssStatus = enum<u8> { NoFix, Fix, Differential, RtkFloat, RtkFixed }
+GnssStatus = enum<u64> { NoFix, Fix, Differential, RtkFloat, RtkFixed }
 GnssFix { position: GeoPoint, covariance: Covariance3, status: GnssStatus }
 Detection2D { bounds: OrientedBox2D, label: string, score: f32, track: u32 }
 Detection3D { bounds: OrientedBox, label: string, score: f32, track: u32 }
@@ -177,9 +177,9 @@ VideoCodec = enum<u8> { Unknown, Mjpeg, H264, H265, Av1 }
 VideoFrame { codec: VideoCodec, width: u32, height: u32,
              keyframe: bool, pts: Timestamp, data: u8[] }
 VideoStreamKind = enum<u8> { Rtsp, WebrtcWhep, Hls, Srt, Rtp, HttpMjpeg, Other = 15 }
-ExternalVideoStream { kind: VideoStreamKind, codec: VideoCodec,
-                      width: u32, height: u32,
-                      url: Uri, name: string<32> }
+ExternalVideoStream { width: u32, height: u32,
+                      kind: VideoStreamKind, codec: VideoCodec,
+                      url: Uri, name: string<30> }
 ```
 
 The `--` lines above are DSL comments.
@@ -270,8 +270,9 @@ this:
   and the C mirrors still match.
 - A `JointState` array is positional. The names ride a `JointNames` variable published
   once, never a field of every sample. `velocity` and `effort` may be empty.
-- A new fixed type lists its widest member first, so the packed wire size matches the
-  natural C size and the type can keep a mirror. The transport internals follow the same
+- A fixed type gains no padding in C: each member starts on a multiple of its size and the
+  total is a multiple of the widest. So an enum beside `f64` values is `enum<u64>`, and
+  `rant_codegen` refuses a type that breaks this. The transport internals follow the same
   rule.
 - A name has one spelling on the wire: fields are snake_case, types and enum options
   PascalCase, and the parser makes them so from whatever was written. `frame_id`,
@@ -312,14 +313,12 @@ which the header static asserts, so a whole value memcpys in and out. Field at a
 through `rant_get_f64(msg, s, "at.pose.position.x")` works exactly as it does for any other
 nested struct.
 
-Every fixed type has a struct, and four of them gain padding in C: `ExternalVideoStream`,
-`CameraIntrinsics`, `RangeReading` and `GnssFix`. Their comments say so, and their fields go
-to the wire one at a time. `Empty` and every type with a variable member, such as `Image`,
-`Polygon` or `PointCloud`, have no struct. The other bindings reflect field by field, so they
-have every type either way.
+`Empty` and every type with a variable member, such as `Image`, `Polygon` or `PointCloud`, have
+no struct. The other bindings reflect field by field, so they have every type either way.
 
 An enum's constants are `RANT_<TYPE>_<OPTION>`, such as `RANT_IMAGE_FORMAT_RGB8` and
-`RANT_VIDEO_CODEC_H264`.
+`RANT_VIDEO_CODEC_H264`. A struct's enum field holds its backing integer, since a C enum has the
+compiler's size, and its comment names the enum.
 
 Beside the types sit only constructors (`rant_double3`, `rant_pose_identity`,
 `rant_transform_identity`), `Color` hex conversion and timestamp arithmetic. Everything that

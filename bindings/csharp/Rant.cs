@@ -1771,22 +1771,22 @@ namespace Rant
         /// fixed, so it works as a latched variable.</summary>
         [RantSchema("ExternalVideoStream")] public struct ExternalVideoStream
         {
-            /// <summary>The protocol the url speaks.</summary>
-            public VideoStreamKind Kind;
-            /// <summary>A hint for pickers. The stream is authoritative once connected.</summary>
-            public VideoCodec Codec;
             /// <summary>A hint in pixels, 0 when unstated.</summary>
             public uint Width;
             /// <summary>A hint in pixels, 0 when unstated.</summary>
             public uint Height;
+            /// <summary>The protocol the url speaks.</summary>
+            public VideoStreamKind Kind;
+            /// <summary>A hint for pickers. The stream is authoritative once connected.</summary>
+            public VideoCodec Codec;
             /// <summary>Where the stream is served.</summary>
             [RantTypeName("Uri")] [RantString(256)] public string Url;
             /// <summary>A name to show for the stream.</summary>
-            [RantString(32)] public string Name;
+            [RantString(30)] public string Name;
         }
 
         /// <summary>A lens distortion model.</summary>
-        [RantSchema("DistortionModel")] public enum DistortionModel : byte
+        [RantSchema("DistortionModel")] public enum DistortionModel : ulong
         {
             /// <summary>An ideal pinhole.</summary>
             None = 0,
@@ -1812,10 +1812,10 @@ namespace Rant
             public double Cx;
             /// <summary>The principal point's y, in pixels.</summary>
             public double Cy;
-            /// <summary>The distortion model Coeffs follows.</summary>
-            public DistortionModel Model;
             /// <summary>The model's coefficients, zero filled past its count.</summary>
             [RantArray(8)] public double[] Coeffs;
+            /// <summary>The distortion model Coeffs follows.</summary>
+            public DistortionModel Model;
         }
         /// <summary>One sample of a robot's joints, in the order a JointNames variable gives.
         /// SI units: radians or meters, per second, newtons or newton meters.</summary>
@@ -1893,7 +1893,7 @@ namespace Rant
             public float[] Intensities;
         }
         /// <summary>What a range sensor measures with.</summary>
-        [RantSchema("RangeKind")] public enum RangeKind : byte
+        [RantSchema("RangeKind")] public enum RangeKind : ulong
         {
             /// <summary>Unstated.</summary>
             Unknown = 0,
@@ -1921,7 +1921,7 @@ namespace Rant
             public RangeKind Kind;
         }
         /// <summary>The quality of a satellite position fix.</summary>
-        [RantSchema("GnssStatus")] public enum GnssStatus : byte
+        [RantSchema("GnssStatus")] public enum GnssStatus : ulong
         {
             /// <summary>The position is not valid.</summary>
             NoFix = 0,

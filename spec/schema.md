@@ -214,7 +214,7 @@ it explicitly, because the node copies the pool by value and close frees the pag
 
 Canonical hashes pinned across languages: `bool` ee90234f61d2520b, `f32[]`
 314844e3386a1fc4, `Float3` 04aa9469cd08b1dd, `Image` 9492b746eb9f64c8, `VideoFrame`
-8361df477b9db68d, `ExternalVideoStream` 807561581dfea720.
+8361df477b9db68d, `ExternalVideoStream` c5b9f05a0bb6ff60.
 
 ## Not done
 

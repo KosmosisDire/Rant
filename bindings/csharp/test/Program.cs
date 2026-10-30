@@ -236,6 +236,19 @@ static class Program
                 Normals = new[] { new Rant.Types.Float3 { X = 0, Y = 0, Z = 1 } },
                 Origin = new Corner { X = 9, Y = 10 },
             };
+            var cams = node.Schema(typeof(Rant.Types.CameraIntrinsics));
+            var cam = (Rant.Types.CameraIntrinsics)cams.Decode(cams.Encode(new Rant.Types.CameraIntrinsics
+            {
+                Fx = 500, Coeffs = new double[] { 0, 0, 0, 0, 0, 0, 0, -0.5 }, Model = Rant.Types.DistortionModel.Rational,
+            }));
+            Check("a wide enum round trips in a CameraIntrinsics", cam.Fx == 500 && cam.Coeffs[7] == -0.5
+                  && cam.Model == Rant.Types.DistortionModel.Rational);
+            var ranges = node.Schema(typeof(Rant.Types.RangeReading));
+            var range = (Rant.Types.RangeReading)ranges.Decode(ranges.Encode(new Rant.Types.RangeReading
+            {
+                Distance = 2.5, Kind = Rant.Types.RangeKind.Radar,
+            }));
+            Check("a wide enum round trips in a RangeReading", range.Distance == 2.5 && range.Kind == Rant.Types.RangeKind.Radar);
             var back = (Shape)sh.Decode(sh.Encode(shape));
             Check("a variable struct array round trips", back.Corners != null && back.Corners.Length == 3
                   && back.Corners[0].X == 1 && back.Corners[2].Y == 6);

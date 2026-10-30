@@ -214,6 +214,16 @@ def std_types():
           and bytes(back.id) == bytes(range(16)) and back.velocity.z == 3.0)
     check("types.now is Unix-epoch microseconds", rant.types.now() > 1600000000000000)
 
+    cams = a.schema(rant.types.CameraIntrinsics)
+    cam = cams.decode(cams.encode(rant.types.CameraIntrinsics(
+        fx=500.0, coeffs=[0.0] * 7 + [-0.5], model=rant.types.DistortionModel.Rational)))
+    check("a wide enum round-trips in a CameraIntrinsics",
+          cam.fx == 500.0 and cam.coeffs[7] == -0.5 and cam.model == rant.types.DistortionModel.Rational)
+    ranges = a.schema(rant.types.RangeReading)
+    reading = ranges.decode(ranges.encode(rant.types.RangeReading(distance=2.5, kind=rant.types.RangeKind.Radar)))
+    check("a wide enum round-trips in a RangeReading",
+          reading.distance == 2.5 and reading.kind == rant.types.RangeKind.Radar)
+
     # the shapes: each mirror is its canonical type and size, Capsule and Cylinder never
     # cross wire, and a variable Polygon2D and an Empty round-trip
     T = rant.types

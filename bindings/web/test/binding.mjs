@@ -293,6 +293,15 @@ await check("any type nests as an array element", async () => {
     assert.deepEqual(words.decode(words.encode([["x", "yz"], ["w"]])), [["x", "yz"], ["w"]]);
 });
 
+await check("a wide enum round trips beside f64 values", async () => {
+    const cams = a.schema(types.CameraIntrinsics);
+    const c = cams.decode(cams.encode({ fx: 500, coeffs: new Float64Array([0, 0, 0, 0, 0, 0, 0, -0.5]), model: "Rational" }));
+    assert.deepEqual([c.fx, c.coeffs[7], c.model], [500, -0.5, "Rational"]);
+    const ranges = a.schema(types.RangeReading);
+    const r = ranges.decode(ranges.encode({ distance: 2.5, kind: "Radar" }));
+    assert.deepEqual([r.distance, r.kind], [2.5, "Radar"]);
+});
+
 await check("a PointCloud, a Grid and an Odometry round trip by their standard names", async () => {
     const cloud = a.schema(types.PointCloud);
     const pc = {

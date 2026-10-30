@@ -354,16 +354,16 @@ static const i_RantStdEntry i_rant_std_table[] = {
     { "ExternalVideoStream",
                  "-- Where to watch a video stream, so a viewer connects to it directly\n"
                  "{\n"
-                 "  kind: VideoStreamKind  -- the protocol of url\n"
-                 "  codec: VideoCodec      -- a hint, Unknown when unstated\n"
                  "  width: u32             -- [px] a hint, 0 when unstated\n"
                  "  height: u32            -- [px] a hint, 0 when unstated\n"
+                 "  kind: VideoStreamKind  -- the protocol of url\n"
+                 "  codec: VideoCodec      -- a hint, Unknown when unstated\n"
                  "  url: Uri               -- the stream address\n"
-                 "  name: string<32>       -- a label for the stream\n"
+                 "  name: string<30>       -- a label for the stream\n"
                  "}" },
     { "DistortionModel",
                  "-- A lens distortion model\n"
-                 "enum<u8> {\n"
+                 "enum<u64> {\n"
                  "  None = 0  -- an ideal pinhole\n"
                  "  BrownConrady = 1\n"
                  "  Fisheye = 2\n"
@@ -378,8 +378,8 @@ static const i_RantStdEntry i_rant_std_table[] = {
                  "  fy: f64                 -- [px] focal length along y\n"
                  "  cx: f64                 -- [px] principal point x\n"
                  "  cy: f64                 -- [px] principal point y\n"
-                 "  model: DistortionModel  -- the lens distortion model\n"
                  "  coeffs: f64[8]          -- OpenCV's order: k1 k2 p1 p2 k3, then k4 k5 k6 for Rational, or k1 to k4 for Fisheye, 0 past that\n"
+                 "  model: DistortionModel  -- the lens distortion model\n"
                  "}" },
     { "JointState",
                  "-- The joints of a robot, in the order of its JointNames\n"
@@ -430,7 +430,7 @@ static const i_RantStdEntry i_rant_std_table[] = {
                  "}" },
     { "RangeKind",
                  "-- What a range sensor measures with\n"
-                 "enum<u8> {\n"
+                 "enum<u64> {\n"
                  "  Unknown = 0  -- unstated\n"
                  "  Ultrasound = 1\n"
                  "  Infrared = 2\n"
@@ -448,7 +448,7 @@ static const i_RantStdEntry i_rant_std_table[] = {
                  "}" },
     { "GnssStatus",
                  "-- The quality of a satellite position fix\n"
-                 "enum<u8> {\n"
+                 "enum<u64> {\n"
                  "  NoFix = 0         -- the position is not valid\n"
                  "  Fix = 1           -- satellites alone\n"
                  "  Differential = 2  -- corrected by SBAS or DGPS\n"

@@ -120,9 +120,9 @@ standard! {
     /// One encoded video frame. Width and height 0 = unstated.
     VideoFrame { codec: VideoCodec, width: u32, height: u32, keyframe: bool, pts: Timestamp, data: Vec<u8> }
     /// A stream a viewer connects to by URL. Codec and size are hints.
-    ExternalVideoStream { kind: VideoStreamKind, codec: VideoCodec, width: u32, height: u32, url: Uri, name: crate::String<32> }
+    ExternalVideoStream { width: u32, height: u32, kind: VideoStreamKind, codec: VideoCodec, url: Uri, name: crate::String<30> }
     /// The pinhole model and its lens distortion, coeffs zero past the model's count.
-    CameraIntrinsics { width: u32, height: u32, fx: f64, fy: f64, cx: f64, cy: f64, model: DistortionModel, coeffs: [f64; 8] }
+    CameraIntrinsics { width: u32, height: u32, fx: f64, fy: f64, cx: f64, cy: f64, coeffs: [f64; 8], model: DistortionModel }
     /// SI positions, velocities and efforts. Velocity and effort may be empty.
     JointState { position: Vec<f64>, velocity: Vec<f64>, effort: Vec<f64> }
     /// The order every JointState array follows, published once as a variable.
@@ -217,7 +217,7 @@ pub enum VideoStreamKind {
 
 /// CameraIntrinsics.model.
 #[derive(Enum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[repr(u8)]
+#[repr(u64)]
 #[rant(standard)]
 #[allow(missing_docs)]
 pub enum DistortionModel {
@@ -230,7 +230,7 @@ pub enum DistortionModel {
 
 /// RangeReading.kind.
 #[derive(Enum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[repr(u8)]
+#[repr(u64)]
 #[rant(standard)]
 #[allow(missing_docs)]
 pub enum RangeKind {
@@ -244,7 +244,7 @@ pub enum RangeKind {
 
 /// GnssFix.status.
 #[derive(Enum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[repr(u8)]
+#[repr(u64)]
 #[rant(standard)]
 #[allow(missing_docs)]
 pub enum GnssStatus {
