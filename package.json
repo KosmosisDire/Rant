@@ -1,0 +1,9 @@
+{
+  "name": "com.rant.types",
+  "version": "0.0.41",
+  "displayName": "Rant Types",
+  "description": "The standard types of Rant, such as Pose, Image and PointCloud, with no middleware.",
+  "unity": "2021.3",
+  "keywords": ["robotics", "types", "rant"],
+  "author": { "name": "Nathan George" }
+}
