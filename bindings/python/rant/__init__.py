@@ -2282,11 +2282,11 @@ class Node:
                 thread, or at dispatch() under Threading.DISPATCH. A later call rebinds, None
                 stops delivery. Returns handler, so it works as a decorator. Raises Error when
                 logs are disabled on this node."""
+        self._on_log = handler       # first, since the catch up replay can land as the bind ends
         if handler is not None and not self._log_bound:
             self._bind_builtin("on_log", self._lib.rant_node_log_topic,
                                self._lib.rant_node_set_log_queue, self._deliver_log)
             self._log_bound = True
-        self._on_log = handler
         return handler
 
     def _deliver_log(self, m):
@@ -2328,11 +2328,11 @@ class Node:
                 callbacks run: on each change, each node's current set when this binds, and an
                 empty set when a node goes away. A later call rebinds, None stops delivery.
                 Returns handler. Raises Error when status is disabled on this node."""
+        self._on_status = handler    # first, since the catch up replay can land as the bind ends
         if handler is not None and not self._status_bound:
             self._bind_builtin("on_status", self._lib.rant_node_status_topic,
                                self._lib.rant_node_set_status_queue, self._deliver_status)
             self._status_bound = True
-        self._on_status = handler
         return handler
 
     def _deliver_status(self, m):

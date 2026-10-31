@@ -1800,6 +1800,15 @@ def log_status():
             time.sleep(0.005)
         return done()
 
+    # A replay can land the moment a bind widens the role, so a caller stalled right there, as
+    # a starved main thread is, must still lose nothing.
+    bind = rant.Node._bind_builtin
+
+    def stalled(self, *args):
+        bind(self, *args)
+        time.sleep(0.3)
+    rant.Node._bind_builtin = stalled
+
     cleared = []
     opts = dict(domain=DOMAIN + 17, multicast_interface=IFACE)
     a = rant.Node("lsa", on_event=lambda e: cleared.append(e.detail)
@@ -1864,6 +1873,7 @@ def log_status():
               quiet.set_status("k", rant.Level.INFO, "x") == rant.SendStatus.NOSYS)
         quiet.close()
     finally:
+        rant.Node._bind_builtin = bind
         a.close()
         b.close()
     print("log_status: PASS\n" if ok else "log_status: FAIL\n")

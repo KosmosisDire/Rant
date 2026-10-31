@@ -106,9 +106,10 @@ Where anything else disagrees about a wrapper API, this file wins.
   point is reachable from every binding the moment it is declared. Bindings format log
   text in their own runtime and call `rant_node_log_text`, never the variadic
   `rant_node_log` over FFI.
-- A binding reads the log and status builtins by registering its handler for the topic's
-  index first, then widening the role. The other order lets the catch up replay land
-  before the handler exists, which first call compilation in C# made happen most runs. A
+- A binding reads the log and status builtins by keeping the user's handler and registering
+  its own for the topic's index first, then widening the role. The other order lets the catch
+  up replay land before the handler exists, which first call compilation in C# made happen
+  most runs and a starved main thread made happen in Python. A
   status handler also sees an empty set for a node that went away: the binding remembers
   which peers last sent a set that was not empty and delivers one on their
   `RANT_PEER_DOWN`.
