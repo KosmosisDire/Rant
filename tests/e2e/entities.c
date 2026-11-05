@@ -1,0 +1,1006 @@
+/* Entities over time: the reflection walk across dropped peers, a retire and reuse churn
+ * soak, a re created subscriber, and the builtin log and meta topics. spec/testing.md says
+ * what each case pins. */
+#include "support/test.h"
+
+/* The dropped peer reflection gate: the entity walk must refuse dropped peers
+ * unless include_dropped is set, or observers grow ghost entities after a restart. */
+static void reflect_dropped_checks(void){
+    RantAllocator aa = rant_allocator_heap(0);
+    RantAllocator ba = rant_allocator_heap(0);
+    RantNodeOpts ao, bo; RantNode *A, *B; RantAddr seed;
+    RantVariable *def; uint32_t pid = 0; int t;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=TEST_DOMAIN+23; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    ao.discovery.announce_interval_us = 100000;   /* fast cadence so the drop is quick */
+    ao.discovery.peer_timeout_us      = 500000;
+    bo=ao;
+    bo.fetch_details = 1;   /* B is the observer: names + schemas in the detail cache */
+    A = rant_node_open(&aa, "ghost-host", NULL, NULL, &ao);
+    B = rant_node_open(&ba, "observer",   NULL, NULL, &bo);
+    CHECK(A && B, "ghost: nodes open");
+    if (!(A && B)){ if(A)rant_node_close(A,0); if(B)rant_node_close(B,0); return; }
+
+    def = rant_node_create_variable_definition(A, "gdial", NULL, NULL);
+    CHECK(def != NULL, "ghost: variable definition created");
+    { int ents = 0, unnamed = 1;
+      /* an entity shows by its hash before its details name it, so wait for every name */
+      for (t=0;t<2000 && (!ents || unnamed);t++){
+          RantIter eit; RantEntityInfo ei; const i_RantDiscoveryPeerView *ps; uint16_t pc;
+          test_pump(A,B,2);
+          ps = test_peers(B, &pc);
+          if (!(ps && pc)) continue;
+          pid = ps[0].id;
+          ents = unnamed = 0;
+          memset(&eit,0,sizeof eit);
+          while (rant_node_entities_next(B, pid, &eit, &ei)){
+              ents += !test_builtin(&ei);
+              unnamed += !ei.name.len;
+          }
+      }
+      CHECK(ents == 1, "ghost: live peer enumerates its entity (%d)", ents); }
+
+    rant_node_close(A, 0);     /* silent death, no BYE: B must DROP (not forget) the peer */
+    { uint64_t end = i_rant_plat_now_us() + 1200000u;     /* > peer_timeout */
+      while (i_rant_plat_now_us() < end) rant_node_poll(B, 5); }
+    { const i_RantDiscoveryPeerView *ps; uint16_t pc, i; int dropped = 0;
+      ps = test_peers(B, &pc);
+      for (i=0; ps && i<pc; i++)
+          if (ps[i].id == pid && ps[i].liveness == RANT_PEER_DROPPED) dropped = 1;
+      CHECK(dropped, "ghost: peer is DROPPED yet still listed (by design)"); }
+    { RantIter eit; RantEntityInfo ei; int ents = 0, mesh = 0;
+      memset(&eit,0,sizeof eit);
+      while (rant_node_entities_next(B, pid, &eit, &ei)) ents += !test_builtin(&ei);
+      CHECK(ents == 1, "ghost: the per-node walk serves the dropped peer's last view (%d)", ents);
+      memset(&eit,0,sizeof eit);
+      while (rant_node_mesh_next(B, &eit, &ei))
+          if (ei.name.len==5 && !memcmp(ei.name.data,"gdial",5)) mesh++;
+      CHECK(mesh == 0, "ghost: the mesh walk never counts a dropped peer (%d)", mesh); }
+
+    rant_node_close(B,0);
+    rant_allocator_reset(&aa); rant_allocator_reset(&ba);
+}
+
+/* The retire and reuse churn soak: retire and create cycles reuse slots, so
+ * nothing grows over sustained churn (spec/testing.md lists the case matrix). */
+static volatile unsigned long ch_c_recv, ch_u_recv, ch_t_recv, ch_c_mismatch;
+static volatile uint32_t ch_c_last;
+static uint32_t ch_seq;
+static void ch_on_message(const RantMsg *m){
+    const char *who = (const char *)m->user;
+    if (!who || m->data.len < 4) return;
+    if      (who[0]=='C'){ ch_c_recv++; ch_c_last = i_rant_le_r32(m->data.data); }
+    else if (who[0]=='U') ch_u_recv++;
+    else if (who[0]=='T') ch_t_recv++;
+}
+static void ch_on_event(const RantEvent *ev){
+    if (ev->kind == RANT_ERROR && ev->error == RANT_E_SCHEMA_MISMATCH
+        && ev->user && ((const char*)ev->user)[0]=='C') ch_c_mismatch++;
+}
+static void ch_pump(RantNode **ns, int n, int ms){
+    uint64_t end = i_rant_plat_now_us() + (uint64_t)ms*1000u;
+    while (i_rant_plat_now_us() < end){
+        int i;
+        for (i=0;i<n;i++) if (ns[i]) rant_node_poll(ns[i], 1);
+    }
+}
+static void ch_send(RantTopic *beat, int nbytes){
+    uint8_t pb[8];
+    memset(pb, 0, sizeof pb);
+    i_rant_le_w32(pb, ++ch_seq);
+    rant_topic_send(beat, rant_bytes(pb, (size_t)nbytes), NULL);
+}
+
+static void churn_checks(void){
+    RantAllocator ma = rant_allocator_heap(0);
+    RantAllocator pa = rant_allocator_heap(0);
+    RantAllocator ca = rant_allocator_heap(0);
+    RantAllocator ua = rant_allocator_heap(0);
+    RantNodeOpts po, co2, uo; RantNode *P, *C, *U; RantAddr seed;
+    RantSchema *G1, *G2, *G3;
+    RantTopic *beat, *csub; RantTopicOpts topts;
+    RantNode *nodes[4];
+    uint16_t base_idx, c_idx, p_hi0=0, c_hi0=0;
+    uint32_t p_int0=0, c_int0=0;
+    size_t p_mem0=0, c_mem0=0, u_mem0=0, mem=0, peak=0; uint64_t calls=0;
+    int t, cyc, idx_ok=1;
+
+    ch_c_recv = ch_u_recv = ch_t_recv = ch_c_mismatch = 0;
+    ch_c_last = 0; ch_seq = 100;
+    G1 = test_compile(&ma, "Beat { v: u32 }", NULL);
+    G2 = test_compile(&ma, "Beat { w: u32 }", NULL);
+    G3 = test_compile(&ma, "Beat { v: u32, extra: u32 }", NULL);
+    CHECK(G1 && G2 && G3, "churn: schemas compile");
+    if (!(G1 && G2 && G3)){ rant_allocator_reset(&ma); return; }
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=TEST_DOMAIN+33; po.discovery.max_peers=6;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    po.discovery.announce_interval_us = 100000;   /* fast cadence: rebinds re-verify quickly */
+    co2=po; uo=po;
+    po.user_data=(void*)"P"; co2.user_data=(void*)"C"; uo.user_data=(void*)"U";
+    P = rant_node_open(&pa, "churn-pub",     NULL,          ch_on_event, &po);
+    C = rant_node_open(&ca, "churn-typed",   ch_on_message, ch_on_event, &co2);
+    U = rant_node_open(&ua, "churn-untyped", ch_on_message, ch_on_event, &uo);
+    CHECK(P && C && U, "churn: nodes open");
+    if (!(P && C && U)){
+        if(P)rant_node_close(P,0); if(C)rant_node_close(C,0); if(U)rant_node_close(U,0);
+        rant_allocator_reset(&pa); rant_allocator_reset(&ca); rant_allocator_reset(&ua);
+        rant_allocator_reset(&ma); return;
+    }
+    nodes[0]=P; nodes[1]=C; nodes[2]=U; nodes[3]=NULL;
+
+    memset(&topts,0,sizeof topts);
+    topts.qos.reliability = RANT_RELIABLE; topts.qos.catch_up = 1;
+    beat = rant_node_create_topic(P, "beat", RANT_PUB_ONLY, G1, &topts);
+    csub = rant_node_create_topic(C, "beat", RANT_SUB_ONLY, G1, &topts);
+    (void)rant_node_create_topic(U, "beat", RANT_SUB_ONLY, NULL, &topts);
+    CHECK(beat && csub, "churn: survivor topics created");
+    base_idx = rant_topic_index(beat); c_idx = rant_topic_index(csub);
+
+    /* warmup: first delivery, then one identical retire/create cycle so every lazy
+       allocation (lane pool, detail buffers, peer maps) is in the baseline */
+    ch_send(beat, 4);
+    for (t=0;t<4000 && (ch_c_last != ch_seq || ch_u_recv == 0);t++) ch_pump(nodes,3,2);
+    CHECK(ch_c_last == ch_seq && ch_u_recv > 0, "churn: warmup delivery (typed + untyped)");
+    CHECK(rant_topic_retire(beat) == RANT_OK, "churn: warmup retire");
+    beat = rant_node_create_topic(P, "beat", RANT_PUB_ONLY, G1, &topts);
+    CHECK(beat && rant_topic_index(beat) == base_idx,
+             "churn: identical re-create REUSES the slot (idx %u)", base_idx);
+    ch_send(beat, 4);
+    for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,3,2);
+    CHECK(ch_c_last == ch_seq, "churn: delivery across the warmup cycle");
+    {   /* saturate the @rant/log keep_last ring, which mirrors every retype refusal: its 4
+           slots fill once and plateau, so the baselines must include them at full size */
+        char big[200]; int k;
+        memset(big, 'x', sizeof big - 1); big[sizeof big - 1] = 0;
+        for (k=0;k<8;k++){
+            rant_node_log(P, RANT_LEVEL_ERROR, "%s", big);
+            rant_node_log(C, RANT_LEVEL_ERROR, "%s", big);
+            rant_node_log(U, RANT_LEVEL_ERROR, "%s", big);
+        }
+    }
+    rant_node_mem_stats(P, &p_mem0, &peak, &calls);
+    rant_node_mem_stats(C, &c_mem0, &peak, &calls);
+    rant_node_mem_stats(U, &u_mem0, &peak, &calls);
+    p_hi0 = i_rant_node_topic_count(P); c_hi0 = i_rant_node_topic_count(C);
+    p_int0 = i_rant_transport_interest_size(P->transport);
+    c_int0 = i_rant_transport_interest_size(C->transport);
+
+    /* A: identical binding churn. Every cycle must reuse the slot, relink with no round
+       trip, and deliver. Nothing may grow. */
+    { int deliver_ok = 1;
+      for (cyc=0;cyc<25;cyc++){
+          unsigned long u0 = ch_u_recv;
+          if (rant_topic_retire(beat) != RANT_OK){ idx_ok = 0; break; }
+          beat = rant_node_create_topic(P, "beat", RANT_PUB_ONLY, G1, &topts);
+          if (!beat || rant_topic_index(beat) != base_idx){ idx_ok = 0; break; }
+          ch_send(beat, 4);
+          for (t=0;t<4000 && (ch_c_last != ch_seq || ch_u_recv == u0);t++) ch_pump(nodes,3,2);
+          if (ch_c_last != ch_seq || ch_u_recv == u0){ deliver_ok = 0; break; }
+      }
+      CHECK(idx_ok, "churn-A: 25 identical cycles reuse the slot");
+      CHECK(deliver_ok, "churn-A: every cycle delivered (typed + untyped)");
+      rant_node_mem_stats(P, &mem, &peak, &calls);
+      CHECK(mem <= p_mem0 + 1024, "churn-A: publisher memory plateaus (%u -> %u)",
+               (unsigned)p_mem0, (unsigned)mem);
+      rant_node_mem_stats(C, &mem, &peak, &calls);
+      CHECK(mem <= c_mem0 + 1024, "churn-A: subscriber memory plateaus (%u -> %u)",
+               (unsigned)c_mem0, (unsigned)mem);
+      CHECK(i_rant_node_topic_count(P) == p_hi0, "churn-A: topic table did not grow");
+      CHECK(i_rant_transport_interest_size(P->transport) == p_int0,
+               "churn-A: announce size unchanged (%u)", p_int0); }
+
+    /* B: retype churn. The publisher rebinds the slot to an incompatible schema: the typed
+       subscriber refuses loudly, the untyped one follows, then the subscriber adopts. */
+    { int deliver_ok = 1, u_ok = 1, mm_ok = 1, iso_ok = 1;
+      uint32_t p_int1 = 0, c_int1 = 0;
+      size_t p_memb = 0, c_memb = 0;   /* re-baselined once the retype caches warm */
+      for (cyc=0;cyc<10;cyc++){
+          RantSchema *ns = (cyc & 1) ? G1 : G2;
+          unsigned long mm0 = ch_c_mismatch, u0 = ch_u_recv, c0 = ch_c_recv;
+          if (rant_topic_retire(beat) != RANT_OK){ idx_ok = 0; break; }
+          beat = rant_node_create_topic(P, "beat", RANT_PUB_ONLY, ns, &topts);
+          if (!beat || rant_topic_index(beat) != base_idx){ idx_ok = 0; break; }
+          ch_send(beat, 4);
+          for (t=0;t<4000 && (ch_u_recv == u0 || ch_c_mismatch == mm0);t++) ch_pump(nodes,3,2);
+          if (ch_u_recv == u0) u_ok = 0;
+          if (ch_c_mismatch == mm0) mm_ok = 0;
+          if (ch_c_recv != c0) iso_ok = 0;   /* never a cross-schema delivery */
+          if (rant_topic_retire(csub) != RANT_OK){ idx_ok = 0; break; }
+          csub = rant_node_create_topic(C, "beat", RANT_SUB_ONLY, ns, &topts);
+          if (!csub || rant_topic_index(csub) != c_idx){ idx_ok = 0; break; }
+          for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,3,2);
+          if (ch_c_last != ch_seq){ deliver_ok = 0; break; }
+          if (cyc == 0){ p_int1 = i_rant_transport_interest_size(P->transport);
+                         c_int1 = i_rant_transport_interest_size(C->transport); }
+          if (cyc == 1){ rant_node_mem_stats(P, &p_memb, &peak, &calls);
+                         rant_node_mem_stats(C, &c_memb, &peak, &calls); }
+      }
+      CHECK(idx_ok, "churn-B: retype cycles keep reusing both slots");
+      CHECK(mm_ok, "churn-B: typed subscriber refuses each retype loudly");
+      CHECK(iso_ok, "churn-B: no cross-schema delivery to the typed subscriber");
+      CHECK(u_ok, "churn-B: untyped subscriber follows every shape");
+      CHECK(deliver_ok, "churn-B: adopted re-create receives the current value (catch-up)");
+      CHECK(p_int1 == p_int0 + 3 && i_rant_transport_interest_size(P->transport) == p_int1,
+               "churn-B: announce grows once by the 3 B gen entry, then holds (%u -> %u)",
+               p_int0, p_int1);
+      CHECK(c_int1 == c_int0 + 3 && i_rant_transport_interest_size(C->transport) == c_int1,
+               "churn-B: subscriber announce likewise (%u -> %u)", c_int0, c_int1);
+      /* the plateau is judged against the warmed baseline two full retype round trips in,
+         after the one time allocations, and the 8 cycles after it must add nothing */
+      rant_node_mem_stats(P, &mem, &peak, &calls);
+      CHECK(mem <= p_memb + 512, "churn-B: publisher memory plateaus (%u -> %u)",
+               (unsigned)p_memb, (unsigned)mem);
+      rant_node_mem_stats(C, &mem, &peak, &calls);
+      CHECK(mem <= c_memb + 512, "churn-B: subscriber memory plateaus (%u -> %u)",
+               (unsigned)c_memb, (unsigned)mem); }
+
+    /* C: compatible retype. The publisher rebinds to a SUPERSET of the subscriber's
+       schema: the typed subscriber keeps receiving with no action and no refusal. */
+    { unsigned long mm0 = ch_c_mismatch;
+      CHECK(rant_topic_retire(beat) == RANT_OK, "churn-C: retire before the superset rebind");
+      beat = rant_node_create_topic(P, "beat", RANT_PUB_ONLY, G3, &topts);
+      CHECK(beat && rant_topic_index(beat) == base_idx, "churn-C: superset re-create reuses the slot");
+      ch_send(beat, 8);
+      for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,3,2);
+      CHECK(ch_c_last == ch_seq, "churn-C: subset-compatible rebind keeps the typed subscriber");
+      CHECK(ch_c_mismatch == mm0, "churn-C: no refusal fired for the compatible rebind"); }
+
+    /* D: transient node waves. Odd waves bring a rival same name publisher of another shape,
+       even waves a late joining subscriber. Survivor state must plateau across all of it. */
+    { int wave_ok = 1, cross_ok = 1, late_ok = 1, live_ok = 1;
+      size_t p_mem1 = 0, c_mem1 = 0, u_mem1 = 0;
+      for (cyc=0;cyc<6;cyc++){
+          RantAllocator ta = rant_allocator_heap(0);
+          RantNodeOpts to2 = po; RantNode *T; RantTopic *tt;
+          unsigned long u0 = ch_u_recv, t0c = ch_t_recv;
+          to2.user_data = (void*)"T";
+          T = rant_node_open(&ta, "churn-transient", ch_on_message, ch_on_event, &to2);
+          if (!T){ wave_ok = 0; rant_allocator_reset(&ta); break; }
+          nodes[3] = T;
+          if (cyc & 1){
+              tt = rant_node_create_topic(T, "beat", RANT_PUB_ONLY, G2, &topts);
+              if (!tt){ wave_ok = 0; }
+              else {
+                  for (t=0;t<4000 && rant_topic_match_count(tt) < 1;t++) ch_pump(nodes,4,2);
+                  {   uint8_t pb[4]; i_rant_le_w32(pb, 0xBADBEEFu);     /* must never reach C */
+                      rant_topic_send(tt, rant_bytes(pb, 4), NULL); }
+                  for (t=0;t<4000 && ch_u_recv == u0;t++) ch_pump(nodes,4,2);
+                  if (ch_u_recv == u0) wave_ok = 0;
+                  ch_send(beat, 8);   /* the survivor stream runs beside the rival */
+                  for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,4,2);
+                  if (ch_c_last != ch_seq) cross_ok = 0;
+              }
+          } else {
+              tt = rant_node_create_topic(T, "beat", RANT_SUB_ONLY, NULL, &topts);
+              if (!tt) wave_ok = 0;
+              else {
+                  for (t=0;t<4000 && ch_t_recv == t0c;t++) ch_pump(nodes,4,2);
+                  if (ch_t_recv == t0c) late_ok = 0;   /* catch-up hands it the current value */
+              }
+          }
+          rant_node_close(T, 1);
+          nodes[3] = NULL;
+          rant_allocator_reset(&ta);
+          ch_send(beat, 8);   /* survivors deliver between waves */
+          for (t=0;t<4000 && ch_c_last != ch_seq;t++) ch_pump(nodes,3,2);
+          if (ch_c_last != ch_seq) live_ok = 0;
+          if (cyc == 0){
+              rant_node_mem_stats(P, &p_mem1, &peak, &calls);
+              rant_node_mem_stats(C, &c_mem1, &peak, &calls);
+              rant_node_mem_stats(U, &u_mem1, &peak, &calls);
+          }
+      }
+      CHECK(wave_ok, "churn-D: every wave node joined and exchanged data");
+      CHECK(cross_ok, "churn-D: rival same-name publisher never cross-wires the typed stream");
+      CHECK(late_ok, "churn-D: late joiners catch up to the current value");
+      CHECK(live_ok, "churn-D: survivor subscriptions deliver through every wave");
+      rant_node_mem_stats(P, &mem, &peak, &calls);
+      CHECK(mem <= p_mem1 + 512, "churn-D: publisher memory plateaus over peer churn (%u -> %u)",
+               (unsigned)p_mem1, (unsigned)mem);
+      rant_node_mem_stats(C, &mem, &peak, &calls);
+      CHECK(mem <= c_mem1 + 512, "churn-D: typed subscriber memory plateaus (%u -> %u)",
+               (unsigned)c_mem1, (unsigned)mem);
+      rant_node_mem_stats(U, &mem, &peak, &calls);
+      CHECK(mem <= u_mem1 + 512, "churn-D: untyped subscriber memory plateaus (%u -> %u)",
+               (unsigned)u_mem1, (unsigned)mem);
+      CHECK(i_rant_node_topic_count(P) == p_hi0 && i_rant_node_topic_count(C) == c_hi0,
+               "churn-D: topic tables never grew"); }
+
+    rant_node_close(P,0); rant_node_close(C,0); rant_node_close(U,0);
+    rant_allocator_reset(&pa); rant_allocator_reset(&ca); rant_allocator_reset(&ua);
+    rant_allocator_reset(&ma);
+}
+
+/* B's log lines as they reach on_message, and whether a queue dispatch ran them */
+static int ml_n, ml_boom0, ml_mirror, ml_live, ml_debug, ml_in_dispatch, ml_dispatching;
+static void ml_on_msg(const RantMsg *m){
+    RantString txt = rant_get_string(m->data, m->schema, "text");
+    uint64_t level = rant_get_uint(m->data, m->schema, "level");
+    uint64_t origin = rant_get_uint(m->data, m->schema, "origin");
+    char tb[64]; size_t tl = txt.len < sizeof tb - 1 ? txt.len : sizeof tb - 1;
+    memcpy(tb, txt.data, tl); tb[tl] = '\0';
+    ml_n++;
+    if (ml_dispatching) ml_in_dispatch++;
+    if (strcmp(tb, "boom 0") == 0 && level == RANT_LEVEL_WARN && origin == RANT_ORIGIN_APP
+        && m->written_us && !m->capture_us) ml_boom0 = 1;
+    if (strstr(tb, "unmatched-send") && level == RANT_LEVEL_ERROR && origin == RANT_ORIGIN_RANT
+        && m->capture_us && m->capture_us <= m->written_us) ml_mirror = 1;
+    if (strcmp(tb, "hidden") == 0) ml_debug = 1;
+    if (strcmp(tb, "live") == 0) ml_live = 1;
+}
+
+/* The metalog phase: A logs before anyone listens, below its level and triggers a mirrored
+ * error, B late joins the log on a queue and reads both, then reads a live line inline,
+ * then calls A's @rant/meta directed at A. */
+static void metalog_checks(void){
+    RantAllocator aa = rant_allocator_heap(0);
+    RantAllocator ba = rant_allocator_heap(0);
+    RantNodeOpts ao, bo; RantNode *A=NULL, *B=NULL; RantAddr seed;
+    int t, i;
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=TEST_DOMAIN+35; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    bo=ao;
+    ao.match_wait_ms = -1;    /* so the unmatched send below commits + fires immediately */
+    A = rant_node_open(&aa, "meta-a", NULL, NULL, &ao);
+    B = rant_node_open(&ba, "meta-b", ml_on_msg, NULL, &bo);
+    CHECK(A && B, "metalog: nodes open");
+    if (!(A && B)){ if(A)rant_node_close(A,0); if(B)rant_node_close(B,0);
+                    rant_allocator_reset(&ba); rant_allocator_reset(&aa); return; }
+
+    CHECK(rant_node_log_topic(A) && rant_node_status_topic(A), "metalog: log and status topics exist");
+    CHECK(rant_node_meta_function(A) != NULL && rant_node_meta_function(B) != NULL,
+             "metalog: meta endpoint hosted");
+    CHECK(rant_node_log(A, (RantLevel)0, "x") == RANT_ERR_NO_TOPIC
+             && rant_node_log(A, (RantLevel)5, "x") == RANT_ERR_NO_TOPIC, "metalog: a bad level refused");
+
+    /* log BEFORE any subscriber exists: the lines land in KEEP_LAST history and a late
+       joiner replays them (catch_up = keep_last). Debug is below the default Info, so it
+       is accepted and never sent */
+    for (i=0;i<2;i++){
+        int lr = rant_node_log(A, RANT_LEVEL_WARN, "boom %d", i);   /* a side effect, kept out of CHECK */
+        CHECK(lr == RANT_OK, "metalog: log %d accepted (%d)", i, lr);
+    }
+    { uint64_t txm=0; int lr = rant_node_log(A, RANT_LEVEL_DEBUG, "hidden");
+      CHECK(lr == RANT_OK, "metalog: a line below the level is accepted (%d)", lr);
+      rant_topic_counts(rant_node_log_topic(A), &txm, NULL, NULL, NULL);
+      CHECK(txm == 2, "metalog: tx counter counts the sent lines only (%u)", (unsigned)txm); }
+
+    /* an internal error mirrors onto @rant/log: an unmatched send right after open (gather
+       unsettled, wait disabled) fires RANT_E_UNMATCHED_SEND */
+    { RantTopic *src = rant_node_create_topic(A, "mirror-src", RANT_PUB_ONLY, NULL, NULL);
+      uint8_t payload[4] = {1,2,3,4};
+      CHECK(src != NULL, "metalog: mirror-src created");
+      if (src) rant_topic_send(src, rant_bytes(payload, 4), NULL);
+      rant_node_poll(A, 0);     /* flush the mirror ring into the log topic */
+    }
+
+    /* late subscriber: B parks its log lines on a queue, then widens its own handle of the
+       log to PUBSUB, so the replay parks and runs only at a dispatch */
+    { RantTopic *eh = rant_node_log_topic(B);
+      RantQueue *lq = rant_node_create_queue(B), *other = rant_node_create_queue(A);
+      int rc = rant_node_set_log_queue(B, other);
+      CHECK(rc == RANT_ERR_STATE, "metalog: another node's queue refused (%d)", rc);
+      rc = rant_node_set_log_queue(B, lq);
+      CHECK(lq && rc == RANT_OK, "metalog: log queue set (%d)", rc);
+      rc = eh ? rant_topic_set_role(eh, RANT_PUBSUB) : -1;
+      CHECK(rc == 0, "metalog: log subscribe (%d)", rc);
+      for (t=0;t<1500 && !(ml_boom0 && ml_mirror);t++){
+          test_pump(A,B,2);
+          ml_dispatching = 1;
+          (void)rant_queue_dispatch(lq, 0, 0);
+          ml_dispatching = 0;
+      }
+      CHECK(ml_n >= 3 && ml_boom0 && ml_mirror && !ml_debug && ml_in_dispatch == ml_n,
+               "metalog: replay + mirrored error dispatched (n=%d boom0=%d mirror=%d debug=%d queued=%d)",
+               ml_n, ml_boom0, ml_mirror, ml_debug, ml_in_dispatch);
+
+      /* NULL makes the lines inline again: a live line reaches on_message from the poll */
+      rc = rant_node_set_log_queue(B, NULL);
+      CHECK(rc == RANT_OK, "metalog: log queue cleared (%d)", rc);
+      ml_in_dispatch = 0;
+      rc = rant_node_log(A, RANT_LEVEL_INFO, "live");
+      CHECK(rc == RANT_OK, "metalog: live line accepted (%d)", rc);
+      PUMP_UNTIL(A, B, 6000, ml_live);
+      CHECK(ml_live && ml_in_dispatch == 0, "metalog: live line delivered inline (%d)", ml_live); }
+
+    /* @rant/meta: B calls A's endpoint directed at A's peer id. A answers on its service
+       thread while B blocks in the call */
+    { const i_RantDiscoveryPeerView *ps; uint16_t cnt=0; uint32_t idA=0;
+      RantResponse rep; int rc;
+      ps = test_peers(B, &cnt);
+      for (i=0;i<(int)cnt;i++)
+          if (ps[i].name.len==6 && memcmp(ps[i].name.data,"meta-a",6)==0) idA = ps[i].id;
+      CHECK(idA != 0, "metalog: found A's peer id (%u)", idA);
+      rant_node_start(A);
+      rc = rant_function_call(rant_node_meta_function(B), rant_bytes(NULL,0), &rep, 3000,
+                              &(RantCallOpts){ .provider = idA });
+      rant_node_stop(A);
+      CHECK(rc==1 && rep.status==RANT_CALL_OK && rep.data.len>0 && rep.schema,
+               "metalog: meta call answered (rc=%d st=%d len=%u)",
+               rc, rep.status, (unsigned)rep.data.len);
+      if (rc==1 && rep.status==RANT_CALL_OK && rep.schema){
+          RantBytes info = rant_get_map(rep.data, rep.schema, "info");
+          RantValue nodev, namev, topv, upt;
+          int ok_node   = rant_map_get(info, "node", &nodev);
+          int ok_name   = ok_node && rant_map_get(nodev.bytes, "name", &namev);
+          int ok_topics = rant_map_get(info, "topics", &topv);
+          CHECK(ok_name && namev.bytes.len==6 && memcmp(namev.bytes.data,"meta-a",6)==0,
+                   "metalog: snapshot node.name == meta-a (%d)", ok_name);
+          { /* only APP topics ride the snapshot: mirror-src, never the @rant/ builtins */
+            RantValue row, nm; uint16_t r; int hid = 0;
+            for (r = 0; ok_topics && r < topv.count; r++)
+                if (rant_map_array_at(topv.bytes, r, &row) && rant_map_get(row.bytes, "name", &nm)
+                    && nm.bytes.len >= 6 && !memcmp(nm.bytes.data, "@rant/", 6)) hid++;
+            CHECK(ok_topics && topv.count == 1 && hid == 0,
+                     "metalog: snapshot lists app topics only (%u rows, %d hidden)",
+                     (unsigned)(ok_topics?topv.count:0), hid); }
+          CHECK(ok_node && rant_map_get(nodev.bytes, "uptime_us", &upt) && upt.v.u > 0,
+                   "metalog: snapshot uptime present");
+      }
+
+      /* the builtins are listed like any entity: A's walks see mirror-src beside them, B
+         hosts only builtins, and B's walk of A carries A's meta function */
+      { RantIter eit; RantEntityInfo ei; int la=0, lb=0, pa=0, ba=0, bb=0, meta=0;
+        memset(&eit,0,sizeof eit);
+        while (rant_node_entities_next(A, RANT_SELF, &eit, &ei)){ if (test_builtin(&ei)) ba++; else la++; }
+        memset(&eit,0,sizeof eit);
+        while (rant_node_entities_next(B, RANT_SELF, &eit, &ei)){ if (test_builtin(&ei)) bb++; else lb++; }
+        memset(&eit,0,sizeof eit);
+        while (rant_node_entities_next(B, idA, &eit, &ei)){
+            if (!test_builtin(&ei)) pa++;
+            else if (ei.kind==RANT_ENTITY_FUNCTION && ei.name.len==10
+                     && !memcmp(ei.name.data,"@rant/meta",10) && ei.provides && !ei.incomplete) meta++;
+        }
+        CHECK(la==1 && lb==0 && pa==1,
+                 "metalog: entity walks list the app's own (A=%d B=%d peerA=%d)", la, lb, pa);
+        CHECK(ba>=4 && bb>=4 && meta==1,
+                 "metalog: entity walks list the builtins (A=%d B=%d peerA meta=%d)", ba, bb, meta); }
+
+      /* the hidden namespace is reserved: a leading '@' is refused in every constructor */
+      { RantVariable *ev = rant_node_create_variable_definition(A, "@rant/evil", NULL, NULL);
+        RantTopic *tp = rant_node_create_topic(A, "a@b", RANT_PUB_ONLY, NULL, NULL);
+        CHECK(ev == NULL && tp == NULL, "metalog: reserved '@' names refused"); } }
+
+    rant_node_close(B,1); rant_node_close(A,1);
+    rant_allocator_reset(&ba); rant_allocator_reset(&aa);
+}
+
+/* B's view of A's status, the latest set decoded, A's debug notes on B, and A's clear events */
+#define ST_MAX 4
+static int st_sets, st_count, st_notes, st_cleared;
+static char st_key[ST_MAX][RANT_STATUS_KEY_MAX + 1], st_text[ST_MAX][64], st_cleared_key[64];
+static uint64_t st_level[ST_MAX], st_origin[ST_MAX], st_clearable[ST_MAX], st_since[ST_MAX];
+static uint32_t st_cleared_by;
+static void st_copy(char *dst, size_t cap, RantString s){
+    size_t l = s.len < cap - 1 ? s.len : cap - 1;
+    memcpy(dst, s.data, l); dst[l] = '\0';
+}
+static void st_on_msg(const RantMsg *m){
+    char path[48]; uint32_t i, n;
+    if (m->topic_index != rant_topic_index(rant_node_status_topic(m->node))){
+        RantString t = rant_get_string(m->data, m->schema, "text"); char tb[192];
+        st_copy(tb, sizeof tb, t);
+        if (strstr(tb, "refused") && rant_get_uint(m->data, m->schema, "level") == RANT_LEVEL_DEBUG
+            && rant_get_uint(m->data, m->schema, "origin") == RANT_ORIGIN_RANT) st_notes++;
+        return;
+    }
+    n = rant_get_array_count(m->data, m->schema, "conditions");
+    st_count = (int)n;
+    for (i = 0; i < n && i < ST_MAX; i++){
+        snprintf(path, sizeof path, "conditions[%u].key", (unsigned)i);
+        st_copy(st_key[i], sizeof st_key[i], rant_get_string(m->data, m->schema, path));
+        snprintf(path, sizeof path, "conditions[%u].text", (unsigned)i);
+        st_copy(st_text[i], sizeof st_text[i], rant_get_string(m->data, m->schema, path));
+        snprintf(path, sizeof path, "conditions[%u].level", (unsigned)i);
+        st_level[i] = rant_get_uint(m->data, m->schema, path);
+        snprintf(path, sizeof path, "conditions[%u].origin", (unsigned)i);
+        st_origin[i] = rant_get_uint(m->data, m->schema, path);
+        snprintf(path, sizeof path, "conditions[%u].clearable", (unsigned)i);
+        st_clearable[i] = rant_get_uint(m->data, m->schema, path);
+        snprintf(path, sizeof path, "conditions[%u].since_us", (unsigned)i);
+        st_since[i] = rant_get_uint(m->data, m->schema, path);
+    }
+    st_sets++;
+}
+static void st_on_event(const RantEvent *e){
+    if (e->kind != RANT_STATUS_CLEARED) return;
+    st_cleared++; st_cleared_by = e->peer;
+    st_copy(st_cleared_key, sizeof st_cleared_key, rant_cstr(e->detail ? e->detail : ""));
+}
+static uint32_t st_peer_id(RantNode *at, const char *name){
+    const i_RantDiscoveryPeerView *ps; uint16_t cnt = 0, i;
+    ps = test_peers(at, &cnt);
+    for (i = 0; i < cnt; i++)
+        if (ps[i].name.len == strlen(name) && !memcmp(ps[i].name.data, name, ps[i].name.len)) return ps[i].id;
+    return 0;
+}
+
+/* The status phase: A raises two conditions before anyone listens and they coalesce into one
+ * set, B late joins and reads it, an update keeps since_us, refused clears leave a debug note
+ * and change nothing, an accepted clear tells A's app, and A's own clear empties the set. */
+static void status_checks(void){
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0), ca = rant_allocator_heap(0);
+    RantNodeOpts ao, bo, co; RantNode *A=NULL, *B=NULL, *C=NULL; RantAddr seed;
+    uint32_t idA, idB; uint64_t since_estop = 0, since_hot = 0; int t, rc, sets;
+    char key[64];
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=TEST_DOMAIN+43; ao.discovery.max_peers=4;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    bo=ao; co=ao;
+    ao.log_level = RANT_LEVEL_DEBUG;     /* A publishes its debug notes */
+    co.disable_status = 1;
+    A = rant_node_open(&aa, "status-a", NULL, st_on_event, &ao);
+    B = rant_node_open(&ba, "status-b", st_on_msg, NULL, &bo);
+    C = rant_node_open(&ca, "status-c", NULL, NULL, &co);
+    CHECK(A && B && C, "status: nodes open");
+    if (!(A && B && C)) goto done;
+
+    CHECK(!rant_node_status_topic(C)
+             && rant_node_set_status(C, "k", RANT_LEVEL_INFO, "x", NULL) == RANT_ERR_NOSYS
+             && rant_node_clear_status(C, "k") == RANT_ERR_NOSYS
+             && rant_node_clear_peer_status(C, 1, "k", 0) == RANT_ERR_NOSYS
+             && rant_node_set_status_queue(C, NULL) == RANT_ERR_NOSYS, "status: disable_status strips it");
+    rant_node_close(C, 0); C = NULL;
+    memset(key, 'k', RANT_STATUS_KEY_MAX + 1); key[RANT_STATUS_KEY_MAX + 1] = '\0';
+    CHECK(rant_node_set_status(A, "", RANT_LEVEL_INFO, "x", NULL) == RANT_ERR_NO_TOPIC
+             && rant_node_set_status(A, "k", (RantLevel)0, "x", NULL) == RANT_ERR_NO_TOPIC
+             && rant_node_set_status(A, key, RANT_LEVEL_INFO, "x", NULL) == RANT_ERR_TOO_BIG
+             && rant_node_clear_peer_status(A, 1, key, 0) == RANT_ERR_TOO_BIG,
+             "status: bad arguments refused");
+
+    /* raised before any subscriber: both land in one set, and the same values again send nothing */
+    { uint64_t txm = 0;
+      rc = rant_node_set_status(A, "estop", RANT_LEVEL_ERROR, "pressed", NULL);
+      CHECK(rc == RANT_OK, "status: estop raised (%d)", rc);
+      rc = rant_node_set_status(A, "overtemp", RANT_LEVEL_WARN, "motor hot", &(RantStatusOpts){ .clearable = 1 });
+      CHECK(rc == RANT_OK, "status: overtemp raised (%d)", rc);
+      rant_node_poll(A, 0);
+      rc = rant_node_set_status(A, "overtemp", RANT_LEVEL_WARN, "motor hot", &(RantStatusOpts){ .clearable = 1 });
+      rant_node_poll(A, 0);
+      rant_topic_counts(rant_node_status_topic(A), &txm, NULL, NULL, NULL);
+      CHECK(rc == RANT_OK && txm == 1, "status: one set for both raises, none for a repeat (%u)", (unsigned)txm); }
+
+    /* a node clears only what it read, so its clear sender opens with the status reader */
+    CHECK(rant_node_clear_peer_status(B, 1, "k", 0) == RANT_ERR_ROLE,
+          "status: a clear before reading status is refused");
+
+    /* B late joins the status and A's log */
+    rc = rant_topic_set_role(rant_node_status_topic(B), RANT_PUBSUB);
+    rc |= rant_topic_set_role(rant_node_log_topic(B), RANT_PUBSUB);
+    CHECK(rc == 0, "status: B subscribes (%d)", rc);
+    PUMP_UNTIL(A, B, 6000, st_count == 2);
+    CHECK(st_count == 2 && !strcmp(st_key[0], "estop") && !strcmp(st_key[1], "overtemp")
+             && st_level[0] == RANT_LEVEL_ERROR && st_level[1] == RANT_LEVEL_WARN
+             && st_origin[0] == RANT_ORIGIN_APP && !st_clearable[0] && st_clearable[1]
+             && st_since[0] && st_since[1] && !strcmp(st_text[1], "motor hot"),
+             "status: the late joiner gets the whole set (n=%d)", st_count);
+    since_estop = st_since[0]; since_hot = st_since[1];
+    idA = st_peer_id(B, "status-a"); idB = st_peer_id(A, "status-b");
+    CHECK(idA && idB, "status: peer ids (%u %u)", idA, idB);
+
+    /* an update replaces the text and keeps since_us */
+    sets = st_sets;
+    rc = rant_node_set_status(A, "estop", RANT_LEVEL_ERROR, "pressed at door 3", NULL);
+    PUMP_UNTIL(A, B, 6000, st_sets > sets);
+    CHECK(rc == RANT_OK && st_count == 2 && !strcmp(st_text[0], "pressed at door 3") && st_since[0] == since_estop,
+             "status: an update keeps since_us (%s)", st_text[0]);
+
+    /* refused clears: not clearable, and an occurrence A no longer holds */
+    rc = rant_node_clear_peer_status(B, idA, "estop", since_estop);
+    rc |= rant_node_clear_peer_status(B, idA, "overtemp", since_hot + 1);
+    rc |= rant_node_clear_peer_status(B, idA, "nothing", 0);
+    PUMP_UNTIL(A, B, 6000, st_notes >= 3);
+    for (t = 0; t < 20; t++) test_pump(A, B, 2);
+    CHECK(rc == RANT_OK && st_notes == 3 && st_cleared == 0 && st_count == 2,
+             "status: refused clears change nothing and leave notes (notes=%d cleared=%d n=%d)",
+             st_notes, st_cleared, st_count);
+
+    /* an accepted clear removes it, tells A's app who cleared it, and B sees the smaller set */
+    rc = rant_node_clear_peer_status(B, idA, "overtemp", since_hot);
+    PUMP_UNTIL(A, B, 6000, st_cleared && st_count == 1);
+    CHECK(rc == RANT_OK && st_cleared == 1 && st_cleared_by == idB && !strcmp(st_cleared_key, "overtemp")
+             && st_count == 1 && !strcmp(st_key[0], "estop"),
+             "status: a peer clear lands (cleared=%d by=%u key=%s n=%d)", st_cleared, st_cleared_by,
+             st_cleared_key, st_count);
+
+    /* A's own clear empties the set, and a clear of nothing is fine */
+    rc = rant_node_clear_status(A, "estop");
+    rc |= rant_node_clear_status(A, "estop");
+    PUMP_UNTIL(A, B, 6000, st_count == 0);
+    CHECK(rc == RANT_OK && st_count == 0, "status: own clear empties the set (n=%d)", st_count);
+
+    /* the set holds RANT_STATUS_MAX conditions */
+    { int k, ok = 1;
+      for (k = 0; k < RANT_STATUS_MAX; k++){
+          snprintf(key, sizeof key, "k%d", k);
+          if (rant_node_set_status(A, key, RANT_LEVEL_INFO, "x", NULL) != RANT_OK) ok = 0;
+      }
+      rc = rant_node_set_status(A, "one-more", RANT_LEVEL_INFO, "x", NULL);
+      PUMP_UNTIL(A, B, 6000, st_count == RANT_STATUS_MAX);
+      CHECK(ok && rc == RANT_ERR_TOO_BIG && st_count == RANT_STATUS_MAX,
+               "status: a full set refuses one more (%d, n=%d)", rc, st_count); }
+
+    rc = rant_topic_set_role(rant_node_status_topic(B), RANT_PUB_ONLY);
+    CHECK(rc == RANT_OK && rant_node_clear_peer_status(B, idA, "k0", 0) == RANT_ERR_ROLE,
+          "status: a node that stops reading status stops clearing (%d)", rc);
+
+done:
+    if (C) rant_node_close(C,0);
+    if (B) rant_node_close(B,1);
+    if (A) rant_node_close(A,1);
+    rant_allocator_reset(&ca); rant_allocator_reset(&ba); rant_allocator_reset(&aa);
+}
+
+static void rc_answer(RantRequest *r, void *u){ (void)u; rant_request_reply(r, rant_bytes(NULL, 0)); }
+
+/* n's own Rant conditions of one kind: their count, and their texts joined by '|' */
+static int rc_kind(RantNode *n, const char *kind, char *texts, size_t cap, uint64_t *level){
+    RantBytes m = i_rant_node_status_view(n);
+    const RantSchema *s = n->status_schema;
+    uint32_t i, count = m.len ? rant_get_array_count(m, s, "conditions") : 0;
+    size_t kl = strlen(kind), o = 0; int c = 0; char path[48];
+    if (texts && cap) texts[0] = '\0';
+    for (i = 0; i < count; i++){
+        RantString k, t;
+        snprintf(path, sizeof path, "conditions[%u].origin", (unsigned)i);
+        if (rant_get_uint(m, s, path) != RANT_ORIGIN_RANT) continue;
+        snprintf(path, sizeof path, "conditions[%u].key", (unsigned)i);
+        k = rant_get_string(m, s, path);
+        if (k.len < kl || memcmp(k.data, kind, kl) != 0 || (k.len > kl && k.data[kl] != '/')) continue;
+        c++;
+        snprintf(path, sizeof path, "conditions[%u].level", (unsigned)i);
+        if (level) *level = rant_get_uint(m, s, path);
+        snprintf(path, sizeof path, "conditions[%u].text", (unsigned)i);
+        t = rant_get_string(m, s, path);
+        if (texts && o + t.len + 2 < cap){ memcpy(texts + o, t.data, t.len); o += t.len; texts[o++] = '|'; texts[o] = '\0'; }
+    }
+    return c;
+}
+
+/* n's Rant condition under exactly key, its text into text. 1 when it holds one */
+static int rc_exact(RantNode *n, const char *key, char *text, size_t cap){
+    RantBytes m = i_rant_node_status_view(n);
+    const RantSchema *s = n->status_schema;
+    uint32_t i, count = m.len ? rant_get_array_count(m, s, "conditions") : 0;
+    char path[48];
+    for (i = 0; i < count; i++){
+        RantString k;
+        snprintf(path, sizeof path, "conditions[%u].origin", (unsigned)i);
+        if (rant_get_uint(m, s, path) != RANT_ORIGIN_RANT) continue;
+        snprintf(path, sizeof path, "conditions[%u].key", (unsigned)i);
+        k = rant_get_string(m, s, path);
+        if (k.len != strlen(key) || memcmp(k.data, key, k.len) != 0) continue;
+        snprintf(path, sizeof path, "conditions[%u].text", (unsigned)i);
+        if (text && cap) st_copy(text, cap, rant_get_string(m, s, path));
+        return 1;
+    }
+    return 0;
+}
+
+/* Rant's own conditions: one per problem naming its peer, each gone exactly when its cause
+ * is, a cap that keeps the app's room and counts the rest, and a refused peer that ages out. */
+static void rant_conditions_checks(void){
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0), ca = rant_allocator_heap(0);
+    RantAllocator ma = rant_allocator_heap(0);
+    RantNodeOpts ao, bo, co; RantNode *A=NULL, *B=NULL, *C=NULL; RantAddr seed;
+    RantTopicOpts rel, be;
+    const RantSchema *f32 = NULL, *f64 = NULL;
+    char tx[2048]; uint64_t lv = 0; int na, nb, k;
+
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&ao,0,sizeof ao); ao.domain=TEST_DOMAIN+44; ao.discovery.max_peers=8;
+    ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
+    bo=ao; co=ao;
+    memset(&rel,0,sizeof rel); rel.qos.reliability = RANT_RELIABLE;
+    memset(&be,0,sizeof be); be.qos.reliability = RANT_BEST_EFFORT;
+    f32 = test_compile(&ma, "RcPose { x: f32 }", NULL);
+    f64 = test_compile(&ma, "RcPose { x: f64 }", NULL);
+    A = rant_node_open(&aa, "rc-a", NULL, NULL, &ao);
+    B = rant_node_open(&ba, "rc-b", st_on_msg, NULL, &bo);
+    C = rant_node_open(&ca, "rc-c", NULL, NULL, &co);
+    CHECK(A && B && C && f32 && f64, "rantcond: nodes open, schemas compile");
+    if (!(A && B && C && f32 && f64)) goto done;
+
+    /* two readers whose schema does not fit: A holds one condition per peer, each named */
+    { RantTopic *ta = rant_node_create_topic(A, "rc/pose", RANT_PUB_ONLY, f32, &rel);
+      RantTopic *tb = rant_node_create_topic(B, "rc/pose", RANT_SUB_ONLY, f64, &rel);
+      RantTopic *tc = rant_node_create_topic(C, "rc/pose", RANT_SUB_ONLY, f64, &rel);
+      CHECK(ta && tb && tc, "rantcond: pose topics");
+      PUMP3_UNTIL(A, B, C, 6000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 2
+                                  && rc_kind(B, "schema_mismatch", NULL, 0, NULL) == 1);
+      na = rc_kind(A, "schema_mismatch", tx, sizeof tx, &lv);
+      CHECK(na == 2 && lv == RANT_LEVEL_ERROR && strstr(tx, "rc/pose to rc-b") && strstr(tx, "rc/pose to rc-c"),
+               "rantcond: a writer holds one schema_mismatch per reader, each naming it (n=%d: %s)", na, tx);
+      nb = rc_kind(B, "schema_mismatch", tx, sizeof tx, NULL);
+      CHECK(nb == 1 && strstr(tx, "rc/pose from rc-a"), "rantcond: the reader names the writer (n=%d: %s)", nb, tx);
+
+      /* the published set carries them as Rant's, never clearable */
+      st_count = 0;
+      (void)rant_topic_set_role(rant_node_status_topic(B), RANT_PUBSUB);
+      PUMP3_UNTIL(A, B, C, 6000, st_count >= 2);
+      CHECK(st_count >= 2 && st_origin[0] == RANT_ORIGIN_RANT && !st_clearable[0]
+               && !strncmp(st_key[0], "schema_mismatch/", 16),
+               "rantcond: A publishes them with origin Rant (n=%d key=%s)", st_count, st_key[0]);
+
+      /* C leaves: only its condition goes */
+      rant_node_close(C, 1); C = NULL;
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 1);
+      na = rc_kind(A, "schema_mismatch", tx, sizeof tx, NULL);
+      CHECK(na == 1 && strstr(tx, "rc-b") && !strstr(tx, "rc-c"),
+               "rantcond: a peer leaving takes only its condition (n=%d: %s)", na, tx);
+
+      /* B retires its reader: both sides clear */
+      CHECK(rant_topic_retire(tb) == RANT_OK, "rantcond: B retires the reader");
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0
+                              && rc_kind(B, "schema_mismatch", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0 && rc_kind(B, "schema_mismatch", NULL, 0, NULL) == 0,
+               "rantcond: a fixed cause clears both sides");
+      (void)rant_topic_retire(ta); }
+
+    /* QoS: a reliable reader meets a best effort writer */
+    { RantTopic *ta = rant_node_create_topic(A, "rc/q", RANT_PUB_ONLY, NULL, &be);
+      RantTopic *tb = rant_node_create_topic(B, "rc/q", RANT_SUB_ONLY, NULL, &rel);
+      PUMP_UNTIL(A, B, 6000, rc_kind(B, "qos_incompatible", NULL, 0, NULL) == 1);
+      nb = rc_kind(B, "qos_incompatible", tx, sizeof tx, NULL);
+      CHECK(ta && tb && nb == 1 && strstr(tx, "rc/q from rc-a"), "rantcond: qos_incompatible names the writer (n=%d: %s)", nb, tx);
+      (void)rant_topic_retire(tb);
+      PUMP_UNTIL(A, B, 6000, rc_kind(B, "qos_incompatible", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(B, "qos_incompatible", NULL, 0, NULL) == 0, "rantcond: qos_incompatible clears with its topic");
+      (void)rant_topic_retire(ta); }
+
+    /* kind: a plain reader of a name another node owns as a variable */
+    { RantTopic *ta = rant_node_create_topic(A, "rc/k", RANT_SUB_ONLY, NULL, &rel);
+      RantVariable *vb = rant_node_create_variable_definition(B, "rc/k", NULL, NULL);
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "kind_mismatch", NULL, 0, NULL) == 1);
+      na = rc_kind(A, "kind_mismatch", tx, sizeof tx, NULL);
+      CHECK(ta && vb && na == 1 && strstr(tx, "rc/k at rc-b"), "rantcond: kind_mismatch names the peer (n=%d: %s)", na, tx);
+      (void)rant_variable_retire(vb);
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "kind_mismatch", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(A, "kind_mismatch", NULL, 0, NULL) == 0, "rantcond: kind_mismatch clears when the variable goes");
+      (void)rant_topic_retire(ta); }
+
+    /* duplicate authority: two providers of one function, each warned about the other */
+    { RantFunction *fa = rant_node_create_function_definition(A, "rc/f", NULL, NULL, rc_answer, NULL, NULL);
+      RantFunction *fb = rant_node_create_function_definition(B, "rc/f", NULL, NULL, rc_answer, NULL, NULL);
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "duplicate_authority", NULL, 0, NULL) == 1
+                              && rc_kind(B, "duplicate_authority", NULL, 0, NULL) == 1);
+      na = rc_kind(A, "duplicate_authority", tx, sizeof tx, &lv);
+      CHECK(fa && fb && na == 1 && lv == RANT_LEVEL_WARN && strstr(tx, "rc/f is also provided by rc-b"),
+               "rantcond: duplicate_authority warns, naming the rival (n=%d: %s)", na, tx);
+      (void)rant_function_retire(fb);
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "duplicate_authority", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(A, "duplicate_authority", NULL, 0, NULL) == 0, "rantcond: the rival retiring clears it");
+      (void)rant_function_retire(fa); }
+
+    /* forced: the owner holds a Warn naming who forced its variable, until it is unforced */
+    { uint8_t one = 1, two = 2; RantBytes got;
+      RantVariable *va = rant_node_create_variable_definition(A, "rc/v", NULL,
+                             &(RantVariableOpts){ .allow_force = 1, .initial = rant_bytes(&one, 1) });
+      RantVariable *vb = rant_node_create_remote_variable(B, "rc/v", NULL, NULL);
+      PUMP_UNTIL(A, B, 6000, vb && rant_variable_get(vb, &got) == 1 && rant_variable_match_count(vb) > 0);
+      CHECK(va && vb && rant_variable_force(vb, rant_bytes(&two, 1)) == RANT_OK, "rantcond: B forces A's variable");
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "forced", NULL, 0, NULL) == 1);
+      na = rc_kind(A, "forced", tx, sizeof tx, &lv);
+      CHECK(na == 1 && lv == RANT_LEVEL_WARN && strstr(tx, "rc/v is forced by rc-b"),
+               "rantcond: forced names the variable and who forced it (n=%d: %s)", na, tx);
+      (void)rant_variable_unforce(vb);
+      PUMP_UNTIL(A, B, 6000, rc_kind(A, "forced", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(A, "forced", NULL, 0, NULL) == 0, "rantcond: unforce clears it");
+      (void)rant_variable_force(va, rant_bytes(&two, 1));
+      rant_node_poll(A, 0);
+      na = rc_kind(A, "forced", tx, sizeof tx, NULL);
+      CHECK(na == 1 && strstr(tx, "forced by this node"), "rantcond: a local force names this node (%s)", tx);
+      (void)rant_variable_retire(vb); (void)rant_variable_retire(va);
+      rant_node_poll(A, 0);
+      CHECK(rc_kind(A, "forced", NULL, 0, NULL) == 0, "rantcond: retiring the variable clears it"); }
+
+    /* many of a kind: past RANT_STATUS_KIND_MAX they fold into one condition under the kind
+       alone, counting them and quoting the first, and unfold when few are left */
+    { RantTopic *ta[20], *tb[20]; char nm[32];
+      for (k = 0; k < 20; k++){
+          snprintf(nm, sizeof nm, "rc/m%02d", k);
+          ta[k] = rant_node_create_topic(A, nm, RANT_PUB_ONLY, f32, &rel);
+          tb[k] = rant_node_create_topic(B, nm, RANT_SUB_ONLY, f64, &rel);
+      }
+      PUMP_UNTIL(A, B, 8000, rc_exact(A, "schema_mismatch", tx, sizeof tx) && strstr(tx, "20 matches"));
+      na = rc_kind(A, "schema_mismatch", NULL, 0, NULL);
+      CHECK(na == 1 && rc_exact(A, "schema_mismatch", tx, sizeof tx)
+               && strstr(tx, "20 matches refused for their schemas. First: rc/m") && !rc_exact(A, "more_problems", NULL, 0),
+               "rantcond: 20 refusals are one condition (n=%d: %s)", na, tx);
+      CHECK(rant_node_set_status(A, "app", RANT_LEVEL_INFO, "still room", NULL) == RANT_OK,
+               "rantcond: the app keeps its room");
+      (void)rant_node_clear_status(A, "app");
+      for (k = 3; k < 20; k++){ (void)rant_topic_retire(tb[k]); (void)rant_topic_retire(ta[k]); }
+      PUMP_UNTIL(A, B, 8000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 3
+                              && !rc_exact(A, "schema_mismatch", NULL, 0));
+      na = rc_kind(A, "schema_mismatch", tx, sizeof tx, NULL);
+      CHECK(na == 3 && !rc_exact(A, "schema_mismatch", NULL, 0) && strstr(tx, "rc/m00 to rc-b"),
+               "rantcond: three left are listed one by one again (n=%d: %s)", na, tx);
+      for (k = 0; k < 3; k++){ (void)rant_topic_retire(tb[k]); (void)rant_topic_retire(ta[k]); }
+      PUMP_UNTIL(A, B, 8000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0);
+      CHECK(rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 0, "rantcond: and none once fixed"); }
+
+done:
+    if (C) rant_node_close(C,1);
+    if (B) rant_node_close(B,1);
+    if (A) rant_node_close(A,1);
+    rant_allocator_reset(&ca); rant_allocator_reset(&ba); rant_allocator_reset(&aa); rant_allocator_reset(&ma);
+}
+
+/* The overall cap: six kinds of three problems list RANT_STATUS_RANT_MAX - 1 and count the
+ * rest in more_problems, and a kind of four folds into one. Driven through the sources' API. */
+static void rc_cap_checks(void){
+    static const i_RantProblemKind kinds[6] = {
+        I_RANT_PROB_WIRE_VERSION, I_RANT_PROB_PEER_REFUSED, I_RANT_PROB_PEER_TOO_BIG,
+        I_RANT_PROB_SCHEMA_MISMATCH, I_RANT_PROB_QOS_INCOMPATIBLE, I_RANT_PROB_KIND_MISMATCH };
+    RantAllocator a = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *N; i_RantProblems ps; char text[64], tx[256]; int k, j, listed;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+46; o.net.multicast_interface="127.0.0.1";
+    N = rant_node_open(&a, "rc-cap", NULL, NULL, &o);
+    CHECK(N != NULL, "rantcap: node opens");
+    if (!N) return;
+    for (k = 0; k < 6; k++){
+        i_rant_node_problems_begin(N, &ps, kinds[k]);
+        for (j = 0; j < RANT_STATUS_KIND_MAX; j++){
+            snprintf(text, sizeof text, "problem %d.%d", k, j);
+            i_rant_node_problem(&ps, (uint32_t)(k * 10 + j + 1), RANT_LEVEL_ERROR, text);
+        }
+        i_rant_node_problems_end(&ps);
+    }
+    listed = i_rant_node_status_count(N, RANT_ORIGIN_RANT);
+    CHECK(listed == RANT_STATUS_RANT_MAX && rc_exact(N, "more_problems", tx, sizeof tx)
+             && strstr(tx, "3 more problems"),
+             "rantcap: %d Rant conditions, the last counting the rest (%s)", listed, tx);
+    i_rant_node_problems_begin(N, &ps, kinds[0]);
+    for (j = 0; j < RANT_STATUS_KIND_MAX + 1; j++){
+        snprintf(text, sizeof text, "10.0.0.%d speaks wire version 6", j + 1);
+        i_rant_node_problem(&ps, (uint32_t)(j + 1), RANT_LEVEL_ERROR, text);
+    }
+    i_rant_node_problems_end(&ps);
+    CHECK(rc_kind(N, "wire_version", NULL, 0, NULL) == 1 && rc_exact(N, "wire_version", tx, sizeof tx)
+             && strstr(tx, "4 nodes speak another wire version. First: 10.0.0.1"),
+             "rantcap: a fourth of a kind folds it into one (%s)", tx);
+    rant_node_close(N, 0);
+    rant_allocator_reset(&a);
+}
+
+/* A static node with room for one peer turns away the next that meets it and holds a
+ * peer_refused condition naming its address, which ages out once that node goes quiet. */
+static void rc_refused_checks(void){
+    static uint8_t mem[1u << 20];
+    RantAllocator da = rant_allocator_static(mem, sizeof mem);
+    RantAllocator ea = rant_allocator_heap(0), fa = rant_allocator_heap(0);
+    RantNodeOpts o, d; RantNode *D=NULL, *E=NULL, *F=NULL; RantAddr seed;
+    char tx[512]; int nd;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+45; o.discovery.max_peers=8;
+    o.discovery.announce_interval_us=200000;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    d = o; d.discovery.max_peers = 1;
+    D = rant_node_open(&da, "rc-d", NULL, NULL, &d);
+    E = rant_node_open(&ea, "rc-e", NULL, NULL, &o);
+    F = rant_node_open(&fa, "rc-f", NULL, NULL, &o);
+    CHECK(D && E && F, "rantcond: refusal nodes open");
+    if (!(D && E && F)) goto done;
+    rant_node_create_topic(D, "rc/refused", RANT_PUB_ONLY, NULL, NULL);
+    rant_node_create_topic(E, "rc/refused", RANT_SUB_ONLY, NULL, NULL);
+    rant_node_create_topic(F, "rc/refused", RANT_SUB_ONLY, NULL, NULL);
+    PUMP3_UNTIL(D, E, F, 6000, rc_kind(D, "peer_refused", NULL, 0, NULL) == 1);
+    nd = rc_kind(D, "peer_refused", tx, sizeof tx, NULL);
+    CHECK(nd == 1 && strstr(tx, "127.0.0.1:") && strstr(tx, "raise max_peers"),
+             "rantcond: a full table holds peer_refused naming the address (n=%d: %s)", nd, tx);
+    rant_node_close(E, 1); E = NULL;
+    rant_node_close(F, 1); F = NULL;
+    { int t; for (t = 0; t < 400 && rc_kind(D, "peer_refused", NULL, 0, NULL); t++) rant_node_poll(D, 5); }
+    CHECK(rc_kind(D, "peer_refused", NULL, 0, NULL) == 0, "rantcond: it ages out once the node goes quiet");
+done:
+    if (F) rant_node_close(F,1);
+    if (E) rant_node_close(E,1);
+    if (D) rant_node_close(D,1);
+    rant_allocator_reset(&fa); rant_allocator_reset(&ea);
+}
+
+/* A fetch_details viewer re creates a retired subscriber after its publisher came back as
+ * a new node, as the transcoder does when a camera restarts. */
+static int rp_pump(RantNode *S, RantNode *P, RantTopic *pub, RantTopic *sub, int ms){
+    uint64_t end = i_rant_plat_now_us() + (uint64_t)ms * 1000u, next = 0;
+    uint8_t pb[4] = {1, 2, 3, 4}; RantMsg m; int got = 0;
+    while (i_rant_plat_now_us() < end){
+        if (i_rant_plat_now_us() >= next){
+            (void)rant_topic_send(pub, rant_bytes(pb, sizeof pb), NULL);
+            next = i_rant_plat_now_us() + 20000u;
+        }
+        rant_node_poll(P, 1); rant_node_poll(S, 1);
+        while (sub && rant_topic_take(sub, &m, 0) == 1) got++;
+    }
+    return got;
+}
+static void republish_checks(void){
+    RantAllocator sa = rant_allocator_heap(0), aa = rant_allocator_heap(0), ba = rant_allocator_heap(0);
+    RantNodeOpts so, po; RantNode *S, *A, *B = NULL; RantAddr seed;
+    RantTopic *sub, *pub; RantTopicOpts o; int got;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&po,0,sizeof po); po.domain=TEST_DOMAIN+40;
+    po.net.multicast_interface="127.0.0.1"; po.net.seed_peers=&seed; po.net.n_seed_peers=1;
+    po.discovery.announce_interval_us = 100000;
+    so = po; so.fetch_details = 1;
+    memset(&o,0,sizeof o); o.pull = 1;
+    S = rant_node_open(&sa, "viewer", NULL, NULL, &so);
+    A = rant_node_open(&aa, "camera", NULL, NULL, &po);
+    CHECK(S && A, "republish: nodes open");
+    if (!(S && A)) goto done;
+    pub = rant_node_create_topic(A, "late", RANT_PUB_ONLY, NULL, NULL);
+    (void)rp_pump(S, A, pub, NULL, 500);
+    sub = rant_node_create_topic(S, "late", RANT_SUB_ONLY, NULL, &o);
+    got = rp_pump(S, A, pub, sub, 1000);
+    CHECK(got > 10, "republish: the subscriber gets the first camera (%d)", got);
+    CHECK(rant_topic_retire(sub) == RANT_OK, "republish: the subscriber retires");
+    rant_node_close(A, 1); A = NULL;
+    B = rant_node_open(&ba, "camera", NULL, NULL, &po);
+    CHECK(B != NULL, "republish: the camera opens again");
+    if (!B) goto done;
+    pub = rant_node_create_topic(B, "late", RANT_PUB_ONLY, NULL, NULL);
+    (void)rp_pump(S, B, pub, NULL, 500);    /* the viewer judges it while the slot is retired */
+    sub = rant_node_create_topic(S, "late", RANT_SUB_ONLY, NULL, &o);
+    got = rp_pump(S, B, pub, sub, 1000);
+    CHECK(got > 10, "republish: the re created subscriber gets the new camera (%d)", got);
+done:
+    if (B) rant_node_close(B, 1);
+    if (A) rant_node_close(A, 1);
+    if (S) rant_node_close(S, 1);
+    rant_allocator_reset(&sa); rant_allocator_reset(&aa); rant_allocator_reset(&ba);
+}
+
+/* A static node that hears more peers than it remembers holds directory_partial, a warning,
+ * and no peer_refused, since none of them meets it. It ages out once they go quiet. */
+static void rc_partial_checks(void){
+    static uint8_t mem[1u << 20];
+    RantAllocator da = rant_allocator_static(mem, sizeof mem);
+    RantNodeOpts o, d; RantNode *D = NULL, *C[6]; RantAddr seed;
+    char tx[512], nm[24], want[32]; uint64_t lv = 0; int k, nd;
+    memset(C, 0, sizeof C);
+    snprintf(want, sizeof want, "remembers %u peers", (unsigned)RANT_RECORDS_PER_PEER);   /* one slot's records */
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+47; o.discovery.announce_interval_us=200000;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    d = o; d.discovery.max_peers = 1;
+    D = rant_node_open(&da, "rc-partial", NULL, NULL, &d);
+    CHECK(D != NULL, "rantpartial: the static node opens");
+    if (!D) return;
+    for (k = 0; k < 6; k++){
+        RantAllocator ca = rant_allocator_heap(0);
+        snprintf(nm, sizeof nm, "rc-crowd%d", k);
+        C[k] = rant_node_open(&ca, nm, NULL, NULL, &o);
+        snprintf(nm, sizeof nm, "rc/crowd%d", k);
+        if (C[k]){ rant_node_create_topic(C[k], nm, RANT_PUB_ONLY, NULL, NULL); rant_node_start(C[k]); }
+    }
+    PUMP_UNTIL(D, NULL, 6000, rc_kind(D, "directory_partial", NULL, 0, NULL) == 1);
+    nd = rc_kind(D, "directory_partial", tx, sizeof tx, &lv);
+    CHECK(nd == 1 && lv == RANT_LEVEL_WARN && strstr(tx, want) && strstr(tx, "raise max_peers")
+          && rc_kind(D, "peer_refused", NULL, 0, NULL) == 0,
+          "rantpartial: among more peers than it remembers it warns and refuses none (n=%d: %s)", nd, tx);
+    for (k = 0; k < 6; k++) if (C[k]) rant_node_close(C[k], 1);
+    PUMP_UNTIL(D, NULL, 3000, rc_kind(D, "directory_partial", NULL, 0, NULL) == 0);
+    CHECK(rc_kind(D, "directory_partial", NULL, 0, NULL) == 0, "rantpartial: it ages out once they go quiet");
+    rant_node_close(D, 1);
+}
+
+static const TestCase cases[] = {
+    { "reflect_dropped", reflect_dropped_checks },
+    { "churn", churn_checks },
+    { "republish", republish_checks },
+    { "log_and_meta", metalog_checks },
+    { "status", status_checks },
+    { "rant_conditions", rant_conditions_checks },
+    { "rant_refused", rc_refused_checks },
+    { "rant_partial", rc_partial_checks },
+    { "rant_cap", rc_cap_checks },
+};
+
+TEST_MAIN(cases)

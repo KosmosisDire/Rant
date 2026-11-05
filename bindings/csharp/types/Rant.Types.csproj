@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The standard types alone, with no native code. The Rant package carries this assembly, and a
+       library such as Rant Math can too. Types.cs is generated: rant_codegen standard. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Rant.Types</AssemblyName>
+    <RootNamespace>Rant.Types</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+
+    <PackageId>Rant.Types</PackageId>
+    <Authors>Nathan George</Authors>
+    <RepositoryUrl>https://github.com/KosmosisDire/Rant</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/KosmosisDire/Rant</PackageProjectUrl>
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../../VERSION').Trim())</Version>
+    <Description>The standard types of Rant, such as Pose, Image and PointCloud, with no middleware.</Description>
+    <PackageTags>robotics;types;rant</PackageTags>
+    <IncludeSymbols>false</IncludeSymbols>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Types.cs" />
+  </ItemGroup>
+
+</Project>

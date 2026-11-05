@@ -1,0 +1,609 @@
+{
+  "revision": 2804007311,
+  "types": [
+    { "name": "Float2", "kind": "struct", "fixed": true, "size": 8,
+      "about": ["A 2D vector of f32"],
+      "members": [
+        { "name": "x", "type": "f32", "unit": "", "note": "" },
+        { "name": "y", "type": "f32", "unit": "", "note": "" }
+      ] },
+    { "name": "Float3", "kind": "struct", "fixed": true, "size": 12,
+      "about": ["A 3D vector of f32"],
+      "members": [
+        { "name": "x", "type": "f32", "unit": "", "note": "" },
+        { "name": "y", "type": "f32", "unit": "", "note": "" },
+        { "name": "z", "type": "f32", "unit": "", "note": "" }
+      ] },
+    { "name": "Float4", "kind": "struct", "fixed": true, "size": 16,
+      "about": ["A 4D vector of f32"],
+      "members": [
+        { "name": "x", "type": "f32", "unit": "", "note": "" },
+        { "name": "y", "type": "f32", "unit": "", "note": "" },
+        { "name": "z", "type": "f32", "unit": "", "note": "" },
+        { "name": "w", "type": "f32", "unit": "", "note": "" }
+      ] },
+    { "name": "Double2", "kind": "struct", "fixed": true, "size": 16,
+      "about": ["A 2D vector of f64"],
+      "members": [
+        { "name": "x", "type": "f64", "unit": "", "note": "" },
+        { "name": "y", "type": "f64", "unit": "", "note": "" }
+      ] },
+    { "name": "Double3", "kind": "struct", "fixed": true, "size": 24,
+      "about": ["A 3D vector of f64"],
+      "members": [
+        { "name": "x", "type": "f64", "unit": "", "note": "" },
+        { "name": "y", "type": "f64", "unit": "", "note": "" },
+        { "name": "z", "type": "f64", "unit": "", "note": "" }
+      ] },
+    { "name": "Double4", "kind": "struct", "fixed": true, "size": 32,
+      "about": ["A 4D vector of f64"],
+      "members": [
+        { "name": "x", "type": "f64", "unit": "", "note": "" },
+        { "name": "y", "type": "f64", "unit": "", "note": "" },
+        { "name": "z", "type": "f64", "unit": "", "note": "" },
+        { "name": "w", "type": "f64", "unit": "", "note": "" }
+      ] },
+    { "name": "Int2", "kind": "struct", "fixed": true, "size": 8,
+      "about": ["A 2D vector of i32, such as a pixel or a grid cell"],
+      "members": [
+        { "name": "x", "type": "i32", "unit": "", "note": "" },
+        { "name": "y", "type": "i32", "unit": "", "note": "" }
+      ] },
+    { "name": "Int3", "kind": "struct", "fixed": true, "size": 12,
+      "about": ["A 3D vector of i32"],
+      "members": [
+        { "name": "x", "type": "i32", "unit": "", "note": "" },
+        { "name": "y", "type": "i32", "unit": "", "note": "" },
+        { "name": "z", "type": "i32", "unit": "", "note": "" }
+      ] },
+    { "name": "Int4", "kind": "struct", "fixed": true, "size": 16,
+      "about": ["A 4D vector of i32"],
+      "members": [
+        { "name": "x", "type": "i32", "unit": "", "note": "" },
+        { "name": "y", "type": "i32", "unit": "", "note": "" },
+        { "name": "z", "type": "i32", "unit": "", "note": "" },
+        { "name": "w", "type": "i32", "unit": "", "note": "" }
+      ] },
+    { "name": "Quaternion", "kind": "struct", "fixed": true, "size": 32,
+      "about": ["A 3D rotation as a unit quaternion, stored x, y, z, w"],
+      "members": [
+        { "name": "x", "type": "f64", "unit": "", "note": "" },
+        { "name": "y", "type": "f64", "unit": "", "note": "" },
+        { "name": "z", "type": "f64", "unit": "", "note": "" },
+        { "name": "w", "type": "f64", "unit": "", "note": "" }
+      ] },
+    { "name": "Color", "kind": "struct", "fixed": true, "size": 4,
+      "about": ["An sRGB color with straight alpha, not premultiplied"],
+      "members": [
+        { "name": "r", "type": "u8", "unit": "", "note": "" },
+        { "name": "g", "type": "u8", "unit": "", "note": "" },
+        { "name": "b", "type": "u8", "unit": "", "note": "" },
+        { "name": "a", "type": "u8", "unit": "", "note": "255 is opaque" }
+      ] },
+    { "name": "Empty", "kind": "struct", "fixed": true, "size": 0,
+      "about": ["No data, for a signal such as a trigger"],
+      "members": [] },
+    { "name": "Uuid", "kind": "alias", "fixed": true, "size": 16,
+      "about": ["A 16 byte unique id"],
+      "members": [
+        { "type": "u8[16]", "unit": "", "note": "RFC 4122 byte order" }
+      ] },
+    { "name": "Timestamp", "kind": "alias", "fixed": true, "size": 8,
+      "about": ["A moment in time, counted from the Unix epoch in UTC"],
+      "members": [
+        { "type": "i64", "unit": "us", "note": "" }
+      ] },
+    { "name": "Duration", "kind": "alias", "fixed": true, "size": 8,
+      "about": ["A length of time"],
+      "members": [
+        { "type": "i64", "unit": "us", "note": "" }
+      ] },
+    { "name": "Matrix3x3", "kind": "alias", "fixed": true, "size": 36,
+      "about": ["A 3 by 3 matrix, indexed row then column"],
+      "members": [
+        { "type": "f32[3][3]", "unit": "", "note": "" }
+      ] },
+    { "name": "Matrix4x4", "kind": "alias", "fixed": true, "size": 64,
+      "about": ["A 4 by 4 matrix, indexed row then column"],
+      "members": [
+        { "type": "f32[4][4]", "unit": "", "note": "" }
+      ] },
+    { "name": "Covariance3", "kind": "alias", "fixed": true, "size": 72,
+      "about": ["The covariance of three values, indexed row then column, in their units squared"],
+      "members": [
+        { "type": "f64[3][3]", "unit": "", "note": "" }
+      ] },
+    { "name": "Covariance6", "kind": "alias", "fixed": true, "size": 288,
+      "about": ["The covariance of a 3D pose or twist, indexed row then column", "The order is x, y and z, then the turn about x, y and z"],
+      "members": [
+        { "type": "f64[6][6]", "unit": "", "note": "" }
+      ] },
+    { "name": "Uri", "kind": "alias", "fixed": true, "size": 258,
+      "about": ["A URL or other URI"],
+      "members": [
+        { "type": "string<256>", "unit": "", "note": "" }
+      ] },
+    { "name": "Pose", "kind": "struct", "fixed": true, "size": 56,
+      "about": ["A position and orientation in a 3D frame"],
+      "members": [
+        { "name": "position", "type": "Double3", "unit": "m", "note": "" },
+        { "name": "orientation", "type": "Quaternion", "unit": "", "note": "" }
+      ] },
+    { "name": "Pose2D", "kind": "struct", "fixed": true, "size": 24,
+      "about": ["A position and heading in a 2D frame, the top view of a Pose"],
+      "members": [
+        { "name": "position", "type": "Double2", "unit": "m or px", "note": "" },
+        { "name": "angle", "type": "f64", "unit": "rad", "note": "from +x toward +y" }
+      ] },
+    { "name": "Transform", "kind": "struct", "fixed": true, "size": 88,
+      "about": ["A Pose and the frame it is measured in"],
+      "members": [
+        { "name": "pose", "type": "Pose", "unit": "", "note": "" },
+        { "name": "parent", "type": "string<30>", "unit": "", "note": "the parent frame, empty when unstated" }
+      ] },
+    { "name": "Transform2D", "kind": "struct", "fixed": true, "size": 56,
+      "about": ["A Pose2D and the frame it is measured in"],
+      "members": [
+        { "name": "pose", "type": "Pose2D", "unit": "", "note": "" },
+        { "name": "parent", "type": "string<30>", "unit": "", "note": "the parent frame, empty when unstated" }
+      ] },
+    { "name": "Twist", "kind": "struct", "fixed": true, "size": 48,
+      "about": ["Linear and angular velocity in 3D"],
+      "members": [
+        { "name": "linear", "type": "Double3", "unit": "m/s", "note": "" },
+        { "name": "angular", "type": "Double3", "unit": "rad/s", "note": "about each axis" }
+      ] },
+    { "name": "Twist2D", "kind": "struct", "fixed": true, "size": 24,
+      "about": ["Linear and angular velocity in 2D"],
+      "members": [
+        { "name": "linear", "type": "Double2", "unit": "m/s", "note": "" },
+        { "name": "angular", "type": "f64", "unit": "rad/s", "note": "from +x toward +y" }
+      ] },
+    { "name": "Wrench", "kind": "struct", "fixed": true, "size": 48,
+      "about": ["A force and a torque in 3D"],
+      "members": [
+        { "name": "force", "type": "Double3", "unit": "N", "note": "" },
+        { "name": "torque", "type": "Double3", "unit": "N m", "note": "about the frame origin" }
+      ] },
+    { "name": "Wrench2D", "kind": "struct", "fixed": true, "size": 24,
+      "about": ["A force and a torque in 2D"],
+      "members": [
+        { "name": "force", "type": "Double2", "unit": "N", "note": "" },
+        { "name": "torque", "type": "f64", "unit": "N m", "note": "from +x toward +y" }
+      ] },
+    { "name": "Accel", "kind": "struct", "fixed": true, "size": 48,
+      "about": ["Linear and angular acceleration in 3D"],
+      "members": [
+        { "name": "linear", "type": "Double3", "unit": "m/s^2", "note": "" },
+        { "name": "angular", "type": "Double3", "unit": "rad/s^2", "note": "about each axis" }
+      ] },
+    { "name": "Accel2D", "kind": "struct", "fixed": true, "size": 24,
+      "about": ["Linear and angular acceleration in 2D"],
+      "members": [
+        { "name": "linear", "type": "Double2", "unit": "m/s^2", "note": "" },
+        { "name": "angular", "type": "f64", "unit": "rad/s^2", "note": "from +x toward +y" }
+      ] },
+    { "name": "PoseWithCovariance", "kind": "struct", "fixed": true, "size": 344,
+      "about": ["A Pose and how uncertain it is"],
+      "members": [
+        { "name": "pose", "type": "Pose", "unit": "", "note": "" },
+        { "name": "covariance", "type": "Covariance6", "unit": "m^2 and rad^2", "note": "the position, then the rotation about x, y and z" }
+      ] },
+    { "name": "TwistWithCovariance", "kind": "struct", "fixed": true, "size": 336,
+      "about": ["A Twist and how uncertain it is"],
+      "members": [
+        { "name": "twist", "type": "Twist", "unit": "", "note": "" },
+        { "name": "covariance", "type": "Covariance6", "unit": "m^2/s^2 and rad^2/s^2", "note": "the linear part, then the angular" }
+      ] },
+    { "name": "Odometry", "kind": "struct", "fixed": true, "size": 712,
+      "about": ["Where a moving body is and how fast it moves, as dead reckoning estimates it"],
+      "members": [
+        { "name": "pose", "type": "PoseWithCovariance", "unit": "", "note": "the body in the parent frame" },
+        { "name": "twist", "type": "TwistWithCovariance", "unit": "", "note": "in the body's own frame" },
+        { "name": "parent", "type": "string<30>", "unit": "", "note": "the frame pose is measured in, empty when unstated" }
+      ] },
+    { "name": "GeoPoint", "kind": "struct", "fixed": true, "size": 24,
+      "about": ["A point on the Earth"],
+      "members": [
+        { "name": "lat", "type": "f64", "unit": "deg", "note": "latitude" },
+        { "name": "lon", "type": "f64", "unit": "deg", "note": "longitude" },
+        { "name": "alt", "type": "f64", "unit": "m", "note": "altitude" }
+      ] },
+    { "name": "AlignedBox", "kind": "struct", "fixed": true, "size": 48,
+      "about": ["A box along the frame axes"],
+      "members": [
+        { "name": "min", "type": "Double3", "unit": "m", "note": "the corner with the lowest x, y and z" },
+        { "name": "max", "type": "Double3", "unit": "m", "note": "the opposite corner" }
+      ] },
+    { "name": "AlignedBox2D", "kind": "struct", "fixed": true, "size": 32,
+      "about": ["A rectangle along the frame axes, also a region of an image"],
+      "members": [
+        { "name": "min", "type": "Double2", "unit": "m or px", "note": "the corner with the lowest x and y" },
+        { "name": "max", "type": "Double2", "unit": "m or px", "note": "the opposite corner" }
+      ] },
+    { "name": "OrientedBox", "kind": "struct", "fixed": true, "size": 80,
+      "about": ["A box at any orientation"],
+      "members": [
+        { "name": "pose", "type": "Pose", "unit": "", "note": "the center and orientation" },
+        { "name": "size", "type": "Double3", "unit": "m", "note": "the full edge lengths" }
+      ] },
+    { "name": "OrientedBox2D", "kind": "struct", "fixed": true, "size": 40,
+      "about": ["A rectangle at any angle"],
+      "members": [
+        { "name": "pose", "type": "Pose2D", "unit": "", "note": "the center and angle" },
+        { "name": "size", "type": "Double2", "unit": "m or px", "note": "the full edge lengths" }
+      ] },
+    { "name": "Plane", "kind": "struct", "fixed": true, "size": 48,
+      "about": ["An endless flat plane"],
+      "members": [
+        { "name": "position", "type": "Double3", "unit": "m", "note": "any point on the plane" },
+        { "name": "normal", "type": "Double3", "unit": "", "note": "unit length" }
+      ] },
+    { "name": "Segment", "kind": "struct", "fixed": true, "size": 48,
+      "about": ["A straight line between two points"],
+      "members": [
+        { "name": "a", "type": "Double3", "unit": "m", "note": "" },
+        { "name": "b", "type": "Double3", "unit": "m", "note": "" }
+      ] },
+    { "name": "Ray", "kind": "struct", "fixed": true, "size": 48,
+      "about": ["A straight line from a point, endless in one direction"],
+      "members": [
+        { "name": "origin", "type": "Double3", "unit": "m", "note": "" },
+        { "name": "direction", "type": "Double3", "unit": "", "note": "unit length, away from origin" }
+      ] },
+    { "name": "Sphere", "kind": "struct", "fixed": true, "size": 32,
+      "about": ["A ball around a center point"],
+      "members": [
+        { "name": "center", "type": "Double3", "unit": "m", "note": "" },
+        { "name": "radius", "type": "f64", "unit": "m", "note": "" }
+      ] },
+    { "name": "Capsule", "kind": "struct", "fixed": true, "size": 56,
+      "about": ["A cylinder with rounded ends"],
+      "members": [
+        { "name": "axis", "type": "Segment", "unit": "", "note": "the centers of the rounded ends" },
+        { "name": "radius", "type": "f64", "unit": "m", "note": "" }
+      ] },
+    { "name": "Cylinder", "kind": "struct", "fixed": true, "size": 56,
+      "about": ["A cylinder with flat ends"],
+      "members": [
+        { "name": "axis", "type": "Segment", "unit": "", "note": "the centers of the flat ends" },
+        { "name": "radius", "type": "f64", "unit": "m", "note": "" }
+      ] },
+    { "name": "Cone", "kind": "struct", "fixed": true, "size": 56,
+      "about": ["A cone from a round base to a tip"],
+      "members": [
+        { "name": "base", "type": "Double3", "unit": "m", "note": "the center of the base" },
+        { "name": "tip", "type": "Double3", "unit": "m", "note": "" },
+        { "name": "radius", "type": "f64", "unit": "m", "note": "at the base" }
+      ] },
+    { "name": "Polygon", "kind": "struct", "fixed": false, "size": 0,
+      "about": ["A closed flat polygon in 3D"],
+      "members": [
+        { "name": "points", "type": "Double3[]", "unit": "m", "note": "the corners in order" }
+      ] },
+    { "name": "Plane2D", "kind": "struct", "fixed": true, "size": 32,
+      "about": ["An endless line, the 2D form of a Plane"],
+      "members": [
+        { "name": "position", "type": "Double2", "unit": "m or px", "note": "any point on the line" },
+        { "name": "normal", "type": "Double2", "unit": "", "note": "unit length" }
+      ] },
+    { "name": "Segment2D", "kind": "struct", "fixed": true, "size": 32,
+      "about": ["A straight line between two points in 2D"],
+      "members": [
+        { "name": "a", "type": "Double2", "unit": "m or px", "note": "" },
+        { "name": "b", "type": "Double2", "unit": "m or px", "note": "" }
+      ] },
+    { "name": "Ray2D", "kind": "struct", "fixed": true, "size": 32,
+      "about": ["A straight line from a point, endless in one direction, in 2D"],
+      "members": [
+        { "name": "origin", "type": "Double2", "unit": "m or px", "note": "" },
+        { "name": "direction", "type": "Double2", "unit": "", "note": "unit length, away from origin" }
+      ] },
+    { "name": "Circle", "kind": "struct", "fixed": true, "size": 24,
+      "about": ["A circle around a center point"],
+      "members": [
+        { "name": "center", "type": "Double2", "unit": "m or px", "note": "" },
+        { "name": "radius", "type": "f64", "unit": "m or px", "note": "" }
+      ] },
+    { "name": "Capsule2D", "kind": "struct", "fixed": true, "size": 40,
+      "about": ["A rectangle with rounded ends"],
+      "members": [
+        { "name": "axis", "type": "Segment2D", "unit": "", "note": "the centers of the rounded ends" },
+        { "name": "radius", "type": "f64", "unit": "m or px", "note": "" }
+      ] },
+    { "name": "Polygon2D", "kind": "struct", "fixed": false, "size": 0,
+      "about": ["A closed polygon in 2D"],
+      "members": [
+        { "name": "points", "type": "Double2[]", "unit": "m or px", "note": "the corners in order" }
+      ] },
+    { "name": "Prism", "kind": "struct", "fixed": false, "size": 64,
+      "about": ["A flat polygon raised to a height, such as a zone of a floor"],
+      "members": [
+        { "name": "pose", "type": "Pose", "unit": "", "note": "the frame the base lies in" },
+        { "name": "base", "type": "Polygon2D", "unit": "m", "note": "in the xy plane of pose" },
+        { "name": "height", "type": "f64", "unit": "m", "note": "along +z of pose" }
+      ] },
+    { "name": "Polyline", "kind": "struct", "fixed": false, "size": 0,
+      "about": ["An open line through points in order"],
+      "members": [
+        { "name": "points", "type": "Double3[]", "unit": "m", "note": "" }
+      ] },
+    { "name": "Polyline2D", "kind": "struct", "fixed": false, "size": 0,
+      "about": ["An open line through points in order in 2D"],
+      "members": [
+        { "name": "points", "type": "Double2[]", "unit": "m or px", "note": "" }
+      ] },
+    { "name": "Path", "kind": "struct", "fixed": false, "size": 0,
+      "about": ["A route of poses to follow in order"],
+      "members": [
+        { "name": "poses", "type": "Pose[]", "unit": "", "note": "" }
+      ] },
+    { "name": "Path2D", "kind": "struct", "fixed": false, "size": 0,
+      "about": ["A route of 2D poses to follow in order"],
+      "members": [
+        { "name": "poses", "type": "Pose2D[]", "unit": "", "note": "" }
+      ] },
+    { "name": "Inertia", "kind": "struct", "fixed": true, "size": 80,
+      "about": ["The mass of a rigid body and how it resists turning"],
+      "members": [
+        { "name": "mass", "type": "f64", "unit": "kg", "note": "" },
+        { "name": "center", "type": "Double3", "unit": "m", "note": "the center of mass in the body frame" },
+        { "name": "ixx", "type": "f64", "unit": "kg m^2", "note": "about the center of mass" },
+        { "name": "ixy", "type": "f64", "unit": "kg m^2", "note": "" },
+        { "name": "ixz", "type": "f64", "unit": "kg m^2", "note": "" },
+        { "name": "iyy", "type": "f64", "unit": "kg m^2", "note": "" },
+        { "name": "iyz", "type": "f64", "unit": "kg m^2", "note": "" },
+        { "name": "izz", "type": "f64", "unit": "kg m^2", "note": "" }
+      ] },
+    { "name": "ImageFormat", "kind": "enum", "backing": "u8", "fixed": true, "size": 1,
+      "about": ["How the data of an Image is laid out, 16 and up a compressed file"],
+      "members": [
+        { "name": "Mono8", "value": 0, "unit": "", "note": "one 8 bit channel" },
+        { "name": "Mono16", "value": 1, "unit": "", "note": "one 16 bit channel" },
+        { "name": "Rgb8", "value": 2, "unit": "", "note": "red, green and blue, 8 bits each" },
+        { "name": "Rgba8", "value": 3, "unit": "", "note": "red, green, blue and alpha, 8 bits each" },
+        { "name": "Bgr8", "value": 4, "unit": "", "note": "blue, green and red, 8 bits each" },
+        { "name": "Yuyv", "value": 5, "unit": "", "note": "YUV 4:2:2, two pixels in four bytes" },
+        { "name": "Nv12", "value": 6, "unit": "", "note": "YUV 4:2:0, a Y plane then interleaved U and V" },
+        { "name": "Monof32", "value": 7, "unit": "", "note": "one 32 bit float channel" },
+        { "name": "Jpeg", "value": 16, "unit": "", "note": "data is a JPEG file" },
+        { "name": "Png", "value": 17, "unit": "", "note": "data is a PNG file" }
+      ] },
+    { "name": "Image", "kind": "struct", "fixed": false, "size": 13,
+      "about": ["A picture, as raw pixels or a compressed file"],
+      "members": [
+        { "name": "width", "type": "u32", "unit": "px", "note": "" },
+        { "name": "height", "type": "u32", "unit": "px", "note": "" },
+        { "name": "stride", "type": "u32", "unit": "bytes", "note": "from one row to the next, 0 when rows are packed" },
+        { "name": "format", "type": "ImageFormat", "unit": "", "note": "how data is laid out" },
+        { "name": "data", "type": "u8[]", "unit": "", "note": "the pixels from the top row, or the file" }
+      ] },
+    { "name": "VideoCodec", "kind": "enum", "backing": "u8", "fixed": true, "size": 1,
+      "about": ["The format of a video bitstream"],
+      "members": [
+        { "name": "Unknown", "value": 0, "unit": "", "note": "unstated" },
+        { "name": "Mjpeg", "value": 1, "unit": "", "note": "" },
+        { "name": "H264", "value": 2, "unit": "", "note": "" },
+        { "name": "H265", "value": 3, "unit": "", "note": "" },
+        { "name": "Av1", "value": 4, "unit": "", "note": "" }
+      ] },
+    { "name": "VideoFrame", "kind": "struct", "fixed": false, "size": 18,
+      "about": ["One encoded frame of a video stream"],
+      "members": [
+        { "name": "codec", "type": "VideoCodec", "unit": "", "note": "the bitstream format" },
+        { "name": "width", "type": "u32", "unit": "px", "note": "the coded size, 0 when unstated" },
+        { "name": "height", "type": "u32", "unit": "px", "note": "the coded size, 0 when unstated" },
+        { "name": "keyframe", "type": "bool", "unit": "", "note": "decodes without earlier frames" },
+        { "name": "pts", "type": "Timestamp", "unit": "us", "note": "when to show the frame" },
+        { "name": "data", "type": "u8[]", "unit": "", "note": "the encoded bitstream" }
+      ] },
+    { "name": "VideoStreamKind", "kind": "enum", "backing": "u8", "fixed": true, "size": 1,
+      "about": ["The protocol a video stream is served over"],
+      "members": [
+        { "name": "Rtsp", "value": 0, "unit": "", "note": "" },
+        { "name": "WebrtcWhep", "value": 1, "unit": "", "note": "WebRTC set up over WHEP" },
+        { "name": "Hls", "value": 2, "unit": "", "note": "" },
+        { "name": "Srt", "value": 3, "unit": "", "note": "" },
+        { "name": "Rtp", "value": 4, "unit": "", "note": "" },
+        { "name": "HttpMjpeg", "value": 5, "unit": "", "note": "MJPEG over HTTP" },
+        { "name": "Other", "value": 15, "unit": "", "note": "" }
+      ] },
+    { "name": "ExternalVideoStream", "kind": "struct", "fixed": true, "size": 300,
+      "about": ["Where to watch a video stream, so a viewer connects to it directly"],
+      "members": [
+        { "name": "width", "type": "u32", "unit": "px", "note": "a hint, 0 when unstated" },
+        { "name": "height", "type": "u32", "unit": "px", "note": "a hint, 0 when unstated" },
+        { "name": "kind", "type": "VideoStreamKind", "unit": "", "note": "the protocol of url" },
+        { "name": "codec", "type": "VideoCodec", "unit": "", "note": "a hint, Unknown when unstated" },
+        { "name": "url", "type": "Uri", "unit": "", "note": "the stream address" },
+        { "name": "name", "type": "string<30>", "unit": "", "note": "a label for the stream" }
+      ] },
+    { "name": "DistortionModel", "kind": "enum", "backing": "u64", "fixed": true, "size": 8,
+      "about": ["A lens distortion model"],
+      "members": [
+        { "name": "None", "value": 0, "unit": "", "note": "an ideal pinhole" },
+        { "name": "BrownConrady", "value": 1, "unit": "", "note": "" },
+        { "name": "Fisheye", "value": 2, "unit": "", "note": "" },
+        { "name": "Rational", "value": 3, "unit": "", "note": "" }
+      ] },
+    { "name": "CameraIntrinsics", "kind": "struct", "fixed": true, "size": 112,
+      "about": ["The pinhole model of a camera and its lens distortion"],
+      "members": [
+        { "name": "width", "type": "u32", "unit": "px", "note": "the resolution these values hold for" },
+        { "name": "height", "type": "u32", "unit": "px", "note": "" },
+        { "name": "fx", "type": "f64", "unit": "px", "note": "focal length along x" },
+        { "name": "fy", "type": "f64", "unit": "px", "note": "focal length along y" },
+        { "name": "cx", "type": "f64", "unit": "px", "note": "principal point x" },
+        { "name": "cy", "type": "f64", "unit": "px", "note": "principal point y" },
+        { "name": "coeffs", "type": "f64[8]", "unit": "", "note": "OpenCV's order: k1 k2 p1 p2 k3, then k4 k5 k6 for Rational, or k1 to k4 for Fisheye, 0 past that" },
+        { "name": "model", "type": "DistortionModel", "unit": "", "note": "the lens distortion model" }
+      ] },
+    { "name": "JointState", "kind": "struct", "fixed": false, "size": 0,
+      "about": ["The joints of a robot, in the order of its JointNames"],
+      "members": [
+        { "name": "position", "type": "f64[]", "unit": "rad or m", "note": "rad for a turning joint, m for a sliding one" },
+        { "name": "velocity", "type": "f64[]", "unit": "rad/s or m/s", "note": "may be empty" },
+        { "name": "effort", "type": "f64[]", "unit": "N m or N", "note": "may be empty" }
+      ] },
+    { "name": "JointNames", "kind": "struct", "fixed": false, "size": 0,
+      "about": ["The joint names a JointState follows, published once"],
+      "members": [
+        { "name": "name", "type": "string[]", "unit": "", "note": "" }
+      ] },
+    { "name": "JointTrajectoryPoint", "kind": "struct", "fixed": false, "size": 8,
+      "about": ["Where the joints should be at one time, in the order of their JointNames"],
+      "members": [
+        { "name": "time", "type": "Duration", "unit": "us", "note": "from the start of the trajectory" },
+        { "name": "position", "type": "f64[]", "unit": "rad or m", "note": "" },
+        { "name": "velocity", "type": "f64[]", "unit": "rad/s or m/s", "note": "may be empty" },
+        { "name": "acceleration", "type": "f64[]", "unit": "rad/s^2 or m/s^2", "note": "may be empty" },
+        { "name": "effort", "type": "f64[]", "unit": "N m or N", "note": "may be empty" }
+      ] },
+    { "name": "JointTrajectory", "kind": "struct", "fixed": false, "size": 0,
+      "about": ["A motion of the joints over time"],
+      "members": [
+        { "name": "points", "type": "JointTrajectoryPoint[]", "unit": "", "note": "in time order" }
+      ] },
+    { "name": "Imu", "kind": "struct", "fixed": true, "size": 296,
+      "about": ["One reading of an inertial measurement unit, in its own frame", "A covariance with -1 first means that value is not measured"],
+      "members": [
+        { "name": "orientation", "type": "Quaternion", "unit": "", "note": "" },
+        { "name": "orientation_covariance", "type": "Covariance3", "unit": "rad^2", "note": "about x, y and z" },
+        { "name": "angular_velocity", "type": "Double3", "unit": "rad/s", "note": "about each axis" },
+        { "name": "angular_velocity_covariance", "type": "Covariance3", "unit": "rad^2/s^2", "note": "" },
+        { "name": "linear_acceleration", "type": "Double3", "unit": "m/s^2", "note": "gravity included" },
+        { "name": "linear_acceleration_covariance", "type": "Covariance3", "unit": "m^2/s^4", "note": "" }
+      ] },
+    { "name": "LaserScan", "kind": "struct", "fixed": false, "size": 21,
+      "about": ["One sweep of a planar range sensor, its beams turning from +x toward +y"],
+      "members": [
+        { "name": "angle_min", "type": "f32", "unit": "rad", "note": "the first beam" },
+        { "name": "angle_step", "type": "f32", "unit": "rad", "note": "from one beam to the next" },
+        { "name": "time_step", "type": "f32", "unit": "s", "note": "from one beam to the next, 0 when unstated" },
+        { "name": "range_min", "type": "f32", "unit": "m", "note": "a shorter range is not valid" },
+        { "name": "range_max", "type": "f32", "unit": "m", "note": "a longer range is not valid" },
+        { "name": "echoes", "type": "u8", "unit": "", "note": "the ranges per beam, 0 reads as 1" },
+        { "name": "ranges", "type": "f32[]", "unit": "m", "note": "each beam's echoes together, +inf when nothing returns" },
+        { "name": "intensities", "type": "f32[]", "unit": "", "note": "in the order of ranges, may be empty" }
+      ] },
+    { "name": "RangeKind", "kind": "enum", "backing": "u64", "fixed": true, "size": 8,
+      "about": ["What a range sensor measures with"],
+      "members": [
+        { "name": "Unknown", "value": 0, "unit": "", "note": "unstated" },
+        { "name": "Ultrasound", "value": 1, "unit": "", "note": "" },
+        { "name": "Infrared", "value": 2, "unit": "", "note": "" },
+        { "name": "Laser", "value": 3, "unit": "", "note": "" },
+        { "name": "Radar", "value": 4, "unit": "", "note": "" }
+      ] },
+    { "name": "RangeReading", "kind": "struct", "fixed": true, "size": 40,
+      "about": ["One distance from a sensor with a single beam or cone along its +x"],
+      "members": [
+        { "name": "distance", "type": "f64", "unit": "m", "note": "+inf when nothing is in range" },
+        { "name": "min", "type": "f64", "unit": "m", "note": "the shortest distance it reads" },
+        { "name": "max", "type": "f64", "unit": "m", "note": "the longest distance it reads" },
+        { "name": "field_of_view", "type": "f64", "unit": "rad", "note": "the full angle of the cone" },
+        { "name": "kind", "type": "RangeKind", "unit": "", "note": "" }
+      ] },
+    { "name": "GnssStatus", "kind": "enum", "backing": "u64", "fixed": true, "size": 8,
+      "about": ["The quality of a satellite position fix"],
+      "members": [
+        { "name": "NoFix", "value": 0, "unit": "", "note": "the position is not valid" },
+        { "name": "Fix", "value": 1, "unit": "", "note": "satellites alone" },
+        { "name": "Differential", "value": 2, "unit": "", "note": "corrected by SBAS or DGPS" },
+        { "name": "RtkFloat", "value": 3, "unit": "", "note": "RTK, ambiguities not yet resolved" },
+        { "name": "RtkFixed", "value": 4, "unit": "", "note": "RTK, centimeter level" }
+      ] },
+    { "name": "GnssFix", "kind": "struct", "fixed": true, "size": 104,
+      "about": ["A position from satellite navigation"],
+      "members": [
+        { "name": "position", "type": "GeoPoint", "unit": "", "note": "" },
+        { "name": "covariance", "type": "Covariance3", "unit": "m^2", "note": "east, north and up" },
+        { "name": "status", "type": "GnssStatus", "unit": "", "note": "" }
+      ] },
+    { "name": "ScalarKind", "kind": "enum", "backing": "u8", "fixed": true, "size": 1,
+      "about": ["The kind of number in a block of raw data, numbered as in PCL"],
+      "members": [
+        { "name": "I8", "value": 1, "unit": "", "note": "" },
+        { "name": "U8", "value": 2, "unit": "", "note": "" },
+        { "name": "I16", "value": 3, "unit": "", "note": "" },
+        { "name": "U16", "value": 4, "unit": "", "note": "" },
+        { "name": "I32", "value": 5, "unit": "", "note": "" },
+        { "name": "U32", "value": 6, "unit": "", "note": "" },
+        { "name": "F32", "value": 7, "unit": "", "note": "" },
+        { "name": "F64", "value": 8, "unit": "", "note": "" },
+        { "name": "I64", "value": 9, "unit": "", "note": "" },
+        { "name": "U64", "value": 10, "unit": "", "note": "" }
+      ] },
+    { "name": "PointField", "kind": "struct", "fixed": false, "size": 9,
+      "about": ["One value that every point of a PointCloud holds"],
+      "members": [
+        { "name": "name", "type": "string", "unit": "", "note": "such as x, y, z, intensity or rgb" },
+        { "name": "offset", "type": "u32", "unit": "bytes", "note": "from the start of the point" },
+        { "name": "kind", "type": "ScalarKind", "unit": "", "note": "" },
+        { "name": "count", "type": "u32", "unit": "", "note": "the numbers in a row, 1 for a single number" }
+      ] },
+    { "name": "PointCloud", "kind": "struct", "fixed": false, "size": 97,
+      "about": ["Points with any values each, packed one point after another as in PCL"],
+      "members": [
+        { "name": "origin", "type": "Transform", "unit": "", "note": "the frame the points are in" },
+        { "name": "width", "type": "u32", "unit": "", "note": "points per row when the cloud is an image, 0 when it has no rows" },
+        { "name": "fields", "type": "PointField[]", "unit": "", "note": "what each point holds" },
+        { "name": "point_step", "type": "u32", "unit": "bytes", "note": "from one point to the next" },
+        { "name": "dense", "type": "bool", "unit": "", "note": "no point holds an invalid value" },
+        { "name": "data", "type": "u8[]", "unit": "", "note": "the points, little endian" }
+      ] },
+    { "name": "Mesh", "kind": "struct", "fixed": false, "size": 97,
+      "about": ["A surface of triangles"],
+      "members": [
+        { "name": "vertices", "type": "PointCloud", "unit": "", "note": "the corners, with x, y and z among their fields" },
+        { "name": "triangles", "type": "u32[]", "unit": "", "note": "three vertex indices each, counterclockwise seen from outside" }
+      ] },
+    { "name": "GridField", "kind": "struct", "fixed": false, "size": 1,
+      "about": ["One value that every cell of a Grid holds"],
+      "members": [
+        { "name": "name", "type": "string", "unit": "", "note": "such as occupancy, height or cost" },
+        { "name": "kind", "type": "ScalarKind", "unit": "", "note": "" },
+        { "name": "data", "type": "u8[]", "unit": "", "note": "one number per cell, x fastest, then y, then z, little endian" }
+      ] },
+    { "name": "Grid", "kind": "struct", "fixed": false, "size": 108,
+      "about": ["A 2D or 3D grid of cells with any values each, such as a map"],
+      "members": [
+        { "name": "origin", "type": "Transform", "unit": "", "note": "the frame, and the pose of the outer corner of cell 0" },
+        { "name": "resolution", "type": "f64", "unit": "m", "note": "the edge of a cell" },
+        { "name": "cells_x", "type": "u32", "unit": "", "note": "cells along x" },
+        { "name": "cells_y", "type": "u32", "unit": "", "note": "cells along y" },
+        { "name": "cells_z", "type": "u32", "unit": "", "note": "cells along z, 1 for a 2D grid" },
+        { "name": "fields", "type": "GridField[]", "unit": "", "note": "what each cell holds" }
+      ] },
+    { "name": "Tensor", "kind": "struct", "fixed": false, "size": 1,
+      "about": ["An array of numbers with any number of dimensions"],
+      "members": [
+        { "name": "kind", "type": "ScalarKind", "unit": "", "note": "" },
+        { "name": "shape", "type": "u32[]", "unit": "", "note": "the size of each dimension, outermost first" },
+        { "name": "data", "type": "u8[]", "unit": "", "note": "the numbers, last dimension fastest, little endian" }
+      ] },
+    { "name": "File", "kind": "struct", "fixed": false, "size": 66,
+      "about": ["A whole file"],
+      "members": [
+        { "name": "name", "type": "string", "unit": "", "note": "the file name with its extension" },
+        { "name": "media_type", "type": "string<64>", "unit": "", "note": "such as image/png, empty when unknown" },
+        { "name": "data", "type": "u8[]", "unit": "", "note": "the file bytes" }
+      ] },
+    { "name": "Detection2D", "kind": "struct", "fixed": false, "size": 48,
+      "about": ["An object found in an image or a 2D frame"],
+      "members": [
+        { "name": "bounds", "type": "OrientedBox2D", "unit": "", "note": "where it is" },
+        { "name": "label", "type": "string", "unit": "", "note": "what it is" },
+        { "name": "score", "type": "f32", "unit": "", "note": "the confidence, 0 to 1" },
+        { "name": "track", "type": "u32", "unit": "", "note": "the same id in every frame, 0 when not tracked" }
+      ] },
+    { "name": "Detection3D", "kind": "struct", "fixed": false, "size": 88,
+      "about": ["An object found in a 3D frame"],
+      "members": [
+        { "name": "bounds", "type": "OrientedBox", "unit": "", "note": "where it is" },
+        { "name": "label", "type": "string", "unit": "", "note": "what it is" },
+        { "name": "score", "type": "f32", "unit": "", "note": "the confidence, 0 to 1" },
+        { "name": "track", "type": "u32", "unit": "", "note": "the same id in every frame, 0 when not tracked" }
+      ] }
+  ]
+}
