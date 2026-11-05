@@ -280,7 +280,7 @@ impl Node {
             &[o.request_schema.as_ref(), o.progress_schema.as_ref(), o.response_schema.as_ref()],
             &what,
         )?;
-        let schema = |s: &Option<Schema>| s.as_ref().map_or(null(), |s| s.raw as *const ffi::RantSchema);
+        let schema = |s: &Option<Schema>| s.as_ref().map_or(null(), |s| s.raw);
         let co = ffi::RantCallObserverOpts {
             best_effort: o.best_effort as u8,
             reflect_from_mesh: o.reflect_from_mesh as u8,
