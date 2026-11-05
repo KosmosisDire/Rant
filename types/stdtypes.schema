@@ -530,7 +530,7 @@ Mesh {
 
 -- One value that every cell of a Grid holds
 GridField {
-  name: string      -- such as occupancy, height or cost
+  name: string      -- such as occupancy, height or cost, or rgba or rgb for a color as a PointField packs it
   kind: ScalarKind
   data: u8[]        -- one number per cell, x fastest, then y, then z, little endian
 }

@@ -223,6 +223,8 @@ and from PCL and ROS without touching each point.
 - `width` is the points per row of a cloud taken from a depth image, and 0 for a cloud with
   no rows.
 - `dense` says no point holds an invalid value such as NaN.
+- A color is a field named `rgba`, or `rgb` with no alpha, of 4 bytes: blue, green, red and
+  alpha, as PCL packs it.
 
 `Mesh` keeps its vertices as a `PointCloud`, so a vertex carries x, y and z and any other
 value, such as a normal or a color. Each three `triangles` are vertex indices,
@@ -233,6 +235,7 @@ counterclockwise seen from outside.
 - `origin` is the pose of the outer corner of cell 0, and the cells run along its +x, +y
   and +z. `cells_z` is 1 for a 2D grid.
 - Each `GridField` holds one number per cell in its own block, x fastest, then y, then z.
+- A field named `rgba` or `rgb` holds a color per cell, packed as a `PointCloud`'s.
 - A map that grows sends a new Grid with a new origin and size.
 
 A covariance is indexed row then column. `Covariance6` runs over x, y and z, then the turn

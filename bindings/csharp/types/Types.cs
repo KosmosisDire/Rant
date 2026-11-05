@@ -819,7 +819,7 @@ namespace Rant.Types
     /// <summary>One value that every cell of a Grid holds</summary>
     [RantSchema("GridField")] public struct GridField
     {
-        /// <summary>such as occupancy, height or cost</summary>
+        /// <summary>such as occupancy, height or cost, or rgba or rgb for a color as a PointField packs it</summary>
         public string Name;
         public ScalarKind Kind;
         /// <summary>one number per cell, x fastest, then y, then z, little endian</summary>

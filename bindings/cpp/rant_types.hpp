@@ -606,7 +606,7 @@ struct Mesh {
 
 /* One value that every cell of a Grid holds */
 struct GridField {
-    std::string name;           /* such as occupancy, height or cost */
+    std::string name;           /* such as occupancy, height or cost, or rgba or rgb for a color as a PointField packs it */
     ScalarKind kind = ScalarKind::I8;
     std::vector<uint8_t> data;  /* one number per cell, x fastest, then y, then z, little endian */
 };

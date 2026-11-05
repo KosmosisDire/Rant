@@ -635,7 +635,7 @@ class Mesh:
 @_std("GridField")
 class GridField:
     """One value that every cell of a Grid holds"""
-    name: str = ""  # such as occupancy, height or cost
+    name: str = ""  # such as occupancy, height or cost, or rgba or rgb for a color as a PointField packs it
     kind: enum(ScalarKind, u8) = ScalarKind.I8
     data: list[u8] = b""  # one number per cell, x fastest, then y, then z, little endian
 

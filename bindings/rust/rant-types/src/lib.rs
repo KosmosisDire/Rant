@@ -879,7 +879,7 @@ pub struct Mesh {
 /// One value that every cell of a Grid holds
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct GridField {
-    /// such as occupancy, height or cost
+    /// such as occupancy, height or cost, or rgba or rgb for a color as a PointField packs it
     pub name: std::string::String,
     pub kind: ScalarKind,
     /// one number per cell, x fastest, then y, then z, little endian

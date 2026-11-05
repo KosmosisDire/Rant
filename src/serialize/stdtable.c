@@ -503,7 +503,7 @@ static const i_RantStdEntry i_rant_std_table[] = {
     { "GridField",
                  "-- One value that every cell of a Grid holds\n"
                  "{\n"
-                 "  name: string  -- such as occupancy, height or cost\n"
+                 "  name: string  -- such as occupancy, height or cost, or rgba or rgb for a color as a PointField packs it\n"
                  "  kind: ScalarKind\n"
                  "  data: u8[]    -- one number per cell, x fastest, then y, then z, little endian\n"
                  "}" },
