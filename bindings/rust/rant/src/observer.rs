@@ -42,6 +42,7 @@ impl CallEventKind {
 /// known. `caller_lo` and `call_id` together name the call.
 pub struct CallEvent<'a> {
     raw: &'a ffi::RantCallEvent,
+    inner: &'a NodeInner,
 }
 
 impl<'a> CallEvent<'a> {
@@ -103,6 +104,20 @@ impl<'a> CallEvent<'a> {
     /// True when the payload's layout is known here.
     pub fn has_schema(&self) -> bool {
         !self.raw.schema.is_null()
+    }
+
+    /// The payload's layout, kept by the node past the handler. None when it is unknown here.
+    pub fn schema(&self) -> Option<Schema> {
+        if self.raw.schema.is_null() {
+            return None;
+        }
+        // SAFETY: the handler runs with the node open, and parse copies the view's wire
+        let s = unsafe {
+            let wire = rbytes(ffi::rant_schema_wire(self.raw.schema));
+            ffi::rant_node_schema_parse(self.inner.raw(), wire.as_ptr().cast(), wire.len())
+        };
+        // SAFETY: every NodeInner lives in an Arc
+        (!s.is_null()).then(|| Schema::new(unsafe { self.inner.arc() }, s))
     }
 
     /// The provider's wall clock at the report in UTC microseconds, 0 when it opted out.
@@ -201,7 +216,7 @@ unsafe extern "C" fn on_event(e: *const ffi::RantCallEvent, user: *mut c_void) {
     // valid for this call
     let (b, e) = unsafe { (&*(user as *const EventBox), &*e) };
     let inner = unsafe { &*b.node };
-    if let Err(refused) = b.cb.run(inner.key(), |f| f(CallEvent { raw: e })) {
+    if let Err(refused) = b.cb.run(inner.key(), |f| f(CallEvent { raw: e, inner })) {
         inner.report_refused(Some(&b.name), refused);
     }
 }

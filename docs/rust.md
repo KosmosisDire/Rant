@@ -177,7 +177,8 @@ let _watch = node.call_observer("arm/home", CallObserverOptions::new(), |e| {
 })?;
 ```
 
-`fields()` reads the payload by name with `reflect_from_mesh(true)` on a `fetch_details` node.
+`fields()` reads the payload by name with `reflect_from_mesh(true)` on a `fetch_details` node,
+and `schema()` gives its layout.
 
 ## Variables
 

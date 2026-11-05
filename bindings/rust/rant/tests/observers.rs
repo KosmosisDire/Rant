@@ -26,6 +26,7 @@ struct Seen {
     status: CallStatus,
     message: String,
     field: i64,
+    layout: Vec<String>,
 }
 
 fn watcher(log: &Arc<Mutex<Vec<Seen>>>) -> impl for<'a> FnMut(rant::CallEvent<'a>) + Send + 'static {
@@ -46,6 +47,7 @@ fn watcher(log: &Arc<Mutex<Vec<Seen>>>) -> impl for<'a> FnMut(rant::CallEvent<'a
             status: e.status(),
             message: e.message().to_owned(),
             field,
+            layout: e.schema().map(|s| s.fields().into_iter().map(|f| f.name).collect()).unwrap_or_default(),
         });
     }
 }
@@ -73,6 +75,7 @@ fn a_third_node_sees_a_call_and_its_answer() {
     assert_eq!((seen[0].caller.as_str(), seen[1].caller.as_str()), ("obs_call", "obs_call"));
     assert_eq!((seen[0].call_id, seen[0].caller_lo), (seen[1].call_id, seen[1].caller_lo));
     assert_eq!((seen[0].field, seen[1].field), (41, 42), "fields read through the mesh's schemas");
+    assert_eq!((seen[0].layout.clone(), seen[1].layout.clone()), (vec!["x".to_string()], vec!["y".to_string()]), "each payload's schema");
     watch.close().unwrap();
 }
 
