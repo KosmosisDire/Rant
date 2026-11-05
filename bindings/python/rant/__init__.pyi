@@ -51,6 +51,13 @@ class SendStatus(IntEnum):
     NOSYS = -6
     SCHEMA = -7
 
+class CallEventKind(IntEnum):
+    CALL = 0
+    RUNNING = 1
+    PROGRESS = 2
+    CANCEL = 3
+    END = 4
+
 class CallStatus(IntEnum):
     OK = 0
     APP_ERROR = 1
@@ -504,6 +511,13 @@ class Node:
                         catch_up: int = 0, keep_last: int = 0, backpressure_wait: float = 0.0,
                         reflect_from_mesh: bool = False, queue: Queue | None = None) -> RemoteVariable[T]: ...
 
+    def call_observer(self, name: str, handler: Callable[[CallEvent], object],
+                      req_schema: type | Schema | str | None = None,
+                      prg_schema: type | Schema | str | None = None,
+                      rsp_schema: type | Schema | str | None = None, *,
+                      best_effort: bool = False, reflect_from_mesh: bool = False,
+                      queue: Queue | None = None, queue_bytes: int = 0) -> CallObserver: ...
+
     def poll(self, timeout: float | None = 0.0) -> int: ...
     def dispatch(self, max_callbacks: int = 0, timeout: float | None = 0.0) -> int: ...
     def create_queue(self) -> Queue: ...
@@ -626,6 +640,32 @@ class VariableUpdate(Generic[T]):
     source: int
     recv_us: int
     written_us: int
+
+class CallEvent:
+    """One step of a call, for a call_observer handler. caller_lo and call_id name the call."""
+    kind: CallEventKind
+    name: str
+    provider: int
+    provider_name: str
+    caller_lo: int
+    caller_name: str
+    call_id: int
+    status: CallStatus
+    message: str
+    data: bytes
+    value: Any
+    written_us: int
+    recv_us: int
+
+class CallObserver:
+    """Watches a function's or task's calls, from node.call_observer."""
+    @property
+    def name(self) -> str: ...
+    @property
+    def match_count(self) -> int: ...
+    def close(self) -> bool: ...
+    def __enter__(self) -> CallObserver: ...
+    def __exit__(self, *exc: object) -> None: ...
 
 class FunctionDefinition(Generic[Req, Rsp]):
     """The implementation side of a function, from node.function_definition."""

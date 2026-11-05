@@ -886,13 +886,14 @@ static void i_rant_reflect_fold(i_RantNodeCore *c, i_RantReflect *r){
         default: break;
         }
     }
-    /* pass 2: an unclaimed partner is a half pair or an unknown kind, surfaced incomplete */
+    /* pass 2: an unclaimed partner is a half pair or an unknown kind, surfaced incomplete.
+       An obs channel belongs to no entity: watching a call is neither providing nor calling */
     for (i = 0; i < r->n_chan; i++){
         i_RantChannel *ch = &r->chan[i];
         const i_RantKindRow *row;
         i_RantPeerEntity *e;
         uint16_t slot;
-        if (!ch->present || ch->entity != I_RANT_NONE16) continue;
+        if (!ch->present || ch->entity != I_RANT_NONE16 || ch->kind == RANT_KIND_CALL_OBS) continue;
         row = i_rant_kind_row(ch->kind);
         e = i_rant_reflect_entity_new(c, r);
         if (!e) return;

@@ -321,6 +321,49 @@ await check("a PointCloud, a Grid and an Odometry round trip by their standard n
     assert.deepEqual([o.pose.covariance[5][4], o.parent], [7, "odom"]);
 });
 
+await check("a third node sees a function's call and a task's whole life", async () => {
+    const Req = struct("ObsReq", { x: i32 });
+    const Rsp = struct("ObsRsp", { y: i32 });
+    const w = await openNode("watch", { ...opts, fetchDetails: true });
+    try {
+        const seen = [];
+        const fw = w.callObserver("obs/fn", (e) => seen.push(e), null, null, null, { reflectFromMesh: true });
+        a.functionDefinition("obs/fn", (v) => ({ y: v.x + 1 }), Req, Rsp);
+        const fn = b.remoteFunction("obs/fn", Req, Rsp);
+        await until(() => fw.matchCount === 1 && fn.matchCount === 1);
+        await until(() => { const e = w.reflection.find("function", "obs/fn"); return e && !e.incomplete; });
+        const r = await fn.call({ x: 41 });
+        assert.equal(r.status, "ok");
+        await until(() => seen.length >= 2);
+        assert.deepEqual(seen.map((e) => e.kind), ["call", "end"]);
+        assert.deepEqual([seen[0].callerName, seen[1].callerName], ["b", "b"]);
+        assert.equal(seen[0].callId, seen[1].callId);
+        assert.equal(seen[0].callerLo, seen[1].callerLo);
+        assert.deepEqual([seen[0].value.x, seen[1].value.y], [41, 42]);
+        assert.equal(fw.close(), true);
+
+        const steps = [];
+        const tw = w.callObserver("obs/job", (e) => steps.push(e));
+        a.taskDefinition("obs/job", async (v, ctx) => {
+            ctx.progress({ x: 1 });
+            while (!ctx.cancelled) await new Promise((res) => setTimeout(res, 5));
+            throw new CancelledError("stopped");
+        }, Req, Req, Rsp);
+        const job = b.remoteTask("obs/job", Req, Req, Rsp);
+        await until(() => tw.matchCount === 1 && job.matchCount === 1);
+        const run = job.call({ x: 0 });
+        await until(() => steps.length >= 3);
+        assert.equal(run.cancel(), "ok");
+        assert.equal((await run.result).status, "cancelled");
+        await until(() => steps.length >= 5);
+        assert.equal(steps[0].kind, "call");
+        assert.deepEqual(steps.slice(1, 3).map((e) => e.kind).sort(), ["progress", "running"]);
+        assert.deepEqual([steps[3].kind, steps[3].message], ["cancel", "b"]);
+        assert.deepEqual([steps[4].kind, steps[4].status, steps[4].message], ["end", "cancelled", "stopped"]);
+        assert.throws(() => a.callObserver("obs/job", () => {}));
+    } finally { w.close(); }
+});
+
 const errors = events.filter((e) => e.kind === "error");
 await check("no errors were reported", async () => assert.deepEqual(errors.map((e) => e.text), []));
 

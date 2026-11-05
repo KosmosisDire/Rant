@@ -202,6 +202,60 @@ RANT_API int rant_function_on_cancel(RantFunction *def, RantCancelFn on_cancel, 
  * answer. RANT_ERR_ROLE when the provider declared no_cancel, RANT_ERR_STATE when not pending. */
 RANT_API int rant_function_cancel(RantFunction *fn, uint32_t call_id);
 
+/* Call observers: any node can watch the calls of a function or task. Its definition reports
+ * each step, at no cost while nobody watches. docs/patterns.md explains them. */
+typedef struct RantCallObserver RantCallObserver;       /* an opaque handle */
+
+typedef enum {
+    RANT_CALL_EVENT_CALL     = 0,   /* a request arrived, data is the request */
+    RANT_CALL_EVENT_RUNNING  = 1,   /* task: the definition sent RUNNING */
+    RANT_CALL_EVENT_PROGRESS = 2,   /* task: data is one progress update */
+    RANT_CALL_EVENT_CANCEL   = 3,   /* task: a cancel arrived, message names the node that asked */
+    RANT_CALL_EVENT_END      = 4    /* the definition answered: status, message, data is the response */
+} RantCallEventKind;
+
+/* One step of a call. Views are valid for the callback only. caller_lo and call_id together
+ * name the call, since call ids are per caller counters. */
+typedef struct {
+    RantCallEventKind   kind;
+    RantString          name;          /* the function or task */
+    uint32_t            provider;      /* the peer reporting it */
+    RantString          provider_name;
+    uint32_t            caller_lo;     /* the caller's uuid low 32 */
+    RantString          caller_name;   /* empty when the provider no longer knows the caller */
+    uint32_t            call_id;
+    RantCallStatus      status;        /* END: the outcome */
+    RantString          message;       /* END: the outcome text. CANCEL: the node that asked */
+    RantBytes           data;
+    const RantSchema   *schema;        /* NULL = untyped, unknown here, or a request in a layout
+                                          other than the provider's. Non NULL = data validated */
+    uint64_t            written_us;    /* the provider's wall clock at the report, 0 = opted out */
+    uint64_t            recv_us;       /* the monotonic clock at arrival */
+} RantCallEvent;
+typedef void (*RantCallEventFn)(const RantCallEvent *event, void *user);
+
+typedef struct {
+    uint8_t    best_effort;         /* 0 = reliable. Never slows the provider either way, a slow
+                                       observer only loses the oldest steps and gets RANT_MSG_LOST */
+    uint8_t    reflect_from_mesh;   /* NULL schemas take the provider's from the mesh, event by
+                                       event. Set opts.fetch_details on the node for it */
+    RantQueue *queue;               /* on_event parks here and runs on rant_queue_dispatch */
+    uint32_t   queue_bytes;         /* the ring cap with a queue, 0 = 1 MB */
+} RantCallObserverOpts;
+
+/* Watches a function or task by name, on every node that defines it. Schemas may be NULL, and
+ * the task's only need prg_schema. NULL on failure: on_event is required, and a node may not
+ * both define and observe one name, RANT_E_NAME_COLLISION. */
+RANT_API RantCallObserver *rant_node_create_call_observer(RantNode *n, const char *name,
+                             const RantSchema *req_schema, const RantSchema *prg_schema,
+                             const RantSchema *rsp_schema, RantCallEventFn on_event, void *user,
+                             const RantCallObserverOpts *opts);
+/* Definitions matched. */
+RANT_API int rant_call_observer_match_count(RantCallObserver *obs);
+/* Parks the channel, silences the callback and frees the handle. The same contract as
+ * rant_function_retire. */
+RANT_API int rant_call_observer_retire(RantCallObserver *obs);
+
 /* Variables: replicated state with one owner, the definition, which publishes the value.
  * Writers push over a set channel with no response. Remotes cache the latest value. */
 typedef struct RantVariable RantVariable;

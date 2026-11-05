@@ -3,7 +3,7 @@
 `src/serialize/` is an independent schema layer over the transport. Both ends share the
 schema, so the wire carries no tags or keys: a value's meaning is its byte position. It
 depends only on `common/` and works standalone. The schema wire version is 8, and the
-message layout below belongs to node wire version 9 (`RANT_WIRE_VERSION`). The user facing
+message layout below belongs to node wire version 10 (`RANT_WIRE_VERSION`). The user facing
 DSL and the standard type roster are in docs/stdtypes.md.
 
 ## Layout

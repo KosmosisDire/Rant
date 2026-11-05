@@ -227,6 +227,11 @@ such as the thread that calls `Dispatch` or the Unity main thread.
 `MatchCount` on a pattern handle counts the other side: definitions on a remote, callers
 or remotes on a definition.
 
+`node.CallObserver(name, handler)` watches a function's or task's calls, with the rules in
+docs/patterns.md. The handler takes a `CallEvent` (`Kind`, `Name`, `ProviderName`, `CallerName`,
+`CallId`, `Status`, `Message`, `Data`). `Fields` reads the payload by name when
+`CallObserverOptions.ReflectFromMesh` is set on a `FetchDetails` node.
+
 ## Variables
 
 `TryGet` reads a copy of the value, `Set` returns the status, `Force` needs `AllowForce`

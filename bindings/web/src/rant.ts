@@ -3,9 +3,10 @@
 
 export {
     openNode, version, RantNode, Reflection, CompiledSchema, Handle, Publisher, Subscriber, FunctionDefinition, RemoteFunction,
-    TaskDefinition, RemoteTask, Variable, VariableDefinition, RemoteVariable, RantError, CancelledError, AppError, MetaSection,
+    TaskDefinition, RemoteTask, Variable, VariableDefinition, RemoteVariable, CallObserver, RantError, CancelledError, AppError, MetaSection,
     type SchemaArg, type NodeOptions, type TopicOptions, type FunctionOptions, type TaskOptions, type VariableOptions,
     type Message, type Request, type TaskContext, type TaskCall, type Response, type Progress, type VariableUpdate,
+    type CallEvent, type CallEventKind, type CallObserverOptions,
     type SendStatus, type CallStatus, type CancelStatus, type Level, type Origin, type LogLine, type Condition,
     type StatusUpdate, type EntityKind, type EventKind,
     type ErrorKind, type RantEvent, type TopicCounts, type QueueStats, type NodeStats, type Peer, type Entity, type MetaSnapshot,

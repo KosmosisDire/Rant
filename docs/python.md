@@ -224,6 +224,11 @@ replays the current value at registration and fires on every state change, `on_w
 on every applied write, both inline on the thread that applied the write, with the value or
 the value and a `VariableUpdate`. A later call rebinds and None clears.
 
+`node.call_observer(name, handler)` watches a function's or task's calls, with the rules in
+docs/patterns.md. The handler takes a `CallEvent` (`kind`, `name`, `provider_name`, `caller_name`,
+`call_id`, `status`, `message`, `data`, `value`), and `reflect_from_mesh=True` on a
+`fetch_details=True` node decodes `value`.
+
 ## Reflection
 
 The walks of docs/reflection.md live on `node.reflection` and return copied snapshots, so

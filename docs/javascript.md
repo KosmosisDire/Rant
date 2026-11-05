@@ -94,6 +94,10 @@ const r = await add.call({ a: 2, b: 3 });     // r.status "ok", r.value { sum: 5
   returns a `TaskCall`: `callId`, `result` and `cancel()`, which answers `"ok"`,
   `"no_cancel"` or `"not_pending"`. `onProgress` gets null first, for RUNNING.
 - Task options add `progressBestEffort`, `progressKeepLast`, `noCancel` and `exclusive`.
+- `node.callObserver(name, handler, req, prg, rsp, options)` watches a function's or task's calls,
+  with the rules in docs/patterns.md. The handler gets a `CallEvent`: `kind`, `name`,
+  `providerName`, `callerName`, `callId`, `status`, `message`, `data` and `value`. Options:
+  `bestEffort`, `reflectFromMesh` on a `fetchDetails` node, `queueBytes`.
 
 ## Variables
 

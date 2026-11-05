@@ -2116,6 +2116,10 @@ RantString i_rant_node_sys_peer_name(RantNode *n, uint32_t peer){
     return nm.data && nm.len ? nm : rant_cstr("unknown-peer");
 }
 
+void i_rant_node_sys_note(RantNode *n, RantLevel level, const char *text){
+    i_rant_node_note(n, level, NULL, text);
+}
+
 /* an address as text for a condition, with no port when it is unknown */
 static void i_rant_problem_addr(const RantAddr *a, char *out, size_t cap){
     char ip[48];

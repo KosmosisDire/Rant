@@ -134,6 +134,15 @@ enum class CallStatus {
     NoProvider = 7    /* nobody defines it: the request never left this node */
 };
 
+/* A step of a call, as a call observer sees it. */
+enum class CallEventKind {
+    Call     = 0,   /* a request arrived, data() is the request */
+    Running  = 1,   /* a task started */
+    Progress = 2,   /* a task reported, data() is the update */
+    Cancel   = 3,   /* a cancel arrived, message() names the node that asked */
+    End      = 4    /* the definition answered: status(), message(), data() is the response */
+};
+
 /* What a mesh entity is. Reflection shows folded entities, never their raw channels. */
 enum class EntityKind { Topic = 0, Function, Variable, Task };
 
@@ -196,6 +205,8 @@ template <class Rsp> class Deferred;
 template <class Prg, class Rsp> class TaskRequest;
 template <class Prg, class Rsp> class PendingTask;
 template <class Prg> class ProgressView;
+class CallEventView;
+class CallObserver;
 template <class Rsp> class Response;
 template <class Rsp> class ResponseView;
 
@@ -532,6 +543,14 @@ struct CallOptions {
     uint32_t  provider = 0;
     uint32_t* id_out   = nullptr;   /* receives the call id at commit (before any wait): the
                                        handle for RemoteTask::cancel from another thread */
+};
+/* A call observer's options. All zero means every default. */
+struct CallObserverOptions {
+    bool         best_effort       = false;     /* no repair. Never slows the provider either way */
+    bool         reflect_from_mesh = false;     /* take the provider's schemas from the mesh, which
+                                                   needs NodeOptions::fetch_details */
+    const Queue* queue             = nullptr;   /* where the handler parks, null = inline */
+    uint32_t     queue_bytes       = 0;         /* its ring cap with a queue, 0 = 1 MB */
 };
 /* A variable handle's options. initial, read_only and allow_force apply to a definition
  * only. VariableOptions<Bytes> takes its initial value as raw bytes. */
@@ -3029,6 +3048,12 @@ public:
     template <class Req, class Prg, class Rsp>
     RemoteTask<Req, Prg, Rsp> remote_task(std::string_view name, const TaskOptions& o = {},
         const Schema& req_schema = {}, const Schema& prg_schema = {}, const Schema& rsp_schema = {});
+    /* Watches the calls of a function or task by name, on every node that defines it. A node
+     * may not define and observe one name. Schemas let the handler read fields, as does
+     * CallObserverOptions::reflect_from_mesh, and only a task needs prg_schema. */
+    CallObserver call_observer(std::string_view name, std::function<void(const CallEventView&)> handler,
+        const CallObserverOptions& o = {}, const Schema& req_schema = {}, const Schema& prg_schema = {},
+        const Schema& rsp_schema = {});
     /* A variable this node owns: it holds the value and publishes every applied write. */
     template <class T>
     VariableDefinition<T> variable_definition(std::string_view name,
@@ -3209,6 +3234,7 @@ private:
     template <class A, class B, class C> friend class RemoteTask;
     template <class A> friend class VariableDefinition;
     template <class A> friend class RemoteVariable;
+    friend class CallObserver;
     template <class A> friend class Publisher;
     template <class A> friend class Subscriber;
 };
@@ -4250,6 +4276,115 @@ private:
     template <class A> friend class RemoteVariable;
     friend class Node;
 };
+
+/* One step of a call, read by field name when a schema is known. A view, valid only inside the
+ * handler. caller_lo() and call_id() together name the call. */
+class CallEventView : public FieldView {
+public:
+    CallEventKind    kind()          const { return static_cast<CallEventKind>(e_->kind); }
+    std::string_view name()          const { return { e_->name.data, e_->name.len }; }
+    /* the definition reporting it, by peer id and name */
+    uint32_t         provider()      const { return e_->provider; }
+    std::string_view provider_name() const { return { e_->provider_name.data, e_->provider_name.len }; }
+    uint32_t         caller_lo()     const { return e_->caller_lo; }
+    /* empty when the provider no longer knows the caller */
+    std::string_view caller_name()   const { return { e_->caller_name.data, e_->caller_name.len }; }
+    uint32_t         call_id()       const { return e_->call_id; }
+    CallStatus       status()        const { return static_cast<CallStatus>(e_->status); }
+    /* End: the outcome text. Cancel: the node that asked. */
+    std::string_view message()       const { return { e_->message.data, e_->message.len }; }
+    /* the provider's wall clock at the report, 0 = it opted out */
+    uint64_t         written_us()    const { return e_->written_us; }
+    /* this node's monotonic microseconds at arrival */
+    uint64_t         recv_us()       const { return e_->recv_us; }
+
+private:
+    explicit CallEventView(const detail::RantCallEvent* e) : FieldView(e->data, e->schema), e_(e) {}
+    const detail::RantCallEvent* e_;
+    friend class CallObserver;
+};
+
+/* Watches a function's or task's calls, from Node::call_observer. It neither calls nor provides,
+ * costs the provider nothing unwatched and never slows it. docs/patterns.md has the limits. */
+class CallObserver {
+public:
+    CallObserver() = default;
+    CallObserver(CallObserver&& o) noexcept { move_from(o); }
+    CallObserver& operator=(CallObserver&& o) noexcept {
+        if (this != &o) { (void)close(); move_from(o); }
+        return *this;
+    }
+    CallObserver(const CallObserver&) = delete;
+    CallObserver& operator=(const CallObserver&) = delete;
+    ~CallObserver() {
+        if (close() == SendStatus::State && impl_) impl_->report_close_refused(name_);
+    }
+
+    bool valid() const noexcept { return st_ && st_->raw.load() && priv::node_open(impl_); }
+    explicit operator bool() const noexcept { return valid(); }
+    /* the definitions matched now */
+    int match_count() const {
+        priv::HandlePass<detail::RantCallObserver> p(impl_.get(), st_.get());
+        return p ? detail::rant_call_observer_match_count(p.raw()) : 0;
+    }
+    /* Stop watching and release the name. The handle is empty after. State from its own inline
+     * callback, and the handle stays valid then. */
+    SendStatus close() {
+        return priv::close_handle<detail::RantCallObserver>(st_.get(), impl_.get(), true, &detail::rant_call_observer_retire);
+    }
+    const std::string& name() const { return name_; }
+
+private:
+    struct Box : priv::HandlerBox {
+        std::function<void(const CallEventView&)> h;
+        priv::NodeImpl* impl = nullptr;
+    };
+    static void tramp(const detail::RantCallEvent* e, void* user) {
+        Box* b = static_cast<Box*>(user);
+        priv::InCallback mark(b->impl);
+        CallEventView view(e);
+        priv::guarded(b->impl, [&] { b->h(view); });
+    }
+    CallObserver(Node& n, std::string_view name, std::function<void(const CallEventView&)> handler,
+                 const CallObserverOptions& o, const Schema& req, const Schema& prg, const Schema& rsp) {
+        priv::Pass p(n.impl_.get());
+        if (!p) { priv::raise_msg("rant::CallObserver: node is not valid"); return; }
+        if (!handler) { priv::raise_msg("rant::CallObserver: a handler is required"); return; }
+        std::string nm(name);
+        name_ = nm;
+        impl_ = n.impl_;
+        detail::RantCallObserverOpts co;
+        std::memset(&co, 0, sizeof co);
+        co.best_effort = o.best_effort ? 1 : 0;
+        co.reflect_from_mesh = o.reflect_from_mesh ? 1 : 0;
+        co.queue = n.impl_->queue_for(o.queue);
+        co.queue_bytes = o.queue_bytes;
+        auto box = std::make_unique<Box>();
+        box->h = std::move(handler);
+        box->impl = impl_.get();
+        detail::RantCallObserver* raw = detail::rant_node_create_call_observer(n.impl_->node, nm.c_str(),
+            req.raw(), prg.raw(), rsp.raw(), &CallObserver::tramp, box.get(), &co);
+        if (!raw) { priv::raise_last(n.impl_->node, "rant::CallObserver create"); return; }
+        {   /* kept alive until node close, like every handler box */
+            std::lock_guard<std::mutex> g(impl_->reg_mu);
+            impl_->boxes.emplace_back(box.release());
+        }
+        st_ = std::make_shared<priv::HandleState<detail::RantCallObserver>>();
+        st_->raw.store(raw);
+    }
+    void move_from(CallObserver& o) noexcept {
+        st_ = std::move(o.st_); impl_ = std::move(o.impl_); name_ = std::move(o.name_);
+    }
+    std::shared_ptr<priv::HandleState<detail::RantCallObserver>> st_;
+    std::shared_ptr<priv::NodeImpl> impl_;
+    std::string name_;
+    friend class Node;
+};
+
+inline CallObserver Node::call_observer(std::string_view name, std::function<void(const CallEventView&)> handler,
+        const CallObserverOptions& o, const Schema& req_schema, const Schema& prg_schema, const Schema& rsp_schema) {
+    return CallObserver(*this, name, std::move(handler), o, req_schema, prg_schema, rsp_schema);
+}
 
 #endif /* !RANT_NO_PATTERNS */
 

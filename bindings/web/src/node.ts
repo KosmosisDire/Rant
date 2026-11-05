@@ -27,6 +27,9 @@ export type ErrorKind =
     | "bad_prefix" | "bad_log_level" | "wire_version" | "bridge";
 
 const SEND: Record<number, SendStatus> = { 0: "ok", [-1]: "no_topic", [-2]: "too_big", [-3]: "role", [-4]: "oom", [-5]: "state", [-6]: "nosys", [-7]: "schema" };
+/* A step of a call, as a call observer sees it. */
+export type CallEventKind = "call" | "running" | "progress" | "cancel" | "end";
+const CALL_EVENT: CallEventKind[] = ["call", "running", "progress", "cancel", "end"];
 const CALL: CallStatus[] = ["ok", "app_error", "no_handler", "timeout", "peer_lost", "cancelled", "running", "no_provider"];
 const CALL_NUMBER: Record<CallStatus, number> = { ok: 0, app_error: 1, no_handler: 2, timeout: 3, peer_lost: 4, cancelled: 5, running: 6, no_provider: 7 };
 const LEVELS: Level[] = ["debug", "info", "warn", "error"];      /* the C numbers them from 1 */
@@ -92,6 +95,35 @@ export interface TaskOptions {
     progressBestEffort?: boolean; progressKeepLast?: number; noCancel?: boolean; exclusive?: boolean; multi?: boolean;
     timeoutMs?: number; backpressureWaitMs?: number; keepLast?: number; reflectFromMesh?: boolean;
 }
+export interface CallObserverOptions {
+    /* no repair, which never slows the provider either way */
+    bestEffort?: boolean;
+    /* takes the provider's schemas from the mesh, which needs fetchDetails on the node */
+    reflectFromMesh?: boolean;
+    /* the ring cap with a queue, 0 = 1 MB */
+    queueBytes?: number;
+}
+
+/* One step of a call, copied out of the callback. callerLo and callId together name the call.
+ * value is the payload decoded when its layout is known, else the raw bytes. */
+export interface CallEvent {
+    kind: CallEventKind;
+    name: string;
+    provider: number;
+    providerName: string;
+    callerLo: number;
+    /* empty when the provider no longer knows the caller */
+    callerName: string;
+    callId: number;
+    status: CallStatus;
+    /* an end's outcome text, or the node that asked for a cancel */
+    message: string;
+    data: Uint8Array;
+    value: unknown;
+    writtenUs: number;
+    recvUs: number;
+}
+
 export interface VariableOptions<T> {
     /* a definition's value before any set */
     initial?: T;
@@ -673,6 +705,13 @@ export class RantNode {
     /* A variable another node owns: reads see the latest value, writes go to the owner. */
     remoteVariable<S extends SchemaArg>(name: string, schema: S, opts: VariableOptions<Val<S>> = {}): RemoteVariable<Val<S>> {
         return new RemoteVariable(this, name, this.resolve(schema), opts, true);
+    }
+
+    /* Watches the calls of a function or task by name, on every node that defines it. A node may
+     * not define and observe one name. Schemas name what value decodes into. */
+    callObserver(name: string, handler: (event: CallEvent) => void, req: SchemaArg = null, prg: SchemaArg = null,
+                 rsp: SchemaArg = null, opts: CallObserverOptions = {}): CallObserver {
+        return new CallObserver(this, name, handler, this.resolve(req), this.resolve(prg), this.resolve(rsp), opts);
     }
 
     /* ---- the rest of the node ---- */
@@ -1497,6 +1536,65 @@ export class Variable<T> extends Handle {
 
 export class VariableDefinition<T> extends Variable<T> {}
 export class RemoteVariable<T> extends Variable<T> {}
+
+/* Watches a function's or task's calls, from node.callObserver. It neither calls nor provides,
+ * costs the provider nothing unwatched and never slows it. docs/patterns.md has the limits. */
+export class CallObserver extends Handle {
+    private h = 0;
+    private box = 0;
+
+    /** @internal */
+    constructor(node: RantNode, name: string, handler: (event: CallEvent) => void, req: Resolved, prg: Resolved,
+                rsp: Resolved, opts: CallObserverOptions) {
+        super(node, name);
+        const n = node.n, nh = node.live(), E = L.RantCallEvent;
+        this.box = node.box((p: number) => {
+            const kind = CALL_EVENT[n.i32(p + E.kind)], schema = n.u32(p + E.schema);
+            const ptr = n.u32(p + E.data), len = n.u32(p + E.data + 4);
+            const names = (kind === "call" ? req : kind === "progress" ? prg : rsp).names;
+            let value: unknown;
+            try { value = schema ? node.decodeAt(schema, ptr, len, names) : n.copy(ptr, len); }
+            catch (e) { node.report("schema_mismatch", `a step of '${name}' did not decode: ${errorText(e)}`, name); return; }
+            try {
+                handler({ kind, name: n.strAt(p + E.name), provider: n.u32(p + E.provider), providerName: n.strAt(p + E.provider_name),
+                          callerLo: n.u32(p + E.caller_lo), callerName: n.strAt(p + E.caller_name), callId: n.u32(p + E.call_id),
+                          status: CALL[n.i32(p + E.status)], message: n.strAt(p + E.message), data: n.copy(ptr, len), value,
+                          writtenUs: n.us(p + E.written_us), recvUs: n.us(p + E.recv_us) });
+            } catch (e) { node.report("none", `the handler of '${name}' threw: ${errorText(e)}`, name); }
+        });
+        const h = scoped(n, (sc) => {
+            const o = sc.alloc(L.RantCallObserverOpts.sizeof), O = L.RantCallObserverOpts;
+            n.setU8(o + O.best_effort, opts.bestEffort ? 1 : 0);
+            n.setU8(o + O.reflect_from_mesh, opts.reflectFromMesh ? 1 : 0);
+            n.setU32(o + O.queue, node.queue);
+            n.setU32(o + O.queue_bytes, opts.queueBytes ?? 0);
+            return n.c.rant_node_create_call_observer(nh, sc.cstr(name), req.ptr, prg.ptr, rsp.ptr, n.fn.callEvent, this.box, o);
+        });
+        if (!h) {
+            node.unbox(this.box);
+            const e = node.lastError;
+            throw new RantError(`callObserver('${name}') failed: ${e.text}`, e);
+        }
+        this.h = h;
+        node.track(this);
+    }
+
+    get closed(): boolean { return !this.h; }
+    /** @internal */ forget(): void {
+        this.h = 0;
+        if (this.box) this.node.unbox(this.box);
+        this.box = 0;
+    }
+    protected retire(): boolean {
+        if (!this.h) return true;
+        const ok = this.node.n.c.rant_call_observer_retire(this.h) === 0;
+        if (ok) this.node.n.wake();
+        return ok;
+    }
+
+    /* the definitions matched now */
+    get matchCount(): number { return this.h ? this.node.n.c.rant_call_observer_match_count(this.h) : 0; }
+}
 
 /* ---- reflection --------------------------------------------------------------------------- */
 

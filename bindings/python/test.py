@@ -1976,6 +1976,81 @@ def pose_leg():
     return ok
 
 
+def call_observer_leg():
+    """A third node sees a function's call and answer, and a task's whole life."""
+    print("call_observer leg: three nodes, loopback")
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    def until(cond, timeout=6.0):
+        end = time.time() + timeout
+        while time.time() < end and not cond():
+            time.sleep(0.005)
+        return cond()
+
+    dom = DOMAIN + 40
+    srv = rant.Node("osrv", on_event=on_event("osrv"), domain=dom, multicast_interface=IFACE)
+    cli = rant.Node("ocli", on_event=on_event("ocli"), domain=dom, multicast_interface=IFACE)
+    obs = rant.Node("oobs", on_event=on_event("oobs"), domain=dom, multicast_interface=IFACE, fetch_details=True)
+    try:
+        seen = []
+        fw = obs.call_observer("o/fn", seen.append, reflect_from_mesh=True)
+        check("created, named", fw.name == "o/fn")
+        srv.function_definition("o/fn", lambda req: JobRsp(total=req.count + 1), JobReq, JobRsp)
+        fn = cli.remote_function("o/fn", JobReq, JobRsp)
+        check("definition matched", until(lambda: fw.match_count == 1 and fn.match_count == 1))
+        time.sleep(0.3)   # the mesh view of the definition's schemas lands
+        rsp = fn.call(JobReq(count=41), timeout=3.0)
+        check("the call answered", rsp.status == rant.CallStatus.OK and rsp.value.total == 42)
+        check("call and end seen", until(lambda: len(seen) >= 2))
+        check("in order", [e.kind for e in seen] == [rant.CallEventKind.CALL, rant.CallEventKind.END])
+        check("names the caller", seen[0].caller_name == "ocli" and seen[1].caller_name == "ocli"
+              and seen[0].call_id == seen[1].call_id and seen[0].caller_lo == seen[1].caller_lo)
+        check("decodes both through the mesh", seen[0].value["count"] == 41 and seen[1].value["total"] == 42)
+        check("the raw bytes too", isinstance(seen[0].data, bytes) and len(seen[0].data) > 0)
+        check("closes", fw.close() is True)
+
+        steps = []
+        tw = obs.call_observer("o/job", steps.append)
+        release = threading.Event()
+
+        def _job(req, task):
+            task.progress(JobPrg(done=1))
+            release.wait(8.0)
+            raise rant.CancelledError("stopped")
+        srv.task_definition("o/job", _job, JobReq, JobPrg, JobRsp)
+        job = cli.remote_task("o/job", JobReq, JobPrg, JobRsp)
+        check("task matched", until(lambda: tw.match_count == 1 and job.match_count == 1))
+        done = []
+        call_id = job.call_async(JobReq(count=1), on_response=done.append)
+        check("task started", call_id != 0)
+        check("running and progress seen", until(lambda: len(steps) >= 3))
+        check("cancel sent", job.cancel(call_id) == rant.SendStatus.OK)
+        check("cancel seen", until(lambda: len(steps) >= 4))
+        release.set()
+        check("end seen", until(lambda: len(steps) >= 5))
+        kinds = sorted(e.kind for e in steps[1:3])
+        check("a task's whole life", steps[0].kind == rant.CallEventKind.CALL
+              and kinds == [rant.CallEventKind.RUNNING, rant.CallEventKind.PROGRESS]
+              and steps[3].kind == rant.CallEventKind.CANCEL and steps[4].kind == rant.CallEventKind.END)
+        check("who cancelled, and the outcome text", steps[3].message == "ocli" and steps[4].message == "stopped"
+              and steps[4].status == rant.CallStatus.CANCELLED)
+        check("the caller got its answer", until(lambda: len(done) == 1))
+        try:
+            srv.call_observer("o/job", steps.append)
+            check("a node cannot define and observe one name", False)
+        except rant.Error:
+            check("a node cannot define and observe one name", True)
+    finally:
+        obs.close(); cli.close(); srv.close()
+    print("call_observer: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
 LEGS = [
     ("version", version_leg),
     ("layout", layout_leg),
@@ -1992,6 +2067,7 @@ LEGS = [
     ("video_types", video_types),
     ("patterns", patterns),
     ("tasks", tasks),
+    ("call_observer", call_observer_leg),
     ("dispatch", dispatch_leg),
     ("array_buffers", array_buffers),
     ("log_status", log_status),

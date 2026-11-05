@@ -108,6 +108,50 @@ queue.
 A remote's first write waits for the owner match like a first topic send, so
 `RANT_ERR_NO_TOPIC` means the owner is really absent.
 
+## Call observers
+
+Any node can watch the calls of a function or task without calling or providing it.
+
+```c
+static void on_step(const RantCallEvent *e, void *user){
+    if (e->kind == RANT_CALL_EVENT_CALL)
+        printf("%.*s called %.*s\n", (int)e->caller_name.len, e->caller_name.data,
+               (int)e->name.len, e->name.data);
+}
+
+RantCallObserver *obs = rant_node_create_call_observer(n, "Arm/Home", NULL, NULL, NULL,
+                                                       on_step, NULL, NULL);
+```
+
+| `kind` | when | `data` |
+|---|---|---|
+| `RANT_CALL_EVENT_CALL` | a request arrived | the request |
+| `RANT_CALL_EVENT_RUNNING` | a task started | empty |
+| `RANT_CALL_EVENT_PROGRESS` | a task reported | the update |
+| `RANT_CALL_EVENT_CANCEL` | a cancel arrived, `message` names who asked | empty |
+| `RANT_CALL_EVENT_END` | the definition answered, with `status` and `message` | the response |
+
+- `caller_lo` and `call_id` together name a call. `provider` is the definition reporting it, so an
+  undirected call to two definitions shows both answers.
+- `schema` decodes `data`. It is one you passed, or with `.reflect_from_mesh` on a
+  `.fetch_details` node the provider's, and only when the report names that exact layout. A
+  caller's wider request arrives raw, with `schema` NULL.
+- It costs a provider nothing while nobody watches. A watched provider never waits: a slow
+  observer loses the oldest steps and gets `RANT_MSG_LOST`.
+- `.queue` runs the callback at dispatch, `.queue_bytes` caps its ring, `.best_effort` asks
+  for no repair.
+- A node cannot define and observe one name, which is refused with `RANT_E_NAME_COLLISION`. A
+  `@rant/` builtin cannot be observed.
+
+Two things never appear as steps:
+
+- A call no definition answered. `TIMEOUT` and `NO_PROVIDER` are known only to the caller, which
+  writes a Warn line on its `@rant/log`.
+- The end of a call whose definition died or retired may be lost with it. Watch
+  `rant_call_observer_match_count` or `RANT_PEER_DOWN`.
+
+`rant_call_observer_retire` follows the rules below.
+
 ## Retire
 
 `rant_function_retire` and `rant_variable_retire` park the entity's channels, answer every

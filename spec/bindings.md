@@ -38,7 +38,7 @@ Where anything else disagrees about a wrapper API, this file wins.
   The cache is authoritative only, never an optimistic echo.
 - Every handle comes from a factory on the node named after it: `publisher`,
   `subscriber`, `function_definition`, `remote_function`, `task_definition`, `remote_task`,
-  `variable_definition`, `remote_variable`, PascalCase in C#. Only a raw handle takes a
+  `variable_definition`, `remote_variable`, `call_observer`, PascalCase in C#. Only a raw handle takes a
   schema, after its options, and `reflect_from_mesh` is an option field.
 - Construction failures throw or reject. Data path outcomes are statuses and events. A C++
   node has a constructor, not `open`, and it and every factory throw `rant::Error`.

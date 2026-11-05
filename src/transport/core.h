@@ -43,7 +43,8 @@ typedef enum {
     RANT_KIND_VAR_SET    = 4,   /* variable sets, writers pub, the owner subs */
     RANT_KIND_TASK_REQ = 5,     /* task requests and cancel ops, callers pub */
     RANT_KIND_TASK_PRG = 6,     /* task progress, the provider pubs, broadcast */
-    RANT_KIND_TASK_RSP = 7      /* task responses, the provider pubs, directed */
+    RANT_KIND_TASK_RSP = 7,     /* task responses, the provider pubs, directed */
+    RANT_KIND_CALL_OBS = 8      /* the steps of a function's or task's calls, the provider pubs */
 } i_RantTopicKind;
 
 /* Immutable per topic facts served in the detail exchange and cached per (peer, index).

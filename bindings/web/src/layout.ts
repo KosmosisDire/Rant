@@ -49,6 +49,10 @@ export const RantTopicOpts = { sizeof: 48, qos: 0, reflect_from_mesh: 36, queue:
 
 export const RantValue = { sizeof: 24, kind: 0, count: 4, v: 8, v_u: 8, v_i: 8, v_f: 8, bytes: 16 } as const;
 
+export const RantCallEvent = { sizeof: 80, kind: 0, name: 4, provider: 12, provider_name: 16, caller_lo: 24, caller_name: 28, call_id: 36, status: 40, message: 44, data: 52, schema: 60, written_us: 64, recv_us: 72 } as const;
+
+export const RantCallObserverOpts = { sizeof: 12, best_effort: 0, reflect_from_mesh: 1, queue: 4, queue_bytes: 8 } as const;
+
 export const RantVariableOpts = { sizeof: 28, initial: 0, access: 8, allow_force: 9, catch_up: 10, keep_last: 12, backpressure_wait_us: 16, reflect_from_mesh: 20, queue: 24 } as const;
 
 export const RantVariableUpdate = { sizeof: 56, variable: 0, name: 4, value: 12, schema: 20, forced: 24, write_seq: 28, source: 32, recv_us: 40, written_us: 48 } as const;

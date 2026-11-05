@@ -16,7 +16,8 @@ Entity kinds ride the announce, so the walks work with or without the patterns l
 ## Folding channels into entities
 
 An entity is never a channel. A function's `@req` and `@rsp` pair is one function, a
-task's three channels are one task, and a variable's `@set` folds in as `writable`. The
+task's three channels are one task, and a variable's `@set` folds in as `writable`. An `@obs`
+channel folds into nothing, since watching a call is neither providing nor calling. The
 `@rant/` builtins are listed like any entity, so a consumer filters them itself. Partners are found by hashing the base name plus the suffix
 and verified against the fetched name when it is known, since 32 bit hashes collide. A
 pattern primary missing a partner, or a partner missing its primary, is surfaced

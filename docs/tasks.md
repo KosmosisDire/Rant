@@ -3,6 +3,7 @@
 A task is a function with progress and cancellation: the same request and response
 machinery, call ids, statuses and `RantFunction` handle. Two additions: a progress channel
 the definition publishes while it works, and a cancel op the caller (or a tool) can send.
+Any node can watch a task's calls, see Call observers in docs/patterns.md.
 The vocabulary is programming vocabulary throughout: request, call, progress, RUNNING,
 complete, fail, cancel.
 

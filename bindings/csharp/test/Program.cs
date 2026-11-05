@@ -2021,6 +2021,77 @@ static class Program
         return ok;
     }
 
+    // A third node sees a function's call and answer, and a task's whole life.
+    static bool CallObserverLeg()
+    {
+        Console.WriteLine("call_observer leg: three nodes, loopback");
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+        bool Until(int ms, Func<bool> f)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < ms) { if (f()) return true; Thread.Sleep(2); }
+            return f();
+        }
+        var srv = new RantNode("osrv", Local(17));
+        var cli = new RantNode("ocli", Local(17));
+        var obs = new RantNode("oobs", Local(17, fetchDetails: true));
+        try
+        {
+            var seen = new List<CallEvent>();
+            var fw = obs.CallObserver("o/fn", e => { lock (seen) seen.Add(e); },
+                                      new CallObserverOptions { ReflectFromMesh = true });
+            Check("created, named", fw.Name == "o/fn");
+            var def = srv.FunctionDefinition<XferReq, XferRsp>("o/fn", q => new XferRsp { Total = q.Chunks + 1 });
+            var fn = cli.RemoteFunction<XferReq, XferRsp>("o/fn");
+            Check("definition matched", Until(6000, () => fw.MatchCount == 1 && fn.MatchCount == 1));
+            Thread.Sleep(300);   // the mesh view of the definition's schemas lands
+            Check("the call answered", fn.Call(new XferReq { Chunks = 41 }).Total == 42);
+            Check("call and end seen", Until(3000, () => { lock (seen) return seen.Count >= 2; }));
+            lock (seen)
+            {
+                Check("in order", seen.Count == 2 && seen[0].Kind == CallEventKind.Call && seen[1].Kind == CallEventKind.End);
+                Check("names the caller", seen[0].CallerName == "ocli" && seen[1].CallerName == "ocli"
+                      && seen[0].CallId == seen[1].CallId && seen[0].CallerLo == seen[1].CallerLo);
+                Check("the raw bytes", seen[0].Data.Length > 0);
+                var fields = seen[1].Fields;
+                Check("fields read through the mesh's schemas", fields != null && fields.Count == 1);
+            }
+            fw.Dispose();
+
+            var steps = new List<CallEvent>();
+            var tw = obs.CallObserver("o/job", e => { lock (steps) steps.Add(e); });
+            var job = srv.TaskDefinition<XferReq, XferPrg, XferRsp>("o/job", async (q, ctx) =>
+            {
+                ctx.Progress(new XferPrg { Done = 1 });
+                await Task.Delay(Timeout.Infinite, ctx.CancellationToken).ConfigureAwait(false);
+                return new XferRsp();
+            });
+            var rjob = cli.RemoteTask<XferReq, XferPrg, XferRsp>("o/job");
+            Check("task matched", Until(6000, () => tw.MatchCount == 1 && rjob.MatchCount == 1));
+            var cts = new CancellationTokenSource();
+            var call = rjob.TryCallAsync(new XferReq(), null, cts.Token);
+            Check("running and progress seen", Until(3000, () => { lock (steps) return steps.Count >= 3; }));
+            cts.Cancel();
+            Check("the end seen", Until(3000, () => { lock (steps) return steps.Count >= 5; }));
+            lock (steps)
+            {
+                Check("the call first", steps.Count == 5 && steps[0].Kind == CallEventKind.Call);
+                Check("running and progress next", steps[1].Kind != CallEventKind.Call && steps[2].Kind != CallEventKind.Call);
+                Check("the cancel names who asked", steps[3].Kind == CallEventKind.Cancel && steps[3].Message == "ocli");
+                Check("the end", steps[4].Kind == CallEventKind.End && steps[4].Status == CallStatus.Cancelled);
+            }
+            Check("the caller got its answer", call.Wait(3000));
+            bool refused = false;
+            try { srv.CallObserver("o/job", e => { }); }
+            catch (RantException) { refused = true; }
+            Check("a node cannot define and observe one name", refused);
+        }
+        finally { obs.Dispose(); cli.Dispose(); srv.Dispose(); }
+        Console.WriteLine("call_observer: " + (ok ? "PASS\n" : "FAIL\n"));
+        return ok;
+    }
+
     static readonly (string Name, Func<bool> Run)[] Legs =
     {
         ("version", VersionLeg),
@@ -2035,6 +2106,7 @@ static class Program
         ("video_live", VideoLive),
         ("patterns", Patterns),
         ("tasks", Tasks),
+        ("call_observer", CallObserverLeg),
         ("dispatch", DispatchLeg),
         ("log", LogLeg),
         ("status", StatusLeg),

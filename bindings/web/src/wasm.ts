@@ -18,7 +18,7 @@ const utf8 = new TextEncoder();
 const text = new TextDecoder();
 
 /* The C callback kinds. Each passes a user value naming the box that handles it. */
-type Callback = "message" | "event" | "request" | "response" | "progress" | "update" | "cancel";
+type Callback = "message" | "event" | "request" | "response" | "progress" | "update" | "cancel" | "callEvent";
 
 let versionOf: Promise<string> | undefined;
 
@@ -47,6 +47,7 @@ export class Native {
             response: m.addFunction(at(L.RantResponse.user, "response"), "vi"),
             progress: m.addFunction(at(L.RantProgress.user, "progress"), "vi"),
             update: m.addFunction(arg("update"), "vii"),
+            callEvent: m.addFunction(arg("callEvent"), "vii"),
             cancel: m.addFunction((token: bigint, user: number) => this.route(user, token, "cancel"), "vji"),
         };
         m.rantWeb.drive(() => { for (const d of [...this.drives]) d(); });

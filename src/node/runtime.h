@@ -429,6 +429,8 @@ int      i_rant_node_sys_wait    (RantNode *n, i_RantSysWaitFn done, void *ctx);
 void     i_rant_node_sys_error (RantNode *n, RantErrorKind error, RantTopic *topic, uint32_t peer);
 /* A peer's node name, "unknown-peer" when it has none. */
 RantString i_rant_node_sys_peer_name(RantNode *n, uint32_t peer);
+/* A line of Rant's own on @rant/log, coalesced by text and sent by the next poll. Lock held. */
+void     i_rant_node_sys_note(RantNode *n, RantLevel level, const char *text);
 /* Rant's own conditions, one kind per problem source (spec/node.md). A source reports its
  * whole current set of one kind between begin and end, and end clears what went unreported
  * and folds a kind past RANT_STATUS_KIND_MAX into one. id names one problem, 0 when the kind

@@ -190,6 +190,18 @@ auto r = move.call(goal, [](const rant::ProgressView<float>& p) { /* *p is the p
 - `cancelled()` tells the worker the caller asked to cancel.
 - `CallOptions::id_out` gives the call id so another thread can `cancel()` it.
 
+## Call observers
+
+Any node can watch a function's or task's calls, docs/patterns.md has the rules.
+
+```cpp
+auto watch = node.call_observer("Arm/Home", [](const rant::CallEventView& e) {
+    if (e.kind() == rant::CallEventKind::Call) log(e.caller_name(), e.data());
+});
+```
+
+Set `CallObserverOptions::reflect_from_mesh` on a `fetch_details` node to read `data()` by field.
+
 ## Variables
 
 ```cpp

@@ -2286,6 +2286,119 @@ static bool bulk_leg() {
     return g_failures == before;
 }
 
+/* A third node sees a function's call and answer by field, and a task's whole life. */
+static bool call_observer_leg() {
+    rant::NodeOptions opts;
+    opts.domain = test_domain(17);
+    opts.multicast_interface = "127.0.0.1";
+    rant::Node a("obs-prov", opts), b("obs-call", opts);
+    rant::NodeOptions wo = opts;
+    wo.fetch_details = true;
+    rant::Node w("obs-watch", wo);
+
+    std::mutex mu;
+    std::vector<rant::CallEventKind> kinds;
+    std::string caller, cancel_by, end_text;
+    uint32_t call_id = 0;
+    bool same_call = true;
+    int64_t req_x = 0, rsp_y = 0;
+    rant::CallObserverOptions oo;
+    oo.reflect_from_mesh = true;
+    auto fobs = w.call_observer("obs/fn", [&](const rant::CallEventView& e) {
+        std::lock_guard<std::mutex> g(mu);
+        kinds.push_back(e.kind());
+        if (e.kind() == rant::CallEventKind::Call) {
+            caller = std::string(e.caller_name());
+            call_id = e.call_id();
+            if (e.has_schema()) req_x = e.get_int("x");
+        } else {
+            same_call = same_call && e.call_id() == call_id;
+            if (e.has_schema()) rsp_y = e.get_int("y");
+        }
+    }, oo);
+    chk("call observer: created", fobs.valid() && fobs.name() == "obs/fn");
+
+    rant::Schema req = a.schema("ObsReq { x: i32 }"), rsp = a.schema("ObsRsp { y: i32 }");
+    auto def = a.function_definition<rant::Bytes, rant::Bytes>("obs/fn",
+        [&](rant::Request<rant::Bytes>& rq) {
+            rant::MessageBuilder out(rsp);
+            out.set_int("y", rq.get_int("x") + 1);
+            rq.reply(out.bytes());
+        }, {}, req, rsp);
+    rant::Schema breq = b.schema("ObsReq { x: i32 }"), brsp = b.schema("ObsRsp { y: i32 }");
+    auto rem = b.remote_function<rant::Bytes, rant::Bytes>("obs/fn", {}, breq, brsp);
+    chk("call observer: definition matched", wait_for(6000,
+        [&] { return fobs.match_count() == 1 && rem.match_count() == 1; }));
+    wait_for(3000, [&] {   /* the mesh view of the definition's schemas lands */
+        auto e = w.reflection().find(rant::EntityKind::Function, "obs/fn");
+        return e && !e->incomplete;
+    });
+    {
+        rant::MessageBuilder m(breq);
+        m.set_int("x", 41);
+        auto r = rem.call(m.bytes(), 3s);
+        chk("call observer: the call answered", r.status() == rant::CallStatus::Ok);
+    }
+    chk("call observer: call and end seen", wait_for(3000,
+        [&] { std::lock_guard<std::mutex> g(mu); return kinds.size() >= 2; }));
+    {
+        std::lock_guard<std::mutex> g(mu);
+        chk("call observer: in order", kinds.size() == 2 && kinds[0] == rant::CallEventKind::Call
+            && kinds[1] == rant::CallEventKind::End);
+        chk("call observer: names the caller", caller == "obs-call" && same_call);
+        chk("call observer: fields read through the mesh's schemas", req_x == 41 && rsp_y == 42);
+        kinds.clear();
+    }
+
+    auto tobs = w.call_observer("obs/job", [&](const rant::CallEventView& e) {
+        std::lock_guard<std::mutex> g(mu);
+        kinds.push_back(e.kind());
+        if (e.kind() == rant::CallEventKind::Cancel) cancel_by = std::string(e.message());
+        if (e.kind() == rant::CallEventKind::End) end_text = std::string(e.message());
+    });
+    std::mutex pmu;
+    std::optional<rant::PendingTask<rant::Bytes, rant::Bytes>> pending;
+    auto job = a.task_definition<rant::Bytes, rant::Bytes, rant::Bytes>("obs/job",
+        [&](rant::TaskRequest<rant::Bytes, rant::Bytes>& t) {
+            std::lock_guard<std::mutex> g(pmu);
+            pending.emplace(t.defer());
+        });
+    auto rjob = b.remote_task<rant::Bytes, rant::Bytes, rant::Bytes>("obs/job");
+    chk("call observer: task matched", wait_for(6000,
+        [&] { return tobs.match_count() == 1 && rjob.match_count() == 1; }));
+    std::atomic<int> done{ 0 };
+    auto tc = rjob.call_async(rant::Bytes{}, {}, [&](const rant::ResponseView<rant::Bytes>&) { done++; });
+    chk("call observer: task deferred", wait_for(3000,
+        [&] { std::lock_guard<std::mutex> g(pmu); return pending.has_value(); }));
+    {
+        std::lock_guard<std::mutex> g(pmu);
+        uint8_t u = 1;
+        pending->progress(rant::Bytes(&u, 1));
+    }
+    chk("call observer: progress seen", wait_for(3000,
+        [&] { std::lock_guard<std::mutex> g(mu); return kinds.size() >= 3; }));
+    chk("call observer: cancel sent", rjob.cancel(tc.id) == rant::SendStatus::Ok);
+    chk("call observer: cancel seen", wait_for(3000,
+        [&] { std::lock_guard<std::mutex> g(mu); return kinds.size() >= 4; }));
+    {
+        std::lock_guard<std::mutex> g(pmu);
+        pending->complete_cancelled("stopped");
+        pending.reset();
+    }
+    chk("call observer: end seen", wait_for(3000,
+        [&] { std::lock_guard<std::mutex> g(mu); return kinds.size() >= 5; }));
+    {
+        std::lock_guard<std::mutex> g(mu);
+        chk("call observer: a task's whole life", kinds.size() == 5 && kinds[0] == rant::CallEventKind::Call
+            && kinds[1] == rant::CallEventKind::Running && kinds[2] == rant::CallEventKind::Progress
+            && kinds[3] == rant::CallEventKind::Cancel && kinds[4] == rant::CallEventKind::End);
+        chk("call observer: who cancelled, and the outcome text", cancel_by == "obs-call" && end_text == "stopped");
+    }
+    chk("call observer: closes", tobs.close() == rant::SendStatus::Ok && !tobs.valid());
+    chk("call observer: the caller got its answer", wait_for(2000, [&] { return done.load() == 1; }));
+    return true;
+}
+
 struct Leg { const char* name; bool (*run)(); };
 static const Leg LEGS[] = {
     { "bulk",       bulk_leg },
@@ -2296,6 +2409,7 @@ static const Leg LEGS[] = {
     { "stdtypes",   stdtypes_leg },
     { "tails",      tails_leg },
     { "tasks",      tasks_leg },
+    { "call_observer", call_observer_leg },
     { "queue",      queue_leg },
     { "status",     status_leg },
     { "lifetime",   lifetime_leg },

@@ -66,7 +66,7 @@ rant_topic_send(pose, rant_bytes(&p, sizeof p));
 
 Every handle comes from the node, named after what it is: publisher, subscriber,
 variable_definition, remote_variable, function_definition, remote_function,
-task_definition, remote_task (PascalCase in C#). A subscriber with no handler is pulled
+task_definition, remote_task, call_observer (PascalCase in C#). A subscriber with no handler is pulled
 with `take`, in Rust one from `pulled_subscriber`. A function or task handler returns its
 answer, and in Rust a value answers Ok and an `Err` fails the call with its text.
 

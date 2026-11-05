@@ -198,6 +198,21 @@ namespace Rant
 
     /// <summary>How a function or task call ended. Timeout, PeerLost and NoProvider are made
     /// on the caller's side.</summary>
+    /// <summary>A step of a call, as a call observer sees it.</summary>
+    public enum CallEventKind
+    {
+        /// <summary>A request arrived, Data is the request.</summary>
+        Call = 0,
+        /// <summary>A task started.</summary>
+        Running = 1,
+        /// <summary>A task reported, Data is the update.</summary>
+        Progress = 2,
+        /// <summary>A cancel arrived, Message names the node that asked.</summary>
+        Cancel = 3,
+        /// <summary>The definition answered: Status, Message, and Data is the response.</summary>
+        End = 4,
+    }
+
     public enum CallStatus
     {
         /// <summary>The handler answered.</summary>
@@ -575,6 +590,33 @@ namespace Rant
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct RantCallEventNative
+    {
+        public int kind;
+        public RantStringView name;
+        public uint provider;
+        public RantStringView provider_name;
+        public uint caller_lo;
+        public RantStringView caller_name;
+        public uint call_id;
+        public int status;
+        public RantStringView message;
+        public RantBytes data;
+        public IntPtr schema;
+        public ulong written_us;
+        public ulong recv_us;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RantCallObserverOpts
+    {
+        public byte best_effort;
+        public byte reflect_from_mesh;
+        public IntPtr queue;
+        public uint queue_bytes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct RantCallOpts
     {
         public uint provider;        // direct a call at one definition by peer id (0 = undirected)
@@ -620,6 +662,8 @@ namespace Rant
     internal delegate void RantResponseFn(IntPtr response);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void RantVariableUpdateFn(IntPtr update, IntPtr user);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void RantCallEventFn(IntPtr ev, IntPtr user);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void RantProgressFn(IntPtr progress);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -887,6 +931,13 @@ namespace Rant
         internal static extern int rant_variable_match_count(IntPtr var);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_variable_retire(IntPtr var);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr rant_node_create_call_observer(IntPtr node, byte[] name, IntPtr req_schema,
+            IntPtr prg_schema, IntPtr rsp_schema, RantCallEventFn on_event, IntPtr user, ref RantCallObserverOpts opts);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_call_observer_match_count(IntPtr obs);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_call_observer_retire(IntPtr obs);
 
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_variable_refresh(IntPtr var);
@@ -1162,6 +1213,20 @@ namespace Rant
 
     /// <summary>Variable options, the C RantVariableOpts. 0 is the default. ReadOnly and
     /// AllowForce are the definition's declarations and mean nothing on a remote.</summary>
+    /// <summary>A call observer's options. All zero means every default.</summary>
+    public sealed class CallObserverOptions
+    {
+        /// <summary>No repair. Never slows the provider either way.</summary>
+        public bool BestEffort;
+        /// <summary>Take the provider's schemas from the mesh, which needs FetchDetails on the node.</summary>
+        public bool ReflectFromMesh;
+        /// <summary>The queue the handler parks on, null = the node's default under
+        /// Threading.Dispatch, else inline.</summary>
+        public RantQueue Queue;
+        /// <summary>Its ring cap with a queue, 0 = 1 MB.</summary>
+        public uint QueueBytes;
+    }
+
     public sealed class VariableOptions
     {
         /// <summary>No set channel: a remote set gets BadRole.</summary>
@@ -2619,6 +2684,13 @@ namespace Rant
                                                    Schema schema = null)
             => new RemoteVariable<T>(this, name, options, schema);
 
+        /// <summary>Watch the calls of a function or task by name, on every node that defines
+        /// it. A node may not define and observe one name. Schemas let Fields read the payloads,
+        /// as does CallObserverOptions.ReflectFromMesh, and only a task needs prgSchema.</summary>
+        public CallObserver CallObserver(string name, Action<CallEvent> handler, CallObserverOptions options = null,
+                                         Schema reqSchema = null, Schema prgSchema = null, Schema rspSchema = null)
+            => new CallObserver(this, name, handler, options, reqSchema, prgSchema, rspSchema);
+
         // ---- built-in log and status ---------------------------------------------------
 
         /// <summary>Publish a log line at a level (already formatted text, truncated at
@@ -3249,6 +3321,11 @@ namespace Rant
             public Action<VariableUpdate> Handler;
             public RantNode Node;
         }
+        internal sealed class CallObsBox
+        {
+            public Action<CallEvent> Handler;
+            public RantNode Node;
+        }
         internal sealed class AsyncCall
         {
             public TaskCompletionSource<ResponseCore> Tcs;
@@ -3327,6 +3404,7 @@ namespace Rant
         internal static readonly RantRequestFn OnRequest = OnRequestTramp;
         internal static readonly RantResponseFn OnResponse = OnResponseTramp;
         internal static readonly RantVariableUpdateFn OnVarUpdate = OnVarUpdateTramp;
+        internal static readonly RantCallEventFn OnCallEvent = OnCallEventTramp;
         internal static readonly RantProgressFn OnProgress = OnProgressTramp;
         internal static readonly RantCancelFn OnCancel = OnCancelTramp;
 
@@ -3434,6 +3512,36 @@ namespace Rant
                 using (box.Node.Gate.Running()) box.Handler(vu);
             }
             catch (Exception e) { Console.Error.WriteLine("rant on_variable_update: " + e); }
+        }
+
+        [MonoPInvokeCallback(typeof(RantCallEventFn))]
+        private static void OnCallEventTramp(IntPtr evPtr, IntPtr user)
+        {
+            try
+            {
+                var box = GetBox((long)user) as CallObsBox;
+                if (box == null) return;
+                var e = Marshal.PtrToStructure<RantCallEventNative>(evPtr);
+                var ev = new CallEvent
+                {
+                    Kind = (CallEventKind)e.kind,
+                    Name = Codec.Str(e.name),
+                    Provider = e.provider,
+                    ProviderName = Codec.Str(e.provider_name),
+                    CallerLo = e.caller_lo,
+                    CallerName = Codec.Str(e.caller_name),
+                    CallId = e.call_id,
+                    Status = (CallStatus)e.status,
+                    Message = Codec.Str(e.message),
+                    Data = Codec.Bytes(e.data),   // copied out: the view dies with the callback
+                    WrittenUs = e.written_us,
+                    RecvUs = e.recv_us,
+                    SchemaPtr = e.schema,
+                    Node = box.Node,
+                };
+                using (box.Node.Gate.Running()) box.Handler(ev);
+            }
+            catch (Exception e) { Console.Error.WriteLine("rant on_call_event: " + e); }
         }
 
         // The bytes a typed handle sends for a value: T encoded with its schema, or a byte[]
@@ -4184,6 +4292,98 @@ namespace Rant
         /// <summary>The writer's wall clock for this write, our own for a local one.</summary>
         public ulong WrittenUs { get; internal set; }
         internal IntPtr SchemaPtr;
+    }
+
+    /// <summary>One step of a call, for a CallObserver handler. CallerLo and CallId together
+    /// name the call.</summary>
+    public sealed class CallEvent
+    {
+        /// <summary>Which step this is.</summary>
+        public CallEventKind Kind { get; internal set; }
+        /// <summary>The function or task.</summary>
+        public string Name { get; internal set; }
+        /// <summary>The peer id of the definition reporting it.</summary>
+        public uint Provider { get; internal set; }
+        /// <summary>The name of the definition's node.</summary>
+        public string ProviderName { get; internal set; }
+        /// <summary>The caller's uuid low 32.</summary>
+        public uint CallerLo { get; internal set; }
+        /// <summary>The caller's node name, empty when the provider no longer knows it.</summary>
+        public string CallerName { get; internal set; }
+        /// <summary>The caller's number for this call.</summary>
+        public uint CallId { get; internal set; }
+        /// <summary>End: the outcome.</summary>
+        public CallStatus Status { get; internal set; }
+        /// <summary>End: the outcome text. Cancel: the node that asked.</summary>
+        public string Message { get; internal set; }
+        /// <summary>The payload's encoded bytes.</summary>
+        public byte[] Data { get; internal set; }
+        /// <summary>The provider's wall clock at the report, 0 = it opted out.</summary>
+        public ulong WrittenUs { get; internal set; }
+        /// <summary>When it arrived, on this node's monotonic clock in microseconds.</summary>
+        public ulong RecvUs { get; internal set; }
+        /// <summary>The payload by field name, null when its layout is unknown here.</summary>
+        public Dictionary<string, object> Fields
+        {
+            get
+            {
+                if (SchemaPtr == IntPtr.Zero) return null;
+                using (Pass p = Node.Gate.Enter()) return p.Ok ? Codec.DecodeDict(SchemaPtr, Data) : null;
+            }
+        }
+        internal IntPtr SchemaPtr;
+        internal RantNode Node;
+    }
+
+    /// <summary>Watches a function's or task's calls, from RantNode.CallObserver. It neither
+    /// calls nor provides, costs the provider nothing unwatched and never slows it.
+    /// docs/patterns.md has the limits.</summary>
+    public sealed class CallObserver : IDisposable, INodeHandle
+    {
+        private readonly HandleState _st = new HandleState();
+        private readonly RantNode _node;
+
+        void INodeHandle.Invalidate() { _st.Invalidate(); }
+
+        /// <summary>The function or task watched.</summary>
+        public string Name { get; }
+
+        internal CallObserver(RantNode node, string name, Action<CallEvent> handler, CallObserverOptions options,
+                              Schema req, Schema prg, Schema rsp)
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            _node = node;
+            Name = name;
+            CallObserverOptions opt = options ?? new CallObserverOptions();
+            var co = new RantCallObserverOpts
+            {
+                best_effort = (byte)(opt.BestEffort ? 1 : 0),
+                reflect_from_mesh = (byte)(opt.ReflectFromMesh ? 1 : 0),
+                queue = node.QueueHandle(opt.Queue),
+                queue_bytes = opt.QueueBytes,
+            };
+            long id = Patterns.AddBox(new Patterns.CallObsBox { Handler = handler, Node = node });
+            node.RegisterPatternBox(id);
+            IntPtr fresh;
+            using (Pass pass = node.Gate.Enter())
+                fresh = !pass.Ok ? IntPtr.Zero : Native.rant_node_create_call_observer(node.Handle, Codec.CStr(name),
+                    req != null ? req.Handle : IntPtr.Zero, prg != null ? prg.Handle : IntPtr.Zero,
+                    rsp != null ? rsp.Handle : IntPtr.Zero, Patterns.OnCallEvent, (IntPtr)id, ref co);
+            if (fresh == IntPtr.Zero) throw new RantException("call observer create failed", node.LastError);
+            _st.Raw = fresh;
+            node.RegisterHandle(this);
+        }
+
+        /// <summary>The definitions matched now.</summary>
+        public int MatchCount { get { using (_st.Use(_node, out IntPtr h)) return h == IntPtr.Zero ? 0 : Native.rant_call_observer_match_count(h); } }
+
+        /// <summary>Stop watching and release the name. No op once dead.</summary>
+        public void Dispose()
+        {
+            var rc = _st.Close(_node, Native.rant_call_observer_retire);
+            if (rc != SendStatus.Ok)
+                throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
+        }
     }
 
     // The engine of Variable<T>, both sides: definition = true holds the authoritative value,

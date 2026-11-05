@@ -29,6 +29,7 @@ __all__ = [
     "FunctionDefinition", "RemoteFunction", "Request", "Response", "Deferred",
     "TaskDefinition", "RemoteTask", "TaskContext", "Progress",
     "Variable", "VariableDefinition", "RemoteVariable", "VariableUpdate",
+    "CallObserver", "CallEvent", "CallEventKind",
     "LogLine", "Condition", "StatusUpdate", "Reflection", "Peer", "Entity", "MetaSnapshot", "version",
 ]
 
@@ -58,6 +59,15 @@ class SendStatus(_pyenum.IntEnum):
     STATE = -5       # wrong state: poll while started, or a call a callback may not make
     NOSYS = -6       # not compiled in (the service thread under RANT_NO_THREADS)
     SCHEMA = -7      # the payload is not a message of the topic's schema
+
+
+class CallEventKind(_pyenum.IntEnum):
+    """A step of a call as a call observer sees it, mirrors RantCallEventKind."""
+    CALL = 0
+    RUNNING = 1
+    PROGRESS = 2
+    CANCEL = 3
+    END = 4
 
 
 class CallStatus(_pyenum.IntEnum):
@@ -2156,6 +2166,12 @@ class Node:
                 keep_last, backpressure_wait, reflect_from_mesh."""
         return RemoteVariable(self, name, schema, **opts)
 
+    def call_observer(self, name, handler, req_schema=None, prg_schema=None, rsp_schema=None, **opts):
+        """Watch the calls of a function or task by name, on every node that defines it.
+                handler takes a CallEvent. A node may not define and observe one name. Options:
+                best_effort, reflect_from_mesh (needs fetch_details), queue, queue_bytes."""
+        return CallObserver(self, name, handler, req_schema, prg_schema, rsp_schema, **opts)
+
     # The registry behind every Publisher and Subscriber. Same name handles on this node
     # share the native slot: the role follows the live holds and the last release retires it.
     def _acquire_topic(self, name, bit, sch, opts):
@@ -3354,6 +3370,82 @@ class RemoteTask(_Function):
             return _send_status(self._node._lib.rant_function_cancel(fn, int(call_id)))
 
 
+class CallEvent:
+    """One step of a call, for a call_observer handler: kind, name, provider, provider_name,
+        caller_lo, caller_name, call_id, status, message, data, value (decoded when the schema
+        is known, else the raw bytes), written_us and recv_us. caller_lo and call_id together
+        name the call. message is the outcome text on END and the node that asked on CANCEL."""
+    __slots__ = ("kind", "name", "provider", "provider_name", "caller_lo", "caller_name", "call_id",
+                 "status", "message", "data", "value", "written_us", "recv_us")
+
+    def __repr__(self):
+        return "CallEvent(%s, %r, caller=%r, call_id=%d, status=%s)" % (
+            self.kind.name, self.name, self.caller_name, self.call_id, self.status.name)
+
+
+class _CallObsBox:
+    __slots__ = ("handler", "schemas", "node", "name")
+
+    def __init__(self, handler, schemas, node, name):
+        self.handler = handler
+        self.schemas = schemas    # the local request, progress and response Schema, None where unset
+        self.node = node
+        self.name = name
+
+
+class CallObserver:
+    """Watches a function's or task's calls, from node.call_observer. It neither calls nor
+        provides, costs the provider nothing unwatched and never slows it. docs/patterns.md has
+        the limits."""
+    __slots__ = ("_node", "_st", "_name")
+
+    def __init__(self, node, name, handler, req_schema=None, prg_schema=None, rsp_schema=None, *,
+                 best_effort=False, reflect_from_mesh=False, queue=None, queue_bytes=0):
+        self._node = node
+        self._name = name
+        schemas = (_as_schema(node, req_schema), _as_schema(node, prg_schema), _as_schema(node, rsp_schema))
+        co = _c.RantCallObserverOpts()
+        _c.memset(_c.byref(co), 0, _c.sizeof(co))
+        co.best_effort = 1 if best_effort else 0
+        co.reflect_from_mesh = 1 if reflect_from_mesh else 0
+        co.queue = node._queue_handle(queue)
+        co.queue_bytes = queue_bytes
+        box_id = _pbox_add(_CallObsBox(handler, schemas, node, name))
+        node._register_box(box_id)
+        with node._gate.use(node._h) as nh:
+            h = nh and node._lib.rant_node_create_call_observer(
+                nh, name.encode("utf-8"), *[s._s if s else None for s in schemas],
+                _on_call_event, _c.c_void_p(box_id), _c.byref(co))
+        if not h:
+            err = node.last_error
+            raise Error("call_observer(%r) failed: %s" % (name, err), err)
+        self._st = _HandleState(h)
+
+    @property
+    def name(self):
+        return self._name
+
+    def _use(self):
+        return self._st.use(self._node._gate)
+
+    @property
+    def match_count(self):
+        """The definitions matched now."""
+        with self._use() as h:
+            return self._node._lib.rant_call_observer_match_count(h) if h else 0
+
+    def close(self):
+        """Stop watching and release the name. Returns True, or False when refused from a
+                callback, where the handle stays live."""
+        return self._st.close(self._node._gate, self._node._lib.rant_call_observer_retire)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
 class Variable:
     """The surface shared by VariableDefinition and RemoteVariable: read the latest value,
         write, force and observe. Reads are local and status free, every write returns its
@@ -3821,6 +3913,47 @@ def _on_response(rsp_ptr):
                 box.on_response(resp)
         except Exception:
             _traceback.print_exc()
+    except Exception:
+        _traceback.print_exc()
+
+
+def _text(view):
+    return _c.string_at(view.data, view.len).decode("utf-8", "replace") if view.data and view.len else ""
+
+
+def _call_event(box, e):
+    kind = CallEventKind(e.kind)
+    # no schema from the report means no layout we know, so a local schema must not guess
+    local = box.schemas[0 if kind == CallEventKind.CALL else 1 if kind == CallEventKind.PROGRESS else 2]
+    val, ok = _decode_payload(e.schema, local if e.schema else None, e.data)
+    if not ok:
+        box.node._report_decode(box.name, "a call event did not decode into its type")
+        return
+    ev = CallEvent()
+    ev.kind = kind
+    ev.name = _text(e.name)
+    ev.provider = e.provider
+    ev.provider_name = _text(e.provider_name)
+    ev.caller_lo = e.caller_lo
+    ev.caller_name = _text(e.caller_name)
+    ev.call_id = e.call_id
+    ev.status = CallStatus(e.status)
+    ev.message = _text(e.message)
+    ev.data = _c.string_at(e.data.data, e.data.len) if e.data.data and e.data.len else b""
+    ev.value = val
+    ev.written_us = e.written_us
+    ev.recv_us = e.recv_us
+    box.handler(ev)
+
+
+@_c.CallEventFn
+def _on_call_event(event_ptr, user):
+    try:
+        box = _pbox_get(user)
+        if box is None:
+            return
+        with box.node._gate.running():
+            _call_event(box, event_ptr.contents)
     except Exception:
         _traceback.print_exc()
 

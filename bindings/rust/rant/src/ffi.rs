@@ -13,7 +13,7 @@ pub const RANT_DISCOVERY_PORT: u32 = 6730;
 pub const RANT_ANNOUNCE_INTERVAL_US: u32 = 3000000;
 pub const RANT_MAX_PEERS: u32 = 16;
 pub const RANT_ALLOCATOR_PAGE: u32 = 65536;
-pub const RANT_WIRE_VERSION: u32 = 9;
+pub const RANT_WIRE_VERSION: u32 = 10;
 pub const RANT_DISCOVERY_META_MAX: u32 = 64;
 pub const RANT_DISCOVERY_WIRE_MAX: u32 = 128;
 pub const RANT_DISCOVERY_FIXED_LEN: u32 = 37;
@@ -1350,6 +1350,63 @@ pub type RantCancelFn = ::std::option::Option<
 >;
 #[repr(C)]
 #[derive(Debug)]
+pub struct RantCallObserver {
+    _unused: [u8; 0],
+}
+pub const RANT_CALL_EVENT_CALL: RantCallEventKind = 0;
+pub const RANT_CALL_EVENT_RUNNING: RantCallEventKind = 1;
+pub const RANT_CALL_EVENT_PROGRESS: RantCallEventKind = 2;
+pub const RANT_CALL_EVENT_CANCEL: RantCallEventKind = 3;
+pub const RANT_CALL_EVENT_END: RantCallEventKind = 4;
+pub type RantCallEventKind = ::std::os::raw::c_uint;
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RantCallEvent {
+    pub kind: RantCallEventKind,
+    pub name: RantString,
+    pub provider: u32,
+    pub provider_name: RantString,
+    pub caller_lo: u32,
+    pub caller_name: RantString,
+    pub call_id: u32,
+    pub status: RantCallStatus,
+    pub message: RantString,
+    pub data: RantBytes,
+    pub schema: *const RantSchema,
+    pub written_us: u64,
+    pub recv_us: u64,
+}
+impl Default for RantCallEvent {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+pub type RantCallEventFn = ::std::option::Option<
+    unsafe extern "C" fn(event: *const RantCallEvent, user: *mut ::std::os::raw::c_void),
+>;
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RantCallObserverOpts {
+    pub best_effort: u8,
+    pub reflect_from_mesh: u8,
+    pub queue: *mut RantQueue,
+    pub queue_bytes: u32,
+}
+impl Default for RantCallObserverOpts {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug)]
 pub struct RantVariable {
     _unused: [u8; 0],
 }
@@ -1992,6 +2049,22 @@ unsafe extern "C" {
     pub fn rant_function_cancel(
         fn_: *mut RantFunction,
         call_id: u32,
+    ) -> ::std::os::raw::c_int;
+    pub fn rant_node_create_call_observer(
+        n: *mut RantNode,
+        name: *const ::std::os::raw::c_char,
+        req_schema: *const RantSchema,
+        prg_schema: *const RantSchema,
+        rsp_schema: *const RantSchema,
+        on_event: RantCallEventFn,
+        user: *mut ::std::os::raw::c_void,
+        opts: *const RantCallObserverOpts,
+    ) -> *mut RantCallObserver;
+    pub fn rant_call_observer_match_count(
+        obs: *mut RantCallObserver,
+    ) -> ::std::os::raw::c_int;
+    pub fn rant_call_observer_retire(
+        obs: *mut RantCallObserver,
     ) -> ::std::os::raw::c_int;
     pub fn rant_node_create_variable_definition(
         n: *mut RantNode,

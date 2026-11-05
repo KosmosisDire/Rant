@@ -167,6 +167,18 @@ let r = arm.call(&goal, CallOptions::new(), |p| {
 - `call_async` returns a `TaskCall` Future. Dropping it before the outcome cancels the
   task, and `detach()` keeps it going.
 
+## Call observers
+
+Any node can watch a function's or task's calls, docs/patterns.md has the rules.
+
+```rust
+let _watch = node.call_observer("arm/home", CallObserverOptions::new(), |e| {
+    println!("{:?} {} {}", e.kind(), e.caller_name(), e.message());
+})?;
+```
+
+`fields()` reads the payload by name with `reflect_from_mesh(true)` on a `fetch_details` node.
+
 ## Variables
 
 ```rust

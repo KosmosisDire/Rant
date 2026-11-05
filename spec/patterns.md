@@ -60,6 +60,7 @@ refused with `RANT_E_KIND_MISMATCH`.
 | `TASK_REQ` (5) | `t@req` | callers, requests and cancel ops |
 | `TASK_PRG` (6) | `t@prg` | the definition, broadcast |
 | `TASK_RSP` (7) | `t@rsp` | the definition, directed |
+| `CALL_OBS` (8) | `f@obs`, `t@obs` | the definition, what observers read |
 
 ## Headers
 
@@ -82,6 +83,8 @@ a remote unforce a typed variable.
 - value: `[u8 flags][u32 write_seq]`, flag 0x01 = forced.
 - `v@set`: `[u8 op]`, op 0 set, 1 force, 2 unforce. A plain set with an empty payload is
   ignored.
+- `@obs`: `[u32 caller_lo][u32 call_id][u8 event][u8 status][u64 schema_hash]`, then
+  `[u8 len][caller name][u8 len][text]` and the payload. See Call observers below.
 
 Statuses `OK`, `APP_ERROR`, `NO_HANDLER`, `CANCELLED` and `RUNNING` are wire carried.
 `TIMEOUT` and `PEER_LOST` are synthesized on the caller. `RUNNING` is the one non terminal
@@ -178,6 +181,47 @@ Traps pinned by `e2e.tasks`:
   PEER_INTEREST is load bearing.
 - Directed sends once leaked on non directed topics because the lane advance no oped
   without the directed flag. Request channels are directed in every mode now.
+
+## Call observers
+
+A third node cannot read a call off its own channels. `@rsp` is directed at the caller, and a
+reader on `@req` looks like a provider: a task call with no provider goes to the oldest match,
+so an observer older than the definition would take the calls, and it would count in
+NO_PROVIDER, the match wait and the handle gate. So a definition reports what happened on a
+channel of its own, `@obs`, and nothing on the call path changes. A remote and `@rant/meta` have
+no `@obs`.
+
+- One report per step: the request at receipt on the inline handler, so a queued definition
+  reports it before its handler runs, then each RUNNING, progress update and answer as it goes
+  out, and each CANCEL op, even one that lands on nothing. Every answer path goes through
+  `i_rant_func_send_reply` or `rant_function_complete`.
+- Unwatched costs one cached count per step. The report is built only with a reader matched.
+- A report never waits. `@obs` has no backpressure, and a matched topic is past the match wait.
+  It is reliable with `keep_last` at three times the handle's, room for a request and its answer
+  per request of a drained batch and a few steps more. A slow reader loses the oldest.
+- `schema_hash` names the layout of the payload, 0 when it has none or none we can name.
+  Delivery uses the writer's layout through a rebased schema (spec/schema.md), so a caller's
+  wider request is in the caller's layout, not ours. Only a pointer tells a rebased schema apart,
+  since it keeps our hash, so a request is named only when `msg->schema` is our own. The observer
+  offers a schema only when its hash matches, and nothing ever decodes in the wrong layout.
+- The channel is raw and carries one payload type per event, so the topic's schema check cannot
+  guard it, and `rant_schema_validate` runs at the observer.
+- Reflection skips `@obs` entirely (spec/reflection.md), so an observer counts as neither side.
+- The caller's name rides every report. A recording then needs no peer lookup, and the name
+  outlives the caller.
+
+Known limits, on purpose:
+
+- A definition's last reports race its retire announce, which the observer handles first since
+  discovery is serviced before the data socket (the trap under One outcome per call), so an end
+  may be lost. A caller has the severed lane backstop. An observer holds no call table, which
+  would need bounds of its own, so it sees the provider go instead.
+- TIMEOUT and NO_PROVIDER exist only at the caller. `i_rant_func_reap` writes them as a Warn
+  note on `@rant/log`, which coalesces repeats. `@rant/meta` calls are left out, since a poll of a
+  dead peer is routine.
+
+The `no_provider_lookalike`, `no_cost_unwatched`, `schemas` and `slow_observer` cases of
+`e2e.observers` pin these.
 
 ## Callback queues
 

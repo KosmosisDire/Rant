@@ -152,6 +152,9 @@ static void i_rant_pat_unlink(void **head, void *elem, size_t next_off){
                                    sender's call, [u32 caller_lo] another caller's */
 #define RANT__PRG_PREFIX 8u    /* prg: [u32 caller_lo][u32 call_id]. caller_lo demuxes the shared
                                 broadcast, since call ids are per caller counters */
+#define RANT__OBS_PREFIX 18u   /* obs: [u32 caller_lo][u32 call_id][u8 event][u8 status][u64 schema_hash],
+                                then [u8 len][caller name][u8 len][text] and the payload */
+#define RANT__OBS_HDR_MAX (RANT__OBS_PREFIX + 2u + 255u + RANT_CALL_MSG_MAX)
 #define RANT__NO_DEADLINE ((uint64_t)-1)     /* a RUNNING call has no timeout */
 
 /* The parked record kinds, see spec/patterns.md. A delivered message is parked whole and
@@ -161,7 +164,8 @@ static void i_rant_pat_unlink(void **head, void *elem, size_t next_off){
 #define RANT__REC_RESPONSE   3u   /* rsp: a terminal outcome, its pending entry is parked */
 #define RANT__REC_RUNNING    4u   /* rsp: RUNNING, on_progress runs once with no data */
 #define RANT__REC_PROGRESS   5u   /* prg: one progress update */
-#define RANT__REC_OUTCOME   (I_RANT_REC_SYNTH | 1u)   /* [u32 call_id][u8 status][text] */
+#define RANT__REC_OBSERVED   6u   /* obs: one step of a call, on_event runs at dispatch */
+#define RANT__REC_OUTCOME  (I_RANT_REC_SYNTH | 1u)   /* [u32 call_id][u8 status][text] */
 #define RANT__REC_VAR       (I_RANT_REC_SYNTH | 2u)   /* [u32 write_seq][u8 forced][u8 flags][2][value] */
 #define RANT__VAR_REC_CHANGED 0x01u
 #define RANT__VAR_REC_REPLAY  0x02u   /* the on_change replay at registration: no on_write */
@@ -219,6 +223,7 @@ struct RantFunction {
     RantTopic        *req;            /* provider SUB_ONLY, caller PUB_ONLY */
     RantTopic        *rsp;            /* provider PUB_ONLY, caller SUB_ONLY, directed */
     RantTopic        *prg;            /* task: the broadcast progress channel, NULL = a function */
+    RantTopic        *obs;            /* definition: what call observers read, else NULL */
     RantRequestFn     on_request; void *on_request_user;   /* provider */
     uint32_t          next_call_id;   /* the caller counter */
     uint32_t          timeout_us;
@@ -264,12 +269,55 @@ static size_t i_rant_func_rsp_hdr(uint8_t *hdr, uint32_t call_id, uint8_t status
     return RANT__FN_PREFIX + 1u + ml;
 }
 
+/* writes [u8 len][s] at hdr + at, cut at what the byte can say. Returns the next offset */
+static size_t i_rant_obs_put(uint8_t *hdr, size_t at, RantString s){
+    size_t l = s.len <= 255u ? s.len : 255u;
+    hdr[at++] = (uint8_t)l;
+    if (l) memcpy(hdr + at, s.data, l);
+    return at + l;
+}
+
+/* Reports one step of a call when anyone watches. It never waits: the channel has no
+ * backpressure and a matched topic is past the match wait. peer 0 = the caller is not known
+ * by id here, so lo alone names it. */
+static void i_rant_func_observe(RantFunction *fn, uint32_t peer, uint32_t lo, uint32_t call_id,
+                                RantCallEventKind event, uint8_t status, const RantSchema *schema,
+                                RantString text, RantBytes data){
+    uint8_t hdr[RANT__OBS_HDR_MAX]; RantString name = rant_string(NULL, 0); size_t at; int acquired;
+    if (!fn->obs || rant_topic_match_count(fn->obs) == 0) return;
+    acquired = i_rant_node_sys_lock(fn->n);
+    if (peer){
+        name = i_rant_node_sys_peer_name(fn->n, peer);
+        if (!lo) lo = i_rant_pat_peer_lo(fn->n, peer);
+    }
+    i_rant_le_w32(hdr, lo); i_rant_le_w32(hdr + 4, call_id);
+    hdr[8] = (uint8_t)event; hdr[9] = status;
+    i_rant_le_w64(hdr + 10, schema ? rant_schema_hash(schema) : 0u);
+    at = i_rant_obs_put(hdr, RANT__OBS_PREFIX, name);
+    at = i_rant_obs_put(hdr, at, text);
+    i_rant_node_sys_unlock(fn->n, acquired);
+    (void)i_rant_topic_send_hdr(fn->obs, rant_bytes(hdr, at), data);
+}
+
+/* an answer as observers see it: RUNNING is a step, every other status ends the call */
+static void i_rant_func_observe_answer(RantFunction *fn, uint32_t caller, uint32_t call_id,
+                                       uint8_t status, const char *message, RantBytes rsp){
+    if (status == RANT_CALL_RUNNING)
+        i_rant_func_observe(fn, caller, 0, call_id, RANT_CALL_EVENT_RUNNING, status, NULL,
+                            rant_string(NULL, 0), rant_bytes(NULL, 0));
+    else
+        i_rant_func_observe(fn, caller, 0, call_id, RANT_CALL_EVENT_END, status,
+                            rsp.len ? rant_topic_schema(fn->rsp) : NULL,
+                            message ? rant_cstr(message) : i_rant_call_status_msg((RantCallStatus)status), rsp);
+}
+
 /* sends a response to one caller. Runs under the lock, so the send commits reentrantly */
 static void i_rant_func_send_reply(RantFunction *fn, uint32_t caller, uint32_t call_id,
                                    uint8_t status, const char *message, RantBytes rsp){
     uint8_t hdr[RANT__FN_RSP_HDR_MAX];
     size_t hl = i_rant_func_rsp_hdr(hdr, call_id, status, message);
     (void)i_rant_topic_send_to(fn->rsp, caller, rant_bytes(hdr, hl), rsp);
+    i_rant_func_observe_answer(fn, caller, call_id, status, message, rsp);
 }
 
 /* parks a delivered pattern message whole on its channel's ring, lock held */
@@ -289,6 +337,9 @@ static void i_rant_func_cancel_op(RantFunction *fn, const RantMsg *msg){
     i_RantDefer *d;
     for (d = fn->defers; d; d = d->next)
         if (d->caller_lo == lo && d->call_id == call_id) break;
+    /* one that lands on nothing is still a step someone took */
+    i_rant_func_observe(fn, d ? d->caller : 0, lo, call_id, RANT_CALL_EVENT_CANCEL, 0, NULL,
+                        msg->publisher_name, rant_bytes(NULL, 0));
     if (!d || d->cancelled) return;
     d->cancelled = 1;
     if (!fn->on_cancel) return;
@@ -358,6 +409,10 @@ static void i_rant_func_on_request(void *user, const RantMsg *msg){
             i_rant_func_cancel_op(fn, msg);
         return;   /* an unknown op is dropped */
     }
+    /* a caller's wider request keeps its own layout here, so only ours may be named */
+    i_rant_func_observe(fn, msg->publisher_id, 0, i_rant_le_r32(msg->header.data), RANT_CALL_EVENT_CALL, 0,
+                        msg->schema == rant_topic_schema(fn->req) ? msg->schema : NULL,
+                        rant_string(NULL, 0), msg->data);
     if (i_rant_topic_queue(fn->req)){ i_rant_func_park_msg(fn->req, RANT__REC_REQUEST, msg); return; }
     i_rant_func_run_request(fn, msg);
 }
@@ -616,7 +671,7 @@ static void i_rant_func_drop_parked(RantFunction *fn){
 }
 
 /* a leading '@' is reserved for the @rant/ builtins, refused in every public constructor */
-#define RANT__PAT_SUFFIX 4u     /* "@req", "@rsp", "@prg" and "@set" */
+#define RANT__PAT_SUFFIX 4u     /* "@req", "@rsp", "@prg", "@set" and "@obs" */
 
 /* Creates the channels for a function or task. mode 1 = a definition, 0 = a remote, 2 =
  * both sides in one handle (the @rant/meta shape), advertised as a definition until its
@@ -720,6 +775,23 @@ static RantFunction *i_rant_function_open(RantNode *n, const char *name,
         (void)rant_topic_set_role(fn->rsp, RANT_INACTIVE);
         if (fn->prg) (void)rant_topic_set_role(fn->prg, RANT_INACTIVE);
         return (RantFunction*)i_rant_pat_half_create_fail(fn->req);
+    }
+    if (mode == 1){
+        /* a raw channel with no wait, wide enough for a call and its answer per request of
+           a drained batch, plus a step or two. Nothing commits while nobody subscribes */
+        RantTopicOpts oopt;
+        uint32_t depth = 3u * (topt.qos.keep_last ? topt.qos.keep_last : 10u);
+        memset(&oopt, 0, sizeof oopt);
+        oopt.qos.reliability = RANT_RELIABLE;
+        oopt.qos.keep_last = (uint16_t)(depth <= 0xFFFFu ? depth : 0xFFFFu);
+        memcpy(rn + nl, "@obs", 5);
+        fn->obs = i_rant_node_create_pattern_topic(n, rn, RANT_PUB_ONLY, NULL, &oopt,
+                              RANT_KIND_CALL_OBS, RANT__OBS_PREFIX, 0, 0, NULL, NULL);
+        if (!fn->obs){
+            (void)rant_topic_set_role(fn->rsp, RANT_INACTIVE);
+            if (fn->prg) (void)rant_topic_set_role(fn->prg, RANT_INACTIVE);
+            return (RantFunction*)i_rant_pat_half_create_fail(fn->req);
+        }
     }
 
     acquired = i_rant_node_sys_lock(n);         /* publish into the manager list */
@@ -887,7 +959,7 @@ static void i_rant_func_drain_defers(RantFunction *fn, const char *message){
 
 int rant_function_retire(RantFunction *fn){
     i_RantPatterns *pm; RantNode *n; int acquired, r;
-    RantTopic *req, *rsp, *prg;
+    RantTopic *req, *rsp, *prg, *obs;
     if (!fn) return RANT_ERR_NO_TOPIC;
     pm = fn->pm; n = fn->n;
     if (pm && fn == pm->meta) return RANT_ERR_STATE;     /* the builtin is node infrastructure */
@@ -906,6 +978,7 @@ int rant_function_retire(RantFunction *fn){
     i_rant_node_advertise_hold(n);
     r = i_rant_pat_park_channels(fn->req, fn->rsp);
     if (r == 0 && fn->prg) (void)rant_topic_set_role(fn->prg, RANT_INACTIVE);
+    if (r == 0 && fn->obs) (void)rant_topic_set_role(fn->obs, RANT_INACTIVE);
     i_rant_node_advertise_release(n);
     if (r != 0) return r;
     acquired = i_rant_node_sys_lock(n);
@@ -919,7 +992,7 @@ int rant_function_retire(RantFunction *fn){
     while (fn->pending) i_rant_func_reap(fn, 0, RANT_CALL_CANCELLED, RANT__REAP_ALL, 0, 0);
     i_rant_func_drop_parked(fn);
     if (pm){ i_rant_pat_unlink((void**)&pm->funcs, fn, offsetof(RantFunction, next)); pm->auth_dirty = 1; }
-    req = fn->req; rsp = fn->rsp; prg = fn->prg;   /* outlive fn, see phase 3 */
+    req = fn->req; rsp = fn->rsp; prg = fn->prg; obs = fn->obs;   /* outlive fn, see phase 3 */
     if (fn->sync_buf)  i_rant_node_sys_bulk(n, fn->sync_buf, 0);
     if (fn->dup_peers) i_rant_node_sys_alloc(n, fn->dup_peers, 0);
     i_rant_node_sys_alloc(n, fn, 0);
@@ -928,6 +1001,7 @@ int rant_function_retire(RantFunction *fn){
     i_rant_node_advertise_hold(n);
     i_rant_pat_release_channels(req, rsp);
     if (prg) (void)rant_topic_retire(prg);
+    if (obs) (void)rant_topic_retire(obs);
     i_rant_node_advertise_release(n);
     return RANT_OK;
 }
@@ -1116,8 +1190,8 @@ static i_RantDefer *i_rant_func_defer_find(RantFunction *fn, uint64_t token, int
 int rant_function_complete(RantFunction *fn, uint64_t token, RantCallStatus status,
                            const char *message, RantBytes rsp){
     i_RantDefer *d;
-    uint8_t hdr[RANT__FN_RSP_HDR_MAX]; size_t hl; RantTopic *rsp_topic; uint32_t caller;
-    int acquired;
+    uint8_t hdr[RANT__FN_RSP_HDR_MAX]; size_t hl; RantTopic *rsp_topic; uint32_t caller, call_id;
+    int acquired, r;
     if (!fn || !token) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_sys_lock(fn->n);
     d = i_rant_func_defer_find(fn, token, 1);
@@ -1126,29 +1200,34 @@ int rant_function_complete(RantFunction *fn, uint64_t token, RantCallStatus stat
         return RANT_ERR_STATE;
     }
     hl = i_rant_func_rsp_hdr(hdr, d->call_id, (uint8_t)status, message);
-    rsp_topic = fn->rsp; caller = d->caller;
+    rsp_topic = fn->rsp; caller = d->caller; call_id = d->call_id;
     i_rant_node_sys_alloc(fn->n, d, 0);
     i_rant_node_sys_unlock(fn->n, acquired);
     /* send outside the lock: a completion from an app thread engages backpressure, from a
        callback it commits reentrantly */
-    return i_rant_topic_send_to(rsp_topic, caller, rant_bytes(hdr, hl), rsp);
+    r = i_rant_topic_send_to(rsp_topic, caller, rant_bytes(hdr, hl), rsp);
+    i_rant_func_observe_answer(fn, caller, call_id, (uint8_t)status, message, rsp);
+    return r;
 }
 
 int rant_function_progress(RantFunction *fn, uint64_t token, RantBytes progress){
     i_RantDefer *d;
-    uint8_t hdr[RANT__PRG_PREFIX]; RantTopic *prg;
-    int acquired;
+    uint8_t hdr[RANT__PRG_PREFIX]; RantTopic *prg; uint32_t caller, lo, call_id;
+    int acquired, r;
     if (!fn) return RANT_ERR_NO_TOPIC;
     if (!fn->is_task) return RANT_ERR_STATE;
     acquired = i_rant_node_sys_lock(fn->n);
     d = i_rant_func_defer_find(fn, token, 0);
     if (!d){ i_rant_node_sys_unlock(fn->n, acquired); return RANT_ERR_STATE; }
     i_rant_le_w32(hdr, d->caller_lo); i_rant_le_w32(hdr + 4, d->call_id);
-    prg = fn->prg;
+    prg = fn->prg; caller = d->caller; lo = d->caller_lo; call_id = d->call_id;
     i_rant_node_sys_unlock(fn->n, acquired);
     /* broadcast outside the lock: reliable subscribers get backpressure end to end, best
-       effort observers are fire and forget */
-    return i_rant_topic_send_hdr(prg, rant_bytes(hdr, RANT__PRG_PREFIX), progress);
+       effort readers are fire and forget */
+    r = i_rant_topic_send_hdr(prg, rant_bytes(hdr, RANT__PRG_PREFIX), progress);
+    i_rant_func_observe(fn, caller, lo, call_id, RANT_CALL_EVENT_PROGRESS, 0, rant_topic_schema(prg),
+                        rant_string(NULL, 0), progress);
+    return r;
 }
 
 int rant_function_cancelled(RantFunction *fn, uint64_t token){
@@ -1205,6 +1284,134 @@ int rant_function_cancel(RantFunction *fn, uint32_t call_id){
        racing the call's own answer lands on nothing at the provider */
     i_rant_le_w32(hdr, call_id); hdr[4] = RANT__FN_OP_CANCEL;
     return i_rant_topic_send_to(fn->req, dest, rant_bytes(hdr, RANT__FN_PREFIX), rant_bytes(NULL, 0));
+}
+
+/* Call observers: the reading side of a definition's obs channel. See spec/patterns.md. */
+
+struct RantCallObserver {
+    RantNode         *n;
+    volatile uint32_t cb_out;         /* its callback out with the lock released, retire waits on 0 */
+    RantTopic        *obs;
+    const RantSchema *schemas[3];     /* request, progress, response: as passed or last found */
+    uint8_t           reflect;
+    RantCallEventFn   on_event; void *user;
+};
+
+/* The schema data decodes with: the one the report's hash names, among what the observer
+ * holds and what the reporting provider declares. NULL when neither is it, so nothing ever
+ * decodes in the wrong layout. Lock held. */
+static const RantSchema *i_rant_obs_schema(RantCallObserver *o, const RantMsg *msg, uint8_t event,
+                                           uint64_t hash){
+    int which = event == RANT_CALL_EVENT_CALL ? 0 : event == RANT_CALL_EVENT_PROGRESS ? 1 : 2;
+    size_t len = msg->topic_name.len - RANT__PAT_SUFFIX;
+    RantEntityInfo e; RantIter it;
+    if (!hash) return NULL;
+    if (o->schemas[which] && rant_schema_hash(o->schemas[which]) == hash) return o->schemas[which];
+    if (!o->reflect) return NULL;
+    memset(&it, 0, sizeof it);
+    while (rant_node_entities_next(o->n, msg->publisher_id, &it, &e)){
+        const RantSchema *s;
+        if ((e.kind != RANT_ENTITY_FUNCTION && e.kind != RANT_ENTITY_TASK) || e.name.len != len
+            || memcmp(e.name.data, msg->topic_name.data, len) != 0) continue;
+        s = which == 0 ? e.schema : which == 1 ? e.progress_schema : e.rsp_schema;
+        if (!s || rant_schema_hash(s) != hash) return NULL;
+        o->schemas[which] = s;     /* an interned schema lives until close */
+        return s;
+    }
+    return NULL;
+}
+
+/* Takes one report apart and hands it to the app, inline or at dispatch. A malformed one is
+ * dropped whole. */
+static void i_rant_obs_run(RantCallObserver *o, const RantMsg *msg){
+    const uint8_t *h = msg->header.data, *p = msg->data.data;
+    size_t left = msg->data.len, nl, tl; int acquired;
+    RantCallEvent e; i_RantCallbackScope cs;
+    if (msg->header.len < RANT__OBS_PREFIX || msg->topic_name.len <= RANT__PAT_SUFFIX || left < 2u) return;
+    if (h[8] > RANT_CALL_EVENT_END) return;
+    nl = p[0];
+    if (left < 2u + nl) return;
+    tl = p[1u + nl];
+    if (left < 2u + nl + tl) return;
+    memset(&e, 0, sizeof e);
+    e.kind = (RantCallEventKind)h[8];
+    e.name = rant_string(msg->topic_name.data, msg->topic_name.len - RANT__PAT_SUFFIX);
+    e.provider = msg->publisher_id; e.provider_name = msg->publisher_name;
+    e.caller_lo = i_rant_le_r32(h); e.call_id = i_rant_le_r32(h + 4);
+    e.status = (RantCallStatus)h[9];
+    e.caller_name = rant_string((const char*)p + 1u, nl);
+    e.message = rant_string((const char*)p + 2u + nl, tl);
+    e.data = rant_bytes(p + 2u + nl + tl, left - 2u - nl - tl);
+    e.written_us = msg->written_us; e.recv_us = msg->recv_us;
+    acquired = i_rant_node_sys_lock(o->n);
+    e.schema = i_rant_obs_schema(o, msg, h[8], i_rant_le_r64(h + 10));
+    i_rant_node_sys_unlock(o->n, acquired);
+    if (e.schema && !rant_schema_validate(e.schema, e.data)) e.schema = NULL;
+    i_rant_node_sys_callback_begin(o->n, &cs, &o->cb_out);
+    o->on_event(&e, o->user);
+    i_rant_node_sys_callback_end(o->n, &cs, &o->cb_out);
+}
+
+static void i_rant_obs_on_message(void *user, const RantMsg *msg){
+    RantCallObserver *o = (RantCallObserver*)user;
+    if (i_rant_topic_queue(o->obs)){ i_rant_func_park_msg(o->obs, RANT__REC_OBSERVED, msg); return; }
+    i_rant_obs_run(o, msg);
+}
+
+static void i_rant_obs_dispatch(void *user, const RantMsg *msg, uint8_t kind){
+    if (kind == RANT__REC_OBSERVED) i_rant_obs_run((RantCallObserver*)user, msg);
+}
+
+RantCallObserver *rant_node_create_call_observer(RantNode *n, const char *name,
+                    const RantSchema *req_schema, const RantSchema *prg_schema,
+                    const RantSchema *rsp_schema, RantCallEventFn on_event, void *user,
+                    const RantCallObserverOpts *opts){
+    char full[RANT_TOPIC_NAME_MAX + 1], rn[RANT_TOPIC_NAME_MAX + 1];
+    const char *mesh_name = i_rant_node_mesh_name(n, name, RANT__PAT_SUFFIX, full);
+    i_RantPatterns *pm; RantCallObserver *o; RantTopicOpts topt; size_t nl;
+    if (!mesh_name || !on_event) return NULL;
+    o = (RantCallObserver*)i_rant_pat_handle_new(n, sizeof *o, &pm);
+    if (!o) return NULL;
+    o->n = n; o->on_event = on_event; o->user = user;
+    o->schemas[0] = req_schema; o->schemas[1] = prg_schema; o->schemas[2] = rsp_schema;
+    o->reflect = (uint8_t)(opts && opts->reflect_from_mesh);
+    memset(&topt, 0, sizeof topt);
+    topt.qos.reliability = (opts && opts->best_effort) ? RANT_BEST_EFFORT : RANT_RELIABLE;
+    topt.qos.queue_bytes = opts ? opts->queue_bytes : 0u;
+    topt.queue = opts ? opts->queue : NULL;
+    nl = strlen(mesh_name);
+    memcpy(rn, mesh_name, nl); memcpy(rn + nl, "@obs", 5);
+    o->obs = i_rant_node_create_pattern_topic(n, rn, RANT_SUB_ONLY, NULL, &topt, RANT_KIND_CALL_OBS,
+                              RANT__OBS_PREFIX, 0, 0, i_rant_obs_on_message, o);
+    if (!o->obs) return NULL;     /* o stays pool allocated: nothing routes into it yet */
+    i_rant_topic_set_dispatch(o->obs, i_rant_obs_dispatch);
+    return o;
+}
+
+int rant_call_observer_match_count(RantCallObserver *obs){
+    return obs ? i_rant_topic_source_match_count(obs->obs) : 0;
+}
+
+int rant_call_observer_retire(RantCallObserver *obs){
+    RantNode *n; RantTopic *ch; int acquired, r;
+    if (!obs) return RANT_ERR_NO_TOPIC;
+    n = obs->n;
+    acquired = i_rant_node_sys_lock(n);
+    if (!acquired || i_rant_topic_busy(obs->obs)){
+        i_rant_node_sys_unlock(n, acquired);
+        return RANT_ERR_STATE;
+    }
+    i_rant_node_sys_settle(n, &obs->cb_out);
+    i_rant_node_sys_unlock(n, acquired);
+    r = i_rant_pat_park_channels(obs->obs, NULL);
+    if (r != 0) return r;
+    acquired = i_rant_node_sys_lock(n);
+    i_rant_pat_clear_channels(obs->obs, NULL);
+    ch = obs->obs;
+    i_rant_node_sys_alloc(n, obs, 0);
+    i_rant_node_sys_unlock(n, acquired);
+    i_rant_pat_release_channels(ch, NULL);
+    return RANT_OK;
 }
 
 /* The built in @rant/meta endpoint, hosted at node open as a both sides multi function.
@@ -2024,6 +2231,15 @@ static uint64_t i_rant_func_reap(RantFunction *fn, uint64_t now, RantCallStatus 
         if (take){
             RantCallStatus st = (fail_status == RANT_CALL_TIMEOUT && p->queued_req)
                               ? RANT_CALL_NO_PROVIDER : fail_status;
+            /* the one outcome no definition can report, since no answer came from one */
+            if (fail_status == RANT_CALL_TIMEOUT && !fn->both){
+                char note[RANT_TOPIC_NAME_MAX + 32];
+                RantString nm = i_rant_topic_name(fn->req);
+                snprintf(note, sizeof note, "call of %.*s ended: %s",
+                         (int)(nm.len > RANT__PAT_SUFFIX ? nm.len - RANT__PAT_SUFFIX : 0), nm.data,
+                         i_rant_call_status_msg(st).data);
+                i_rant_node_sys_note(fn->n, RANT_LEVEL_WARN, note);
+            }
             *pp = p->next;
             i_rant_func_fail_pending(fn, p, st, i_rant_call_status_msg(st), park);
             continue;

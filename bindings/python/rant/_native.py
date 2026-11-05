@@ -309,6 +309,33 @@ class RantVariableUpdate(Structure):
     ]
 
 
+class RantCallEvent(Structure):
+    _fields_ = [
+        ("kind", c_int),
+        ("name", RantStringView),
+        ("provider", c_uint32),
+        ("provider_name", RantStringView),
+        ("caller_lo", c_uint32),
+        ("caller_name", RantStringView),
+        ("call_id", c_uint32),
+        ("status", c_int),
+        ("message", RantStringView),
+        ("data", RantBytes),
+        ("schema", c_void_p),
+        ("written_us", c_uint64),
+        ("recv_us", c_uint64),
+    ]
+
+
+class RantCallObserverOpts(Structure):
+    _fields_ = [
+        ("best_effort", c_uint8),
+        ("reflect_from_mesh", c_uint8),
+        ("queue", c_void_p),
+        ("queue_bytes", c_uint32),
+    ]
+
+
 class RantTaskOpts(Structure):
     _fields_ = [
         ("progress_best_effort", c_uint8),
@@ -411,6 +438,7 @@ AllocFn = CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_size_t)
 ReqFn = CFUNCTYPE(None, POINTER(RantRequest), c_void_p)
 RspFn = CFUNCTYPE(None, POINTER(RantResponse))
 VarFn = CFUNCTYPE(None, POINTER(RantVariableUpdate), c_void_p)
+CallEventFn = CFUNCTYPE(None, POINTER(RantCallEvent), c_void_p)
 CancelFn = CFUNCTYPE(None, c_uint64, c_void_p)
 NULL_REQ_FN = cast(None, ReqFn)   # a CFUNCTYPE argtype refuses a bare None
 NULL_VAR_FN = cast(None, VarFn)
@@ -514,6 +542,10 @@ def bind(lib):
     F("rant_variable_wait", [c_void_p, c_int], c_int)
     F("rant_variable_match_count", [c_void_p], c_int)
     F("rant_variable_retire", [c_void_p], c_int)
+    F("rant_node_create_call_observer", [c_void_p, c_char_p, c_void_p, c_void_p, c_void_p,
+                                         CallEventFn, c_void_p, POINTER(RantCallObserverOpts)], c_void_p)
+    F("rant_call_observer_match_count", [c_void_p], c_int)
+    F("rant_call_observer_retire", [c_void_p], c_int)
     F("rant_variable_refresh", [c_void_p], c_int)
     F("rant_variable_schema", [c_void_p], c_void_p)
     F("rant_variable_on_change", [c_void_p, VarFn, c_void_p], c_int)
