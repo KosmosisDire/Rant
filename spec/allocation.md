@@ -39,7 +39,8 @@ by use, never by size: the arena is one big block and the hottest memory Rant ha
 - Bulk, big or cold: the record array and the peer blobs, writer history samples, reader
   reassembly buffers and bitmaps, callback queue rings, the node core's interest and detail
   buffers, the meta snapshot and its answer, the SHM receive scratch, and in the patterns
-  layer a variable's value and shadow, a call's reply and a queued request.
+  layer a variable's value and shadow, each calling thread's call reply slot and a queued
+  request.
 
 NULL is the main pool, and the main allocator passed again is one pool. Any mode works:
 static over a PSRAM buffer, or dynamic over `heap_caps_realloc` with `MALLOC_CAP_SPIRAM`. The

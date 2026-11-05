@@ -1093,6 +1093,76 @@ static void sync_capture_checks(void){
 #endif
 }
 
+/* SYNC THREADS: blocking calls from several threads on one handle each get their own answer
+   whole, though the answers differ in size (spec/patterns.md) */
+#define ST_THREADS 4
+#define ST_CALLS   40
+static RantFunction *st_fn;
+static long long st_failed, st_wrong;
+/* the answer to {thread, seq}: the request, then the thread's byte to a length set by both */
+static size_t st_len(uint8_t thread, uint8_t seq){ return 2u + (thread + 1u) * 1500u + seq * 37u; }
+static void st_on_request(RantRequest *req, void *user){
+    static uint8_t payload[2 + ST_THREADS * 1500 + ST_CALLS * 37];
+    size_t len;
+    (void)user;
+    if (req->data.len != 2) return;
+    len = st_len(req->data.data[0], req->data.data[1]);
+    memcpy(payload, req->data.data, 2);
+    memset(payload + 2, req->data.data[0], len - 2);
+    rant_request_reply(req, rant_bytes(payload, len));
+}
+static void st_caller(void *arg){
+    uint8_t thread = (uint8_t)(uintptr_t)arg, req[2];
+    int i;
+    for (i = 0; i < ST_CALLS; i++){
+        RantResponse r; size_t k, want = st_len(thread, (uint8_t)i); int bad;
+        req[0] = thread; req[1] = (uint8_t)i;
+        if (rant_function_call(st_fn, rant_bytes(req, 2), &r, 3000, NULL) != 1 || r.status != RANT_CALL_OK){
+            test_atomic_add(&st_failed, 1);
+            continue;
+        }
+        bad = r.data.len != want || memcmp(r.data.data, req, 2) != 0;
+        for (k = 2; !bad && k < want; k++) bad = r.data.data[k] != thread;
+        if (bad) test_atomic_add(&st_wrong, 1);
+    }
+}
+static void sync_threads_checks(void){
+#ifndef RANT_THREADS
+    test_skip("needs service threads");
+#else
+    RantAllocator pa = rant_allocator_heap(0), ca = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *p, *c; RantFunction *def = NULL;
+    i_RantThread th[ST_THREADS]; int t;
+    memset(&o, 0, sizeof o);
+    o.domain = TEST_DOMAIN+55; o.disable_shm = 1; o.discovery.max_peers = 4;
+    o.net.multicast_interface = "127.0.0.1";
+    st_fn = NULL;
+    p = rant_node_open(&pa, "st-provider", NULL, NULL, &o);
+    c = rant_node_open(&ca, "st-caller", NULL, NULL, &o);
+    CHECK(p && c, "sync_threads: nodes open");
+    if (p && c){
+        def = rant_node_create_function_definition(p, "st/fn", NULL, NULL, st_on_request, NULL, NULL);
+        st_fn = rant_node_create_remote_function(c, "st/fn", NULL, NULL, NULL);
+    }
+    CHECK(def && st_fn, "sync_threads: function pair created");
+    if (def && st_fn){
+        rant_node_start(p); rant_node_start(c);
+        WAIT_UNTIL(8000, rant_function_match_count(st_fn) > 0);
+        CHECK(rant_function_match_count(st_fn) > 0, "sync_threads: caller matched");
+        for (t = 0; t < ST_THREADS; t++) i_rant_plat_thread_start(&th[t], st_caller, (void*)(uintptr_t)t);
+        for (t = 0; t < ST_THREADS; t++) i_rant_plat_thread_join(&th[t]);
+        CHECK(test_atomic_load(&st_failed) == 0, "sync_threads: every call is answered (%lld failed)",
+              test_atomic_load(&st_failed));
+        CHECK(test_atomic_load(&st_wrong) == 0, "sync_threads: every call gets its own answer (%lld of %d wrong)",
+              test_atomic_load(&st_wrong), ST_THREADS * ST_CALLS);
+    }
+    if (c) rant_node_close(c, 0);
+    if (p) rant_node_close(p, 0);
+    st_fn = NULL;
+    rant_allocator_reset(&ca); rant_allocator_reset(&pa);
+#endif
+}
+
 
 /* The one announce phase: a pattern handle's channels reach peers together, so a provider
  * never knows a caller's req without its rsp and prg. Each create, and each step of a
@@ -1373,6 +1443,7 @@ static const TestCase cases[] = {
     { "reflect_reuse", reflect_reuse_checks },
     { "loud", loud_checks },
     { "sync_capture", sync_capture_checks },
+    { "sync_threads", sync_threads_checks },
     { "one_announce", one_announce_checks },
     { "handle_gate", handle_gate_checks },
     { "refresh_live", refresh_live_checks },

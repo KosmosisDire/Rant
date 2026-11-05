@@ -215,6 +215,16 @@ typedef struct i_RantDefer {
     uint8_t       cancel_notified;   /* on_cancel ran, or is parked to run, once */
 } i_RantDefer;
 
+/* One calling thread's blocking call scratch. Its last answer stays until that thread's next
+ * blocking call on the handle, so threads calling at once never share one. */
+typedef struct i_RantSyncSlot {
+    struct i_RantSyncSlot *next;
+    uint64_t        thread;
+    uint8_t        *buf; uint32_t cap;
+    char            msg[RANT_CALL_MSG_MAX];
+    uint8_t         msg_len;
+} i_RantSyncSlot;
+
 struct RantFunction {
     RantNode         *n;
     i_RantPatterns *pm;
@@ -232,9 +242,7 @@ struct RantFunction {
     i_RantDefer      *defers;         /* provider: the live defer registry */
     RantCancelFn      on_cancel; void *on_cancel_user;     /* task definition, one slot */
     uint32_t          self_lo;        /* our own uuid low 32, the progress demux filter */
-    uint8_t        *sync_buf; uint32_t sync_cap;     /* the sync call reply scratch */
-    char            sync_msg[RANT_CALL_MSG_MAX];     /* the sync call message scratch */
-    uint8_t         sync_msg_len;
+    i_RantSyncSlot *sync_slots;     /* the blocking calls' scratch, one per calling thread */
     uint8_t         is_provider;    /* a pure definition, 0 for a both sides handle */
     uint8_t         both;           /* both sides in one handle, the @rant/meta shape */
     uint8_t         is_task;        /* the task shape */
@@ -993,7 +1001,12 @@ int rant_function_retire(RantFunction *fn){
     i_rant_func_drop_parked(fn);
     if (pm){ i_rant_pat_unlink((void**)&pm->funcs, fn, offsetof(RantFunction, next)); pm->auth_dirty = 1; }
     req = fn->req; rsp = fn->rsp; prg = fn->prg; obs = fn->obs;   /* outlive fn, see phase 3 */
-    if (fn->sync_buf)  i_rant_node_sys_bulk(n, fn->sync_buf, 0);
+    while (fn->sync_slots){
+        i_RantSyncSlot *s = fn->sync_slots;
+        fn->sync_slots = s->next;
+        if (s->buf) i_rant_node_sys_bulk(n, s->buf, 0);
+        i_rant_node_sys_bulk(n, s, 0);
+    }
     if (fn->dup_peers) i_rant_node_sys_alloc(n, fn->dup_peers, 0);
     i_rant_node_sys_alloc(n, fn, 0);
     if (pm) i_rant_pat_problems(pm);           /* its rivals' conditions go with it */
@@ -1048,30 +1061,44 @@ int rant_function_refresh(RantFunction *fn){
     return 1;
 }
 
-/* The blocking call's response capture, run under the node lock: copies the payload into the
- * function's scratch. The schema pointer is safe to hold, an interned schema lives until close. */
-typedef struct { RantFunction *fn; int done; RantCallStatus status;
+/* The blocking call's response capture, under the node lock: copies the payload into the
+ * calling thread's scratch. The schema pointer stays valid, an interned schema lives to close. */
+typedef struct { RantFunction *fn; i_RantSyncSlot *slot; int done; RantCallStatus status;
                  const RantSchema *schema; uint32_t len; uint32_t provider;
                  uint64_t written_us; } i_RantSyncCtx;
 static void i_rant_func_sync_response(const RantResponse *r){
     i_RantSyncCtx *c = (i_RantSyncCtx*)r->user;
-    RantFunction *fn = c->fn;
+    i_RantSyncSlot *s = c->slot;
     c->status = r->status; c->schema = r->schema; c->len = (uint32_t)r->data.len;
     c->provider = r->provider; c->written_us = r->written_us;
-    {   /* the message view dies with the callback: copy into the handle's scratch */
+    {   /* the message view dies with the callback: copy into the scratch */
         size_t ml = r->message.len <= RANT_CALL_MSG_MAX ? r->message.len : RANT_CALL_MSG_MAX;
-        if (ml) memcpy(fn->sync_msg, r->message.data, ml);
-        fn->sync_msg_len = (uint8_t)ml;
+        if (ml) memcpy(s->msg, r->message.data, ml);
+        s->msg_len = (uint8_t)ml;
     }
     if (r->data.len){
-        if (fn->sync_cap < r->data.len){
-            uint8_t *nb = (uint8_t*)i_rant_node_sys_bulk(fn->n, fn->sync_buf, r->data.len);
-            if (nb){ fn->sync_buf = nb; fn->sync_cap = (uint32_t)r->data.len; }
+        if (s->cap < r->data.len){
+            uint8_t *nb = (uint8_t*)i_rant_node_sys_bulk(c->fn->n, s->buf, r->data.len);
+            if (nb){ s->buf = nb; s->cap = (uint32_t)r->data.len; }
             else c->len = 0;
         }
-        if (fn->sync_cap >= r->data.len) memcpy(fn->sync_buf, r->data.data, r->data.len);
+        if (s->cap >= r->data.len) memcpy(s->buf, r->data.data, r->data.len);
     }
     c->done = 1;
+}
+
+/* The calling thread's scratch, made in the bulk pool at its first blocking call on the
+ * handle. Lock held. */
+static i_RantSyncSlot *i_rant_func_sync_slot(RantFunction *fn){
+    uint64_t self = i_rant_node_thread_id(fn->n);
+    i_RantSyncSlot *s;
+    for (s = fn->sync_slots; s; s = s->next)
+        if (s->thread == self) return s;
+    s = (i_RantSyncSlot*)i_rant_node_sys_bulk(fn->n, NULL, sizeof *s);
+    if (!s) return NULL;
+    memset(s, 0, sizeof *s);
+    s->thread = self; s->next = fn->sync_slots; fn->sync_slots = s;
+    return s;
 }
 
 /* The blocking call's wait predicate, under the node lock. A task that reached RUNNING
@@ -1091,13 +1118,16 @@ static int i_rant_func_call_wait_done(RantNode *n, void *user, uint64_t now, uin
 
 int rant_function_call(RantFunction *fn, RantBytes req, RantResponse *out, int timeout_ms,
                        const RantCallOpts *opts){
-    i_RantSyncCtx ctx; i_RantCallWait cw; i_RantPending *entry = NULL; int acquired, r; uint32_t id;
+    i_RantSyncCtx ctx; i_RantCallWait cw; i_RantPending *entry = NULL; i_RantSyncSlot *slot;
+    int acquired, r; uint32_t id;
     if (!fn) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_sys_lock(fn->n);
     if (!acquired){ i_rant_node_sys_unlock(fn->n, acquired); return RANT_ERR_STATE; }   /* from a callback */
+    slot = i_rant_func_sync_slot(fn);
     i_rant_node_sys_unlock(fn->n, acquired);
+    if (!slot) return RANT_ERR_OOM;
     ctx.fn = fn; ctx.done = 0; ctx.status = RANT_CALL_TIMEOUT; ctx.schema = NULL; ctx.len = 0;
-    ctx.provider = 0; ctx.written_us = 0;
+    ctx.provider = 0; ctx.written_us = 0; ctx.slot = slot;
     r = i_rant_function_call_id(fn, req, i_rant_func_sync_response, &ctx, opts, &id, &entry);
     if (r != RANT_OK) return r;
     cw.ctx = &ctx; cw.id = id;
@@ -1116,13 +1146,13 @@ int rant_function_call(RantFunction *fn, RantBytes req, RantResponse *out, int t
     if (out){
         memset(out, 0, sizeof *out);
         out->status = ctx.done ? ctx.status : RANT_CALL_TIMEOUT;
-        out->data = rant_bytes(fn->sync_buf,
+        out->data = rant_bytes(slot->buf,
                                (ctx.done && ctx.status != RANT_CALL_TIMEOUT) ? ctx.len : 0);
         out->schema = out->data.len ? ctx.schema : NULL;
         out->provider = ctx.done ? ctx.provider : 0;
         out->written_us = ctx.done ? ctx.written_us : 0;
-        /* the same lifetime rule as data: the scratch holds it until the next blocking call */
-        out->message = ctx.done ? rant_string(fn->sync_msg, fn->sync_msg_len)
+        /* the same lifetime rule as data: the scratch holds it until this thread's next call */
+        out->message = ctx.done ? rant_string(slot->msg, slot->msg_len)
                                 : i_rant_call_status_msg(RANT_CALL_TIMEOUT);
     }
     /* 0 = timed out, whichever deadline expired first, 1 = a real outcome */

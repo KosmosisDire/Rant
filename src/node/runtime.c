@@ -3035,6 +3035,14 @@ void  *i_rant_node_sys_bulk(RantNode *n, void *ptr, size_t size){ return i_rant_
 void **i_rant_node_sys_slot (RantNode *n){ return &n->patterns; }
 uint64_t i_rant_node_now_us (RantNode *n){ (void)n; return i_rant_plat_now_us(); }
 uint64_t i_rant_node_wall_us(RantNode *n){ (void)n; return i_rant_plat_wall_us(); }
+uint64_t i_rant_node_thread_id(RantNode *n){
+    (void)n;
+#ifdef RANT_THREADS
+    return i_rant_plat_thread_id();
+#else
+    return 0;
+#endif
+}
 /* The node lock for a pattern call, reentrancy aware like the internal entry lock. No kick
  * on unlock: every mutating path kicks at its own layer, and read only ops must not wake. */
 int  i_rant_node_sys_lock    (RantNode *n){ return i_rant_node_lock(n); }

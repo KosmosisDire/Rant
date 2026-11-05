@@ -74,7 +74,7 @@ program in this order.
 | `e2e.detail` | detail_live, interest_external, interest_bulk, filter_fetch |
 | `e2e.shm` | shm_node |
 | `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
-| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, one_announce, handle_gate, refresh_live, dropped_peer |
+| `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, sync_threads, one_announce, handle_gate, refresh_live, dropped_peer |
 | `e2e.tasks` | task, task_matrix |
 | `e2e.observers` | function_steps, task_steps, no_provider_lookalike, refused_twin, no_cost_unwatched, schemas, queued, slow_observer, threaded, caller_failures, malformed_reports |
 | `e2e.entities` | reflect_dropped, churn, republish, log_and_meta, status, rant_conditions, rant_refused, rant_partial, rant_cap |

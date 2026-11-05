@@ -65,7 +65,9 @@ on error. Under `rant_node_start` it sleeps on the service thread's progress,
 otherwise it drives the node loop itself. From a callback it is refused with
 `RANT_ERR_STATE`, and `rant_function_call_async` is the tool there. On a task the timeout
 bounds only the wait for the first response, then it waits for the terminal outcome and
-`rant_function_cancel` from another thread is the way out.
+`rant_function_cancel` from another thread is the way out. The views in `out` stay valid
+until the calling thread's next blocking call on the handle, so threads may call one handle
+at once.
 
 A call from a fresh remote waits for its match like a first topic send (docs/topics.md).
 

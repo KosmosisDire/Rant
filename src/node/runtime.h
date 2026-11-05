@@ -405,6 +405,8 @@ void    *i_rant_node_sys_bulk(RantNode *n, void *ptr, size_t size);
 void   **i_rant_node_sys_slot (RantNode *n);
 uint64_t i_rant_node_now_us     (RantNode *n);
 uint64_t i_rant_node_wall_us    (RantNode *n);
+/* The calling thread's id, 0 in a build without threads. */
+uint64_t i_rant_node_thread_id  (RantNode *n);
 /* The node lock for a pattern call that mutates state: 1 = acquired here, 0 = already held
  * by this thread. sys_unlock never kicks. sys_poll drives one loop tick. */
 int      i_rant_node_sys_lock    (RantNode *n);

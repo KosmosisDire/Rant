@@ -171,6 +171,12 @@ way out the call, under one lock hold, unlinks the entry if it is still pending,
 that count is 0 on other threads, then frees it. So no progress callback runs once
 `rant_function_call` returned, and `progress_user` may live on the caller's stack.
 
+The capture copies the answer into the calling thread's slot on the handle
+(`i_RantSyncSlot`), found by thread id under the lock and made at that thread's first call.
+So threads calling one handle at once never share a buffer, and each answer stays until its
+own thread calls again. Slots live until retire, and a recycled thread id takes over the
+slot of the thread that had it, which can no longer read it.
+
 Traps pinned by `e2e.tasks`:
 
 - A send only commits. A poll pass transmits. Retire and close drain the CANCELLED
