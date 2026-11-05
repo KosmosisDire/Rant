@@ -1,0 +1,162 @@
+# Build system
+
+The root `CMakeLists.txt` amalgamates `src/` into `dist/` and builds the host tools and
+tests. Four targets: `rant` is the header only core, `rant_platform` the OS
+libraries (Windows: ws2_32, bcrypt, winmm. Linux: rt) plus Threads, `rant_host` the built
+static library a consumer links, and `rant_shared` the shared library the bindings load.
+Each carries a `rant::` alias, and that is what another project links, whether it adds
+Rant as a subproject or finds the installed package.
+
+- `tools/pack.cmake` runs through an `add_custom_command` whose OUTPUT is `dist/rant.h`
+  and the files made from it, so it re packs only when a `src/` file or pack.cmake
+  changes. It also splices `rant.h`, `rant_types.hpp` and `rant_reflect.inc` into `dist/rant.hpp` and writes the two anchors. `dist/` is not committed,
+  so configure also runs the packer once when any output is missing: a header only
+  consumer depends on no build step, and cmake before 3.19 takes no dependency on an
+  INTERFACE target. The target is `rant_dist`, not `dist`, since a consumer may own that
+  name.
+- `pyproject.toml` builds the Python wheel through scikit-build-core, which runs this same
+  CMake with `SKBUILD` set. The one rule keyed on it installs `rant_shared` next to the
+  package. It carries `rant_types` at its top level and depends on nothing, so a library
+  with its own copy of the types can take Rant's classes when they can be imported. The
+  wheel is tagged `py3-none`, since ctypes needs no Python ABI, so one wheel
+  per platform serves every interpreter. Linux wheels are built inside manylinux, which
+  is what gives the shipped Linux library its glibc 2.28 floor.
+- CMake `file(WRITE)` turns `\n` into CRLF on Windows while `file(READ)` strips CR. The
+  packer strips `\r` after read so its logic is deterministic, and `.gitattributes` pins
+  every committed text file to LF.
+- The packer strips local `#include "..."` lines with a newline anchored regex, so an
+  include inside a comment or string is never touched. Each source file is wrapped in
+  `#pragma region` markers so editors fold it, with `-Wunknown-pragmas` silenced on GCC.
+- The standard types have one definition, `types/stdtypes.schema`. `rant_codegen --standard`
+  (`tools/codegen`) reads it with Rant's own compiler, standalone so it never needs the table
+  it writes, and writes `src/common/stdtypes.h` with `types/extras.h` pasted at its end,
+  `bindings/cpp/rant_types.hpp` inside `types/extras.hpp` at its marker, `bindings/cpp/rant_reflect.inc`,
+  `bindings/csharp/types/Types.cs` under `types/extras.cs`, `bindings/python/rant_types/__init__.py`
+  and its stub with `types/extras.py` and `types/extras.pyi` pasted at their ends,
+  `bindings/rust/rant-types/src/lib.rs` with `types/extras.rs` pasted at its end, `bindings/rust/rant/src/types/standard.rs`,
+  `bindings/web/src/stdtypes.ts`,
+  `src/serialize/stdroster.h`, `src/serialize/stdtable.c` and `types/stdtypes.json`. The
+  outputs are committed so a build needs no generator, and ctest `codegen.current` fails when
+  one is stale. A definition sees only those above it, and file order is `RantStdType`'s.
+- The guards `RANT_STDTYPES_H` and `RANT_TYPES_HPP` hold a revision made from every type's name and wire, so two
+  different copies of the types in one program stop at an `#error` instead of missing a type.
+- `tools/static_runtime.cmake` links the C and C++ runtime statically so a copied binary
+  runs with no redistributable. MSVC's default `/MD` needs VCRUNTIME140.dll and the debug
+  runtime ships only with Visual Studio, which is the "vcruntime dll not found" a copied
+  explorer hits. It must be included before any target or FetchContent subproject so every
+  object agrees on one runtime, and it forces policy CMP0091 NEW because vendored freetype
+  asks for cmake 3.0 and would otherwise build `/MD` from the legacy flags. MinGW takes a
+  full `-static`, other GNU toolchains static libgcc and libstdc++ with glibc shared. Every
+  variable it sets is a plain one in Rant's own directory scope, so a project that adds
+  Rant as a subproject keeps the runtime it picked and only Rant's targets go static.
+- `CMakePresets.json` has `windows` and `linux` configure presets, both with `binaryDir`
+  `build`. The Windows preset pins no generator and no architecture so
+  it works with any installed Visual Studio. Build presets `windows` and `linux` pin
+  Release, `windows-debug` and `linux-debug` pin Debug.
+- Multi config generators append a per config subdirectory to the output dir, so the root
+  pins every config's output dir to `bin/`. The VS generator's `cmake --build` defaults to
+  Debug whatever the config order, which is why the build preset pins Release.
+  `CMAKE_DEFAULT_BUILD_TYPE` is rejected by the VS generator, so it is guarded to Ninja
+  Multi-Config with an `unset(... CACHE)` else branch.
+- `RANT_BUILD_TOOLS=OFF` (auto when cross compiling or when Rant is a subproject) drops
+  the programs. `rant_platform` and `rant_host` survive it, because a consumer wants the
+  library without the tests. A cross build gets `rant` alone: the platform is its own.
+- Four targets, one job each. `rant` is the `dist/` include directory and nothing else.
+  `rant_platform` is the OS libraries, in `tools/rant_platform.cmake` so the root build and
+  a standalone `bridge-rant` configure share one list. `rant_host` is a static library over
+  `dist/rant.c`, so a consumer defines no `RANT_IMPLEMENTATION` and writes no anchor.
+  The in tree programs link `rant` and `rant_platform` instead, never `rant_host`: each
+  compiles its own flavour of the amalgamation, some with `RANT_NO_SHM`, and linking the built library too would define every symbol twice. `rant_shared` is the
+  same anchor built with `RANT_BUILD_SHARED` and hidden visibility, `EXCLUDE_FROM_ALL` in a
+  subproject, and it exports `RANT_LINK_SHARED` to whatever links it.
+- `dist/rant.c` and `dist/rant.cpp` are the generated anchors, two lines each. They are
+  what `rant_host`, the native plugin builds and the bridge compile, so the define lives
+  in one generated place instead of a hand written file per consumer.
+- Everything but the library and its packer is top level only: the programs, the `bin/`
+  output dir and the multi config defaults. The test is
+  `CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR`, since `PROJECT_IS_TOP_LEVEL` wants
+  cmake 3.21 and the root asks for 3.15. The config type list really did reach a
+  consumer once: it is a FORCEd cache entry, so it overwrote the consumer's own. `dist/` is
+  not committed, so a consumer runs the packer and reads `src/`.
+- `install()` copies `dist/rant.h`, `dist/rant_types.h`, `dist/rant.hpp` and `dist/rant_types.hpp` into `include/` and writes an export set plus
+  `rant-config.cmake` (from `tools/rant-config.cmake.in`) into `share/cmake/rant`, so
+  `find_package(rant CONFIG)` hands over the same two targets. The config finds Threads
+  before the targets file, which names `Threads::Threads`.
+- The version lives once, in `VERSION` at the root: `project()` reads it so the config
+  package answers a version request with `SameMinorVersion` compatibility, `Rant.csproj`
+  reads it through an MSBuild property function, `pyproject.toml` through the
+  scikit-build-core regex provider, and the Unity packer stamps it into `package.json`.
+  A release is a tag `v` plus that number, which the release job makes. Cargo cannot read
+  a file, so `bindings/rust/Cargo.toml` repeats the number, and both the Rust suite and the
+  workflow refuse a mismatch.
+- The packer reads `VERSION` too and writes `#define RANT_VERSION` at the top of
+  `dist/rant.h`, so a consumer that compiles the header gets the version with no build
+  define. `VERSION` is a dependency of the pack command, so a bump re packs.
+- The magic is `i_rant_magic` in `node/runtime.c`: a leading NUL, `RANT-MAGIC `, the
+  format number, then the closing NUL. `RANT-MAGIC ` and the decimal format number after
+  it never change shape, so a reader parses the number first and stops at one it does
+  not know. Format 1 continues with ` v` and the version, then one space separated word
+  per feature compiled in (`threads`, `shm`, `proc_stats`, `patterns`, `stdtypes`,
+  `plat_custom`). A new feature word keeps the format and a reader ignores words it does
+  not know. Any other change bumps `RANT_MAGIC_FORMAT`.
+  `rant_node_open` reads one byte of it through a volatile pointer: a static link with
+  `--gc-sections` or `/OPT:REF` drops unreferenced data, and every Rant user opens a node.
+  A tool that searches for the magic must not carry the whole pattern itself, or it
+  finds itself.
+- Three builds, one macro. `src/common/api.h` defines `RANT_API`, which every public
+  declaration carries. The default build compiles Rant into the caller's own binary and
+  needs no decoration. `RANT_BUILD_SHARED` marks each entry point exported, so the shared
+  library's export table is exactly what the public headers declare and nothing else,
+  which is why no binding keeps an export list. `RANT_LINK_SHARED` marks them imported,
+  which only Windows needs. GNU toolchains also take `-fvisibility=hidden` so the
+  internals stay in. The declaration carries the attribute and the definition in the `.c`
+  stays plain: the amalgamation puts both in one translation unit, declaration first.
+- `rant_allocator_heap` is the process heap as an allocator. It exists so a binding over
+  the shared library never has to reach for an internal symbol or route allocation back
+  through its own runtime.
+- The `RANT_THREADS` and `RANT_SHM` detection blocks live identically in both
+  `platform/core.h` and `transport/core.h`, because every translation unit must agree
+  whichever header it saw first. Edit both together. Code guards are `#ifdef RANT_THREADS`,
+  never `#ifndef RANT_NO_THREADS`. A new platform layer declares support by implementing
+  the thread, mutex, condvar and waker contract and defining `RANT_THREADS` itself.
+- The `RANT_IMPLEMENTATION` auto define in `rant.hpp` is guarded by
+  `!defined(__cplusplus)`, so a `.cpp` anchor spells the define itself.
+- Bindings: `rant_shared` is the one native library every binding loads. The top level
+  build copies it to `dist/native/<rid>/`, named by .NET runtime identifier, so the NuGet,
+  Unity and Python packages read one place. macOS builds it universal under the portable
+  `osx` identifier. `tools/unity.cmake` assembles the Unity package. Nothing under `dist/`
+  is committed.
+- The `packages` target builds whichever of `unity_package`, `nuget_package` (needs
+  dotnet) and `python_wheel` (needs Python) this machine can, into `dist/`, each over the
+  libraries in `dist/native/`. The release workflow runs the same three after merging the
+  libraries of every platform. Off Linux, with `uv` and `docker` found, `python_wheel`
+  also builds the x86_64 manylinux wheel: `uv build --sdist`, then cibuildwheel on that
+  sdist in Docker, so Docker must be running. `python_install` is apart from `packages`:
+  it force reinstalls the fresh wheel, and `Python3_FIND_REGISTRY LAST` makes that the
+  PATH Python.
+- CI is one workflow, `build.yml`, on every push to main and every pull request. On linux,
+  windows and macos it builds the library and its programs, runs the tests, builds
+  `tools/consumer` from the source tree and from an install, packs the NuGet and builds the
+  wheel of that platform. `web` builds and tests Rant in wasm.
+- A run on main whose `VERSION` has no tag yet also releases it, so the run that checks a
+  release commit is the one that publishes it. Two more jobs per platform, then one release
+  job after every check. `native` runs cibuildwheel, which builds the wheel
+  and, inside it, the library the NuGet and Unity packages bundle, so the Linux libraries
+  come out of the manylinux container, aarch64 under QEMU since no arm runner is free on
+  a private repo. `programs` builds the tools into one zip per platform, Linux on
+  ubuntu-22.04 for a glibc 2.35 floor. `release` stops when another commit holds the
+  version, then builds the sdist from the clean checkout, packs the `dist/` headers, merges
+  the libraries, packs the NuGet, assembles the Unity package, attaches everything to a
+  GitHub Release, which tags this commit, pushes the upm and upm-types branches, and publishes to nuget.org
+  and PyPI when the `NUGET_API_KEY` and `PYPI_API_TOKEN` secrets exist.
+- The Rust crate ships as a git dependency on the tag `crate-v<VERSION>`: a parentless
+  commit of the release tree plus `bindings/rust/rant/csrc/`, the packed `rant.h` and
+  `rant.c`, so cargo fetches one snapshot and never needs cmake. `build.rs` compiles
+  `csrc/` when present, else packs `src/` with `tools/pack.cmake`, which a checkout does.
+  The tag is never moved, since packages pin it.
+- `tools/consumer` is a throwaway project that consumes Rant the way a user does, from the
+  source tree by default and from an install with `RANT_CONSUMER_FIND_PACKAGE=ON`. It is
+  the only thing that notices when external consumption breaks, which the normal build
+  cannot see.
+- `.gitignore` binary patterns are anchored to the root. An unanchored `node` once matched
+  `src/node/`. Check `git status --ignored` when a new source file will not stage.

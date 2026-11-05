@@ -1,0 +1,11 @@
+[package]
+name = "rant-ffigen"
+description = "Regenerates the Rant crate's FFI declarations from dist/rant.h"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# Pinned exactly: another bindgen spells the same header differently
+bindgen = { version = "=0.73.2", default-features = false, features = ["runtime", "prettyplease"] }
