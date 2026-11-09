@@ -8,7 +8,7 @@ description: Writing code with Rant, the robotics middleware, in C, C++, Python,
 Rant connects programs ("nodes") on one machine or a network ("the mesh"). Nodes find each
 other on their own and share four kinds of entity: topics, variables, functions and tasks.
 This skill is the code. The `rant` command makes, builds and runs nodes, and its own skill
-`rant-skill` comes with `rant install rant_skill`. Full docs:
+`rant-cli` comes with `rant setup skill`. Full docs:
 https://docs.rantlib.dev/llms.txt (fetch the page you need).
 
 - Read the project before changing it. Keep its layout, names and style. The rules below
@@ -145,7 +145,7 @@ rant_queue_dispatch(q, 0, 100);              /* on the thread that runs them */
     `Arm { mode: Mode }`. An inline `{ }` or `enum` in a field is refused.
   - Fields are snake_case on the wire. Write them in the language's style (`frame_id` in
     Python and Rust, `FrameId` in C#) and Rant converts, so both are `frame_id`.
-  - Nodes are snake_case, named like their file, as the skill `rant-skill` says.
+  - Nodes are snake_case, named like their file, as the skill `rant-cli` says.
 - Units are SI: meters, seconds, m/s, N, radians. Time is a `Timestamp`, microseconds since
   the Unix epoch.
 - Frames are right handed, and an angle turns from +x toward +y. Two kinds of 2D differ:
