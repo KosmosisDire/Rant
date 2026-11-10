@@ -16,9 +16,16 @@
 #include <string_view>
 #include <vector>
 
-/* RANT_MATH, set for a whole build by linking Rant Math, gives each type its methods. */
-#if defined(RANT_MATH) && !defined(RANT_MATH_MEMBERS_HPP)
-#include "rant_math_members.hpp"
+/* Rant Math's methods go into each type when RANT_MATH is set or its members header is on the include
+ * path, so every file of a build sees the same types. */
+#if !defined(RANT_MATH_MEMBERS_HPP)
+#  if defined(RANT_MATH)
+#    include "rant_math_members.hpp"
+#  elif defined(__has_include)
+#    if __has_include("rant_math_members.hpp")
+#      include "rant_math_members.hpp"
+#    endif
+#  endif
 #endif
 
 namespace rant {
