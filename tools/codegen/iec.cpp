@@ -100,6 +100,7 @@ private:
 
     std::map<std::string, const Def *> defs_;
     std::map<std::string, Shape> done_;
+    std::map<std::string, std::string> arrays_;   // each array type's name and the schema text it came from
     std::string out_;
 
     static std::string about(const Def &d) {
@@ -136,7 +137,11 @@ private:
     }
 
     Shape array_type(const std::string &name, const Type &t, const std::string &text) {
+        const auto seen = arrays_.find(name);
+        if (done_.count(name) && (seen == arrays_.end() || seen->second != spell(t)))
+            throw std::runtime_error("the IEC name " + name + " is taken by another type, rename a field or type");
         if (done_.count(name)) return done_.at(name);
+        arrays_[name] = spell(t);
         std::vector<uint16_t> counts;
         const Type *e = &t;
         for (; e->kind == Type::Array; e = e->elem.get()) {
