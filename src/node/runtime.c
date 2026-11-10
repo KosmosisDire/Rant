@@ -2214,7 +2214,8 @@ static void i_rant_node_trouble(void *u, RantErrorKind what, uint32_t peer, uint
 }
 
 /* Rebuilds every Rant condition the runtime owns from the state behind it, so each lasts
- * exactly as long as its cause. duplicate_authority and forced are the patterns layer's. */
+ * exactly as long as its cause. duplicate_authority and forced are the patterns layer's.
+ * Out of line to keep its big frame off the service thread's deepest stack path (ESP32 6784 to 5296). */
 RANT__NOINLINE static void i_rant_node_problems_rebuild(RantNode *n){
     i_RantProblems one, big, schema, qos, kind;
     i_RantTroubleSink sink;
