@@ -14,10 +14,8 @@ spell their shapes out.
 
 ## Why names, not just shapes
 
-Before wire version 8 a schema was purely structural: `{ x: f64, y: f64, z: f64 }` matched
-any other schema with those three fields. That is right for a field's layout and wrong for
-its meaning. A `Twist` (linear plus angular velocity) and two `Double3`s are the same
-bytes. A Celsius reading and a Fahrenheit reading are both `f32`.
+A schema matches by shape, which is right for a field's layout and wrong for its meaning. A `Twist`
+and two `Double3`s are the same bytes, and a Celsius and a Fahrenheit reading are both `f32`.
 
 So a type may carry a NAME. It rides the schema wire, never a message byte, and it narrows
 matching:
@@ -29,13 +27,8 @@ matching:
 | `Celsius = f32` | `f32` | refused, the reader asked for a Celsius |
 | `Celsius = f32` | `Fahrenheit = f32` | refused, different names never cross wire |
 
-The shape is still always checked. A name never skips structural verification, and a peer
-advertising `Uuid = u8[15]` is refused rather than trusted (`rant_std_recognize` verifies
-name and shape). Struct root names stay strict equal in both directions, and enum option
-names stay advisory.
-
-Naming costs zero message bytes. `Celsius` is four bytes on the wire the schema is
-exchanged on, and nothing per message.
+The shape is still checked, so a peer advertising `Uuid = u8[15]` is refused. Struct names match
+exactly and enum option names are advisory.
 
 ## The roster
 
@@ -267,27 +260,12 @@ this:
 - Matrices and covariances are indexed row then column, `m[row][column]`.
 - Color is RGBA bytes in sRGB, straight alpha.
 - Uuid holds the 16 bytes in RFC 4122 order, not a platform GUID's mixed endian layout.
-  The C# binding converts explicitly rather than calling `Guid.ToByteArray`.
-- `Transform.parent` and `Transform2D.parent` name the frame this one is measured in, `""`
-  when unstated. The cap is 30 rather than 32 so the packed 88 and 56 bytes stay 8 aligned
-  and the C mirrors still match.
+- `Transform.parent` and `Transform2D.parent` name the frame this one is measured in, `""` when unstated.
 - A `JointState` array is positional. The names ride a `JointNames` variable published
   once, never a field of every sample. `velocity` and `effort` may be empty.
-- A fixed type gains no padding in C: each member starts on a multiple of its size and the
-  total is a multiple of the widest. So an enum beside `f64` values is `enum<u64>`, and
-  `rant_codegen` refuses a type that breaks this. The transport internals follow the same
-  rule.
-- A name has one spelling on the wire: fields are snake_case, types and enum options
-  PascalCase, and the parser makes them so from whatever was written. `frame_id`,
-  `FrameId` and `frameId` are one field, `robot_pose` is `RobotPose`, `IDLE` is `Idle`.
-  An underscore, a case change and the last capital of a run split words (`HTTPServer`
-  is `http_server`), a digit stays with its word (`Imu9Dof` is `imu9_dof`). PascalCase
-  cannot show where single letters split, so in a type a run of them is one word:
-  `point_x_y`, `point_xy` and `PointXY` are all `PointXy`. Two fields of
-  one struct, or two options of one enum, with the same wire name are refused. Every binding derives a member's wire
-  name by the same rule, `rant_field_name` in C, so a C# `FrameId`, a Python `frame_id`
-  and a C `frameId` meet with no attribute, and a path such as `"frameId"` given to
-  `rant_get_f32` finds `frame_id`.
+- A name has one spelling on the wire: fields are snake_case and types and enum options PascalCase.
+  `frame_id`, `FrameId` and `frameId` are one field, so a C# `FrameId` and a Python `frame_id` meet
+  with no attribute. Two fields with the same wire name are refused.
 
 Deliberately absent for now: civil date and time, unit annotated value types (SI by
 convention today, schema level unit annotations are the future mechanism), IP addresses,
@@ -301,11 +279,12 @@ A vector shows its numbers another way with no library but the types.
 
 - C++: `Double3 d = float3;` and `static_cast<Float3>(d)`, Int vectors up to Double, and `==` on every vector.
 - C#: the same, and to and from `System.Numerics` vectors and `Quaternion`.
-- Rust: `Double3::from(float3)`, and with the feature `nalgebra` `From` to and from its vectors, matrices,
-  quaternions and isometries.
+- Rust: `Double3::from(float3)`, and with the feature `nalgebra` `From` to and from its vectors, matrices and
+  `Quaternion`, and from its `UnitQuaternion` and `Isometry3` into `Quaternion` and `Pose`.
 - Python: `x, y, z = v` and `numpy.array(v)`, for every vector and `Quaternion`.
 
-Anything that computes, such as another tool's axes or a unit rotation, is Rant Math's.
+Anything that computes, such as another tool's axes or a unit rotation, is Rant Math's. Its methods and
+operators appear on these types in every language once Rant Math is linked or installed.
 
 ## Using them from C
 
@@ -454,17 +433,3 @@ Reflection reaches the same values by flat index with `rant_get_value_at` and
 - `rant_set_value_at` sets values only: an array of fixed elements from its packed bytes.
   `rant_set_array_count_at` sizes a variable array by flat index, as `rant_set_array_count`
   does by path, and its elements are then set one at a time.
-
-## Wire format
-
-Named types are `RANT_NAMED` (kind 18) in schema wire version 8:
-
-```
-NAMED := [u8 kind=18][u8 namelen >= 1][name][type inner]
-```
-
-`inner` is never itself NAMED, and NAMED never appears in root position. A root's name
-rides the schema header instead, so there is exactly one encoding for it and the hash
-stays canonical. `rant_schema_print` spells a schema back with each named type hoisted to
-a leading definition, `Name { }` for a struct and `Name = type` for the rest, dependencies
-first, and that text recompiles to identical bytes. The full wire grammar is in spec/schema.md.

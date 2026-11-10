@@ -137,6 +137,14 @@ rant_queue_dispatch(q, 0, 100);              /* on the thread that runs them */
   `Double2/3`, `Quaternion`, `JointState`, `Odometry`, `Imu`, `LaserScan`, `PointCloud`,
   `Mesh`, `Grid`, `Image`, `File`, `Color`, `Timestamp`, `Duration`, `Empty` and the rest at
   https://docs.rantlib.dev/llms.txt. Never define your own pose, vector, cloud or map.
+- Standard types are plain values that cast to the numbers a program already uses:
+  - C++: `Double3 d = float3;`, `static_cast<Float3>(d)`, `==` on every vector.
+  - C#: the same, and to and from `System.Numerics` vectors and `Quaternion`.
+  - Python: `x, y, z = v` and `numpy.array(v)`, for every vector and `Quaternion`.
+  - Rust: `Double3::from(float3)`, and the `nalgebra` feature of `rant-types` adds `From` to and from
+    nalgebra's vectors, matrices and quaternions. `rant::types::names()` lists every standard type.
+  - With Rant Math linked or installed (`rant add math`), its methods and operators appear on these
+    types, so use them instead of writing vector or rotation maths.
 - Pick the entity by shape: a topic for a stream, a variable for state or a setting with
   one owner, a function for a quick question, a task for a long job with progress or cancel.
 - Names are snake_case where they meet code and PascalCase everywhere else:
