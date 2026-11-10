@@ -1,0 +1,384 @@
+# Node
+
+The node owns the sockets and the clock, drives discovery, and turns discovery into
+transport lifecycle. The user facing API is in docs/node.md.
+
+## Core and runtime
+
+`node/core.c` is sans-IO: the peer table (peer id to physical address) and the discovery
+to transport lifecycle. `node/runtime.c` owns the sockets, the clock, the route probe,
+the send and receive paths and the public `rant_node_*` API. The runtime resolves the
+transport core's abstract destination (a peer id) to a wire address. A second transport
+(serial, Bluetooth) is a new runtime over the same cores. See spec/transports.md.
+
+Three datagram families arrive on the data socket: the transport's, `uDSC` (discovery)
+and `uDTL` (details and interest pages). Every data datagram pays two linear peer scans
+(`id_for_addr` then the peer slot), the first thing to index if peer counts grow.
+
+Receive is drained until the socket is empty or `RANT_RX_BUDGET_US` (5 ms) elapses, then
+discovery and send get their turn, so a slow `on_message` never starves them. A datagram
+the socket refuses is held in `tx_hold` and retried first next tick, never dropped. The
+data socket is bound before discovery opens so the announce carries the real port, with no
+address reuse, so a port collision fails loudly at open.
+
+## Delivery
+
+Every delivery path (inline UDP, shared memory, parked redelivery) runs one sequence:
+strip the source stamp, split the pattern header (`prefix_bytes`, plus a `[u8 len][bytes]`
+message on a response channel), validate the payload length against the publisher's
+schema, then queue or call back. A zero length payload on a pattern channel is an op only
+message and skips the schema, as does a task request whose op byte is not CALL. A message
+that fails validation is dropped and surfaced, never handed to the app.
+
+## Growth
+
+In dynamic mode a peer that found no slot and an oversized peer blob are growth signals,
+not verdicts: at the next poll, between ticks, the slots double until every peer that wants
+one fits, or the accept bound grows, discovery fetches the peers the growth made room for,
+and the app never sees the refusal. Static mode surfaces both. A size that failed to allocate is remembered so the
+retry surfaces instead of spinning. See spec/allocation.md for the grow itself.
+
+## Settle
+
+`rant_node_settle` solicits, re sent four times a second, and returns once every live
+record has been heard since the solicit, no match has formed for one window (the announce
+interval capped at 300 ms), and one window has passed overall. With no peer heard
+at all only a full announce interval can rule out a slow one. The post open gather latch
+uses the same predicate anchored at open, so a first send's match wait knows the announce
+cache covers the peers that were already there.
+
+## Threading
+
+One node level mutex at the API boundary, never held across a blocking wait. The sans-IO
+cores stay lock free. Per topic lock sharding is the future path and this design is a
+strict prefix of it.
+
+- `i_rant_node_poll_locked(n, timeout, outer)` is the one poll body. The public poll, the
+  service loop and the non started backpressure pump all run it. `outer = 1` drops the
+  lock around the platform poll over the data, waker and discovery descriptors. The wait
+  is capped by the transport's next deadline and discovery's next announce, so an idle
+  service thread wakes about once a second, and the service loop is capped at 250 ms so a
+  lost wakeup is bounded.
+- The waker is a self connected loopback UDP socket, the one self pipe pollable on both
+  Windows and POSIX. Mutating entry points kick it (coalesced) so the change is serviced
+  now. A waker open failure degrades the open (kicks no op, next tick latency).
+- A send transmits on the caller's thread. `i_rant_node_send_tx` runs the one TX drain
+  (`i_rant_node_tx_drain`, shared with the poll body and `i_rant_node_flush_tx`) under the
+  lock the send already holds whenever another thread runs the loop (a service thread or
+  a sleeping poller), so there is no handoff, no waker datagram and no wait for a TX
+  pass. A full socket parks the datagram in `tx_hold` and kicks the poller to retry. A
+  send can also arm a transport timer (a rate capped lane's tick, a tail heartbeat) ahead
+  of the wake the sleeping poller planned. `sleep_until_us` records that plan, and the
+  send kicks when the new deadline lands a millisecond or more before it, or the timer
+  would fire up to the 250 ms cap late. A
+  send from a callback leaves the drain to the pass that called it. A single threaded
+  program keeps the batch at its poll, where one datagram carries many submessages. The
+  price of the inline drain is that batching: a tight loop of small sends tops out near
+  450k a second where the handoff reached 750k with a deep history.
+  `pollers_sleeping` is a counter, since a flag lost kicks with several pollers.
+- A plain topic `on_message` runs with the lock released (`i_rant_node_callback_begin`
+  and `end`), so a send on another thread never waits for a handler. The blocking
+  function call's own capture is internal and stays under the lock, so its caller finds
+  the call answered or still pending, never mid copy. The thread is
+  stamped `cb_thread` while it is out and `cb_out` counts such callbacks. A call the
+  handler makes takes the lock back for its duration (`cb_depth` counts the nesting) and
+  still gets `acquired = 0`, so it keeps the callback rules: no wait, no pump, and the
+  refusals below. A refused nested call must still unlock. Entry points that move the
+  arena or the lanes (create, set role, retire, retype, start, stop, the queue setup) and
+  the one poll body wait in `i_rant_node_callbacks_settle` until no callback is out on
+  another thread, so a foreign poll or a pump never enters the receive path behind a
+  paused delivery. The patterns layer brackets its inline callbacks the same way through
+  `i_rant_node_sys_callback_begin` and `end` (request, response, progress and cancel
+  handlers, `on_write` and `on_change`), each handle counting its own callbacks out, so
+  its retire waits on that count and a variable's store writers wait on it too, since the
+  update the observer holds views the store. A handle counts a callback only when the
+  bracket released the lock itself, so a handler a queue dispatch runs, with the lock
+  already released, counts nothing, and the topic's busy flag guards its retire instead.
+  Synthesized outcomes at retire, close and timeout, and `on_event`, still run under the lock.
+  A queue dispatch releases the lock through the same bracket unmarked, so a dispatch
+  thread keeps the full API.
+- Reentrancy is the callback thread stamp above, and the owner thread id for a nested
+  call that already holds the lock. From callbacks, send and read only queries are legal.
+  Poll, create topic, set role, drain, start, stop and close are refused with
+  `RANT_ERR_STATE`: create would relocate the arena mid receive, set role would replay
+  interest into the proxy mid delivery, stop would self join. A send from a marked
+  handler writes the socket itself like any other sender, since the paused pass already
+  allows a send there, so a burst inside a handler never overwrites itself whatever the
+  depth. A send from `on_event` or a synthesized outcome commits and leaves the write to
+  the pass that fired it.
+- Backpressure: the one send wait. A send that would overwrite unacked reliable history
+  waits up to `qos.backpressure_wait_us` on the shared skeleton, asleep on the node condvar
+  when a service thread runs (the work pass tail broadcasts when waiters exist) and
+  pumping otherwise. It does not kick: it waits for acks, which wake the poller by
+  themselves, and a kick per wake made the two threads spin. There is no unsent wait.
+  Unsent history at send time means a full socket, so KEEP_LAST proceeds and
+  `RANT_E_EVICTED_UNSENT` fires after the send commits. A rate capped lane is exempt from
+  `i_rant_transport_send_would_evict_unsent`, since it holds samples back on purpose.
+- The blocking waits (match wait, send backpressure, topic drain, node settle, queue
+  wait) share one `i_rant_node_wait_until` skeleton: predicate, periodic hook, outer flag.
+  Invariants it carries: waiter accounting, re derive arena pointers after any wait, exit
+  when the service thread stops, kick before sleep. The patterns layer's blocking call and
+  variable wait ride it through `i_rant_node_sys_wait`, so they sleep on the service
+  thread's progress when one runs and pump the loop otherwise.
+- `rant_node_stop` elects one joiner, broadcasts, kicks, unlocks, joins without the lock,
+  then clears the running flag and broadcasts a second time for waiters that re slept.
+- `RANT_NO_THREADS` keeps the single threaded contract and `rant_node_start` returns
+  `RANT_ERR_NOSYS`. Guards are `#ifdef RANT_THREADS`.
+
+## Callback queues
+
+`RantQueue` is a drain group, not storage. `rant_queue_dispatch` scans the handles created
+with it (`RantTopic.queue`) and pops the record with the oldest arrival stamp across their
+rings, stopping at the stamp taken on entry so arrivals during the dispatch wait for the
+next call. Each pop views the record (`viewing`), sets the ring busy so a retire of that
+handle is refused meanwhile, releases the node lock around the callback when this thread
+owns it, and releases the view after. `RantQueue.busy` refuses a concurrent or nested
+dispatch, and `RantNode.dispatching` counts busy queues and refuses close. A topic created
+with a queue allocates its ring at creation and the create fails with `OOM` when it cannot.
+A queue of another node fails the create with `STATE`. Queues are pool allocations freed by
+the reset at close, at most `RANT_QUEUES_MAX`. The rings, caps and park rules are the
+queue rings' below.
+
+Events park on one node ring (`RantNode.event_q`, allocated by `rant_node_set_event_queue`,
+`silent` so an eviction counts without emitting) as `I_RANT_REC_EVENT` records: the
+`RantEvent` copy, then `topic_name`, `peer_name` and `detail` as length, presence and
+NUL terminated bytes, since all three are views that die with a retire or a peer drop. The
+patterns layer's `sys_on_event` still runs inline at emit, state applies at receipt. The
+group walk treats the ring as a handle less member of the event queue.
+
+## Queue rings
+
+A queued handle's messages are copied by the poll thread into a per handle byte ring
+(`i_RantMsgQueue`: a record header holding its size, the payload length, the two stamps and
+the publisher id and name length, then the copied sender name, then an 8 aligned payload.
+Records never wrap). The ring starts small and grows to `qos.queue_bytes`. An explicit
+value pre allocates the ring in full. A grow always makes room for two of the message that
+needed it, past the cap if it must, since the record a view or a callback pins blocks every
+grow until it is released, and its successor must fit beside it.
+
+A pull topic (`RantTopic.pull`) has the same ring with no callback queue: `rant_topic_take`
+views the tail record until the next take, and `take_latest` pops all but the newest first,
+repeating while the freed space unparks a reliable lane. The record being dispatched or
+taken pins the ring tail, so grow and eviction skip while its callback runs or its view
+lives, and best effort degrades to drop newest until then. `RantMsg.schema` is re resolved
+at dispatch or take, since the delivery map can repoint. The sender name is copied
+into the record because discovery views die with the peer.
+
+At the cap the policy is the reliability QoS. Best effort overwrites the oldest and fires
+`RANT_MSG_LOST`. Reliable PARKS delivery in the transport reader: `on_message` returns
+nonzero, no `deliver_upto` advance, no ack, no repair traffic, the message held in the
+assembly buffer (the SHM variant parks the descriptor). Incoming DATA of the next sample
+fills the one ahead hold, so an unpark delivers both with no resend. The writer's
+`acked_upto` stalls, its history fills, and the publisher's send blocks on normal flow
+control. Draining calls `i_rant_transport_deliver_parked` and kicks the waker. A writer HB
+floor past the held sample gives up with one `MSG_LOST`, the bounded loss escape. Any new
+sans-IO consumer of `i_RantMessageFn` must return 0.
+
+Size the queue at least `keep_last` times the message size, or the reader parks while
+the writer keeps bursting and heals only through the paced repair path (16.4 to 3.7 GB/s
+measured with a 4 MB queue against a 16 MB burst). A zero copy hold (refcounted, ack on
+release) is the known escape for huge payloads, not built.
+
+## Timestamps
+
+`written_us` is 8 little endian bytes the writer prepends inside the sample ahead of any
+pattern header, stamped in `i_rant_writer_store` from the `i_RantTransportConfig.source_time` hook
+(the node wires it to `i_rant_plat_wall_us`). A NULL hook still writes 8 zero bytes:
+framing is driven by the QoS alone, never by hook presence. The opt out
+(`qos.no_timestamp`) rides the attrs byte of the DETAIL_RESP (`RANT_ATTR_NO_TIMESTAMP`,
+see spec/interest.md), and the detail intake re applies the cached interest blob in the
+same call that forms proxies, so the receiver always knows before it can deliver. The
+node strips the stamp at one point before the pattern prefix split (the queue path strips
+at enqueue). `recv_us` is the node's monotonic clock at the moment the poll received the
+message, or at enqueue for a queued topic.
+
+`capture_us` is a second 8 byte slot right after `written_us`, present only when the
+sender passed one. A microsecond wall clock needs 51 bits, so bit 63 of `written_us`
+carries the marker that announces it, and the strip masks that bit off before the value
+reaches `RantMsg`. The marker lives inside the sample rather than in the DATA submessage
+flags on purpose: repair, catch up replay, the SHM chunk and the queue ring then
+carry it with no extra plumbing, exactly as the source stamp already does, and neither
+delivery callback grows an argument. A sample whose marker is set but which is too short
+to hold the slot is malformed and is passed through whole rather than read past.
+A `no_timestamp` topic frames neither slot, so a capture time cannot ride it.
+
+## Errors
+
+One event kind, `RANT_ERROR`, with a `RantErrorKind` code. `RantEvent` and its codes live
+in `common/types.h` and every layer fires them directly, so an error has one name from
+the transport to the bindings and nothing is translated on the way up. The transport
+fills the topic name itself and asks its `schema_why` hook for the mismatch text.
+Discovery fires only its two errors (`PEER_REFUSED`, `PEER_META_TOO_BIG`) as events. Its
+peer up and peer down are plain hooks, since they carry the overlay and the DROP or GONE
+reason the node core acts on, and the app's `PEER_UP` and `PEER_DOWN` come from the node
+core after it has done that work. `i_rant_discovery_last_error` returns a `RantErrorKind`
+too. Each layer sets `.user` to its own config user, and the single emit point swaps in
+the app's `user_data`. Text is built on demand by
+`rant_event_str`, so the data path never touches it. `rant_last_error(n)` keeps the last
+error per node, and a process global slot keeps the failure of a `rant_node_open` that
+returned no handle. That failure also fires the `on_event` passed to open.
+
+`RantEvent.detail` says exactly what was incompatible on a schema mismatch,
+recorded per (peer, topic, direction) at detail intake. `RantEvent.peer_name` is resolved
+once at the single emit point so `rant_event_str` never prints a bare id. `RantEvent` is
+returned by value, so every binding mirror must match it exactly (spec/bindings.md).
+Deferred on purpose: `RANT_E_SHM` (needs once only dedup) and `RANT_E_BAD_PACKET` (risks a
+flood from hostile traffic). Internal errors are mirrored to `@rant/log` at Error with
+origin Rant through a fixed ring of 8 records (events fire mid receive where re entering
+the transport is unsafe, so the poll pass flushes them), duplicates coalesce into "(xN)",
+overflow becomes one summary line. Rant's other lines, such as a refused status clear, ride
+the same ring as notes coalesced by text, and a note below the log level is never
+recorded. Each line goes out with the time it fired as `capture_us`. The ring is
+allocated on the first line, so a healthy node never pays for it. `RANT_E_SEND` carries the datagram size and the first submessage's topic, so a
+starved link (an ESP32 out of WiFi buffers reports ENOMEM) says which topic and how big.
+
+## Name prefix
+
+The prefix is built once at open: `RANT_PREFIX` outermost, then `opts.prefix`, joined with
+`/` into `n->prefix`. A launcher can move a whole program under a cell without the program
+knowing, and the program can still group its own names. Each part is checked at open: no
+`@`, no leading or trailing `/`, and room left for a `/` and a one byte name.
+
+Every public create (topic, function, task, variable, both sides) passes its name through
+`i_rant_node_mesh_name` before anything else sees it. Everything below that point, from the
+pattern channels and their `@` suffixes to reflect_from_mesh and the transport identity
+hash, only ever sees the full mesh name, so there is one name per entity. A leading `/` is
+the way out: it is stripped and the prefix is skipped. A name that holds `@`, is empty, or
+will not fit `RANT_TOPIC_NAME_MAX` with its channel suffix fires `RANT_E_BAD_NAME`.
+
+Reflection and `rant_node_mesh_find` take and give full names. They describe the mesh, and
+an observer like the explorer passes back names it read from a walk. Built ins are made
+below the resolver and are never prefixed.
+
+`RANT_NODE_NAME_PREFIX` is separate. It goes with `/` in front of the node name after
+`RANT_NODE_NAME` and the auto name, and the result is cut to `RANT_NODE_NAME_MAX` like any
+node name.
+
+## Built ins
+
+The builtins ride outside `opts.max_topics` in a block at the top of the reserve, so user
+topics keep dense 0 based indices. A `creating_builtin` flag routes open time allocation
+into the block and user creates step over it after a grow. Every handle iteration goes
+through `i_rant_node_topic_hi`.
+
+Builtins are hidden from every high level surface. Both entity walks skip them, the meta
+snapshot reports app topics only, and a leading `@` is refused in every public constructor
+so an app entity can never land in the hidden namespace. The raw interest walk still
+yields them. `rant_node_log_topic`, `rant_node_status_topic` and `rant_node_meta_function`
+are the way in.
+
+The log and status schemas share `RantLevel = enum<u8> { Debug = 1, Info, Warn, Error }`
+and `RantOrigin = enum<u8> { App, Rant }`. The level starts at 1 so that 0 in
+`opts.log_level` means the default.
+
+`@rant/log` is reliable with `keep_last` = `catch_up` = 4 and no backpressure wait, so a
+slow subscriber only loses old lines. Catch up replay is per writer lane, so a late
+subscriber gets each node's last 4 lines. The record schema is
+`RantLog { level: RantLevel, origin: RantOrigin, text: string }`, and the text is capped at
+`RANT_LOG_MAX` (512) bytes. The line's time is the message's `capture_us` when set (Rant's
+own lines, which flush after they fired), else its `written_us`. The level filter runs in
+the call, before formatting, so a Debug line below the level costs a compare. A node never
+delivers to itself, so consuming the log means reading every other node's lines.
+
+`@rant/status` carries the node's whole set as
+`RantStatus { conditions: RantCondition[] }`, reliable with `keep_last` = `catch_up` = 1.
+Each set supersedes the last, so the one retained message is the whole truth for a late
+subscriber and a lost one heals with the next. A periodic republish would add nothing:
+repair covers loss, catch up covers a late join, and `RANT_PEER_DOWN` covers a node that
+went away. The set lives as its own message in a node owned buffer, grown by one element
+per raise, so there is one copy and the flush sends it as is. A raise, update or clear
+edits it under the lock and marks it dirty, and the poll pass publishes it once, which
+coalesces a burst and keeps the calls safe mid receive. An update with the same level,
+text and clearable marks nothing. A condition is identified by origin and key, and since
+the key and text are `string<48>` and `string<160>` slots the caps are wire constants.
+
+`@rant/status/clear` carries `RantClear { key: string<48>, since_us: u64 }`, directed at the
+owner, reliable with `catch_up` 0 so a clear never replays onto a node that restarted. Every
+node receives on it. A node sends on it only while it reads `@rant/status`, since a clear
+names a `since_us` only a read set shows: a role change of the status topic sets the clear
+topic's role in the same announce. So two nodes that never read status never match through
+it, and a reader is already matched with every node through status. The owner's handler runs mid receive: an app condition that is
+clearable and whose `since_us` matches is removed and `RANT_STATUS_CLEARED` fires with the
+asker as `.peer` and the key as `.detail`. Anything else becomes a Debug note. There is no
+reply, since the next set is the answer, and the `since_us` match keeps two operators'
+clears from landing on a later raise of the same key.
+
+## Rant's own conditions
+
+Errors that are really states (a node that cannot be a peer, a refused match, a rival
+authority, a forced variable) also hold an origin Rant condition, one per problem, so a
+late subscriber sees what is wrong now rather than a log line that scrolled away. The
+`RANT_ERROR` event still fires once, as the moment. The kinds and their texts are in
+docs/node.md.
+
+Conditions are derived from state, never from events, since most causes end silently. A
+source reports its whole current set of one kind between `i_rant_node_problems_begin` and
+`_end`, and end removes that kind's conditions that went unreported. The runtime rebuilds
+its kinds at the poll pass when `problems_dirty` is set (any RANT_ERROR, a peer up, down or
+interest change, our own re advertise), when an aging problem is due, or when discovery's
+`partial` differs from what the last rebuild saw:
+
+- Match refusals (`schema_mismatch`, `qos_incompatible`, `kind_mismatch`): each interest
+  apply re derives `RANT__AST_REF_*` bits per (peer, entry) where it fires the events, and
+  `i_rant_transport_troubles` walks them, skipping our topics that parked or retired. The
+  schema text is the node core's stored reason, empty under `RANT_NO_DIAG`.
+- Sources that are not peers (`wire_version`, `peer_refused`, and `peer_too_big` for a
+  blob) live in discovery's trouble table of `RANT_DISCOVERY_TROUBLE_MAX` (16), refreshed
+  on every datagram and reported until 3 announce intervals of silence. A newcomer takes
+  only a stale entry's place, never a live one's, else it marks the kind as having more,
+  so on a mesh of 500 old nodes the tracked set and the status stay still instead of
+  cycling every announce. The table is also the once per source dedup of the events: the
+  wire version event fires per tracked source and once when the first one past it is
+  heard, and the node drops repeats of a refused or too big source the same way
+  (`i_rant_discovery_trouble_new`), since discovery still fires those every announce as
+  the growth signal of a dynamic node. A dynamic node grows instead of refusing, so it
+  reports a refusal or a blob only past what it can reach. A source taken as a peer leaves
+  the refused entries at once.
+- `directory_partial` is discovery's `partial`: a live peer forgotten for room within three
+  announce intervals (spec/discovery.md, Records and slots). Forgetting fires no event, so it
+  is watched as a state. One condition, a warning, stating the records held, and for a
+  static node to raise `max_peers`. A peer refused a slot stays `peer_refused`, so a crowd
+  that meets nothing here is never reported as refused.
+- `peer_too_big` also covers a peer whose index map failed to allocate, `bridge` reads the
+  tunnel's link state each look while down, since a reconnect says nothing, and
+  `announce_overflow` is the transport's `interest_truncated`.
+- The patterns layer rebuilds `duplicate_authority` and `forced` itself whenever its rival
+  lists or a force change. A rival that stops providing is dropped on the peer's next
+  interest apply, so its condition goes while the peer stays.
+
+A key is the kind alone or `kind/` plus 8 hex digits of FNV-1a over what names the problem
+(peer id, topic index and side, an address's bytes, an entity name), so it stays fixed
+while the problem lasts. The form is a contract readers rely on, and grouping never parses
+it: each source reports into one kind's set. Past `RANT_STATUS_KIND_MAX` (3) problems a
+kind folds at its end into one condition under the kind alone, with the count, " or more"
+when the source tracks fewer than it heard, and the first problem's text. The fold sweeps
+the kind's listed conditions before it puts its own, so it always has their room. Rant
+conditions count against `RANT_STATUS_RANT_MAX`, not the app's cap, and the last slot is
+kept for `more_problems`, which counts what did not fit. The scratch per kind holds the
+ids and the first text, under 150 bytes, since the poll pass may run on a small embedded
+stack.
+
+`rant_node_set_log_queue` and `rant_node_set_status_queue` give their handle a ring and the
+queue after creation, the one handle queue that changes. A binding sets it before widening
+the role, so the catch up replay parks rather than landing inline.
+
+`@rant/meta` is one handle carrying both sides: the answering side advertised from open and
+the asking side once the app takes the handle (spec/patterns.md, The meta function), a
+handler plus a pending list, directed requests so a call aimed at one peer never wakes the
+rest, keep_last 2 rings, created with `.multi`. The request is an optional 4 byte section mask (NODE, PROC,
+TOPICS, PEERS, empty = all). The response is `RantMeta { info: map }` with node, proc,
+topics and peers sections. The peers section lists the peers holding a slot, so a small
+node's answer stays small on a big mesh, and the node section counts them as
+`matched_peers` beside `peers`, every live record. The snapshot builder is node owned: the buffer starts at 1 KB and doubles on
+overflow up to 4 MB. The per topic `pending` count is one bulk walk per peer, not a walk per topic. No
+self inspection, since a node never matches itself. An ordinary remote must never
+advertise the provider side (it would auto answer NO_HANDLER and race the real provider).
+
+Per node cost at rest is about 7 to 8 kB. Meta adds 4 to 8 kB only once queried.
+
+## Interfaces
+
+The runtime enumerates interfaces with `i_rant_plat_local_ifaces`, joins the group on
+each, and feeds its subnets to discovery for locator ranking. It re enumerates every 3 s
+in auto mode. Discovery's tick runs after the main wait off its revents, so a poll pass
+costs one poll syscall. See spec/discovery.md.

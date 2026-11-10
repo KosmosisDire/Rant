@@ -1,0 +1,13 @@
+[package]
+name = "rant-tick"
+version = "0.0.0"
+edition = "2024"
+publish = false
+workspace = "../../../bindings/rust"
+
+[[bin]]
+name = "rant_tick"
+path = "tick.rs"
+
+[dependencies]
+rant-middleware = { path = "../../../bindings/rust/rant" }
