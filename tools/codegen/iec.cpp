@@ -79,7 +79,7 @@ public:
 
     std::string source(const Model &model) {
         for (const Def &d : model.defs) {
-            if (!d.fixed || (d.kind == Def::Struct && d.members.empty())) continue;
+            if (!d.fixed) continue;
             if (d.kind == Def::Alias) {
                 // An alias to an array is a type of its own name, any other names what it holds.
                 if (d.members[0].type.kind == Type::Array) array_type(d.name, d.members[0].type, about(d));
@@ -203,6 +203,12 @@ private:
             fields += doc(note, "        ") + (s.scalar ? "        [DataType(\"" + s.iec + "\")]\n" : "") +
                       "        public " + s.cs + " " + cs_ident(iec_name(m.name)) + ";\n";
             if (s.init) inits += "            " + cs_ident(m.name) + ".Init();\n";
+        }
+        // IEC has no empty struct, so one holds a BOOL the library never sends.
+        if (d.members.empty()) {
+            fields = "        /// <summary>A placeholder, never on the wire</summary>\n"
+                     "        [DataType(\"BOOL\")]\n        public bool unused;\n";
+            size = align = 1;
         }
         std::string text = doc(about(d), "    ") + "    [Structure]\n    public struct " + iec_name(d.name) +
                            "\n    {\n" + fields;

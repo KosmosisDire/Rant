@@ -145,6 +145,15 @@ namespace Rant
         public byte a;
     }
 
+    /// <summary>No data, for a signal such as a trigger</summary>
+    [Structure]
+    public struct Empty
+    {
+        /// <summary>A placeholder, never on the wire</summary>
+        [DataType("BOOL")]
+        public bool unused;
+    }
+
     /// <summary>A 16 byte unique id</summary>
     [Array(1)]
     [ArrayDimension(0, 0, 15)]
