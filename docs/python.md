@@ -1,6 +1,6 @@
 # Python
 
-`pip install rant-middleware` installs the `rant` package: the wrapper in `bindings/python/rant`
+The release's wheel installs the `rant` package: the wrapper in `bindings/python/rant`
 plus the shared library for your platform, bound through ctypes, so nothing compiles on
 your machine. In a source checkout, the CMake target `python_install` builds the wheel
 and installs it, or build `rant_shared` and put `bindings/python/` on `sys.path`. `RANT_LIBRARY` points the wrapper at any other copy of the

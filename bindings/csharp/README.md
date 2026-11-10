@@ -42,16 +42,11 @@ other package. `dotnet pack bindings/csharp/types/Rant.Types.csproj` packs the t
 
 ## Install
 
-```sh
-dotnet add package Rant
-```
-
-Before the package is on nuget.org, download the `.nupkg` from the GitHub Release and
-register its folder as a source first:
+Download the `.nupkg` from the GitHub Release and register its folder as a source:
 
 ```sh
 dotnet nuget add source ./path/to/that/folder -n rant
-dotnet add package Rant
+dotnet add package Rant --source rant
 ```
 
 ## Use
