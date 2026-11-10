@@ -93,7 +93,10 @@ static std::string cpp_def(const Def &d, const Defs &defs) {
         for (const Member &m : d.members)
             rows.push_back({ cpp_member(m.type, cpp_name(m.name), defs), comment_of(m) });
     }
-    return about_of(d) + "struct " + d.name + " {\n" + member_lines(rows) + "};\n";
+    // A library that gives the type methods, as Rant Math does, defines RANT_MEMBERS_<name> before this.
+    const std::string hook = "RANT_MEMBERS_" + d.name;
+    return about_of(d) + "struct " + d.name + " {\n" + member_lines(rows) + "#ifdef " + hook + "\n    " + hook +
+           "\n#endif\n};\n";
 }
 
 static std::string types_header(const Model &model, const std::string &extras) {

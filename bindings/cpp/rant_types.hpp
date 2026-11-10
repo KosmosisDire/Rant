@@ -16,6 +16,11 @@
 #include <string_view>
 #include <vector>
 
+/* RANT_MATH, set for a whole build by linking Rant Math, gives each type its methods. */
+#if defined(RANT_MATH) && !defined(RANT_MATH_MEMBERS_HPP)
+#include "rant_math_members.hpp"
+#endif
+
 namespace rant {
 
 /* The capped string wire slot, [u16 live length][N bytes]. assign() refuses over capacity
@@ -49,6 +54,9 @@ namespace types {
 struct Float2 {
     float x = 0;
     float y = 0;
+#ifdef RANT_MEMBERS_Float2
+    RANT_MEMBERS_Float2
+#endif
 };
 
 /* A 3D vector of f32 */
@@ -56,6 +64,9 @@ struct Float3 {
     float x = 0;
     float y = 0;
     float z = 0;
+#ifdef RANT_MEMBERS_Float3
+    RANT_MEMBERS_Float3
+#endif
 };
 
 /* A 4D vector of f32 */
@@ -64,12 +75,18 @@ struct Float4 {
     float y = 0;
     float z = 0;
     float w = 0;
+#ifdef RANT_MEMBERS_Float4
+    RANT_MEMBERS_Float4
+#endif
 };
 
 /* A 2D vector of f64 */
 struct Double2 {
     double x = 0;
     double y = 0;
+#ifdef RANT_MEMBERS_Double2
+    RANT_MEMBERS_Double2
+#endif
 };
 
 /* A 3D vector of f64 */
@@ -77,6 +94,9 @@ struct Double3 {
     double x = 0;
     double y = 0;
     double z = 0;
+#ifdef RANT_MEMBERS_Double3
+    RANT_MEMBERS_Double3
+#endif
 };
 
 /* A 4D vector of f64 */
@@ -85,12 +105,18 @@ struct Double4 {
     double y = 0;
     double z = 0;
     double w = 0;
+#ifdef RANT_MEMBERS_Double4
+    RANT_MEMBERS_Double4
+#endif
 };
 
 /* A 2D vector of i32, such as a pixel or a grid cell */
 struct Int2 {
     int32_t x = 0;
     int32_t y = 0;
+#ifdef RANT_MEMBERS_Int2
+    RANT_MEMBERS_Int2
+#endif
 };
 
 /* A 3D vector of i32 */
@@ -98,6 +124,9 @@ struct Int3 {
     int32_t x = 0;
     int32_t y = 0;
     int32_t z = 0;
+#ifdef RANT_MEMBERS_Int3
+    RANT_MEMBERS_Int3
+#endif
 };
 
 /* A 4D vector of i32 */
@@ -106,6 +135,9 @@ struct Int4 {
     int32_t y = 0;
     int32_t z = 0;
     int32_t w = 0;
+#ifdef RANT_MEMBERS_Int4
+    RANT_MEMBERS_Int4
+#endif
 };
 
 /* A 3D rotation as a unit quaternion, stored x, y, z, w */
@@ -114,6 +146,9 @@ struct Quaternion {
     double y = 0;
     double z = 0;
     double w = 0;
+#ifdef RANT_MEMBERS_Quaternion
+    RANT_MEMBERS_Quaternion
+#endif
 };
 
 /* An sRGB color with straight alpha, not premultiplied */
@@ -122,6 +157,9 @@ struct Color {
     uint8_t g = 0;
     uint8_t b = 0;
     uint8_t a = 0;  /* 255 is opaque */
+#ifdef RANT_MEMBERS_Color
+    RANT_MEMBERS_Color
+#endif
 };
 
 /* No data, for a signal such as a trigger */
@@ -130,114 +168,174 @@ struct Empty {};
 /* A 16 byte unique id */
 struct Uuid {
     uint8_t bytes[16] = {};  /* RFC 4122 byte order */
+#ifdef RANT_MEMBERS_Uuid
+    RANT_MEMBERS_Uuid
+#endif
 };
 
 /* A moment in time, counted from the Unix epoch in UTC */
 struct Timestamp {
     int64_t us = 0;  /* [us] */
+#ifdef RANT_MEMBERS_Timestamp
+    RANT_MEMBERS_Timestamp
+#endif
 };
 
 /* A length of time */
 struct Duration {
     int64_t us = 0;  /* [us] */
+#ifdef RANT_MEMBERS_Duration
+    RANT_MEMBERS_Duration
+#endif
 };
 
 /* A 3 by 3 matrix, indexed row then column */
 struct Matrix3x3 {
     float m[3][3] = {};
+#ifdef RANT_MEMBERS_Matrix3x3
+    RANT_MEMBERS_Matrix3x3
+#endif
 };
 
 /* A 4 by 4 matrix, indexed row then column */
 struct Matrix4x4 {
     float m[4][4] = {};
+#ifdef RANT_MEMBERS_Matrix4x4
+    RANT_MEMBERS_Matrix4x4
+#endif
 };
 
 /* The covariance of three values, indexed row then column, in their units squared */
 struct Covariance3 {
     double m[3][3] = {};
+#ifdef RANT_MEMBERS_Covariance3
+    RANT_MEMBERS_Covariance3
+#endif
 };
 
 /* The covariance of a 3D pose or twist, indexed row then column
  * The order is x, y and z, then the turn about x, y and z */
 struct Covariance6 {
     double m[6][6] = {};
+#ifdef RANT_MEMBERS_Covariance6
+    RANT_MEMBERS_Covariance6
+#endif
 };
 
 /* A URL or other URI */
 struct Uri {
     String<256> value;
+#ifdef RANT_MEMBERS_Uri
+    RANT_MEMBERS_Uri
+#endif
 };
 
 /* A position and orientation in a 3D frame */
 struct Pose {
     Double3 position;  /* [m] */
     Quaternion orientation;
+#ifdef RANT_MEMBERS_Pose
+    RANT_MEMBERS_Pose
+#endif
 };
 
 /* A position and heading in a 2D frame, the top view of a Pose */
 struct Pose2D {
     Double2 position;  /* [m or px] */
     double angle = 0;  /* [rad] from +x toward +y */
+#ifdef RANT_MEMBERS_Pose2D
+    RANT_MEMBERS_Pose2D
+#endif
 };
 
 /* A Pose and the frame it is measured in */
 struct Transform {
     Pose pose;
     String<30> parent;  /* the parent frame, empty when unstated */
+#ifdef RANT_MEMBERS_Transform
+    RANT_MEMBERS_Transform
+#endif
 };
 
 /* A Pose2D and the frame it is measured in */
 struct Transform2D {
     Pose2D pose;
     String<30> parent;  /* the parent frame, empty when unstated */
+#ifdef RANT_MEMBERS_Transform2D
+    RANT_MEMBERS_Transform2D
+#endif
 };
 
 /* Linear and angular velocity in 3D */
 struct Twist {
     Double3 linear;   /* [m/s] */
     Double3 angular;  /* [rad/s] about each axis */
+#ifdef RANT_MEMBERS_Twist
+    RANT_MEMBERS_Twist
+#endif
 };
 
 /* Linear and angular velocity in 2D */
 struct Twist2D {
     Double2 linear;      /* [m/s] */
     double angular = 0;  /* [rad/s] from +x toward +y */
+#ifdef RANT_MEMBERS_Twist2D
+    RANT_MEMBERS_Twist2D
+#endif
 };
 
 /* A force and a torque in 3D */
 struct Wrench {
     Double3 force;   /* [N] */
     Double3 torque;  /* [N m] about the frame origin */
+#ifdef RANT_MEMBERS_Wrench
+    RANT_MEMBERS_Wrench
+#endif
 };
 
 /* A force and a torque in 2D */
 struct Wrench2D {
     Double2 force;      /* [N] */
     double torque = 0;  /* [N m] from +x toward +y */
+#ifdef RANT_MEMBERS_Wrench2D
+    RANT_MEMBERS_Wrench2D
+#endif
 };
 
 /* Linear and angular acceleration in 3D */
 struct Accel {
     Double3 linear;   /* [m/s^2] */
     Double3 angular;  /* [rad/s^2] about each axis */
+#ifdef RANT_MEMBERS_Accel
+    RANT_MEMBERS_Accel
+#endif
 };
 
 /* Linear and angular acceleration in 2D */
 struct Accel2D {
     Double2 linear;      /* [m/s^2] */
     double angular = 0;  /* [rad/s^2] from +x toward +y */
+#ifdef RANT_MEMBERS_Accel2D
+    RANT_MEMBERS_Accel2D
+#endif
 };
 
 /* A Pose and how uncertain it is */
 struct PoseWithCovariance {
     Pose pose;
     Covariance6 covariance;  /* [m^2 and rad^2] the position, then the rotation about x, y and z */
+#ifdef RANT_MEMBERS_PoseWithCovariance
+    RANT_MEMBERS_PoseWithCovariance
+#endif
 };
 
 /* A Twist and how uncertain it is */
 struct TwistWithCovariance {
     Twist twist;
     Covariance6 covariance;  /* [m^2/s^2 and rad^2/s^2] the linear part, then the angular */
+#ifdef RANT_MEMBERS_TwistWithCovariance
+    RANT_MEMBERS_TwistWithCovariance
+#endif
 };
 
 /* Where a moving body is and how fast it moves, as dead reckoning estimates it */
@@ -245,6 +343,9 @@ struct Odometry {
     PoseWithCovariance pose;    /* the body in the parent frame */
     TwistWithCovariance twist;  /* in the body's own frame */
     String<30> parent;          /* the frame pose is measured in, empty when unstated */
+#ifdef RANT_MEMBERS_Odometry
+    RANT_MEMBERS_Odometry
+#endif
 };
 
 /* A point on the Earth */
@@ -252,66 +353,99 @@ struct GeoPoint {
     double lat = 0;  /* [deg] latitude */
     double lon = 0;  /* [deg] longitude */
     double alt = 0;  /* [m] altitude */
+#ifdef RANT_MEMBERS_GeoPoint
+    RANT_MEMBERS_GeoPoint
+#endif
 };
 
 /* A box along the frame axes */
 struct AlignedBox {
     Double3 min;  /* [m] the corner with the lowest x, y and z */
     Double3 max;  /* [m] the opposite corner */
+#ifdef RANT_MEMBERS_AlignedBox
+    RANT_MEMBERS_AlignedBox
+#endif
 };
 
 /* A rectangle along the frame axes, also a region of an image */
 struct AlignedBox2D {
     Double2 min;  /* [m or px] the corner with the lowest x and y */
     Double2 max;  /* [m or px] the opposite corner */
+#ifdef RANT_MEMBERS_AlignedBox2D
+    RANT_MEMBERS_AlignedBox2D
+#endif
 };
 
 /* A box at any orientation */
 struct OrientedBox {
     Pose pose;     /* the center and orientation */
     Double3 size;  /* [m] the full edge lengths */
+#ifdef RANT_MEMBERS_OrientedBox
+    RANT_MEMBERS_OrientedBox
+#endif
 };
 
 /* A rectangle at any angle */
 struct OrientedBox2D {
     Pose2D pose;   /* the center and angle */
     Double2 size;  /* [m or px] the full edge lengths */
+#ifdef RANT_MEMBERS_OrientedBox2D
+    RANT_MEMBERS_OrientedBox2D
+#endif
 };
 
 /* An endless flat plane */
 struct Plane {
     Double3 position;  /* [m] any point on the plane */
     Double3 normal;    /* unit length */
+#ifdef RANT_MEMBERS_Plane
+    RANT_MEMBERS_Plane
+#endif
 };
 
 /* A straight line between two points */
 struct Segment {
     Double3 a;  /* [m] */
     Double3 b;  /* [m] */
+#ifdef RANT_MEMBERS_Segment
+    RANT_MEMBERS_Segment
+#endif
 };
 
 /* A straight line from a point, endless in one direction */
 struct Ray {
     Double3 origin;     /* [m] */
     Double3 direction;  /* unit length, away from origin */
+#ifdef RANT_MEMBERS_Ray
+    RANT_MEMBERS_Ray
+#endif
 };
 
 /* A ball around a center point */
 struct Sphere {
     Double3 center;     /* [m] */
     double radius = 0;  /* [m] */
+#ifdef RANT_MEMBERS_Sphere
+    RANT_MEMBERS_Sphere
+#endif
 };
 
 /* A cylinder with rounded ends */
 struct Capsule {
     Segment axis;       /* the centers of the rounded ends */
     double radius = 0;  /* [m] */
+#ifdef RANT_MEMBERS_Capsule
+    RANT_MEMBERS_Capsule
+#endif
 };
 
 /* A cylinder with flat ends */
 struct Cylinder {
     Segment axis;       /* the centers of the flat ends */
     double radius = 0;  /* [m] */
+#ifdef RANT_MEMBERS_Cylinder
+    RANT_MEMBERS_Cylinder
+#endif
 };
 
 /* A cone from a round base to a tip */
@@ -319,46 +453,70 @@ struct Cone {
     Double3 base;       /* [m] the center of the base */
     Double3 tip;        /* [m] */
     double radius = 0;  /* [m] at the base */
+#ifdef RANT_MEMBERS_Cone
+    RANT_MEMBERS_Cone
+#endif
 };
 
 /* A closed flat polygon in 3D */
 struct Polygon {
     std::vector<Double3> points;  /* [m] the corners in order */
+#ifdef RANT_MEMBERS_Polygon
+    RANT_MEMBERS_Polygon
+#endif
 };
 
 /* An endless line, the 2D form of a Plane */
 struct Plane2D {
     Double2 position;  /* [m or px] any point on the line */
     Double2 normal;    /* unit length */
+#ifdef RANT_MEMBERS_Plane2D
+    RANT_MEMBERS_Plane2D
+#endif
 };
 
 /* A straight line between two points in 2D */
 struct Segment2D {
     Double2 a;  /* [m or px] */
     Double2 b;  /* [m or px] */
+#ifdef RANT_MEMBERS_Segment2D
+    RANT_MEMBERS_Segment2D
+#endif
 };
 
 /* A straight line from a point, endless in one direction, in 2D */
 struct Ray2D {
     Double2 origin;     /* [m or px] */
     Double2 direction;  /* unit length, away from origin */
+#ifdef RANT_MEMBERS_Ray2D
+    RANT_MEMBERS_Ray2D
+#endif
 };
 
 /* A circle around a center point */
 struct Circle {
     Double2 center;     /* [m or px] */
     double radius = 0;  /* [m or px] */
+#ifdef RANT_MEMBERS_Circle
+    RANT_MEMBERS_Circle
+#endif
 };
 
 /* A rectangle with rounded ends */
 struct Capsule2D {
     Segment2D axis;     /* the centers of the rounded ends */
     double radius = 0;  /* [m or px] */
+#ifdef RANT_MEMBERS_Capsule2D
+    RANT_MEMBERS_Capsule2D
+#endif
 };
 
 /* A closed polygon in 2D */
 struct Polygon2D {
     std::vector<Double2> points;  /* [m or px] the corners in order */
+#ifdef RANT_MEMBERS_Polygon2D
+    RANT_MEMBERS_Polygon2D
+#endif
 };
 
 /* A flat polygon raised to a height, such as a zone of a floor */
@@ -366,26 +524,41 @@ struct Prism {
     Pose pose;          /* the frame the base lies in */
     Polygon2D base;     /* [m] in the xy plane of pose */
     double height = 0;  /* [m] along +z of pose */
+#ifdef RANT_MEMBERS_Prism
+    RANT_MEMBERS_Prism
+#endif
 };
 
 /* An open line through points in order */
 struct Polyline {
     std::vector<Double3> points;  /* [m] */
+#ifdef RANT_MEMBERS_Polyline
+    RANT_MEMBERS_Polyline
+#endif
 };
 
 /* An open line through points in order in 2D */
 struct Polyline2D {
     std::vector<Double2> points;  /* [m or px] */
+#ifdef RANT_MEMBERS_Polyline2D
+    RANT_MEMBERS_Polyline2D
+#endif
 };
 
 /* A route of poses to follow in order */
 struct Path {
     std::vector<Pose> poses;
+#ifdef RANT_MEMBERS_Path
+    RANT_MEMBERS_Path
+#endif
 };
 
 /* A route of 2D poses to follow in order */
 struct Path2D {
     std::vector<Pose2D> poses;
+#ifdef RANT_MEMBERS_Path2D
+    RANT_MEMBERS_Path2D
+#endif
 };
 
 /* The mass of a rigid body and how it resists turning */
@@ -398,6 +571,9 @@ struct Inertia {
     double iyy = 0;   /* [kg m^2] */
     double iyz = 0;   /* [kg m^2] */
     double izz = 0;   /* [kg m^2] */
+#ifdef RANT_MEMBERS_Inertia
+    RANT_MEMBERS_Inertia
+#endif
 };
 
 /* How the data of an Image is laid out, 16 and up a compressed file */
@@ -421,6 +597,9 @@ struct Image {
     uint32_t stride = 0;                      /* [bytes] from one row to the next, 0 when rows are packed */
     ImageFormat format = ImageFormat::Mono8;  /* how data is laid out */
     std::vector<uint8_t> data;                /* the pixels from the top row, or the file */
+#ifdef RANT_MEMBERS_Image
+    RANT_MEMBERS_Image
+#endif
 };
 
 /* The format of a video bitstream */
@@ -440,6 +619,9 @@ struct VideoFrame {
     bool keyframe = false;                   /* decodes without earlier frames */
     Timestamp pts;                           /* [us] when to show the frame */
     std::vector<uint8_t> data;               /* the encoded bitstream */
+#ifdef RANT_MEMBERS_VideoFrame
+    RANT_MEMBERS_VideoFrame
+#endif
 };
 
 /* The protocol a video stream is served over */
@@ -461,6 +643,9 @@ struct ExternalVideoStream {
     VideoCodec codec = VideoCodec::Unknown;        /* a hint, Unknown when unstated */
     Uri url;                                       /* the stream address */
     String<30> name;                               /* a label for the stream */
+#ifdef RANT_MEMBERS_ExternalVideoStream
+    RANT_MEMBERS_ExternalVideoStream
+#endif
 };
 
 /* A lens distortion model */
@@ -481,6 +666,9 @@ struct CameraIntrinsics {
     double cy = 0;                                   /* [px] principal point y */
     double coeffs[8] = {};                           /* OpenCV's order: k1 k2 p1 p2 k3, then k4 k5 k6 for Rational, or k1 to k4 for Fisheye, 0 past that */
     DistortionModel model = DistortionModel::None_;  /* the lens distortion model */
+#ifdef RANT_MEMBERS_CameraIntrinsics
+    RANT_MEMBERS_CameraIntrinsics
+#endif
 };
 
 /* The joints of a robot, in the order of its JointNames */
@@ -488,11 +676,17 @@ struct JointState {
     std::vector<double> position;  /* [rad or m] rad for a turning joint, m for a sliding one */
     std::vector<double> velocity;  /* [rad/s or m/s] may be empty */
     std::vector<double> effort;    /* [N m or N] may be empty */
+#ifdef RANT_MEMBERS_JointState
+    RANT_MEMBERS_JointState
+#endif
 };
 
 /* The joint names a JointState follows, published once */
 struct JointNames {
     std::vector<std::string> name;
+#ifdef RANT_MEMBERS_JointNames
+    RANT_MEMBERS_JointNames
+#endif
 };
 
 /* Where the joints should be at one time, in the order of their JointNames */
@@ -502,11 +696,17 @@ struct JointTrajectoryPoint {
     std::vector<double> velocity;      /* [rad/s or m/s] may be empty */
     std::vector<double> acceleration;  /* [rad/s^2 or m/s^2] may be empty */
     std::vector<double> effort;        /* [N m or N] may be empty */
+#ifdef RANT_MEMBERS_JointTrajectoryPoint
+    RANT_MEMBERS_JointTrajectoryPoint
+#endif
 };
 
 /* A motion of the joints over time */
 struct JointTrajectory {
     std::vector<JointTrajectoryPoint> points;  /* in time order */
+#ifdef RANT_MEMBERS_JointTrajectory
+    RANT_MEMBERS_JointTrajectory
+#endif
 };
 
 /* One reading of an inertial measurement unit, in its own frame
@@ -518,6 +718,9 @@ struct Imu {
     Covariance3 angular_velocity_covariance;     /* [rad^2/s^2] */
     Double3 linear_acceleration;                 /* [m/s^2] gravity included */
     Covariance3 linear_acceleration_covariance;  /* [m^2/s^4] */
+#ifdef RANT_MEMBERS_Imu
+    RANT_MEMBERS_Imu
+#endif
 };
 
 /* One sweep of a planar range sensor, its beams turning from +x toward +y */
@@ -530,6 +733,9 @@ struct LaserScan {
     uint8_t echoes = 0;              /* the ranges per beam, 0 reads as 1 */
     std::vector<float> ranges;       /* [m] each beam's echoes together, +inf when nothing returns */
     std::vector<float> intensities;  /* in the order of ranges, may be empty */
+#ifdef RANT_MEMBERS_LaserScan
+    RANT_MEMBERS_LaserScan
+#endif
 };
 
 /* What a range sensor measures with */
@@ -548,6 +754,9 @@ struct RangeReading {
     double max = 0;            /* [m] the longest distance it reads */
     double field_of_view = 0;  /* [rad] the full angle of the cone */
     RangeKind kind = RangeKind::Unknown;
+#ifdef RANT_MEMBERS_RangeReading
+    RANT_MEMBERS_RangeReading
+#endif
 };
 
 /* The quality of a satellite position fix */
@@ -564,6 +773,9 @@ struct GnssFix {
     GeoPoint position;
     Covariance3 covariance;  /* [m^2] east, north and up */
     GnssStatus status = GnssStatus::NoFix;
+#ifdef RANT_MEMBERS_GnssFix
+    RANT_MEMBERS_GnssFix
+#endif
 };
 
 /* The kind of number in a block of raw data, numbered as in PCL */
@@ -586,6 +798,9 @@ struct PointField {
     uint32_t offset = 0;  /* [bytes] from the start of the point */
     ScalarKind kind = ScalarKind::I8;
     uint32_t count = 0;   /* the numbers in a row, 1 for a single number */
+#ifdef RANT_MEMBERS_PointField
+    RANT_MEMBERS_PointField
+#endif
 };
 
 /* Points with any values each, packed one point after another as in PCL */
@@ -596,12 +811,18 @@ struct PointCloud {
     uint32_t point_step = 0;         /* [bytes] from one point to the next */
     bool dense = false;              /* no point holds an invalid value */
     std::vector<uint8_t> data;       /* the points, little endian */
+#ifdef RANT_MEMBERS_PointCloud
+    RANT_MEMBERS_PointCloud
+#endif
 };
 
 /* A surface of triangles */
 struct Mesh {
     PointCloud vertices;              /* the corners, with x, y and z among their fields */
     std::vector<uint32_t> triangles;  /* three vertex indices each, counterclockwise seen from outside */
+#ifdef RANT_MEMBERS_Mesh
+    RANT_MEMBERS_Mesh
+#endif
 };
 
 /* One value that every cell of a Grid holds */
@@ -609,6 +830,9 @@ struct GridField {
     std::string name;           /* such as occupancy, height or cost, or rgba or rgb for a color as a PointField packs it */
     ScalarKind kind = ScalarKind::I8;
     std::vector<uint8_t> data;  /* one number per cell, x fastest, then y, then z, little endian */
+#ifdef RANT_MEMBERS_GridField
+    RANT_MEMBERS_GridField
+#endif
 };
 
 /* A 2D or 3D grid of cells with any values each, such as a map */
@@ -619,6 +843,9 @@ struct Grid {
     uint32_t cells_y = 0;           /* cells along y */
     uint32_t cells_z = 0;           /* cells along z, 1 for a 2D grid */
     std::vector<GridField> fields;  /* what each cell holds */
+#ifdef RANT_MEMBERS_Grid
+    RANT_MEMBERS_Grid
+#endif
 };
 
 /* An array of numbers with any number of dimensions */
@@ -626,6 +853,9 @@ struct Tensor {
     ScalarKind kind = ScalarKind::I8;
     std::vector<uint32_t> shape;  /* the size of each dimension, outermost first */
     std::vector<uint8_t> data;    /* the numbers, last dimension fastest, little endian */
+#ifdef RANT_MEMBERS_Tensor
+    RANT_MEMBERS_Tensor
+#endif
 };
 
 /* A whole file */
@@ -633,6 +863,9 @@ struct File {
     std::string name;           /* the file name with its extension */
     String<64> media_type;      /* such as image/png, empty when unknown */
     std::vector<uint8_t> data;  /* the file bytes */
+#ifdef RANT_MEMBERS_File
+    RANT_MEMBERS_File
+#endif
 };
 
 /* An object found in an image or a 2D frame */
@@ -641,6 +874,9 @@ struct Detection2D {
     std::string label;     /* what it is */
     float score = 0;       /* the confidence, 0 to 1 */
     uint32_t track = 0;    /* the same id in every frame, 0 when not tracked */
+#ifdef RANT_MEMBERS_Detection2D
+    RANT_MEMBERS_Detection2D
+#endif
 };
 
 /* An object found in a 3D frame */
@@ -649,6 +885,9 @@ struct Detection3D {
     std::string label;   /* what it is */
     float score = 0;     /* the confidence, 0 to 1 */
     uint32_t track = 0;  /* the same id in every frame, 0 when not tracked */
+#ifdef RANT_MEMBERS_Detection3D
+    RANT_MEMBERS_Detection3D
+#endif
 };
 
 /* Each fixed type is its wire bytes, so it copies as is and passes to the C structs. */

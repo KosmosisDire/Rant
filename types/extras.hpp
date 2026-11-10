@@ -7,6 +7,11 @@
 #include <string_view>
 #include <vector>
 
+/* RANT_MATH, set for a whole build by linking Rant Math, gives each type its methods. */
+#if defined(RANT_MATH) && !defined(RANT_MATH_MEMBERS_HPP)
+#include "rant_math_members.hpp"
+#endif
+
 namespace rant {
 
 /* The capped string wire slot, [u16 live length][N bytes]. assign() refuses over capacity
