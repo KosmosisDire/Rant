@@ -23,6 +23,29 @@ g++ -std=c++17 -Idist app.cpp dist/rant.cpp -o app.exe -lws2_32 -liphlpapi -lbcr
 
 It builds with g++, clang++, clang-cl and MSVC, and with `-fno-exceptions -fno-rtti`.
 
+### Arduino and PlatformIO
+
+On ESP32 boards, `rant add` in a sketch folder puts Rant in the Arduino sketchbook, and in a
+PlatformIO project it pins Rant in `lib_deps`. Each release carries the library as
+`rant-<version>-arduino.zip`. Start the node once WiFi is up:
+
+```cpp
+#include <WiFi.h>
+#include <rant.hpp>
+
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);   // setup() and loop() open and use the node
+rant::Node *node;
+
+void setup() {
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) delay(250);
+  node = new rant::Node("board");
+}
+```
+
+PlatformIO's stock ESP32 platform builds gnu++11, so `rant add` sets `-std=gnu++17` there. Its
+GCC 8 takes no `{ .domain = 7 }` options, so set the fields one by one.
+
 ## Node
 
 ```cpp

@@ -37,6 +37,7 @@ Every package this machine can build lands in `dist/`:
 cmake --build build --config Release --target packages
 ```
 
+`arduino_package` packs `dist/rant-<version>-arduino.zip`, the library Arduino and PlatformIO take.
 `unity_package` assembles `dist/com.rant.rant/`, `dist/com.rant.types/` and `dist/rant-<version>.unitypackage`,
 `nuget_package` runs `dotnet pack` for `dist/Rant.<version>.nupkg`, and `python_wheel`
 runs `pip wheel` for this platform's wheel. Each bundles the native libraries in

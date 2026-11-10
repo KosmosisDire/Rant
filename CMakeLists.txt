@@ -224,7 +224,10 @@ if(RANT_IS_TOP_LEVEL AND TARGET rant_shared)
   add_custom_target(unity_package
     COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/unity.cmake" VERBATIM)
   add_dependencies(unity_package rant_shared)
-  add_custom_target(packages DEPENDS unity_package)
+  add_custom_target(arduino_package
+    COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/arduino.cmake" VERBATIM)
+  add_dependencies(arduino_package rant_dist)
+  add_custom_target(packages DEPENDS unity_package arduino_package)
   if(TARGET web_package)
     add_dependencies(packages web_package)
   endif()
