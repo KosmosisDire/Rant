@@ -127,6 +127,7 @@ Define these before the include.
 | `RANT_NO_SHM` | force shared memory off. Drops the Linux `-lrt` |
 | `RANT_THREADS` | node lock and service thread. Auto on for Windows and POSIX with pthreads |
 | `RANT_NO_THREADS` | force threading off. `rant_node_start` returns `RANT_ERR_NOSYS` |
+| `RANT_ESP_THREAD_STACK` | the stack in bytes of each thread Rant starts on ESP32, 16384 by default |
 | `RANT_PROC_STATS` | process CPU and memory in the meta snapshot. Auto on where the OS can measure |
 | `RANT_NO_PROC_STATS` | force the proc section off |
 | `RANT_NO_DIAG` | strip the `rant_event_str` texts. An error then formats as `error <N>` |

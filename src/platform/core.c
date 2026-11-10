@@ -91,6 +91,9 @@
     #else
       #include <esp_system.h>   /* IDF 4: the same declaration */
     #endif
+    #ifndef RANT_ESP_THREAD_STACK
+      #define RANT_ESP_THREAD_STACK 16384   /* bytes for each thread Rant starts */
+    #endif
   #elif defined(__linux__)
     #include <sys/random.h>     /* getrandom */
   #endif
@@ -764,7 +767,19 @@ static void *i_rant_plat_thread_tramp(void *p){
 int i_rant_plat_thread_start(i_RantThread *t, void (*fn)(void *), void *arg){
     i_RantThreadImpl *ti = (i_RantThreadImpl *)t;
     ti->fn = fn; ti->arg = arg;
+  #if defined(ESP_PLATFORM)
+    {   /* ESP-IDF gives a pthread 2 KB, which one poll overflows */
+        pthread_attr_t a;
+        int ok;
+        pthread_attr_init(&a);
+        pthread_attr_setstacksize(&a, RANT_ESP_THREAD_STACK);
+        ok = pthread_create(&ti->t, &a, i_rant_plat_thread_tramp, ti) == 0;
+        pthread_attr_destroy(&a);
+        return ok;
+    }
+  #else
     return pthread_create(&ti->t, NULL, i_rant_plat_thread_tramp, ti) == 0;
+  #endif
 }
 void i_rant_plat_thread_join(i_RantThread *t){
     pthread_join(((i_RantThreadImpl *)t)->t, NULL);
