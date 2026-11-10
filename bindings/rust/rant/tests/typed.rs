@@ -423,3 +423,13 @@ fn a_pulled_typed_subscriber_takes_values() {
     }));
     assert_eq!(got.unwrap(), c);
 }
+
+#[test]
+fn every_standard_type_is_listed_and_compiles_by_its_name() {
+    let node = Node::new("std_names", options(60, Threading::Manual)).unwrap();
+    let names = rant::types::names();
+    assert!(names.contains(&"Pose") && names.contains(&"Polygon2D") && names.len() > 80);
+    for name in names {
+        assert_eq!(node.schema(name).unwrap().name(), name);
+    }
+}

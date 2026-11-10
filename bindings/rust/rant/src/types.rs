@@ -5,6 +5,14 @@ use crate::message::{Decoder, Encoder, Message, Spell, kind};
 
 pub use rant_types::*;
 
+/// Every standard type's name, each a schema of its own through [`Node::schema`](crate::Node::schema).
+pub fn names() -> Vec<&'static str> {
+    (crate::ffi::RANT_STD_NONE + 1..crate::ffi::RANT_STD_COUNT)
+        // SAFETY: the C gives a static NUL terminated name for every value below the count
+        .filter_map(|t| unsafe { std::ffi::CStr::from_ptr(crate::ffi::rant_std_name(t)) }.to_str().ok())
+        .collect()
+}
+
 /// A random version 4 uuid.
 pub fn new_uuid() -> Uuid {
     let mut u = crate::ffi::RantUuid::default();
