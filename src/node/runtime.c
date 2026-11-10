@@ -41,6 +41,15 @@ typedef struct {
 #define RANT__QWRAP 0xFFFFFFFFu
 #define RANT__QALIGN(x) (((uint32_t)(x) + 7u) & ~7u)
 
+/* a big frame kept out of its caller, so it never sits under the caller's later deep calls */
+#if defined(__GNUC__)
+  #define RANT__NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+  #define RANT__NOINLINE __declspec(noinline)
+#else
+  #define RANT__NOINLINE
+#endif
+
 /* One handle's ring on its callback queue, filled by the poll thread and drained by
  * rant_queue_dispatch. Under the node lock. The ring and this struct are stable pool allocations. */
 typedef struct {
@@ -1111,7 +1120,12 @@ static int i_rant_prefix_join(char *out, size_t *len, const char *part, size_t p
     return 1;
 }
 
-RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_message, RantEventFn on_event, const RantNodeOpts *opts){
+enum { I_RANT_BUILTIN_LOGS = 1, I_RANT_BUILTIN_STATUS = 2, I_RANT_BUILTIN_META = 4 };
+
+/* The open up to the builtins, which rant_node_open adds once this big frame is gone, since
+ * compiling their schemas runs deep. builtins gets the I_RANT_BUILTIN_ ones asked for. */
+RANT__NOINLINE static RantNode *i_rant_node_open_core(RantAllocator *alloc, const char *name, RantMsgFn on_message,
+                                                      RantEventFn on_event, const RantNodeOpts *opts, uint8_t *builtins){
     RantNodeOpts o; i_RantDiscoveryCoreConfig dc; i_RantTransportConfig tc; i_RantNodeBlocks blocks;
     uint16_t max_peers, max_topics, user_topics;
     uint8_t *base; void *arena; size_t need; RantAllocator pool;
@@ -1382,17 +1396,10 @@ RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_me
     n->open_us = i_rant_plat_now_us();
     n->last_error.kind = RANT_ERROR;     /* .error NONE until one fires: reads as "no error" */
 
-    /* the builtins last, since they create topics. A failed creation degrades and never
-       fails the open */
     n->log_level = o.log_level;
     n->log_errors = (uint8_t)(!o.disable_error_logs && !o.disable_logs);
-    n->creating_builtin = 1;               /* allocate from the builtin block */
-    if (!o.disable_logs) i_rant_node_logs_open(n);
-    if (!o.disable_status) i_rant_node_status_open(n);
-#ifndef RANT_NO_PATTERNS
-    if (!o.disable_meta) i_rant_patterns_meta_open(n);
-#endif
-    n->creating_builtin = 0;
+    *builtins = (uint8_t)((o.disable_logs ? 0 : I_RANT_BUILTIN_LOGS) | (o.disable_status ? 0 : I_RANT_BUILTIN_STATUS)
+                          | (o.disable_meta ? 0 : I_RANT_BUILTIN_META));
     return n;
 
 fail_sock:
@@ -1410,6 +1417,22 @@ fail_threads:
     i_rant_plat_cleanup();
     i_rant_node_pools_reset(n);       /* frees the node struct and arena */
     return NULL;
+}
+
+RantNode *rant_node_open(RantAllocator *alloc, const char *name, RantMsgFn on_message, RantEventFn on_event, const RantNodeOpts *opts){
+    uint8_t builtins = 0;
+    RantNode *n = i_rant_node_open_core(alloc, name, on_message, on_event, opts, &builtins);
+    if (!n) return NULL;
+    /* the builtins last, since they create topics. A failed creation degrades and never
+       fails the open */
+    n->creating_builtin = 1;               /* allocate from the builtin block */
+    if (builtins & I_RANT_BUILTIN_LOGS) i_rant_node_logs_open(n);
+    if (builtins & I_RANT_BUILTIN_STATUS) i_rant_node_status_open(n);
+#ifndef RANT_NO_PATTERNS
+    if (builtins & I_RANT_BUILTIN_META) i_rant_patterns_meta_open(n);
+#endif
+    n->creating_builtin = 0;
+    return n;
 }
 
 /* Dynamic mode growth: relocates the node into a bigger arena at the given counts. Message
@@ -2192,7 +2215,7 @@ static void i_rant_node_trouble(void *u, RantErrorKind what, uint32_t peer, uint
 
 /* Rebuilds every Rant condition the runtime owns from the state behind it, so each lasts
  * exactly as long as its cause. duplicate_authority and forced are the patterns layer's. */
-static void i_rant_node_problems_rebuild(RantNode *n){
+RANT__NOINLINE static void i_rant_node_problems_rebuild(RantNode *n){
     i_RantProblems one, big, schema, qos, kind;
     i_RantTroubleSink sink;
     i_RantDiscoveryTrouble tr[RANT_DISCOVERY_TROUBLE_MAX];
