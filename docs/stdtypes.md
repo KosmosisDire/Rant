@@ -295,6 +295,18 @@ sparse grids, magnetometer, battery and joystick readings, a TF tree, and WebRTC
 signaling (SDP and ICE ride as opaque strings through an app level function, see the media
 section).
 
+## Casts
+
+A vector shows its numbers another way with no library but the types.
+
+- C++: `Double3 d = float3;` and `static_cast<Float3>(d)`, Int vectors up to Double, and `==` on every vector.
+- C#: the same, and to and from `System.Numerics` vectors and `Quaternion`.
+- Rust: `Double3::from(float3)`, and with the feature `nalgebra` `From` to and from its vectors, matrices,
+  quaternions and isometries.
+- Python: `x, y, z = v` and `numpy.array(v)`, for every vector and `Quaternion`.
+
+Anything that computes, such as another tool's axes or a unit rotation, is Rant Math's.
+
 ## Using them from C
 
 ```c

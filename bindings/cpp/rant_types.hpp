@@ -50,10 +50,24 @@ template <uint16_t N> struct String {
  * using directive. */
 namespace types {
 
+/* The vectors, named ahead since each casts to another. */
+struct Float2;
+struct Float3;
+struct Float4;
+struct Double2;
+struct Double3;
+struct Double4;
+struct Int2;
+struct Int3;
+struct Int4;
+
 /* A 2D vector of f32 */
 struct Float2 {
     float x = 0;
     float y = 0;
+    bool operator==(const Float2 &o) const { return x == o.x && y == o.y; }
+    bool operator!=(const Float2 &o) const { return !(*this == o); }
+    operator Double2() const;
 #ifdef RANT_MEMBERS_Float2
     RANT_MEMBERS_Float2
 #endif
@@ -64,6 +78,9 @@ struct Float3 {
     float x = 0;
     float y = 0;
     float z = 0;
+    bool operator==(const Float3 &o) const { return x == o.x && y == o.y && z == o.z; }
+    bool operator!=(const Float3 &o) const { return !(*this == o); }
+    operator Double3() const;
 #ifdef RANT_MEMBERS_Float3
     RANT_MEMBERS_Float3
 #endif
@@ -75,6 +92,9 @@ struct Float4 {
     float y = 0;
     float z = 0;
     float w = 0;
+    bool operator==(const Float4 &o) const { return x == o.x && y == o.y && z == o.z && w == o.w; }
+    bool operator!=(const Float4 &o) const { return !(*this == o); }
+    operator Double4() const;
 #ifdef RANT_MEMBERS_Float4
     RANT_MEMBERS_Float4
 #endif
@@ -84,6 +104,9 @@ struct Float4 {
 struct Double2 {
     double x = 0;
     double y = 0;
+    bool operator==(const Double2 &o) const { return x == o.x && y == o.y; }
+    bool operator!=(const Double2 &o) const { return !(*this == o); }
+    explicit operator Float2() const;
 #ifdef RANT_MEMBERS_Double2
     RANT_MEMBERS_Double2
 #endif
@@ -94,6 +117,9 @@ struct Double3 {
     double x = 0;
     double y = 0;
     double z = 0;
+    bool operator==(const Double3 &o) const { return x == o.x && y == o.y && z == o.z; }
+    bool operator!=(const Double3 &o) const { return !(*this == o); }
+    explicit operator Float3() const;
 #ifdef RANT_MEMBERS_Double3
     RANT_MEMBERS_Double3
 #endif
@@ -105,6 +131,9 @@ struct Double4 {
     double y = 0;
     double z = 0;
     double w = 0;
+    bool operator==(const Double4 &o) const { return x == o.x && y == o.y && z == o.z && w == o.w; }
+    bool operator!=(const Double4 &o) const { return !(*this == o); }
+    explicit operator Float4() const;
 #ifdef RANT_MEMBERS_Double4
     RANT_MEMBERS_Double4
 #endif
@@ -114,6 +143,9 @@ struct Double4 {
 struct Int2 {
     int32_t x = 0;
     int32_t y = 0;
+    bool operator==(const Int2 &o) const { return x == o.x && y == o.y; }
+    bool operator!=(const Int2 &o) const { return !(*this == o); }
+    operator Double2() const;
 #ifdef RANT_MEMBERS_Int2
     RANT_MEMBERS_Int2
 #endif
@@ -124,6 +156,9 @@ struct Int3 {
     int32_t x = 0;
     int32_t y = 0;
     int32_t z = 0;
+    bool operator==(const Int3 &o) const { return x == o.x && y == o.y && z == o.z; }
+    bool operator!=(const Int3 &o) const { return !(*this == o); }
+    operator Double3() const;
 #ifdef RANT_MEMBERS_Int3
     RANT_MEMBERS_Int3
 #endif
@@ -135,6 +170,9 @@ struct Int4 {
     int32_t y = 0;
     int32_t z = 0;
     int32_t w = 0;
+    bool operator==(const Int4 &o) const { return x == o.x && y == o.y && z == o.z && w == o.w; }
+    bool operator!=(const Int4 &o) const { return !(*this == o); }
+    operator Double4() const;
 #ifdef RANT_MEMBERS_Int4
     RANT_MEMBERS_Int4
 #endif
@@ -889,6 +927,17 @@ struct Detection3D {
     RANT_MEMBERS_Detection3D
 #endif
 };
+
+/* A vector in another precision: up to Double as it is, down to Float by static_cast. */
+inline Float2::operator Double2() const { return { static_cast<double>(x), static_cast<double>(y) }; }
+inline Float3::operator Double3() const { return { static_cast<double>(x), static_cast<double>(y), static_cast<double>(z) }; }
+inline Float4::operator Double4() const { return { static_cast<double>(x), static_cast<double>(y), static_cast<double>(z), static_cast<double>(w) }; }
+inline Double2::operator Float2() const { return { static_cast<float>(x), static_cast<float>(y) }; }
+inline Double3::operator Float3() const { return { static_cast<float>(x), static_cast<float>(y), static_cast<float>(z) }; }
+inline Double4::operator Float4() const { return { static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), static_cast<float>(w) }; }
+inline Int2::operator Double2() const { return { static_cast<double>(x), static_cast<double>(y) }; }
+inline Int3::operator Double3() const { return { static_cast<double>(x), static_cast<double>(y), static_cast<double>(z) }; }
+inline Int4::operator Double4() const { return { static_cast<double>(x), static_cast<double>(y), static_cast<double>(z), static_cast<double>(w) }; }
 
 /* Each fixed type is its wire bytes, so it copies as is and passes to the C structs. */
 static_assert(sizeof(Float2) == 8, "Float2 must be its wire bytes");

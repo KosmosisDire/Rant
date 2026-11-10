@@ -75,6 +75,9 @@ namespace Rant.Types
     {
         public float X;
         public float Y;
+        public static implicit operator Double2(Float2 v) => new Double2 { X = v.X, Y = v.Y };
+        public static implicit operator System.Numerics.Vector2(Float2 v) => new System.Numerics.Vector2(v.X, v.Y);
+        public static implicit operator Float2(System.Numerics.Vector2 v) => new Float2 { X = v.X, Y = v.Y };
     }
 
     /// <summary>A 3D vector of f32</summary>
@@ -83,6 +86,9 @@ namespace Rant.Types
         public float X;
         public float Y;
         public float Z;
+        public static implicit operator Double3(Float3 v) => new Double3 { X = v.X, Y = v.Y, Z = v.Z };
+        public static implicit operator System.Numerics.Vector3(Float3 v) => new System.Numerics.Vector3(v.X, v.Y, v.Z);
+        public static implicit operator Float3(System.Numerics.Vector3 v) => new Float3 { X = v.X, Y = v.Y, Z = v.Z };
     }
 
     /// <summary>A 4D vector of f32</summary>
@@ -92,6 +98,9 @@ namespace Rant.Types
         public float Y;
         public float Z;
         public float W;
+        public static implicit operator Double4(Float4 v) => new Double4 { X = v.X, Y = v.Y, Z = v.Z, W = v.W };
+        public static implicit operator System.Numerics.Vector4(Float4 v) => new System.Numerics.Vector4(v.X, v.Y, v.Z, v.W);
+        public static implicit operator Float4(System.Numerics.Vector4 v) => new Float4 { X = v.X, Y = v.Y, Z = v.Z, W = v.W };
     }
 
     /// <summary>A 2D vector of f64</summary>
@@ -99,6 +108,9 @@ namespace Rant.Types
     {
         public double X;
         public double Y;
+        public static explicit operator Float2(Double2 v) => new Float2 { X = (float)v.X, Y = (float)v.Y };
+        public static explicit operator System.Numerics.Vector2(Double2 v) => new System.Numerics.Vector2((float)v.X, (float)v.Y);
+        public static implicit operator Double2(System.Numerics.Vector2 v) => new Double2 { X = v.X, Y = v.Y };
     }
 
     /// <summary>A 3D vector of f64</summary>
@@ -107,6 +119,9 @@ namespace Rant.Types
         public double X;
         public double Y;
         public double Z;
+        public static explicit operator Float3(Double3 v) => new Float3 { X = (float)v.X, Y = (float)v.Y, Z = (float)v.Z };
+        public static explicit operator System.Numerics.Vector3(Double3 v) => new System.Numerics.Vector3((float)v.X, (float)v.Y, (float)v.Z);
+        public static implicit operator Double3(System.Numerics.Vector3 v) => new Double3 { X = v.X, Y = v.Y, Z = v.Z };
     }
 
     /// <summary>A 4D vector of f64</summary>
@@ -116,6 +131,9 @@ namespace Rant.Types
         public double Y;
         public double Z;
         public double W;
+        public static explicit operator Float4(Double4 v) => new Float4 { X = (float)v.X, Y = (float)v.Y, Z = (float)v.Z, W = (float)v.W };
+        public static explicit operator System.Numerics.Vector4(Double4 v) => new System.Numerics.Vector4((float)v.X, (float)v.Y, (float)v.Z, (float)v.W);
+        public static implicit operator Double4(System.Numerics.Vector4 v) => new Double4 { X = v.X, Y = v.Y, Z = v.Z, W = v.W };
     }
 
     /// <summary>A 2D vector of i32, such as a pixel or a grid cell</summary>
@@ -123,6 +141,7 @@ namespace Rant.Types
     {
         public int X;
         public int Y;
+        public static implicit operator Double2(Int2 v) => new Double2 { X = v.X, Y = v.Y };
     }
 
     /// <summary>A 3D vector of i32</summary>
@@ -131,6 +150,7 @@ namespace Rant.Types
         public int X;
         public int Y;
         public int Z;
+        public static implicit operator Double3(Int3 v) => new Double3 { X = v.X, Y = v.Y, Z = v.Z };
     }
 
     /// <summary>A 4D vector of i32</summary>
@@ -140,6 +160,7 @@ namespace Rant.Types
         public int Y;
         public int Z;
         public int W;
+        public static implicit operator Double4(Int4 v) => new Double4 { X = v.X, Y = v.Y, Z = v.Z, W = v.W };
     }
 
     /// <summary>A 3D rotation as a unit quaternion, stored x, y, z, w</summary>
@@ -149,6 +170,8 @@ namespace Rant.Types
         public double Y;
         public double Z;
         public double W;
+        public static explicit operator System.Numerics.Quaternion(Quaternion v) => new System.Numerics.Quaternion((float)v.X, (float)v.Y, (float)v.Z, (float)v.W);
+        public static implicit operator Quaternion(System.Numerics.Quaternion v) => new Quaternion { X = v.X, Y = v.Y, Z = v.Z, W = v.W };
     }
 
     /// <summary>An sRGB color with straight alpha, not premultiplied</summary>

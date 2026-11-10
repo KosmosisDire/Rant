@@ -79,6 +79,50 @@ static std::string cpp_member(const Type &t, const std::string &name, const Defs
     return decl + ";";
 }
 
+// Float, Double and Int vectors: their size, or 0 for any other type.
+static int vector_size(const std::string &name) {
+    for (const char *family : { "Float", "Double", "Int" }) {
+        const std::string f = family;
+        if (name.size() == f.size() + 1 && name.compare(0, f.size(), f) == 0 && name.back() >= '2' && name.back() <= '4')
+            return name.back() - '0';
+    }
+    return 0;
+}
+
+// The casts a vector makes into another precision: up to Double with no word, down to Float with
+// static_cast. Int to Float would round, so it has none.
+static std::vector<std::pair<std::string, bool>> vector_casts(const std::string &name) {
+    const std::string n(1, name.back());
+    if (name.rfind("Float", 0) == 0) return { { "Double" + n, false } };
+    if (name.rfind("Double", 0) == 0) return { { "Float" + n, true } };
+    return { { "Double" + n, false } };
+}
+
+static std::string vector_members(const Def &d) {
+    std::string out, same;
+    for (const Member &m : d.members) same += std::string(same.empty() ? "" : " && ") + m.name + " == o." + m.name;
+    out += "    bool operator==(const " + d.name + " &o) const { return " + same + "; }\n";
+    out += "    bool operator!=(const " + d.name + " &o) const { return !(*this == o); }\n";
+    for (const auto &c : vector_casts(d.name))
+        out += std::string("    ") + (c.second ? "explicit " : "") + "operator " + c.first + "() const;\n";
+    return out;
+}
+
+// The casts' bodies, once every vector is complete.
+static std::string vector_definitions(const Model &model) {
+    std::string out;
+    for (const Def &d : model.defs) {
+        if (d.kind == Def::Enum || !vector_size(d.name)) continue;
+        for (const auto &c : vector_casts(d.name)) {
+            const std::string to = c.first.rfind("Float", 0) == 0 ? "float" : "double";
+            std::string fields;
+            for (const Member &m : d.members) fields += std::string(fields.empty() ? "" : ", ") + "static_cast<" + to + ">(" + m.name + ")";
+            out += "inline " + d.name + "::operator " + c.first + "() const { return { " + fields + " }; }\n";
+        }
+    }
+    return out;
+}
+
 static std::string cpp_def(const Def &d, const Defs &defs) {
     std::vector<std::pair<std::string, std::string>> rows;
     if (d.kind == Def::Enum) {
@@ -95,7 +139,8 @@ static std::string cpp_def(const Def &d, const Defs &defs) {
     }
     // A library that gives the type methods, as Rant Math does, defines RANT_MEMBERS_<name> before this.
     const std::string hook = "RANT_MEMBERS_" + d.name;
-    return about_of(d) + "struct " + d.name + " {\n" + member_lines(rows) + "#ifdef " + hook + "\n    " + hook +
+    const std::string own = d.kind == Def::Struct && vector_size(d.name) ? vector_members(d) : "";
+    return about_of(d) + "struct " + d.name + " {\n" + member_lines(rows) + own + "#ifdef " + hook + "\n    " + hook +
            "\n#endif\n};\n";
 }
 
@@ -105,11 +150,16 @@ static std::string types_header(const Model &model, const std::string &extras) {
     if (at == std::string::npos) throw std::runtime_error("types/extras.hpp has no marker");
 
     Defs defs;
-    std::string body;
+    std::string body = "/* The vectors, named ahead since each casts to another. */\n";
+    for (const Def &d : model.defs)
+        if (d.kind == Def::Struct && vector_size(d.name)) body += "struct " + d.name + ";\n";
+    body += "\n";
     for (const Def &d : model.defs) {
         defs[d.name] = &d;
         body += cpp_def(d, defs) + "\n";
     }
+    body += "/* A vector in another precision: up to Double as it is, down to Float by static_cast. */\n" +
+            vector_definitions(model) + "\n";
     body += "/* Each fixed type is its wire bytes, so it copies as is and passes to the C structs. */\n";
     for (const Def &d : model.defs)
         if (d.fixed && d.packed && d.kind != Def::Enum)

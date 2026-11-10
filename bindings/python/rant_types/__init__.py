@@ -699,6 +699,22 @@ def identity_pose():
 def identity_transform():
     return Transform(identity_pose())
 
+
+# A vector or a quaternion unpacks into its numbers, and goes into numpy as an array of them.
+def _numbers(cls):
+    names = [f.name for f in _dataclasses.fields(cls)]
+    cls.__iter__ = lambda self: iter([getattr(self, n) for n in names])
+
+    def __array__(self, dtype=None, copy=None):
+        import numpy
+        return numpy.array(list(self), dtype=dtype)
+    cls.__array__ = __array__
+
+
+for _cls in (Float2, Float3, Float4, Double2, Double3, Double4, Int2, Int3, Int4, Quaternion):
+    _numbers(_cls)
+del _numbers, _cls
+
 # The vocabulary only built the roster, so it stays out of this package's names.
 del _Array, _StdAlias, _std, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, string, enum
 

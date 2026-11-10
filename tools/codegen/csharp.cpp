@@ -95,6 +95,47 @@ static Spelled cs_member(const Type &t, const Defs &defs) {
     throw std::runtime_error("the C# types hold no map");
 }
 
+// A vector or a quaternion in another precision, and as System.Numerics holds it in floats: up with
+// no word, down by an explicit cast. C# takes each cast once, so one between two of Rant's types sits
+// in the type it starts from.
+static std::string cs_casts(const Def &d) {
+    const std::string &n = d.name;
+    std::vector<std::string> fields;
+    for (const Member &m : d.members) fields.push_back(pascal(m.name));
+    auto made = [&](const std::string &to, const std::string &cast, bool braces) {
+        std::string out;
+        for (size_t i = 0; i < fields.size(); i++)
+            out += (i ? ", " : "") + (braces ? fields[i] + " = " : std::string()) + cast + "v." + fields[i];
+        return braces ? "new " + to + " { " + out + " }" : "new " + to + "(" + out + ")";
+    };
+    auto line = [&](bool implicit, const std::string &to, const std::string &from, const std::string &body) {
+        return std::string("        public static ") + (implicit ? "implicit" : "explicit") + " operator " + to + "(" + from +
+               " v) => " + body + ";\n";
+    };
+    std::string out;
+    bool vec = false;
+    for (const std::string family : { "Float", "Double", "Int" })
+        vec |= n.size() == family.size() + 1 && n.rfind(family, 0) == 0 && n.back() >= '2' && n.back() <= '4';
+    if (vec) {
+        const std::string size(1, n.back()), numerics = "System.Numerics.Vector" + size;
+        if (n.rfind("Float", 0) == 0) {
+            out += line(true, "Double" + size, n, made("Double" + size, "", true));
+            out += line(true, numerics, n, made(numerics, "", false));
+            out += line(true, n, numerics, made(n, "", true));
+        } else if (n.rfind("Double", 0) == 0) {
+            out += line(false, "Float" + size, n, made("Float" + size, "(float)", true));
+            out += line(false, numerics, n, made(numerics, "(float)", false));
+            out += line(true, n, numerics, made(n, "", true));
+        } else {
+            out += line(true, "Double" + size, n, made("Double" + size, "", true));
+        }
+    } else if (n == "Quaternion") {
+        out += line(false, "System.Numerics.Quaternion", n, made("System.Numerics.Quaternion", "(float)", false));
+        out += line(true, n, "System.Numerics.Quaternion", made(n, "", true));
+    }
+    return out;
+}
+
 static std::string cs_def(const Def &d, const Defs &defs) {
     const std::string in = "        ";
     std::string out = summary(about_text(d), "    ");
@@ -113,7 +154,7 @@ static std::string cs_def(const Def &d, const Defs &defs) {
         const Spelled s = cs_member(m.type, defs);
         out += summary(comment_of(m), in) + in + s.attrs + "public " + s.type + " " + pascal(m.name) + ";\n";
     }
-    return out + "    }\n";
+    return out + cs_casts(d) + "    }\n";
 }
 
 static std::string types_source(const Model &model, const std::string &extras) {

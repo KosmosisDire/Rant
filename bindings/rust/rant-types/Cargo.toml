@@ -9,3 +9,10 @@ repository.workspace = true
 
 [lib]
 name = "rant_types"
+
+[dependencies]
+nalgebra = { version = "0.34", optional = true, default-features = false, features = ["std"] }
+
+[features]
+# Casts to and from nalgebra's types.
+nalgebra = ["dep:nalgebra"]

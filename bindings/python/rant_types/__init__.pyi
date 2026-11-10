@@ -5,18 +5,22 @@ decodes to."""
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import TypeAlias
+from typing import Any, Iterator, TypeAlias
 
 @dataclass
 class Float2:
     x: float = 0.0
     y: float = 0.0
+    def __iter__(self) -> Iterator[float]: ...
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any: ...
 
 @dataclass
 class Float3:
     x: float = 0.0
     y: float = 0.0
     z: float = 0.0
+    def __iter__(self) -> Iterator[float]: ...
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any: ...
 
 @dataclass
 class Float4:
@@ -24,17 +28,23 @@ class Float4:
     y: float = 0.0
     z: float = 0.0
     w: float = 0.0
+    def __iter__(self) -> Iterator[float]: ...
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any: ...
 
 @dataclass
 class Double2:
     x: float = 0.0
     y: float = 0.0
+    def __iter__(self) -> Iterator[float]: ...
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any: ...
 
 @dataclass
 class Double3:
     x: float = 0.0
     y: float = 0.0
     z: float = 0.0
+    def __iter__(self) -> Iterator[float]: ...
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any: ...
 
 @dataclass
 class Double4:
@@ -42,17 +52,23 @@ class Double4:
     y: float = 0.0
     z: float = 0.0
     w: float = 0.0
+    def __iter__(self) -> Iterator[float]: ...
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any: ...
 
 @dataclass
 class Int2:
     x: int = 0
     y: int = 0
+    def __iter__(self) -> Iterator[int]: ...
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any: ...
 
 @dataclass
 class Int3:
     x: int = 0
     y: int = 0
     z: int = 0
+    def __iter__(self) -> Iterator[int]: ...
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any: ...
 
 @dataclass
 class Int4:
@@ -60,6 +76,8 @@ class Int4:
     y: int = 0
     z: int = 0
     w: int = 0
+    def __iter__(self) -> Iterator[int]: ...
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any: ...
 
 @dataclass
 class Quaternion:
@@ -67,6 +85,8 @@ class Quaternion:
     y: float = 0.0
     z: float = 0.0
     w: float = 0.0
+    def __iter__(self) -> Iterator[float]: ...
+    def __array__(self, dtype: Any = None, copy: Any = None) -> Any: ...
 
 @dataclass
 class Color:
