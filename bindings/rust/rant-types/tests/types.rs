@@ -53,3 +53,19 @@ fn time_and_color() {
     assert_eq!(Color::from_hex(0x11223344).to_hex(), 0x11223344);
     assert_eq!(Color::from_hex(0x11223344).a, 0x44);
 }
+
+#[cfg(feature = "nalgebra")]
+#[test]
+fn nalgebra_casts() {
+    use nalgebra as na;
+    let v = Double3 { x: 1.0, y: 2.0, z: 3.0 };
+    assert_eq!(Double3::from(na::Vector3::<f64>::from(v)), v);
+    let m = Matrix3x3 { m: [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]] };
+    let n = na::Matrix3::<f32>::from(m);
+    assert_eq!(n[(0, 2)], 3.0);
+    assert_eq!(Matrix3x3::from(n), m);
+    let q = Quaternion { x: 0.1, y: 0.2, z: 0.3, w: 0.4 };
+    assert_eq!(Quaternion::from(na::Quaternion::<f64>::from(q)), q);
+    let pose = Pose::from(na::Isometry3::new(na::Vector3::new(1.0, 2.0, 3.0), na::Vector3::zeros()));
+    assert_eq!((pose.position, pose.orientation.w), (Double3 { x: 1.0, y: 2.0, z: 3.0 }, 1.0));
+}
