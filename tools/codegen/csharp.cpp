@@ -113,21 +113,13 @@ static std::string cs_casts(const Def &d) {
                " v) => " + body + ";\n";
     };
     std::string out;
-    bool vec = false;
-    for (const std::string family : { "Float", "Double", "Int" })
-        vec |= n.size() == family.size() + 1 && n.rfind(family, 0) == 0 && n.back() >= '2' && n.back() <= '4';
-    if (vec) {
+    if (vector_size(n)) {
         const std::string size(1, n.back()), numerics = "System.Numerics.Vector" + size;
-        if (n.rfind("Float", 0) == 0) {
-            out += line(true, "Double" + size, n, made("Double" + size, "", true));
-            out += line(true, numerics, n, made(numerics, "", false));
+        const VectorCast c = vector_cast(n);
+        out += line(!c.is_explicit, c.to, n, made(c.to, c.is_explicit ? "(float)" : "", true));
+        if (n.rfind("Int", 0) != 0) {
+            out += line(!c.is_explicit, numerics, n, made(numerics, c.is_explicit ? "(float)" : "", false));
             out += line(true, n, numerics, made(n, "", true));
-        } else if (n.rfind("Double", 0) == 0) {
-            out += line(false, "Float" + size, n, made("Float" + size, "(float)", true));
-            out += line(false, numerics, n, made(numerics, "(float)", false));
-            out += line(true, n, numerics, made(n, "", true));
-        } else {
-            out += line(true, "Double" + size, n, made("Double" + size, "", true));
         }
     } else if (n == "Quaternion") {
         out += line(false, "System.Numerics.Quaternion", n, made("System.Numerics.Quaternion", "(float)", false));

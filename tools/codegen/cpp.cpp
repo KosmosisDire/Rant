@@ -79,32 +79,13 @@ static std::string cpp_member(const Type &t, const std::string &name, const Defs
     return decl + ";";
 }
 
-// Float, Double and Int vectors: their size, or 0 for any other type.
-static int vector_size(const std::string &name) {
-    for (const char *family : { "Float", "Double", "Int" }) {
-        const std::string f = family;
-        if (name.size() == f.size() + 1 && name.compare(0, f.size(), f) == 0 && name.back() >= '2' && name.back() <= '4')
-            return name.back() - '0';
-    }
-    return 0;
-}
-
-// The casts a vector makes into another precision: up to Double with no word, down to Float with
-// static_cast. Int to Float would round, so it has none.
-static std::vector<std::pair<std::string, bool>> vector_casts(const std::string &name) {
-    const std::string n(1, name.back());
-    if (name.rfind("Float", 0) == 0) return { { "Double" + n, false } };
-    if (name.rfind("Double", 0) == 0) return { { "Float" + n, true } };
-    return { { "Double" + n, false } };
-}
-
 static std::string vector_members(const Def &d) {
     std::string out, same;
     for (const Member &m : d.members) same += std::string(same.empty() ? "" : " && ") + m.name + " == o." + m.name;
     out += "    bool operator==(const " + d.name + " &o) const { return " + same + "; }\n";
     out += "    bool operator!=(const " + d.name + " &o) const { return !(*this == o); }\n";
-    for (const auto &c : vector_casts(d.name))
-        out += std::string("    ") + (c.second ? "explicit " : "") + "operator " + c.first + "() const;\n";
+    const VectorCast c = vector_cast(d.name);
+    out += std::string("    ") + (c.is_explicit ? "explicit " : "") + "operator " + c.to + "() const;\n";
     return out;
 }
 
@@ -113,12 +94,11 @@ static std::string vector_definitions(const Model &model) {
     std::string out;
     for (const Def &d : model.defs) {
         if (d.kind == Def::Enum || !vector_size(d.name)) continue;
-        for (const auto &c : vector_casts(d.name)) {
-            const std::string to = c.first.rfind("Float", 0) == 0 ? "float" : "double";
-            std::string fields;
-            for (const Member &m : d.members) fields += std::string(fields.empty() ? "" : ", ") + "static_cast<" + to + ">(" + m.name + ")";
-            out += "inline " + d.name + "::operator " + c.first + "() const { return { " + fields + " }; }\n";
-        }
+        const VectorCast c = vector_cast(d.name);
+        const std::string to = c.to.rfind("Float", 0) == 0 ? "float" : "double";
+        std::string fields;
+        for (const Member &m : d.members) fields += std::string(fields.empty() ? "" : ", ") + "static_cast<" + to + ">(" + m.name + ")";
+        out += "inline " + d.name + "::operator " + c.to + "() const { return { " + fields + " }; }\n";
     }
     return out;
 }

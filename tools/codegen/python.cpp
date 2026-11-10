@@ -144,11 +144,7 @@ static std::string runtime_def(const Def &d, const Defs &defs) {
 // A vector or a quaternion: plain numbers that unpack in order and go into numpy as an array.
 static bool numeric(const Def &d) {
     if (d.kind != Def::Struct) return false;
-    if (d.name == "Quaternion") return true;
-    for (const std::string family : { "Float", "Double", "Int" })
-        if (d.name.size() == family.size() + 1 && d.name.rfind(family, 0) == 0 && d.name.back() >= '2' && d.name.back() <= '4')
-            return true;
-    return false;
+    return d.name == "Quaternion" || vector_size(d.name) > 0;
 }
 
 static std::string runtime_source(const Model &model, const std::string &extras) {

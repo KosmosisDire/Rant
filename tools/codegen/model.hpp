@@ -56,6 +56,17 @@ std::string snake(const std::string &name);
 // matrix is m and a [us] value is us, as everyone writes them.
 std::string alias_member(const Def &def);
 
+// The size of a Float, Double or Int vector (Float3 is 3), or 0 for any other type.
+int vector_size(const std::string &name);
+
+// The cast a vector makes into another precision: Float up to Double and Int up to Double are
+// implicit, Double down to Float is explicit. Int to Float would round, so it has none.
+struct VectorCast {
+    std::string to;
+    bool is_explicit;
+};
+VectorCast vector_cast(const std::string &name);
+
 // The type as schema text, such as string<30>, Double3[] or f32[3][3].
 std::string spell(const Type &type);
 // A member's comment as schema text, [unit] then note, with lines apart by newlines.

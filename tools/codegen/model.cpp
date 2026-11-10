@@ -164,6 +164,21 @@ std::string snake(const std::string &name) {
     return out;
 }
 
+int vector_size(const std::string &name) {
+    for (const char *family : { "Float", "Double", "Int" }) {
+        const std::string f = family;
+        if (name.size() == f.size() + 1 && name.compare(0, f.size(), f) == 0 && name.back() >= '2' && name.back() <= '4')
+            return name.back() - '0';
+    }
+    return 0;
+}
+
+VectorCast vector_cast(const std::string &name) {
+    const std::string n(1, name.back());
+    if (name.rfind("Double", 0) == 0) return { "Float" + n, true };
+    return { "Double" + n, false };
+}
+
 std::string alias_member(const Def &d) {
     const Member &m = d.members[0];
     if (m.unit == "us") return "us";
