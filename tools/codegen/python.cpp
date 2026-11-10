@@ -155,6 +155,12 @@ static std::string runtime_source(const Model &model, const std::string &extras)
     out += "\n" + extras + "\n";
     out += "# The vocabulary only built the roster, so it stays out of this package's names.\n";
     out += "del _Array, _StdAlias, _std, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, string, enum\n";
+    out += "\n# With Rant Math installed the types take its methods and operators, values from a node too.\n"
+           "import importlib.util as _util\n"
+           "if _util.find_spec(\"rant_math\") is not None:\n"
+           "    import rant_math as _rant_math  # noqa: F401\n"
+           "    del _rant_math\n"
+           "del _util\n";
     return out;
 }
 

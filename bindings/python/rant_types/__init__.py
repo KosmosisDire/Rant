@@ -701,3 +701,10 @@ def identity_transform():
 
 # The vocabulary only built the roster, so it stays out of this package's names.
 del _Array, _StdAlias, _std, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, string, enum
+
+# With Rant Math installed the types take its methods and operators, values from a node too.
+import importlib.util as _util
+if _util.find_spec("rant_math") is not None:
+    import rant_math as _rant_math  # noqa: F401
+    del _rant_math
+del _util
