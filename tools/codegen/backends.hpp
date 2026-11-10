@@ -23,6 +23,8 @@ std::vector<Output> write_csharp(const Model &model, const std::string &extras);
 std::vector<Output> write_python(const Model &model, const std::string &extras, const std::string &stub_extras);
 // The Rust types with extras pasted after them, and the middleware's Message impls of them.
 std::vector<Output> write_rust(const Model &model, const std::string &extras);
+// The fixed types as the IEC 61131-3 types of the PLCnext library.
+std::vector<Output> write_iec(const Model &model);
 // The TypeScript value types and table of schemas.
 std::vector<Output> write_typescript(const Model &model);
 // The whole model for tools that read no schema text, such as the docs site.

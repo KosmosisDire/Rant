@@ -34,7 +34,8 @@ Rant as a subproject or finds the installed package.
   `bindings/csharp/types/Types.cs` under `types/extras.cs`, `bindings/python/rant_types/__init__.py`
   and its stub with `types/extras.py` and `types/extras.pyi` pasted at their ends,
   `bindings/rust/rant-types/src/lib.rs` with `types/extras.rs` pasted at its end, `bindings/rust/rant/src/types/standard.rs`,
-  `bindings/web/src/stdtypes.ts`,
+  `bindings/web/src/stdtypes.ts`, `bindings/plcnext/StandardTypes.cs` (the fixed types as the
+  IEC 61131-3 types of the PLCnext library),
   `src/serialize/stdroster.h`, `src/serialize/stdtable.c` and `types/stdtypes.json`. The
   outputs are committed so a build needs no generator, and ctest `codegen.current` fails when
   one is stale. A definition sees only those above it, and file order is `RantStdType`'s.

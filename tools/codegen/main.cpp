@@ -67,6 +67,7 @@ static int run(const std::string &root, bool check) {
         outputs.push_back(o);
     for (Output &o : write_rust(model, must_read(root + "/types/extras.rs"))) outputs.push_back(o);
     for (Output &o : write_typescript(model)) outputs.push_back(o);
+    for (Output &o : write_iec(model)) outputs.push_back(o);
     for (Output &o : write_json(model)) outputs.push_back(o);
 
     int stale = 0;
