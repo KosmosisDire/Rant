@@ -1,5 +1,24 @@
 # Getting started
 
+## Install
+
+`rant add` in a package adds Rant for its language. By hand, take the newest
+[release](https://github.com/KosmosisDire/Rant/releases):
+
+| language | how |
+|---|---|
+| C, C++ with CMake | `CPMAddPackage(NAME rant GIT_REPOSITORY https://github.com/KosmosisDire/Rant.git GIT_TAG v<version>)`, then link `rant::rant_host` (docs/building.md) |
+| C, C++ without CMake | `rant.h` and `rant.c`, or `rant.hpp` and `rant.cpp`, from the release |
+| Python | `pip install` the release's wheel for your platform |
+| C# | the release's `Rant.<version>.nupkg`: `dotnet nuget add source <folder> -n rant`, then `dotnet add package Rant --source rant` |
+| Rust | `rant-middleware = { git = "https://github.com/KosmosisDire/Rant.git", tag = "crate-v<version>" }` (docs/rust.md) |
+| Unity | Package Manager, Add package from git URL: `https://github.com/KosmosisDire/Rant.git#upm` |
+| TypeScript | `npm install` the release's `rant-middleware-<version>.tgz` (docs/javascript.md) |
+| Arduino, PlatformIO | `rant add` in the sketch or project (docs/cpp.md) |
+| Tools | the release's `rant-<version>-<platform>.zip` |
+
+## Build it in
+
 Rant is a C99 library shipped as one header, `rant.h`, built from `src/`. Define the
 implementation macro in exactly one C file:
 
