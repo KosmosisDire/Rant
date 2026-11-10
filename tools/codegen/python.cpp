@@ -182,8 +182,11 @@ static std::string runtime_source(const Model &model, const std::string &extras)
     out += "\n# With Rant Math installed the types take its methods and operators, values from a node too.\n"
            "import importlib.util as _util\n"
            "if _util.find_spec(\"rant_math\") is not None:\n"
-           "    import rant_math as _rant_math  # noqa: F401\n"
-           "    del _rant_math\n"
+           "    try:\n"
+           "        import rant_math as _rant_math  # noqa: F401\n"
+           "        del _rant_math\n"
+           "    except ImportError:\n"
+           "        pass\n"
            "del _util\n";
     return out;
 }
