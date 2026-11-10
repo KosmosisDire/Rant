@@ -23,7 +23,6 @@ const SKIPPED: &[(&str, &str)] = &[
     ("rant_schema_validate", "the C validates every delivery and every typed send"),
     ("rant_schema_field_type_wire", "no binding exposes it"),
     ("rant_std_by_name", "the standard types are spelled by name, recognition is a tool concern"),
-    ("rant_std_name", "as rant_std_by_name"),
     ("rant_std_text", "as rant_std_by_name"),
     ("rant_std_recognize", "as rant_std_by_name"),
     ("rant_std_recognize_field", "as rant_std_by_name"),
