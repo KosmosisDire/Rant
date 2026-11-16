@@ -66,7 +66,9 @@ strict prefix of it.
   (`i_rant_node_tx_drain`, shared with the poll body and `i_rant_node_flush_tx`) under the
   lock the send already holds whenever another thread runs the loop (a service thread or
   a sleeping poller), so there is no handoff, no waker datagram and no wait for a TX
-  pass. A full socket parks the datagram in `tx_hold` and kicks the poller to retry. A
+  pass. A full socket parks the datagram in `tx_hold` and kicks the poller to retry. Full
+  means EAGAIN, or ENOBUFS, which a full interface queue gives on POSIX. Any other failure,
+  ENOMEM from an exhausted lwIP heap among them, drops the datagram with `RANT_E_SEND`. A
   send can also arm a transport timer (a rate capped lane's tick, a tail heartbeat) ahead
   of the wake the sleeping poller planned. `sleep_until_us` records that plan, and the
   send kicks when the new deadline lands a millisecond or more before it, or the timer

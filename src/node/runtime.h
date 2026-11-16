@@ -91,6 +91,15 @@ typedef void (*RantMsgFn)(const RantMsg *msg);
  * page_size 0 is the default. spec/allocation.md explains the modes. */
 RANT_API RantAllocator rant_allocator_heap(uint32_t page_size);
 
+/* A dynamic alloc with max_bytes 0 gets the smaller of these at open: a share of the
+ * device's memory, and its free memory less a reserve for the system. spec/allocation.md */
+#ifndef RANT_MEM_PERCENT
+#define RANT_MEM_PERCENT 25u
+#endif
+#ifndef RANT_MEM_RESERVE
+#define RANT_MEM_RESERVE (40u * 1024u)
+#endif
+
 /* Opens a node on alloc, which it copies and resets on close, so use one per node. alloc
  * is required and NULL refuses the open with RANT_E_OOM. name NULL gives an auto name,
  * on_message and on_event may be NULL, opts NULL means defaults. */

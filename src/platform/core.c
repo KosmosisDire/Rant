@@ -71,9 +71,11 @@
     #include <netinet/tcp.h>     /* TCP_NODELAY */
   #endif
   #include <stdlib.h>           /* arc4random_buf */
+  #if defined(ESP_PLATFORM)
+    #include <esp_heap_caps.h>    /* heap_caps_get_* */
+  #endif
   #ifdef RANT_PROC_STATS
     #if defined(ESP_PLATFORM)
-      #include <esp_heap_caps.h>  /* heap_caps_get_* */
       #include <freertos/FreeRTOS.h>
       #include <freertos/task.h>  /* uxTaskGetSystemState */
     #else
@@ -331,8 +333,7 @@ esp_cpu_done:
 int i_rant_plat_heap_stats(uint64_t *total_bytes, uint64_t *free_bytes,
                            uint64_t *min_free_bytes, uint64_t *largest_free_block_bytes){
 #if defined(ESP_PLATFORM)
-    if (total_bytes)              *total_bytes = (uint64_t)heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
-    if (free_bytes)               *free_bytes = (uint64_t)heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+    i_rant_plat_memory(total_bytes, free_bytes);
     if (min_free_bytes)           *min_free_bytes = (uint64_t)heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
     if (largest_free_block_bytes) *largest_free_block_bytes =
         (uint64_t)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
@@ -359,6 +360,32 @@ uint64_t i_rant_plat_wall_us(void){
 void *i_rant_plat_realloc(void *ptr, size_t size){
     if (size == 0){ free(ptr); return NULL; }
     return realloc(ptr, size);
+}
+
+int i_rant_plat_memory(uint64_t *total_bytes, uint64_t *free_bytes){
+    uint64_t total = 0, freeb = 0;
+#if defined(_WIN32)
+    MEMORYSTATUSEX ms; ms.dwLength = sizeof ms;
+    if (!GlobalMemoryStatusEx(&ms)) return 0;
+    total = ms.ullTotalPhys; freeb = ms.ullAvailPhys;
+#elif defined(ESP_PLATFORM)
+    total = (uint64_t)heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
+    freeb = (uint64_t)heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+#elif defined(_SC_PHYS_PAGES)
+    {   long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGESIZE), avail = pages;
+  #ifdef _SC_AVPHYS_PAGES
+        avail = sysconf(_SC_AVPHYS_PAGES);
+  #endif
+        if (pages <= 0 || psz <= 0) return 0;
+        total = (uint64_t)pages * (uint64_t)psz;
+        freeb = avail > 0 ? (uint64_t)avail * (uint64_t)psz : total;   /* macOS has no free count */
+    }
+#else
+    return 0;
+#endif
+    if (total_bytes) *total_bytes = total;
+    if (free_bytes)  *free_bytes = freeb;
+    return total != 0;
 }
 
 /* UDP sockets */
@@ -495,7 +522,8 @@ int i_rant_plat_would_block(void){
 #ifdef _WIN32
     return WSAGetLastError() == WSAEWOULDBLOCK;
 #else
-    return errno == EAGAIN || errno == EWOULDBLOCK;
+    /* a full interface queue is ENOBUFS: back off like EAGAIN */
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS;
 #endif
 }
 

@@ -11,7 +11,7 @@ returns NULL on overflow, for embedded no heap use. `rant_allocator_dynamic(back
 page_size)` bumps within pages and takes a new page through the injected `RantPageFn`
 when full. `rant_allocator_heap(page_size)` is that over the process heap and is what a
 caller with no page source of its own uses, including every binding. Exhaustion surfaces
-as `RANT_E_OOM`. `max_bytes` is a runaway guard (0 = `RANT_MEM_DEFAULT_MAX`).
+as `RANT_E_OOM`. `max_bytes` caps the pool (Limit).
 
 Two intents, explicit not size based. `rant_allocator_fixed` bumps a shared page,
 cheapest, never individually freed. `rant_allocator_alloc` is a `RantAllocFn` (pass `&a`
@@ -23,7 +23,9 @@ Freed blocks go to a reuse pool in both modes and never back to the backing heap
 steady state churn cannot fragment the system heap. Size classes are quarter power of two
 (waste at most 25%), exact size above 4 kB. Static mode sizes every block exactly, since
 the buffer cannot grow. A pooled block is reused only when it is within twice the ask, so
-a big block is not spent on a small one. The runaway guard counts pooled memory as held.
+a big block is not spent on a small one. The limit counts pooled memory as held, and a take
+over it gives pooled blocks back to the heap until it fits, so idle blocks of the wrong
+size never hold the node at its limit.
 The page allocator halves its request on failure for fragmented heaps.
 
 ## Two pools
@@ -61,6 +63,25 @@ both, so every alloc and its free name the same hook.
 `rant_node_mem_stats` reports the main pool, since SRAM is what runs out. The meta
 snapshot's node section adds `bulk_in_use`, `bulk_peak` and `bulk_alloc_calls` when a bulk
 is set.
+
+## Limit
+
+The pool keeps what it frees for reuse, so without a cap a node keeps its high water
+mark. On an ESP32 a crowd of peers that left without a BYE, each held until GONE, took the
+free heap below what WiFi needs to receive, and the board went deaf while it still
+announced. A dynamic pool opened with `max_bytes` 0 gets the smaller of
+`RANT_MEM_PERCENT` (25) percent of the device's memory and its free memory less
+`RANT_MEM_RESERVE` (40 kB), never below what the open itself takes. A platform that cannot
+tell its memory leaves the pool unlimited, and `SIZE_MAX` asks for that.
+
+At the limit the node makes room from departed peers before anything live. A new record
+takes the oldest DROPPED one's place, and a slot goes to a DROPPED peer before the table
+grows. The arena never shrinks, so a grow that would leave less than a quarter of the
+limit is refused, which keeps room for the work of the peers it serves. Any other refused
+take makes the next poll forget DROPPED peers, oldest first, until it would fit, so a retry
+finds room. A refused grow surfaces the peer as
+`RANT_E_PEER_REFUSED` with the `peer_refused` condition. Meta reports the limit as
+`mem_limit`.
 
 ## The copied pool rule
 
@@ -195,4 +216,6 @@ functional, so make them cheap rather than leaning on `disable_logs` and `disabl
 | RANT_SHM_CLASS_SHIFT | 2 | SHM class growth ratio |
 | RANT_SHM_N_CLASSES | 7 | number of SHM classes |
 | RANT_RECORDS_PER_PEER | 4 | records per slot a static node reserves at open |
+| RANT_MEM_PERCENT | 25 | a dynamic pool's default limit as a share of the device's memory |
+| RANT_MEM_RESERVE | 40 kB | free memory a dynamic pool's default limit leaves the system |
 | RANT_DISCOVERY_FILTER_BYTES | 32 | each record's filter, a power of two from 8 to 64 |

@@ -189,6 +189,8 @@ void           i_rant_discovery_replay_peers(i_RantDiscoveryState *st);
 /* Judges one slotted peer again by the blob we hold, as when what admit judges by came in
  * after the blob. 1 when it gave its slot back. */
 int            i_rant_discovery_rejudge(i_RantDiscoveryState *st, uint32_t id);
+/* Forgets the oldest DROPPED peer as GONE, for room in memory. 0 when none is DROPPED. */
+int            i_rant_discovery_forget_dropped(i_RantDiscoveryState *st);
 /* Replaces the overlay and bumps its version so peers re fetch it. meta must stay valid.
  * now_us dates the change, which every announce reports as its age. */
 void           i_rant_discovery_set_meta(i_RantDiscoveryState *st, RantBytes meta, uint64_t now_us);

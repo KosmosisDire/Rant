@@ -51,6 +51,8 @@ int      i_rant_plat_heap_stats(uint64_t *total_bytes, uint64_t *free_bytes,
 
 /* The one heap dependency. ptr NULL allocates, size 0 frees and returns NULL. */
 void    *i_rant_plat_realloc(void *ptr, size_t size);
+/* The device's memory and how much is free, for a node's default limit. 0 when unknown. */
+int      i_rant_plat_memory(uint64_t *total_bytes, uint64_t *free_bytes);
 
 /* UDP sockets */
 i_RantSock i_rant_plat_udp_open(void);                       /* RANT_SOCK_BAD on failure */

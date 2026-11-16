@@ -48,6 +48,18 @@ static inline size_t i_rant_allocator_class(size_t n){
 static inline int i_rant_allocator_over(const RantAllocator *a, size_t need){
     return a->max_bytes && a->in_use + a->pooled + need > a->max_bytes;
 }
+/* Over the limit, a dynamic pool gives its idle blocks back to the heap until need fits.
+ * 1 when it fits. */
+static inline int i_rant_allocator_room(RantAllocator *a, size_t need){
+    while (i_rant_allocator_over(a, need) && a->free_pool){
+        i_RantPage *pg = a->free_pool;
+        a->free_pool = pg->next;
+        if (a->free_pool) a->free_pool->prev = NULL;
+        a->pooled -= pg->cap; a->pages_live--;
+        a->page_realloc(pg, 0);
+    }
+    return !i_rant_allocator_over(a, need);
+}
 
 static inline RantAllocator rant_allocator_static(void *buffer, size_t size){
     RantAllocator a;
@@ -78,7 +90,7 @@ static inline void *i_rant_allocator_bump(RantAllocator *a, size_t need){
     need = i_rant_allocator_align(need);
     if (!pg || i_rant_allocator_align(pg->used) + need > pg->cap){
         size_t psz, floor_sz; i_RantPage *np;
-        if (!a->page_realloc || i_rant_allocator_over(a, need)) return NULL;
+        if (!a->page_realloc || !i_rant_allocator_room(a, need)) return NULL;
         psz = a->page_size;
         floor_sz = need + sizeof(i_RantPage);
         if (floor_sz > psz) psz = floor_sz;
@@ -131,7 +143,7 @@ static inline void *i_rant_allocator_new_owned(RantAllocator *a, size_t cap){
         }
     }
     if (a->page_realloc){
-        if (i_rant_allocator_over(a, cap)) return NULL;
+        if (!i_rant_allocator_room(a, cap)) return NULL;
         pg = (i_RantPage *)a->page_realloc(NULL, sizeof(i_RantPage) + cap);
         if (!pg) return NULL;
         pg->prev = NULL; pg->next = a->owned; if (a->owned) a->owned->prev = pg;

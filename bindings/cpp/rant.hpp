@@ -509,6 +509,9 @@ struct NodeOptions {
      * growth, shared memory off, and the open fails when the buffer is too small. */
     void*                    memory      = nullptr;
     size_t                   memory_size = 0;
+    /* The most the heap gives the node. 0 takes the smaller of a quarter of the device's
+     * memory and its free memory less 40 kB, SIZE_MAX is unlimited. */
+    size_t                   memory_limit = 0;
     /* A second buffer, such as one in PSRAM, for the big buffers touched rarely: message
      * history and reassembly, peer records, queue rings. Null keeps them with the rest. */
     void*                    bulk        = nullptr;
@@ -2720,6 +2723,7 @@ public:
         detail::RantAllocator mem = (o.memory && o.memory_size)
             ? detail::rant_allocator_static(o.memory, o.memory_size)
             : detail::rant_allocator_heap(0);
+        mem.max_bytes = o.memory_limit;
         detail::RantAllocator bulk = detail::rant_allocator_static(o.bulk, o.bulk_size);
         co.bulk = (o.bulk && o.bulk_size) ? &bulk : nullptr;    /* copied at open */
         detail::RantNode* n = detail::rant_node_open(

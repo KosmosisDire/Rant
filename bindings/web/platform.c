@@ -121,6 +121,12 @@ void *i_rant_plat_realloc(void *ptr, size_t size){
     return realloc(ptr, size);
 }
 
+/* wasm memory grows on demand, so the page's node has no default limit */
+int i_rant_plat_memory(uint64_t *total_bytes, uint64_t *free_bytes){
+    (void)total_bytes; (void)free_bytes;
+    return 0;
+}
+
 i_RantSock i_rant_plat_udp_open(void){
     int i, id;
     for (i = 0; i < MAX_SOCKETS && sockets[i].id; i++) {}

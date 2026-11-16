@@ -92,7 +92,7 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
         p=i_rant_event_append_str(p,end," bytes), skipped"); break;
     case RANT_E_PEER_REFUSED:
         p=i_rant_event_append_str(p,end,"peer-refused at "); p=i_rant_event_append_addr(p,end,ev);
-        p=i_rant_event_append_str(p,end,": peer table full of active peers (raise max_peers)"); break;
+        p=i_rant_event_append_str(p,end,": peer table full of active peers (raise max_peers, or the memory limit)"); break;
     case RANT_E_EVICTED_UNSENT:
         p=i_rant_event_append_str(p,end,"evicted-unsent "); p=i_rant_event_append_topic(p,end,ev);
         p=i_rant_event_append_str(p,end," seqno "); p=i_rant_event_append_u64(p,end,ev->lost_first);

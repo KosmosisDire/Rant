@@ -224,10 +224,12 @@ struct RantNode {
     RantAllocator pool;
     RantAllocator bulk;            /* the message sized and cold buffers, when has_bulk */
     size_t         oom_bytes;      /* the last take a pool refused, which an open failure reports */
+    uint8_t        mem_short;      /* a take was refused since the last poll */
     uint8_t        has_bulk;
     uint8_t        alloc_dynamic;
     uint32_t       seat_misses;    /* discovery's count when the table last grew for them */
     uint16_t       max_peers;      /* the current peer table capacity, doubles on a dynamic grow */
+    uint8_t        peer_grow_failed;   /* the pool's limit refused the last grow for peers */
     /* the accept bound: the largest peer announce blob we store. It self heals up, see
        spec/discovery.md. meta_grow_failed remembers a size that would not allocate */
     uint16_t       meta_cap;
@@ -271,14 +273,14 @@ struct RantNode {
 static void *i_rant_node_alloc(void *u, void *ptr, size_t size){
     RantNode *n = (RantNode*)u;
     void *p = rant_allocator_alloc(&n->pool, ptr, size);
-    if (!p && size) n->oom_bytes = size;
+    if (!p && size){ n->oom_bytes = size; n->mem_short = 1; }
     return p;
 }
 /* The hook for the message sized and cold buffers. spec/allocation.md, Two pools */
 static void *i_rant_node_bulk_alloc(void *u, void *ptr, size_t size){
     RantNode *n = (RantNode*)u;
     void *p = rant_allocator_alloc(n->has_bulk ? &n->bulk : &n->pool, ptr, size);
-    if (!p && size) n->oom_bytes = size;
+    if (!p && size){ n->oom_bytes = size; n->mem_short = 1; }
     return p;
 }
 /* Frees all the node holds. The main pool is copied out first, since its reset frees n. */
@@ -840,9 +842,9 @@ static int i_rant_node_on_message(void *u, uint16_t topic_index, uint32_t from, 
  * swap it for the app's user_data before handing on. */
 static void i_rant_node_on_event(const RantEvent *ev){
     RantNode *n = (RantNode*)ev->user;
-    /* dynamic mode has no peer cap: the poll grows the table for a refused peer, which a
-       slot then takes. Static mode surfaces it */
-    if (n->alloc_dynamic && ev->kind == RANT_ERROR && ev->error == RANT_E_PEER_REFUSED) return;
+    /* dynamic mode grows the table at the next poll for a refused peer, which a slot then
+       takes. Static mode, and a pool at its limit, surface it */
+    if (n->alloc_dynamic && !n->peer_grow_failed && ev->kind == RANT_ERROR && ev->error == RANT_E_PEER_REFUSED) return;
     /* a blob we cannot hold is a growth signal too: grow at the next poll. Sizes past the
        wire ceiling and a size that already failed surface */
     if (n->alloc_dynamic && ev->kind == RANT_ERROR && ev->error == RANT_E_PEER_META_TOO_BIG){
@@ -1106,6 +1108,17 @@ RantAllocator rant_allocator_heap(uint32_t page_size){
     return rant_allocator_dynamic(i_rant_plat_realloc, page_size);
 }
 
+/* The default limit of a dynamic pool, never below floor, the open's own need. 0 when the
+ * platform cannot tell, which is unlimited. */
+static size_t i_rant_mem_default(size_t floor){
+    uint64_t total = 0, freeb = 0, lim;
+    if (!i_rant_plat_memory(&total, &freeb)) return 0;
+    lim = total / 100u * RANT_MEM_PERCENT;
+    if (freeb < lim + RANT_MEM_RESERVE) lim = freeb > RANT_MEM_RESERVE ? freeb - RANT_MEM_RESERVE : 0;
+    if (lim < floor) lim = floor;
+    return lim > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)lim;
+}
+
 /* Appends one prefix part behind a '/'. 0 when it holds '@', starts or ends with '/', or the
  * whole leaves no room for a '/' and a one byte name. */
 static int i_rant_prefix_join(char *out, size_t *len, const char *part, size_t part_len){
@@ -1227,6 +1240,8 @@ RANT__NOINLINE static RantNode *i_rant_node_open_core(RantAllocator *alloc, cons
     /* The node copies the caller's allocator into its own pool, so the caller's may be a
        temporary. The node struct stays put across a grow, the arena is relocated. */
     pool = *alloc;
+    if (pool.page_realloc && !pool.max_bytes)
+        pool.max_bytes = i_rant_mem_default(sizeof *n + need + pool.page_size);
     n = (RantNode*)rant_allocator_alloc(&pool, NULL, sizeof *n);
     if (!n) return i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, sizeof *n);
     memset(n, 0, sizeof *n);
@@ -1464,6 +1479,9 @@ static int i_rant_node_grow(RantNode *n, uint16_t new_max_peers, uint16_t new_ma
     memset(&b,0,sizeof b);
     i_rant_node_layout(&b, new_max_topics, &tc, &dc, &nb);
     need = b.offset + 32u;
+    /* the arena never shrinks, so a grow leaves a quarter of the limit for the work of the
+       peers and topics it serves */
+    if (n->pool.max_bytes && n->pool.in_use + need > n->pool.max_bytes - n->pool.max_bytes / 4u) return 0;
     new_arena = rant_allocator_alloc(&n->pool, NULL, need);
     if (!new_arena) return 0;
     nbase = (uint8_t*)(((uintptr_t)new_arena+15u)&~(uintptr_t)15u);
@@ -2236,15 +2254,16 @@ RANT__NOINLINE static void i_rant_node_problems_rebuild(RantNode *n){
     one.more = (uint8_t)i_rant_discovery_trouble_more(i_rant_discovery_state(n->discovery), RANT_E_WIRE_VERSION);
     i_rant_node_problems_end(&one);
     i_rant_node_problems_begin(n, &one, I_RANT_PROB_PEER_REFUSED);
-    for (i = 0; i < nt && !n->alloc_dynamic; i++){   /* a dynamic table grows instead */
+    for (i = 0; i < nt && (!n->alloc_dynamic || n->peer_grow_failed); i++){   /* else it grows */
         if (tr[i].kind != RANT_E_PEER_REFUSED) continue;
         i_rant_problem_addr(&tr[i].addr, addr, sizeof addr);
-        snprintf(text, sizeof text, "%s meets this node but finds all %u slots taken, raise max_peers",
-                 addr, (unsigned)tr[i].value);
+        snprintf(text, sizeof text, "%s meets this node but finds all %u slots taken, %s",
+                 addr, (unsigned)tr[i].value,
+                 n->alloc_dynamic ? "memory is at its limit" : "raise max_peers");
         i_rant_node_problem(&one, i_rant_problem_addr_id(&tr[i].addr), RANT_LEVEL_ERROR, text);
         aging = 1;
     }
-    if (!n->alloc_dynamic)
+    if (!n->alloc_dynamic || n->peer_grow_failed)
         one.more = (uint8_t)i_rant_discovery_trouble_more(i_rant_discovery_state(n->discovery), RANT_E_PEER_REFUSED);
     i_rant_node_problems_end(&one);
     n->partial_shown = (uint8_t)i_rant_discovery_partial(i_rant_discovery_state(n->discovery));
@@ -2514,6 +2533,13 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
 #endif
 
     i_rant_node_callbacks_settle(n);     /* never two threads inside the receive path */
+    /* a take hit the pool's limit last tick: forget departed peers, oldest first, until it
+       would fit, so the next try finds room. spec/allocation.md, Limit */
+    if (n->mem_short){
+        n->mem_short = 0;
+        while (n->pool.max_bytes && n->pool.in_use + n->oom_bytes > n->pool.max_bytes
+               && i_rant_discovery_forget_dropped(i_rant_discovery_state(n->discovery))) {}
+    }
     /* peers found no slot last tick: grow now, between ticks, by doubling until every peer
        that wants a slot has one, and the slots that came open take them */
     if (n->alloc_dynamic && i_rant_discovery_seat_misses(i_rant_discovery_state(n->discovery)) != n->seat_misses){
@@ -2522,7 +2548,10 @@ static void i_rant_node_poll_locked(RantNode *n, int timeout_ms, int outer){
         n->seat_misses = i_rant_discovery_seat_misses(ds);
         while (want < need && want < 0xFFFFu) want *= 2u;
         if (want > 0xFFFFu) want = 0xFFFFu;
-        if (want > n->max_peers) i_rant_node_grow(n, (uint16_t)want, n->max_topics, 0);
+        if (want > n->max_peers){
+            uint8_t failed = (uint8_t)!i_rant_node_grow(n, (uint16_t)want, n->max_topics, 0);
+            if (failed != n->peer_grow_failed){ n->peer_grow_failed = failed; n->problems_dirty = 1; }
+        }
     }
     /* a peer's blob exceeded the accept bound last tick: raise it, and discovery fetches that
        peer's blob again. A failed grow is remembered, see spec/node.md */
@@ -3515,6 +3544,7 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
         rant_map_put_uint(w, "mem_in_use", (uint64_t)in_use);
         rant_map_put_uint(w, "mem_peak", (uint64_t)peak);
         rant_map_put_uint(w, "alloc_calls", allocs);
+        if (n->pool.max_bytes) rant_map_put_uint(w, "mem_limit", (uint64_t)n->pool.max_bytes);
         if (n->has_bulk){
             rant_allocator_stats(&n->bulk, &in_use, &peak, &allocs);
             rant_map_put_uint(w, "bulk_in_use", (uint64_t)in_use);

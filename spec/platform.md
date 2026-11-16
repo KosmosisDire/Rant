@@ -51,7 +51,10 @@ cannot measure implements nothing. The SHM and THREADS detection blocks are mirr
   `RANT_NODE_NAME` or `RANT_DOMAIN`. It returns the full length like snprintf, so a caller
   sees a value cut short. A platform with no environment, like a MotoPlus kernel module, returns 0.
 - Heap. `i_rant_plat_realloc` is the single heap dependency (ptr NULL allocates, size 0
-  frees). A target with a custom heap overrides just this.
+  frees). A target with a custom heap overrides just this. `i_rant_plat_memory` gives the
+  device's total and free memory for a node's default limit (spec/allocation.md, Limit):
+  physical memory on a desktop, the default heap on ESP. A platform that returns 0 leaves
+  nodes unlimited.
 - Poll. `RANT_POLLOUT` asks for writable, and `RANT_POLLERR` reports a hang up or an error
   whatever was asked. A poll of no sockets sleeps, which WSAPoll refuses, so Windows
   sleeps instead. A signal that ends the wait on POSIX reads as a timeout, not as

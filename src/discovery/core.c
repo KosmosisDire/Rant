@@ -1269,6 +1269,21 @@ void i_rant_discovery_mark_copy(uint8_t *datagram, size_t len, i_RantCopyMark ma
 
 void i_rant_discovery_solicit(i_RantDiscoveryState *st){ if (st) st->want_solicit = 1; }
 
+int i_rant_discovery_forget_dropped(i_RantDiscoveryState *st){
+    uint16_t i, victim = I_RANT_REC_NONE; uint64_t oldest = (uint64_t)-1;
+    if (!st) return 0;
+    for (i = 0; i < st->records.cap; i++){
+        const i_RantDiscoveryRecord *rec = i_rant_discovery_rec(st, i);
+        if (rec && rec->state == I_RANT_REC_DROPPED && rec->last_heard_us <= oldest){
+            oldest = rec->last_heard_us; victim = i;
+        }
+    }
+    if (victim == I_RANT_REC_NONE) return 0;
+    i_rant_discovery_peer_gone(st, victim);
+    st->distrust = 1;                    /* a peer forgotten for room may still hold us */
+    return 1;
+}
+
 /* No version changes. The local side may now have a topic a held blob's interest matches,
  * or none it did. */
 void i_rant_discovery_replay_peers(i_RantDiscoveryState *st){

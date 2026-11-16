@@ -18,7 +18,8 @@ https://docs.rantlib.dev/llms.txt (fetch the page you need).
   in a PlatformIO project it pins it in `lib_deps`. On ESP32, start the node once WiFi is up, call
   `WiFi.setSleep(false)` before `WiFi.begin` (power save delays messages by 100 to 300 ms,
   and after begin the board took no unicast), and give an Arduino
-  sketch `SET_LOOP_TASK_STACK_SIZE(16 * 1024);`.
+  sketch `SET_LOOP_TASK_STACK_SIZE(16 * 1024);`. A node's memory has a default limit that
+  leaves WiFi room. Leave it unless asked, and `memory_limit` in C++ sets it.
 
 ## Writing nodes
 

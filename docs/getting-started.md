@@ -168,6 +168,8 @@ A `NO` flag always wins. An embedded target with its own sockets and clock defin
 | `RANT_MATCH_WAIT_MS` | 1000 | default first send match wait |
 | `RANT_TOPIC_NAME_MAX` | 64 | max topic name bytes |
 | `RANT_QUEUE_CAP` | 1 MB | default ring cap of a topic on a callback queue |
+| `RANT_MEM_PERCENT` | 25 | a node's default memory limit as a share of the device's memory |
+| `RANT_MEM_RESERVE` | 40 kB | free memory a node's default limit leaves the system, the lower limit wins |
 | `RANT_DISCOVERY_META_MAX` | 64 | default per peer announce blob capacity |
 | `RANT_RECORDS_PER_PEER` | 4 | peers a static node can know per matched peer slot (docs/discovery.md) |
 | `RANT_DISCOVERY_FILTER_BYTES` | 32 | bytes per known peer that let a new topic ask only the peers it may meet |

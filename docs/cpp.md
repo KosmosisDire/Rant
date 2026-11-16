@@ -93,6 +93,10 @@ To run one handle's callbacks on a thread of your own, pass it a queue from
 
 ### Memory
 
+On the heap a node takes at most the smaller of a quarter of the device's memory and its
+free memory less 40 kB, so on an ESP32 WiFi keeps room to receive. `memory_limit` sets
+another limit, and `SIZE_MAX` lifts it.
+
 `memory` and `memory_size` run the node in one buffer, with no heap and no growth. `bulk`
 and `bulk_size` add a second buffer for the big buffers touched rarely: message history and
 reassembly, peer records, queue rings. On an ESP32-S3 give the node SRAM and the bulk PSRAM:
