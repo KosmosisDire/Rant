@@ -91,13 +91,13 @@ It reaches a mesh on another network, or one its own host cannot join.
 
 ```c
 RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){
-    .net = { .bridge = "ws://192.168.1.20:6731", .bridge_passphrase = "secret" } });
+    .net = { .bridge = "ws://192.168.1.20:6731" } });
 ```
 
-- `RANT_BRIDGE` and `RANT_BRIDGE_PASSPHRASE` set them for a node whose code leaves them
-  NULL. An empty `bridge` means this host's own sockets whatever the environment says.
+- `RANT_BRIDGE` sets it for a node whose code leaves it NULL. An empty `bridge` means this
+  host's own sockets whatever the environment says.
 - The open connects first and fails with `RANT_E_BRIDGE` when the bridge cannot be reached
-  or refuses, `.detail` saying why, such as `wrong passphrase`.
+  or refuses, `.detail` saying why, such as `this bridge speaks protocol 15, the client 16`.
 - A dropped link fires `RANT_E_BRIDGE` and reconnects on its own. A restarted bridge gets
   the node's sockets bound again on the same ports, so peers keep reaching it.
 - `ws://` only: the library carries no TLS. Shared memory is off, since its peers are on
@@ -131,7 +131,7 @@ theirs down from 6739.
 | `seed_peers`, `n_seed_peers` | addresses to also unicast announces to. Port 0 = the discovery port |
 | `recv_buffer_bytes`, `send_buffer_bytes` | data socket OS buffers. 0 = OS default |
 | `fragment_size` | UDP payload bytes per fragment. 0 = `RANT_FRAG_SIZE`. One size per node |
-| `bridge`, `bridge_passphrase` | run on a bridge's sockets (Through a bridge) |
+| `bridge` | run on a bridge's sockets (Through a bridge) |
 
 `opts.discovery` holds `announce_interval_us` (3 s), `peer_timeout_us` (12 s) and
 `max_peers` (16 matched peers).

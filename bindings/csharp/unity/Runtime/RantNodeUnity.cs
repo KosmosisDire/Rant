@@ -38,8 +38,6 @@ namespace Rant
         [SerializeField] private bool persistAcrossScenes = true;
         [Tooltip("The Rant bridge whose sockets the node uses, such as ws://192.168.1.20:6731, to reach a mesh this machine cannot join. Required in a WebGL player, which cannot open UDP sockets. Empty elsewhere means this machine's own.")]
         [SerializeField] private string bridgeUrl = "";
-        [Tooltip("The bridge's passphrase, empty when it asks for none.")]
-        [SerializeField] private string bridgePassphrase = "";
 
         private static RantNodeUnity s_main;
 
@@ -62,16 +60,16 @@ namespace Rant
         /// <summary>What a node opens with, so a change in the inspector reopens it.</summary>
         private struct Settings
         {
-            public string Name, Interface, Prefix, Bridge, Passphrase;
+            public string Name, Interface, Prefix, Bridge;
             public int Domain, MaxTopics;
             public bool Same(Settings o) => Name == o.Name && Interface == o.Interface && Prefix == o.Prefix
-                && Bridge == o.Bridge && Passphrase == o.Passphrase && Domain == o.Domain && MaxTopics == o.MaxTopics;
+                && Bridge == o.Bridge && Domain == o.Domain && MaxTopics == o.MaxTopics;
         }
 
         private Settings Current => new Settings
         {
             Name = nodeName, Interface = multicastInterface, Prefix = prefix, Bridge = bridgeUrl,
-            Passphrase = bridgePassphrase, Domain = domain, MaxTopics = maxTopics,
+            Domain = domain, MaxTopics = maxTopics,
         };
 
         /// <summary>The scene's RantNodeUnity (found lazily), or null if none exists.</summary>
@@ -312,7 +310,7 @@ namespace Rant
         private bool TunnelReady()
         {
             if (!RantWebGL.Needed) return true;
-            string want = bridgeUrl + "\n" + bridgePassphrase;
+            string want = bridgeUrl;
             if (_tunnelFor != want)
             {
                 if (_tunnelUp || _tunnelOpening) RantWebGL.Disconnect();
@@ -328,7 +326,7 @@ namespace Rant
             }
             _tunnelOpening = true;
             _bridgeRetryAt = -1;
-            RantWebGL.Connect(bridgeUrl, bridgePassphrase, nodeName, (why) =>
+            RantWebGL.Connect(bridgeUrl, nodeName, (why) =>
             {
                 if (_tunnelFor != want) return;
                 _tunnelOpening = false;
@@ -367,7 +365,6 @@ namespace Rant
                 MulticastInterface = string.IsNullOrEmpty(multicastInterface) ? null : multicastInterface,
                 // In a WebGL player the tunnel is up already and is the player's own sockets
                 Bridge = bridged ? bridgeUrl : null,
-                BridgePassphrase = bridged ? bridgePassphrase : null,
                 // Every callback parks on the node's queue and runs in Pump, on the frame. A
                 // build without threads makes Dispatch() poll as well.
                 Threading = Threading.Dispatch,

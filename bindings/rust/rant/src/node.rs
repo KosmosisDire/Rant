@@ -86,7 +86,6 @@ options! {
         multicast_interface: Option<String> = None,
         seed_peers: Vec<String> = Vec::new(),
         bridge: Option<String> = None,
-        bridge_passphrase: Option<String> = None,
         match_wait: Option<Duration> = None,
         log_level: Option<Level> = None,
     }
@@ -115,12 +114,6 @@ impl NodeOptions {
     /// mesh. Left out takes RANT_BRIDGE, else this host's own.
     pub fn bridge(mut self, url: impl Into<String>) -> Self {
         self.bridge = Some(url.into());
-        self
-    }
-
-    /// The bridge's passphrase. Left out takes RANT_BRIDGE_PASSPHRASE.
-    pub fn bridge_passphrase(mut self, passphrase: impl Into<String>) -> Self {
-        self.bridge_passphrase = Some(passphrase.into());
         self
     }
 
@@ -338,7 +331,6 @@ struct Net {
     prefix: Option<CString>,
     interface: Option<CString>,
     bridge: Option<CString>,
-    bridge_passphrase: Option<CString>,
     seeds: Vec<ffi::RantAddr>,
 }
 
@@ -365,7 +357,6 @@ impl Net {
             prefix: c(&o.prefix, ErrorKind::BadPrefix, "prefix")?,
             interface: c(&o.multicast_interface, ErrorKind::BadAddress, "multicast interface")?,
             bridge: c(&o.bridge, ErrorKind::Bridge, "bridge")?,
-            bridge_passphrase: c(&o.bridge_passphrase, ErrorKind::Bridge, "bridge passphrase")?,
             seeds,
         })
     }
@@ -681,7 +672,6 @@ impl Node {
                 send_buffer_bytes: o.send_buffer_bytes,
                 fragment_size: o.fragment_size,
                 bridge: c_ptr(&inner.net.bridge),
-                bridge_passphrase: c_ptr(&inner.net.bridge_passphrase),
             },
             discovery: ffi::RantNodeDiscovery {
                 announce_interval_us: to_us(o.announce_interval),

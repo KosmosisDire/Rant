@@ -160,7 +160,6 @@ pub struct RantNodeNet {
     pub send_buffer_bytes: u32,
     pub fragment_size: u16,
     pub bridge: *const ::std::os::raw::c_char,
-    pub bridge_passphrase: *const ::std::os::raw::c_char,
 }
 impl Default for RantNodeNet {
     fn default() -> Self {

@@ -55,7 +55,7 @@ The binding takes the net object as `openNode`'s `net` option. A C or C++ app ge
 import { TunnelNet } from "rant-middleware/tunnel";
 import createApp from "./app.mjs";     // built with -sMODULARIZE -sEXPORT_ES6
 
-const rantNet = await TunnelNet.connect("ws://192.168.1.20:6731", { passphrase: "..." });
+const rantNet = await TunnelNet.connect("ws://192.168.1.20:6731");
 await createApp({ rantNet });
 ```
 
@@ -68,7 +68,6 @@ const rantNet = await UdpNet.create();
 
 | `TunnelNet.connect(url, opts)` option | Meaning |
 |---|---|
-| `passphrase` | The bridge's passphrase. |
 | `name` | The session's name in the bridge's logs, and the hostname the node sees. |
 | `transport` | `"auto"` (default) adds WebRTC when it connects, `"websocket"` never tries. |
 | `iceServers`, `rtcTimeoutMs` | Servers beside the bridge's own, and how long WebRTC may take (4000). |
@@ -84,7 +83,11 @@ session. A dropped connection reconnects on its own and keeps every socket.
 `findBridges(url?)` from `rant-middleware/tunnel` lists the bridges on the network as
 `[{ name, url, version, self }]`. Every bridge answers the name `rant-bridges.local` over
 mDNS and lists the others it hears, so the default `ws://rant-bridges.local:6731` reaches
-one, with no passphrase.
+one.
+
+A bridge opens sessions only for the pages its `allowed_origins` lists: by default pages on
+the bridge's computer and LAN, and explore.rantlib.dev. Any other page may still list the
+bridges, and its connect fails with the message naming the line to add.
 
 | `UdpNet.create(opts)` option | Meaning |
 |---|---|

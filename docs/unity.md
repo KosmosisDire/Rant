@@ -160,7 +160,7 @@ misbehaves.
 | Run In Edit Mode | keep the node live outside play mode |
 | Log Events | print peer lifecycle, loss and errors to the Console |
 | Persist Across Scenes | survive scene loads in play mode |
-| Bridge Url, Bridge Passphrase | the Rant bridge whose sockets the node uses (Through a bridge). Empty means this machine's own |
+| Bridge Url | the Rant bridge whose sockets the node uses (Through a bridge). Empty means this machine's own |
 
 ## Through a bridge
 

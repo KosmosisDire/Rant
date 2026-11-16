@@ -14,8 +14,7 @@ typedef struct i_RantTunnel i_RantTunnel;
 #ifdef RANT_TUNNEL
 /* Connects to the bridge at url, a ws:// URL, and opens a session named name. NULL with
  * why filled when it cannot be reached or refuses. */
-i_RantTunnel *i_rant_tunnel_open(const char *url, const char *passphrase, const char *name,
-                                 char *why, size_t why_cap);
+i_RantTunnel *i_rant_tunnel_open(const char *url, const char *name, char *why, size_t why_cap);
 /* Sends what is queued, within a bounded wait, then ends the session. Its sockets close first. */
 void          i_rant_tunnel_close(i_RantTunnel *t);
 /* 1 with one line in why when the link dropped or a socket op failed since the last call. */

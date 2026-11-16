@@ -119,7 +119,6 @@ int main(int argc, char **argv){
     FIELD(RantNodeNet, send_buffer_bytes)
     FIELD(RantNodeNet, fragment_size)
     FIELD(RantNodeNet, bridge)
-    FIELD(RantNodeNet, bridge_passphrase)
     SIZE(RantNodeOpts)
     FIELD(RantNodeOpts, domain)
     FIELD(RantNodeOpts, max_topics)

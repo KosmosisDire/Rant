@@ -416,7 +416,6 @@ class Node:
                  recv_buffer_bytes: int = 0, send_buffer_bytes: int = 0,
                  announce_interval: float = 0.0, peer_timeout: float = 0.0,
                  max_peers: int = 0, bridge: str | None = None,
-                 bridge_passphrase: str | None = None,
                  threading: Threading = Threading.SERVICE_THREAD) -> None: ...
     @property
     def name(self) -> str | None: ...

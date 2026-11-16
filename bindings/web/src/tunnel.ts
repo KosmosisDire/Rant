@@ -3,9 +3,8 @@
  * and reads none. spec/tunnel.md has the protocol. */
 
 import { dotted, naddr, type Interface, type NetObject, type Sink } from "./net.js";
-import { passphraseProof } from "./proof.js";
 
-const PROTOCOL = 15;
+const PROTOCOL = 16;
 const UDP = 9;
 const PING = 7;             /* [u8 7][u32 seq][u32 us][u32 jitter_us][u32 samples][u32 missed] */
 const PONG = 8;             /* [u8 8][u32 seq] */
@@ -26,7 +25,6 @@ export interface Connection { state: ConnectionState; carrier: "webrtc" | "webso
 export interface TunnelEvent { kind: string; text: string; [field: string]: unknown }
 
 export interface TunnelOptions {
-    passphrase?: string;
     /* the session's name in the bridge's logs, and the hostname the node sees */
     name?: string;
     transport?: "auto" | "websocket";
@@ -48,7 +46,7 @@ export interface TunnelOptions {
 export interface FoundBridge { name: string; url: string; version: string; self: boolean }
 
 /* The bridges on a network, as the bridge at url lists them. Every bridge answers the name
- * rant-bridges.local, so the default reaches whichever answers first. No passphrase needed. */
+ * rant-bridges.local, so the default reaches whichever answers first. Any page may ask. */
 export async function findBridges(url = "ws://rant-bridges.local:6731", timeoutMs = 3000): Promise<FoundBridge[]> {
     const ws = new WebSocket(url);
     try {
@@ -413,11 +411,7 @@ class Link {
         ws.onmessage = (m) => typeof m.data === "string" ? this.text(JSON.parse(m.data)) : this.binary(new Uint8Array(m.data as ArrayBuffer));
         ws.onclose = (e) => this.dropped(ws, e.code ? ` (${e.code}${e.reason ? " " + e.reason : ""})` : "");
         const refused = (e: Error & { answered?: boolean }) => { if (e.answered) this.refused = e; throw e; };
-        /* the passphrase proves itself on the bridge's nonce and never crosses the wire */
-        const c = await this.request({ op: "challenge" }).catch((e: Error & { answered?: boolean }) => refused(
-            e.answered ? Object.assign(new Error("the bridge is older than this client, update it"), { answered: true }) : e));
-        const r = await this.request({ op: "open", proto: PROTOCOL, proof: passphraseProof(this.opts.passphrase ?? "", c.nonce),
-                                       name: this.opts.name, resume: this.token || undefined, probe_interval_ms: this.opts.probeIntervalMs })
+        const r = await this.request({ op: "open", proto: PROTOCOL, name: this.opts.name, resume: this.token || undefined, probe_interval_ms: this.opts.probeIntervalMs })
             .catch(refused);
         this.token = r.resume_token;
         this.interfaces = (r.interfaces ?? []).map((f: { addr: string; mask: string }) => ({ addr: naddr(f.addr), mask: naddr(f.mask) }));

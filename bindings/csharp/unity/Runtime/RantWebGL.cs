@@ -17,7 +17,7 @@ namespace Rant
 
 #if UNITY_WEBGL && !UNITY_EDITOR
         private delegate void Done(int id, IntPtr error);
-        [DllImport("__Internal")] private static extern void RantWebGLConnect(string url, string passphrase, string name, int id, Done done);
+        [DllImport("__Internal")] private static extern void RantWebGLConnect(string url, string name, int id, Done done);
         [DllImport("__Internal")] private static extern void RantWebGLDisconnect();
 
         private static readonly Dictionary<int, Action<string>> s_pending = new Dictionary<int, Action<string>>();
@@ -35,12 +35,12 @@ namespace Rant
 
         /// <summary>Opens the tunnel to the bridge at url, such as ws://192.168.1.20:6731, then calls
         /// done with null, or with why it failed. name is the session's name in the bridge's logs.</summary>
-        public static void Connect(string url, string passphrase, string name, Action<string> done)
+        public static void Connect(string url, string name, Action<string> done)
         {
 #if UNITY_WEBGL && !UNITY_EDITOR
             int id = ++s_next;
             s_pending[id] = done;
-            RantWebGLConnect(url, passphrase ?? "", name ?? "", id, OnDone);
+            RantWebGLConnect(url, name ?? "", id, OnDone);
 #else
             done("a tunnel is for a WebGL player, a node here has sockets of its own");
 #endif

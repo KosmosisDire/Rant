@@ -502,7 +502,6 @@ struct NodeOptions {
     /* Run on the sockets of the Rant bridge at this ws:// URL, a node of its host to the mesh.
      * Empty takes RANT_BRIDGE, else this host's own. */
     std::string              bridge;
-    std::string              bridge_passphrase;   /* empty takes RANT_BRIDGE_PASSPHRASE */
     /* discovery cadence */
     std::chrono::microseconds announce_interval{ 0 };   /* 0 = 3 s */
     std::chrono::microseconds peer_timeout{ 0 };        /* 0 = 12 s */
@@ -2714,7 +2713,6 @@ public:
         co.net.seed_peers          = impl->seeds.empty() ? nullptr : impl->seeds.data();
         co.net.n_seed_peers        = static_cast<uint16_t>(impl->seeds.size());
         co.net.bridge              = o.bridge.empty() ? nullptr : o.bridge.c_str();
-        co.net.bridge_passphrase   = o.bridge_passphrase.empty() ? nullptr : o.bridge_passphrase.c_str();
         co.net.fragment_size       = o.fragment_size;
         co.net.recv_buffer_bytes   = o.recv_buffer_bytes;
         co.net.send_buffer_bytes   = o.send_buffer_bytes;

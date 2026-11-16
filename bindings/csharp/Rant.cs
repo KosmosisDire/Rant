@@ -338,7 +338,6 @@ namespace Rant
         public uint send_buffer_bytes;
         public ushort fragment_size;
         public IntPtr bridge;                  // const char*
-        public IntPtr bridge_passphrase;       // const char*
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1130,8 +1129,6 @@ namespace Rant
         /// <summary>Run on the sockets of the Rant bridge at this ws:// URL, a node of its host
         /// to the mesh. Null takes RANT_BRIDGE, else this host's own.</summary>
         public string Bridge;
-        /// <summary>The bridge's passphrase. Null takes RANT_BRIDGE_PASSPHRASE.</summary>
-        public string BridgePassphrase;
         /// <summary>Microseconds between discovery announces, 0 = 3 s.</summary>
         public uint AnnounceIntervalUs;
         /// <summary>Drop a peer after this many microseconds of silence, 0 = 12 s.</summary>
@@ -2280,9 +2277,7 @@ namespace Rant
             IntPtr prefixPtr = Codec.CStrPtr(o.Prefix);     // copied by open, freed below
             co.prefix = prefixPtr;
             IntPtr bridgePtr = Codec.CStrPtr(o.Bridge);     // copied by open, freed below
-            IntPtr bridgePassPtr = Codec.CStrPtr(o.BridgePassphrase);
             co.net.bridge = bridgePtr;
-            co.net.bridge_passphrase = bridgePassPtr;
             co.net.fragment_size = o.FragmentSize;
             co.net.recv_buffer_bytes = o.RecvBufferBytes;
             co.net.send_buffer_bytes = o.SendBufferBytes;
@@ -2296,7 +2291,6 @@ namespace Rant
             if (seedBlock != IntPtr.Zero) Marshal.FreeHGlobal(seedBlock);
             Codec.FreeCStr(prefixPtr);
             Codec.FreeCStr(bridgePtr);
-            Codec.FreeCStr(bridgePassPtr);
 
             if (h == IntPtr.Zero)
             {

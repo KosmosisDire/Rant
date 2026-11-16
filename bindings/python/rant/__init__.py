@@ -1976,7 +1976,7 @@ class Node:
                  discovery_port=0, multicast_ttl=0, seed_peers=(),
                  fragment_size=0, recv_buffer_bytes=0,
                  send_buffer_bytes=0, announce_interval=0.0, peer_timeout=0.0, max_peers=0,
-                 bridge=None, bridge_passphrase=None, threading=Threading.SERVICE_THREAD):
+                 bridge=None, threading=Threading.SERVICE_THREAD):
         """Open a node. name None = auto generated. on_event receives every peer, loss and
                 error event, printed to stderr when None. The options are
                 docs/getting-started.md's, durations in seconds and 0 = the default.
@@ -2039,7 +2039,6 @@ class Node:
             co.net.seed_peers = _c.cast(seeds, _c.c_void_p)
             co.net.n_seed_peers = n_seeds
         co.net.bridge = bridge.encode("utf-8") if bridge else None   # copied by open
-        co.net.bridge_passphrase = bridge_passphrase.encode("utf-8") if bridge_passphrase is not None else None
         co.net.fragment_size = fragment_size
         co.net.recv_buffer_bytes = recv_buffer_bytes
         co.net.send_buffer_bytes = send_buffer_bytes

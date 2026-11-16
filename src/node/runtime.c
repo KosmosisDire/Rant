@@ -1196,7 +1196,7 @@ RANT__NOINLINE static RantNode *i_rant_node_open_core(RantAllocator *alloc, cons
     char node_name[RANT_NODE_NAME_MAX + 1]; uint8_t node_name_len = 0;
     char launch_name[RANT_NODE_NAME_MAX + 1], launch_domain[32]; size_t len;
     char launch_prefix[RANT_TOPIC_NAME_MAX + 1], prefix[RANT_TOPIC_NAME_MAX + 1]; size_t prefix_len = 0;
-    char launch_bridge[512], launch_pass[256], launch_level[8]; const char *bridge;
+    char launch_bridge[512], launch_level[8]; const char *bridge;
 
     /* a live reference, so a linker that drops unreferenced data keeps the magic */
     (void)*(const volatile char *)i_rant_magic;
@@ -1234,11 +1234,6 @@ RANT__NOINLINE static RantNode *i_rant_node_open_core(RantAllocator *alloc, cons
         if (len >= sizeof launch_bridge)
             return i_rant_node_open_fail_why(on_event, o.user_data, RANT_E_BRIDGE, "RANT_BRIDGE is too long");
         bridge = launch_bridge;
-    }
-    if (!o.net.bridge_passphrase && (len = i_rant_plat_env("RANT_BRIDGE_PASSPHRASE", launch_pass, sizeof launch_pass))){
-        if (len >= sizeof launch_pass)
-            return i_rant_node_open_fail_why(on_event, o.user_data, RANT_E_BRIDGE, "RANT_BRIDGE_PASSPHRASE is too long");
-        o.net.bridge_passphrase = launch_pass;
     }
     if (bridge && !bridge[0]) bridge = NULL;
     o.net.bridge = bridge;
@@ -1428,7 +1423,7 @@ RANT__NOINLINE static RantNode *i_rant_node_open_core(RantAllocator *alloc, cons
     if (o.net.bridge){
 #ifdef RANT_TUNNEL
         char why[160];
-        n->tunnel = i_rant_tunnel_open(o.net.bridge, o.net.bridge_passphrase, n->name, why, sizeof why);
+        n->tunnel = i_rant_tunnel_open(o.net.bridge, n->name, why, sizeof why);
         if (!n->tunnel){ (void)i_rant_node_open_fail_why(on_event, o.user_data, RANT_E_BRIDGE, why); goto fail_threads; }
 #else
         (void)i_rant_node_open_fail_why(on_event, o.user_data, RANT_E_BRIDGE, "this build of Rant has no tunnel to a bridge");

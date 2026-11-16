@@ -122,8 +122,6 @@ typedef struct {
     const char           *bridge;            /* the ws:// URL of a Rant bridge whose sockets this node
                                                 uses, a node of that host to the mesh. NULL takes
                                                 RANT_BRIDGE, unset means this host's own */
-    const char           *bridge_passphrase; /* the bridge's passphrase. NULL takes
-                                                RANT_BRIDGE_PASSPHRASE */
 } RantNodeNet;
 
 /* Discovery cadence and the peer table size, zero means default. */

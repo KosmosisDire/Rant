@@ -73,7 +73,7 @@ Names are capped at `RANT_NODE_NAME_MAX` (32) bytes.
 | `RANT_PREFIX` | the outer name prefix, in front of `opts.prefix` (see Name prefix) |
 | `RANT_REMAP` | renames names the code creates, `from=to` entries joined by `,` (see Remap) |
 | `RANT_LOG_LEVEL` | `debug`, `info`, `warn` or `error`, the lowest level a node whose code leaves `log_level` at 0 logs. Any other word refuses the open with `RANT_E_BAD_LOG_LEVEL` |
-| `RANT_BRIDGE`, `RANT_BRIDGE_PASSPHRASE` | run a node whose code sets no `net.bridge` on a bridge's sockets (docs/discovery.md, Through a bridge) |
+| `RANT_BRIDGE` | run a node whose code sets no `net.bridge` on a bridge's sockets (docs/discovery.md, Through a bridge) |
 
 All are read once at `rant_node_open`. Set `RANT_DOMAIN` machine wide, or per workspace,
 to put every node there on one domain.

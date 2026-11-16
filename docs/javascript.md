@@ -21,7 +21,7 @@ node.subscriber("Line1/Conveyor", Conveyor, (c) => console.log(c.speed));
 - `openNode(name, options)` is the one async step: it loads the wasm and opens the node.
   Every factory and call after it is synchronous, and a call returns a promise.
 - `options.net` gives the sockets. In Node.js leave it out for this machine's UDP. In a page
-  pass `await TunnelNet.connect(url, { passphrase })` from `rant-middleware/tunnel`, which
+  pass `await TunnelNet.connect(url)` from `rant-middleware/tunnel`, which
   borrows them from a bridge (docs/web.md).
 - The other options are docs/getting-started.md's in camelCase: `domain`, `prefix`,
   `multicastInterface`, `maxTopics`, `fetchDetails`, `disableLogs`, `logLevel`,
