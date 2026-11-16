@@ -27,7 +27,7 @@ It builds with g++, clang++, clang-cl and MSVC, and with `-fno-exceptions -fno-r
 
 On ESP32 boards, `rant add` in a sketch folder puts Rant in the Arduino sketchbook, and in a
 PlatformIO project it pins Rant in `lib_deps`. Each release carries the library as
-`rant-<version>-arduino.zip`. Start the node once WiFi is up:
+`rant-<version>-arduino.zip`. Start the node once WiFi is up, with power save off:
 
 ```cpp
 #include <WiFi.h>
@@ -37,6 +37,7 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);   // setup() and loop() open and use the no
 rant::Node *node;
 
 void setup() {
+  WiFi.setSleep(false);   // power save delays every message by 100 to 300 ms
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) delay(250);
   node = new rant::Node("board");

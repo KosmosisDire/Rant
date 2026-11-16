@@ -16,6 +16,7 @@ void setup() {
 
     /* Bring WiFi up first: Rant assumes the interface already exists. */
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);   /* before begin: after it, the board stopped taking unicast */
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     Serial.printf("connecting to %s", WIFI_SSID);
     while (WiFi.status() != WL_CONNECTED) { delay(250); Serial.print("."); }

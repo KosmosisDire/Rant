@@ -15,8 +15,10 @@ https://docs.rantlib.dev/llms.txt (fetch the page you need).
   are for new work and for what the project leaves open.
 - Add Rant to a package with `rant add`, never by hand. `rant new package` and `rant new node`
   make one with Rant added. In an Arduino sketch folder it installs Rant in the sketchbook, and
-  in a PlatformIO project it pins it in `lib_deps`. On ESP32, start the node once WiFi is up, and give
-  an Arduino sketch `SET_LOOP_TASK_STACK_SIZE(16 * 1024);`.
+  in a PlatformIO project it pins it in `lib_deps`. On ESP32, start the node once WiFi is up, call
+  `WiFi.setSleep(false)` before `WiFi.begin` (power save delays messages by 100 to 300 ms,
+  and after begin the board took no unicast), and give an Arduino
+  sketch `SET_LOOP_TASK_STACK_SIZE(16 * 1024);`.
 
 ## Writing nodes
 
