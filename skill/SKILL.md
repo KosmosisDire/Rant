@@ -168,6 +168,7 @@ rant_queue_dispatch(q, 0, 100);              /* on the thread that runs them */
   - Image or screen: origin at the top left, x right, y down, angles clockwise on screen.
     Raw image rows start at the top.
 - Keep domain, prefixes and node names out of the code: the config files and groups place
-  them, and the name in the code is only a default.
+  them, and the name in the code is only a default. A group renames one entity with `remap`,
+  so a filter can take over a name while its source moves aside.
 - A type mismatch between two nodes is refused, not silently read, so both sides use the
   same type by name.

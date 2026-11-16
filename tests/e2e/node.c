@@ -341,6 +341,57 @@ static void prefix_checks(void){
     test_setenv("RANT_PREFIX", "");
 }
 
+/* The remap phase: RANT_REMAP renames what the code wrote on every kind before the prefix, a
+ * value past the Windows short read works, and a bad entry refuses the open. */
+static void remap_checks(void){
+    static const char *bad[] = { "Wrench", "=x", "a=", "a=b@c", "a=b,a=c", "a=b,", "a=/" };
+    RantAllocator a = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *n; RantTopic *t; RantEntityInfo info; RantEvent err;
+    char longmap[512]; size_t i, at = 0;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+41; o.net.multicast_interface="127.0.0.1";
+    test_setenv("RANT_PREFIX", "cellA");
+    test_setenv("RANT_REMAP", "Wrench=Wrench/Raw,/Clock=Time/Clock,Home=/Arm/Home,Speed=Arm/Speed");
+    n = rant_node_open(&a, "arm", NULL, NULL, &o);
+    CHECK(n != NULL, "remap: open with RANT_REMAP");
+    if (n){
+        t = rant_node_create_topic(n, "Wrench", RANT_PUB_ONLY, NULL, NULL);
+        CHECK(st_name_is(t, "cellA/Wrench/Raw"), "remap: a topic takes the new name under the prefix");
+        t = rant_node_create_topic(n, "Pose", RANT_PUB_ONLY, NULL, NULL);
+        CHECK(st_name_is(t, "cellA/Pose"), "remap: a name with no entry stays");
+        t = rant_node_create_topic(n, "/Clock", RANT_SUB_ONLY, NULL, NULL);
+        CHECK(st_name_is(t, "cellA/Time/Clock"), "remap: the code's leading '/' is part of the name matched");
+        CHECK(rant_node_create_function_definition(n, "Home", NULL, NULL, NULL, NULL, NULL) != NULL
+                 && rant_node_mesh_find(n, RANT_ENTITY_FUNCTION, "Arm/Home", &info) == 1,
+                 "remap: a function takes a new name that skips the prefix");
+        CHECK(rant_node_create_variable_definition(n, "Speed", NULL, NULL) != NULL
+                 && rant_node_mesh_find(n, RANT_ENTITY_VARIABLE, "cellA/Arm/Speed", &info) == 1,
+                 "remap: a variable takes the new name");
+        rant_node_close(n, 0);
+    }
+    rant_allocator_reset(&a);
+    test_setenv("RANT_PREFIX", "");
+    for (i = 0; i < 30; i++) at += (size_t)snprintf(longmap + at, sizeof longmap - at, "%sName%02u=Moved%02u", i ? "," : "", (unsigned)i, (unsigned)i);
+    test_setenv("RANT_REMAP", longmap);
+    n = rant_node_open(&a, "arm", NULL, NULL, &o);
+    CHECK(n != NULL, "remap: open with a %u byte RANT_REMAP", (unsigned)at);
+    if (n){
+        t = rant_node_create_topic(n, "Name29", RANT_PUB_ONLY, NULL, NULL);
+        CHECK(st_name_is(t, "Moved29"), "remap: the last entry of a long RANT_REMAP applies");
+        rant_node_close(n, 0);
+    }
+    rant_allocator_reset(&a);
+    for (i = 0; i < sizeof bad / sizeof bad[0]; i++){
+        test_setenv("RANT_REMAP", bad[i]);
+        n = rant_node_open(&a, "arm", NULL, NULL, &o);
+        err = rant_last_error(NULL);
+        CHECK(n == NULL && err.error == RANT_E_BAD_REMAP && err.detail,
+                 "remap: '%s' refuses the open (%s)", bad[i], err.detail ? err.detail : "no detail");
+        if (n) rant_node_close(n, 0);
+        rant_allocator_reset(&a);
+    }
+    test_setenv("RANT_REMAP", "");
+}
+
 /* Two domains on one host: each discovery socket receives its own domain's group only. The
  * other domain's nodes send nothing unicast, so its announces could only come by the group.
  * Other programs' seeds reach port 6730 by unicast, so their domains are not counted. */
@@ -721,6 +772,7 @@ static const TestCase cases[] = {
     { "launch_domain", launchdomain_checks },
     { "launch_log_level", launchloglevel_checks },
     { "prefix", prefix_checks },
+    { "remap", remap_checks },
     { "domain_groups", domaingroup_checks },
     { "poll_signal", poll_signal_checks },
 };

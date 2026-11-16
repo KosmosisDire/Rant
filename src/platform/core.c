@@ -214,17 +214,26 @@ size_t i_rant_plat_env(const char *name, char *buf, size_t cap){
     buf[0] = 0;
 #if defined(_WIN32)
     {   /* the wide call, so a name outside the ANSI code page arrives as UTF-8 */
-        wchar_t wname[64], wval[256]; char utf8[768]; DWORD len; int i;
+        wchar_t wname[64], wsmall[256], *wval = wsmall; char usmall[768], *utf8 = usmall;
+        DWORD len, need; int i; HANDLE heap = GetProcessHeap(); void *block = NULL;
         for (i = 0; name[i] && i < 63; i++) wname[i] = (wchar_t)(unsigned char)name[i];
         wname[i] = 0;
-        len = GetEnvironmentVariableW(wname, wval, 256);
-        if (len == 0) return 0;
-        if (len >= 256) return len;      /* too long for wval: report the cut with buf empty */
-        i = WideCharToMultiByte(CP_UTF8, 0, wval, (int)len, utf8, (int)sizeof utf8, NULL, NULL);
-        if (i <= 0) return 0;
-        n = (size_t)i;
-        memcpy(buf, utf8, n < cap ? n : cap - 1);
-        buf[n < cap ? n : cap - 1] = 0;
+        len = GetEnvironmentVariableW(wname, wsmall, 256);
+        if (len >= 256){     /* a long value, read through a passing heap block: len is the size it needs */
+            need = len;
+            block = HeapAlloc(heap, 0, (SIZE_T)need * (sizeof(wchar_t) + 3u));
+            if (!block) return need;     /* report the cut with buf empty */
+            wval = (wchar_t*)block; utf8 = (char*)(wval + need);
+            len = GetEnvironmentVariableW(wname, wval, need);
+            if (len >= need) len = 0;
+        }
+        i = len ? WideCharToMultiByte(CP_UTF8, 0, wval, (int)len, utf8, (int)(len * 3u), NULL, NULL) : 0;
+        if (i > 0){
+            n = (size_t)i;
+            memcpy(buf, utf8, n < cap ? n : cap - 1);
+            buf[n < cap ? n : cap - 1] = 0;
+        }
+        if (block) HeapFree(heap, 0, block);
         return n;
     }
 #else

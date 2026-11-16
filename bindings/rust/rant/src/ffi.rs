@@ -53,6 +53,8 @@ pub const RANT_SCHEMA_MAX_DEPTH: u32 = 8;
 pub const RANT_STDTYPES_H: u32 = 2804007311;
 pub const RANT_SELF: u32 = 0;
 pub const RANT_MATCH_WAIT_MS: u32 = 1000;
+pub const RANT_MEM_PERCENT: u32 = 25;
+pub const RANT_MEM_RESERVE: u32 = 40960;
 pub const RANT_QUEUE_CAP: u32 = 1048576;
 pub const RANT_QUEUES_MAX: u32 = 8;
 pub const RANT_LOG_MAX: u32 = 512;
@@ -211,9 +213,10 @@ pub const RANT_E_STATE: RantErrorKind = 24;
 pub const RANT_E_BAD_SCHEMA: RantErrorKind = 25;
 pub const RANT_E_BAD_DOMAIN: RantErrorKind = 26;
 pub const RANT_E_BAD_PREFIX: RantErrorKind = 27;
-pub const RANT_E_BAD_LOG_LEVEL: RantErrorKind = 28;
-pub const RANT_E_WIRE_VERSION: RantErrorKind = 29;
-pub const RANT_E_BRIDGE: RantErrorKind = 30;
+pub const RANT_E_BAD_REMAP: RantErrorKind = 28;
+pub const RANT_E_BAD_LOG_LEVEL: RantErrorKind = 29;
+pub const RANT_E_WIRE_VERSION: RantErrorKind = 30;
+pub const RANT_E_BRIDGE: RantErrorKind = 31;
 pub type RantErrorKind = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Copy, Clone)]

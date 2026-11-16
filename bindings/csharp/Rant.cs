@@ -142,6 +142,8 @@ namespace Rant
         /// <summary>RANT_PREFIX or Prefix holds '@', starts or ends with '/' or is too long, so
         /// the open was refused.</summary>
         BadPrefix,
+        /// <summary>RANT_REMAP holds a bad entry, so the open was refused: Detail says which.</summary>
+        BadRemap,
         /// <summary>RANT_LOG_LEVEL or LogLevel is not a level, so the open was refused.</summary>
         BadLogLevel,
         /// <summary>A node of the domain speaks another wire version: Ip, Port. Once per

@@ -219,6 +219,8 @@ struct RantNode {
     uint8_t       name_len;
     char          prefix[RANT_TOPIC_NAME_MAX + 1];  /* RANT_PREFIX then opts.prefix, '/' joined */
     uint8_t       prefix_len;
+    const char   *remap;       /* RANT_REMAP, checked "from=to" entries joined by ',', in the pool */
+    size_t        remap_len;
     void          *arena;      /* the control structs block, relocated on grow */
     /* the node's pools, copied from the caller's allocators at open and reset on close */
     RantAllocator pool;
@@ -1133,6 +1135,54 @@ static int i_rant_prefix_join(char *out, size_t *len, const char *part, size_t p
     return 1;
 }
 
+/* 1 when one side of a remap entry could be a name in code: not empty past a leading '/',
+ * no '@', '=' or ',' and not too long. */
+static int i_rant_remap_side_ok(const char *s, size_t len){
+    size_t i;
+    if (len && s[0] == '/'){ s++; len--; }
+    if (!len || len > RANT_TOPIC_NAME_MAX) return 0;
+    for (i = 0; i < len; i++) if (s[i] == '@' || s[i] == '=' || s[i] == ',') return 0;
+    return 1;
+}
+
+/* Checks RANT_REMAP's entries. NULL when all are good, else why, with the entry in *bad. */
+static const char *i_rant_remap_check(const char *s, size_t len, const char **bad, size_t *bad_len){
+    const char *p = s, *end = s + len, *stop, *eq, *q, *qeq;
+    for (;;){
+        stop = (const char*)memchr(p, ',', (size_t)(end - p));
+        if (!stop) stop = end;
+        *bad = p; *bad_len = (size_t)(stop - p);
+        eq = (const char*)memchr(p, '=', (size_t)(stop - p));
+        if (!eq) return "has no '='";
+        if (!i_rant_remap_side_ok(p, (size_t)(eq - p)) || !i_rant_remap_side_ok(eq + 1, (size_t)(stop - eq - 1)))
+            return "has a side that is empty, too long or holds '@', '=' or ','";
+        for (q = s; q < p; q = (const char*)memchr(q, ',', (size_t)(p - q)) + 1){
+            qeq = (const char*)memchr(q, '=', (size_t)(p - q));
+            if (qeq - q == eq - p && memcmp(q, p, (size_t)(eq - p)) == 0) return "remaps a name twice";
+        }
+        if (stop == end) return NULL;
+        p = stop + 1;
+    }
+}
+
+/* The name RANT_REMAP puts in place of the name the code wrote, or NULL. */
+static const char *i_rant_remap_find(const RantNode *n, const char *name, size_t name_len, size_t *len){
+    const char *p = n->remap, *end, *stop, *eq;
+    if (!p) return NULL;
+    end = p + n->remap_len;
+    for (;;){
+        stop = (const char*)memchr(p, ',', (size_t)(end - p));
+        if (!stop) stop = end;
+        eq = (const char*)memchr(p, '=', (size_t)(stop - p));
+        if ((size_t)(eq - p) == name_len && memcmp(p, name, name_len) == 0){
+            *len = (size_t)(stop - eq - 1);
+            return eq + 1;
+        }
+        if (stop == end) return NULL;
+        p = stop + 1;
+    }
+}
+
 enum { I_RANT_BUILTIN_LOGS = 1, I_RANT_BUILTIN_STATUS = 2, I_RANT_BUILTIN_META = 4 };
 
 /* The open up to the builtins, which rant_node_open adds once this big frame is gone, since
@@ -1255,6 +1305,25 @@ RANT__NOINLINE static RantNode *i_rant_node_open_core(RantAllocator *alloc, cons
     {   i_RantBump b; memset(&b,0,sizeof b);
         b.base = base; b.cap = need - (size_t)(base - (uint8_t*)arena);
         i_rant_node_layout(&b, max_topics, &tc, &dc, &blocks); }
+    /* the launcher's renames of the code's names, any length, so read into the pool */
+    {   char probe[1]; size_t rlen = i_rant_plat_env("RANT_REMAP", probe, sizeof probe);
+        const char *why, *bad; size_t bad_len; char *r; char msg[192];
+        if (rlen){
+            r = (char*)i_rant_node_alloc(n, NULL, rlen + 1u);
+            if (!r){ i_rant_node_pools_reset(n);
+                     return i_rant_node_open_fail(on_event, o.user_data, RANT_E_OOM, 0, 0, rlen + 1u); }
+            msg[0] = '\0';
+            if (i_rant_plat_env("RANT_REMAP", r, rlen + 1u) != rlen)
+                snprintf(msg, sizeof msg, "changed while it was read");
+            else if ((why = i_rant_remap_check(r, rlen, &bad, &bad_len)) != NULL)
+                snprintf(msg, sizeof msg, "entry '%.*s' %s", (int)(bad_len < 64u ? bad_len : 64u), bad, why);
+            if (msg[0]){
+                i_rant_node_pools_reset(n);
+                return i_rant_node_open_fail_why(on_event, o.user_data, RANT_E_BAD_REMAP, msg);
+            }
+            n->remap = r; n->remap_len = rlen;
+        }
+    }
 
     if (!i_rant_plat_startup()){
         i_rant_node_pools_reset(n);
@@ -1792,12 +1861,16 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
 }
 
 const char *i_rant_node_mesh_name(RantNode *n, const char *name, size_t room, char *buf){
-    const char *rel; size_t at, nl; int acquired;
+    const char *src, *rel; size_t len, at, nl; int acquired;
     if (!n || !name) return NULL;
-    rel = name[0] == '/' ? name + 1 : name;
-    at = (rel == name && n->prefix_len) ? (size_t)n->prefix_len + 1u : 0u;
-    for (nl = 0; rel[nl] && rel[nl] != '@' && at + nl + room < RANT_TOPIC_NAME_MAX; nl++) {}
-    if (nl == 0 || rel[nl]){     /* empty, an '@' or too long */
+    len = strlen(name);
+    /* a launcher's remap replaces the code's name, then the prefix applies to the new one */
+    if (!(src = i_rant_remap_find(n, name, len, &len))) src = name;
+    rel = (len && src[0] == '/') ? src + 1 : src;
+    if (rel != src) len--;
+    at = (rel == src && n->prefix_len) ? (size_t)n->prefix_len + 1u : 0u;
+    for (nl = 0; nl < len && rel[nl] != '@' && at + nl + room < RANT_TOPIC_NAME_MAX; nl++) {}
+    if (nl == 0 || nl < len){     /* empty, an '@' or too long */
         acquired = i_rant_node_lock(n);
         i_rant_node_create_fail(n, RANT_E_BAD_NAME, name, 0, acquired);
         i_rant_node_unlock(n, acquired);

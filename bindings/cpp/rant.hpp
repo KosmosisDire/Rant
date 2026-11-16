@@ -110,6 +110,7 @@ enum class ErrorKind {
     BadSchema,            /* schema text or wire that does not compile */
     BadDomain,            /* RANT_DOMAIN is not a number from 0 to 65535 */
     BadPrefix,            /* RANT_PREFIX or the prefix option holds '@', starts or ends with '/' or is too long */
+    BadRemap,             /* RANT_REMAP holds a bad entry: detail() says which */
     BadLogLevel,          /* RANT_LOG_LEVEL or the log_level option is not a level */
     WireVersion,          /* a node of the domain speaks another wire version: ip, port. Once per source */
     Bridge                /* the bridge cannot be reached, refused, or its link dropped: detail() */
@@ -162,6 +163,7 @@ static_assert((int)ErrorKind::BadAddress == detail::RANT_E_BAD_ADDRESS, "error e
 static_assert((int)ErrorKind::BadSchema == detail::RANT_E_BAD_SCHEMA, "error enum drift");
 static_assert((int)ErrorKind::BadDomain == detail::RANT_E_BAD_DOMAIN, "error enum drift");
 static_assert((int)ErrorKind::BadPrefix == detail::RANT_E_BAD_PREFIX, "error enum drift");
+static_assert((int)ErrorKind::BadRemap == detail::RANT_E_BAD_REMAP, "error enum drift");
 static_assert((int)ErrorKind::BadLogLevel == detail::RANT_E_BAD_LOG_LEVEL, "error enum drift");
 static_assert((int)ErrorKind::Bridge == detail::RANT_E_BRIDGE, "error enum drift");
 static_assert((int)FieldType::Struct == detail::RANT_STRUCT, "field-type enum drift");

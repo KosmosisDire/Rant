@@ -181,6 +181,7 @@ typedef enum {
     RANT_E_BAD_DOMAIN,         /* RANT_DOMAIN is not a number from 0 to 65535, refused at open */
     RANT_E_BAD_PREFIX,         /* RANT_PREFIX or opts.prefix holds '@', starts or ends with '/' or
                                   leaves no room for a name, refused at open */
+    RANT_E_BAD_REMAP,          /* RANT_REMAP holds a bad entry, refused at open: .detail says which */
     RANT_E_BAD_LOG_LEVEL,      /* RANT_LOG_LEVEL or opts.log_level is not a level, refused at open */
     /* a node this one cannot speak with */
     RANT_E_WIRE_VERSION,       /* a node of the domain speaks another wire version: .ip, .ip_len,

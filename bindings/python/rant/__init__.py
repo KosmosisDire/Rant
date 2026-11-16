@@ -146,9 +146,10 @@ class ErrorKind(_pyenum.IntEnum):
     BAD_SCHEMA = 25      # a create refused: the schema failed to parse
     BAD_DOMAIN = 26      # an open refused: RANT_DOMAIN is not a number from 0 to 65535
     BAD_PREFIX = 27      # an open refused: RANT_PREFIX or prefix holds '@', starts or ends with '/' or is too long
-    BAD_LOG_LEVEL = 28   # an open refused: RANT_LOG_LEVEL or log_level is not a level
-    WIRE_VERSION = 29    # a node of the domain speaks another wire version: ip, port. Once per source
-    BRIDGE = 30          # the bridge cannot be reached or refused, or its link dropped: detail says why
+    BAD_REMAP = 28       # an open refused: RANT_REMAP holds a bad entry, detail says which
+    BAD_LOG_LEVEL = 29   # an open refused: RANT_LOG_LEVEL or log_level is not a level
+    WIRE_VERSION = 30    # a node of the domain speaks another wire version: ip, port. Once per source
+    BRIDGE = 31          # the bridge cannot be reached or refused, or its link dropped: detail says why
 
 
 class PeerLiveness(_pyenum.IntEnum):

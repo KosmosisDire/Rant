@@ -71,6 +71,7 @@ Names are capped at `RANT_NODE_NAME_MAX` (32) bytes.
 | `RANT_NODE_NAME_PREFIX` | goes with `/` in front of the node name, cut to the 32 byte cap |
 | `RANT_DOMAIN` | the domain for a node whose code leaves `domain` at 0. Not a number from 0 to 65535 refuses the open with `RANT_E_BAD_DOMAIN` |
 | `RANT_PREFIX` | the outer name prefix, in front of `opts.prefix` (see Name prefix) |
+| `RANT_REMAP` | renames names the code creates, `from=to` entries joined by `,` (see Remap) |
 | `RANT_LOG_LEVEL` | `debug`, `info`, `warn` or `error`, the lowest level a node whose code leaves `log_level` at 0 logs. Any other word refuses the open with `RANT_E_BAD_LOG_LEVEL` |
 | `RANT_BRIDGE`, `RANT_BRIDGE_PASSPHRASE` | run a node whose code sets no `net.bridge` on a bridge's sockets (docs/discovery.md, Through a bridge) |
 
@@ -95,6 +96,25 @@ rant_node_create_topic(n, "/Clock", RANT_SUB_ONLY, NULL, NULL);  /* Clock */
   `RANT_E_BAD_PREFIX`.
 - Messages, reflection and `rant_node_mesh_find` use full names, with no prefix applied.
 - Node names are not prefixed. `RANT_NODE_NAME_PREFIX` does that separately.
+
+## Remap
+
+`RANT_REMAP` gives a name the code creates another name, so a launcher can move one
+entity without touching the program. It covers topics, functions, tasks and variables, on
+both sides.
+
+```c
+/* RANT_PREFIX=CellA RANT_REMAP=Wrench=Wrench/Raw,Home=/Arm/Home */
+rant_node_create_topic(n, "Wrench", RANT_PUB_ONLY, NULL, NULL);   /* CellA/Wrench/Raw */
+rant_node_create_function_definition(n, "Home", NULL, NULL, NULL, NULL, NULL);   /* Arm/Home */
+```
+
+- `from` is the name exactly as the code wrote it, a leading `/` included.
+- `to` then takes the prefix like any name, or skips it with a leading `/`.
+- A name holding `=` or `,` cannot be remapped.
+- An entry with no `=`, an empty side, `@` in a name, or a name remapped twice refuses the
+  open with `RANT_E_BAD_REMAP`, whose `.detail` names the entry.
+- An entry no create matches does nothing.
 
 ## Memory
 

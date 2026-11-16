@@ -122,9 +122,10 @@ class ErrorKind(IntEnum):
     BAD_SCHEMA = 25
     BAD_DOMAIN = 26
     BAD_PREFIX = 27
-    BAD_LOG_LEVEL = 28
-    WIRE_VERSION = 29
-    BRIDGE = 30
+    BAD_REMAP = 28
+    BAD_LOG_LEVEL = 29
+    WIRE_VERSION = 30
+    BRIDGE = 31
 
 class PeerLiveness(IntEnum):
     ACTIVE = 0

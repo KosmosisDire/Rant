@@ -150,6 +150,10 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
         p=i_rant_event_append_str(p,end,"bad-domain: RANT_DOMAIN is not a number from 0 to 65535, open refused"); break;
     case RANT_E_BAD_PREFIX:
         p=i_rant_event_append_str(p,end,"bad-prefix: RANT_PREFIX or opts.prefix holds '@', starts or ends with '/' or is too long, open refused"); break;
+    case RANT_E_BAD_REMAP:
+        p=i_rant_event_append_str(p,end,"bad-remap: RANT_REMAP ");
+        p=i_rant_event_append_str(p,end,ev->detail ? ev->detail : "holds a bad entry");
+        p=i_rant_event_append_str(p,end,", open refused"); break;
     case RANT_E_BAD_LOG_LEVEL:
         p=i_rant_event_append_str(p,end,"bad-log-level: RANT_LOG_LEVEL or opts.log_level is not debug, info, warn or error, open refused"); break;
     case RANT_E_WIRE_VERSION:

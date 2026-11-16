@@ -248,6 +248,12 @@ hash, only ever sees the full mesh name, so there is one name per entity. A lead
 the way out: it is stripped and the prefix is skipped. A name that holds `@`, is empty, or
 will not fit `RANT_TOPIC_NAME_MAX` with its channel suffix fires `RANT_E_BAD_NAME`.
 
+`RANT_REMAP` is read at open into one pool block of any length, checked whole, and kept as
+the text. The resolver looks the code's name up there first and resolves the entry's new name
+in its place, so a remap composes with the prefix and needs no other path. A lookup walks the
+entries, which is fine since creates are rare. The Windows env read takes a passing heap block
+for a value past 255 characters.
+
 Reflection and `rant_node_mesh_find` take and give full names. They describe the mesh, and
 an observer like the explorer passes back names it read from a walk. Built ins are made
 below the resolver and are never prefixed.
