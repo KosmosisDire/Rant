@@ -25,8 +25,8 @@ It builds with g++, clang++, clang-cl and MSVC, and with `-fno-exceptions -fno-r
 
 ### Arduino and PlatformIO
 
-On ESP32 boards, `rant add` in a sketch folder puts Rant in the Arduino sketchbook, and in a
-PlatformIO project it pins Rant in `lib_deps`. Each release carries the library as
+On ESP32 boards, `rant install rant` puts Rant in the Arduino sketchbook for every sketch, and
+`rant add` in a PlatformIO project pins Rant in `lib_deps`. Each release carries the library as
 `rant-<version>-arduino.zip`. Start the node once WiFi is up, with power save off:
 
 ```cpp

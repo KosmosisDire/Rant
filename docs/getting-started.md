@@ -14,7 +14,7 @@
 | Rust | `rant-middleware = { git = "https://github.com/KosmosisDire/Rant.git", tag = "crate-v<version>" }` (docs/rust.md) |
 | Unity | Package Manager, Add package from git URL: `https://github.com/KosmosisDire/Rant.git#upm` |
 | TypeScript | `npm install` the release's `rant-middleware-<version>.tgz` (docs/javascript.md) |
-| Arduino, PlatformIO | `rant add` in the sketch or project (docs/cpp.md) |
+| Arduino, PlatformIO | `rant install rant` for sketches, `rant add` in a project (docs/cpp.md) |
 | Tools | the release's `rant-<version>-<platform>.zip` |
 
 ## Build it in
