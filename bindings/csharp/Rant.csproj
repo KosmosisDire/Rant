@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The NuGet package: the P/Invoke wrapper plus the native library per platform under
+       runtimes/<rid>/native/, so .NET loads the right one. The CMake target rant_shared
+       builds the library into dist/native/<rid>/, then: dotnet pack bindings/csharp/Rant.csproj -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Rant</AssemblyName>
+    <RootNamespace>Rant</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- RANT_UNSAFE: a decoded array of any number type is one copy out of the message -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);RANT_UNSAFE</DefineConstants>
+
+    <PackageId>Rant</PackageId>
+    <Authors>Nathan George</Authors>
+    <RepositoryUrl>https://github.com/KosmosisDire/Rant</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/KosmosisDire/Rant</PackageProjectUrl>
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../VERSION').Trim())</Version>
+    <Description>Rant: peer discovery over UDP multicast plus reliable realtime UDP pub/sub, with typed (schema) messages. Thin P/Invoke wrapper over a prebuilt native library (win-x64, linux-x64, linux-arm64, osx).</Description>
+    <PackageTags>networking;pubsub;udp;discovery;realtime;middleware;rant</PackageTags>
+    <IncludeSymbols>false</IncludeSymbols>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Rant.cs" />
+    <None Include="README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!-- The standard types go inside this package, so it needs no other. A library may carry the
+       same assembly, and .NET loads the newest one. -->
+  <PropertyGroup>
+    <TargetsForTfmSpecificBuildOutput>$(TargetsForTfmSpecificBuildOutput);RantPackTypes</TargetsForTfmSpecificBuildOutput>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="types/Rant.Types.csproj" PrivateAssets="all" />
+  </ItemGroup>
+  <Target Name="RantPackTypes" DependsOnTargets="ResolveReferences">
+    <ItemGroup>
+      <RantTypes Include="@(ReferenceCopyLocalPaths->WithMetadataValue('ReferenceSourceTarget', 'ProjectReference'))" />
+      <BuildOutputInPackage Include="@(RantTypes);@(RantTypes->'%(RootDir)%(Directory)%(Filename).xml')" />
+    </ItemGroup>
+  </Target>
+
+  <!-- Globbed, so a platform that was not built is left out rather than failing the pack. -->
+  <ItemGroup>
+    <None Include="../../dist/native/**" Pack="true" PackagePath="runtimes/%(RecursiveDir)native/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!-- The examples restore from dist/ into bindings/csharp/.packages. A fresh pack drops the
+       extracted copy, so their next build takes this package rather than a stale same version. -->
+  <Target Name="RantDropExtracted" AfterTargets="Pack">
+    <RemoveDir Directories="$(MSBuildThisFileDirectory).packages/rant" />
+  </Target>
+
+</Project>

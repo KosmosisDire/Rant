@@ -1,0 +1,9 @@
+name        = "rant"
+description = "The Rant middleware: discovery, transport and shared memory for nodes on the mesh"
+
+library {
+  cmake  = "rant::rant_host"
+  python = "rant-middleware"
+  csharp = "Rant"
+  rust   = "rant-middleware"
+}
