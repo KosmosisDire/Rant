@@ -148,8 +148,7 @@ Rant as a subproject or finds the installed package.
   ubuntu-22.04 for a glibc 2.35 floor. `release` stops when another commit holds the
   version, then builds the sdist from the clean checkout, packs the `dist/` headers, merges
   the libraries, packs the NuGet, assembles the Unity package, attaches everything to a
-  GitHub Release, which tags this commit, pushes the upm and upm-types branches, and publishes to nuget.org
-  and PyPI when the `NUGET_API_KEY` and `PYPI_API_TOKEN` secrets exist.
+  GitHub Release, which tags this commit, and pushes the upm and upm-types branches.
 - The Rust crate ships as a git dependency on the tag `crate-v<VERSION>`: a parentless
   commit of the release tree plus `bindings/rust/rant/csrc/`, the packed `rant.h` and
   `rant.c`, so cargo fetches one snapshot and never needs cmake. `build.rs` compiles

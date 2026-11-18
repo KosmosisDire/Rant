@@ -2,10 +2,11 @@
 
 The Python wrapper for Rant: peer discovery over UDP
 multicast plus reliable realtime UDP pub/sub, with typed messages. The wheel carries the
-native library, so nothing compiles on your machine.
+native library, so nothing compiles on your machine. Each GitHub release carries a wheel per
+platform:
 
 ```sh
-pip install rant-middleware
+pip install rant_middleware-<version>-py3-none-<platform>.whl
 ```
 
 ```python
