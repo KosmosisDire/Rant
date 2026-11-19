@@ -42,12 +42,15 @@ export interface TunnelOptions {
     onEvent?: (e: TunnelEvent) => void;
 }
 
-/* A bridge on the network, as a bridge lists them. */
-export interface FoundBridge { name: string; url: string; version: string; self: boolean }
+/* A domain with nodes on it, as a bridge hears the census. */
+export interface DomainInfo { domain: number; nodes: number }
 
-/* The bridges on a network, as the bridge at url lists them. Every bridge answers the name
- * rant-bridges.local, so the default reaches whichever answers first. Any page may ask. */
-export async function findBridges(url = "ws://rant-bridges.local:6731", timeoutMs = 3000): Promise<FoundBridge[]> {
+/* A bridge on the network, as a bridge lists them. domains are the ones its network has, absent
+ * when the bridge could not be asked or is older than 0.0.18. */
+export interface FoundBridge { name: string; url: string; version: string; self: boolean; domains?: DomainInfo[] }
+
+/* The list the bridge at url answers. */
+async function askBridges(url: string, timeoutMs: number): Promise<FoundBridge[]> {
     const ws = new WebSocket(url);
     try {
         return await new Promise<FoundBridge[]>((resolve, reject) => {
@@ -57,13 +60,30 @@ export async function findBridges(url = "ws://rant-bridges.local:6731", timeoutM
             ws.onmessage = (m) => {
                 clearTimeout(timer);
                 const r = JSON.parse(String(m.data));
-                if (r.ok) resolve(r.bridges ?? []);
+                /* a bridge that does not advertise lists itself with no address of its own */
+                if (r.ok) resolve((r.bridges ?? []).map((b: FoundBridge) => (b.self && !b.url ? { ...b, url } : b)));
                 else reject(new Error(`the bridge at ${url} lists no bridges, update it to 0.0.7 or later`));
             };
         });
     } finally {
         ws.close();
     }
+}
+
+/* The bridges on a network, as the bridge at url lists them, each with its domains. Every
+ * bridge answers the name rant-bridges.local, so the default reaches whichever answers first.
+ * The others are asked for their domains at once. Any page may ask. */
+export async function findBridges(url = "ws://rant-bridges.local:6731", timeoutMs = 3000): Promise<FoundBridge[]> {
+    const list = await askBridges(url, timeoutMs);
+    return Promise.all(list.map(async (b) => {
+        if (b.self || !b.url) return b;
+        try {
+            const own = (await askBridges(b.url, timeoutMs)).find((o) => o.self);
+            return own?.domains ? { ...b, domains: own.domains } : b;
+        } catch {
+            return b;
+        }
+    }));
 }
 
 /* What crossed the tunnel. Packets are datagrams, batches the messages that carried them. */

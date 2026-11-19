@@ -81,7 +81,8 @@ const rantNet = await UdpNet.create();
 session. A dropped connection reconnects on its own and keeps every socket.
 
 `findBridges(url?)` from `rant-middleware/tunnel` lists the bridges on the network as
-`[{ name, url, version, self }]`. Every bridge answers the name `rant-bridges.local` over
+`[{ name, url, version, self, domains }]`, where `domains` holds `{ domain, nodes }` for each
+domain that bridge's network has, absent when that bridge could not be asked. Every bridge answers the name `rant-bridges.local` over
 mDNS and lists the others it hears, so the default `ws://rant-bridges.local:6731` reaches
 one.
 

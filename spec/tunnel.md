@@ -64,8 +64,11 @@ Every bridge with `advertise` on (the default) speaks mDNS on the interfaces it 
 
 `{"op":"bridges","seq":1}`, before or after `open` and from any page, answers
 `{"bridges":[{"name","url","version","self"}]}`: this bridge once, at its address on the
-asker's network, then the others. The list is no secret, since mDNS tells anyone on the network. `findBridges(url)`
-beside `TunnelNet` asks it, `ws://rant-bridges.local:6731` by default.
+asker's network, then the others. This bridge's entry also carries
+`"domains":[{"domain","nodes"}]`, the domains its network has, from a census watch it keeps
+open (spec/discovery.md, Census). The list is no secret, since mDNS tells anyone on the network. `findBridges(url)`
+beside `TunnelNet` asks it, `ws://rant-bridges.local:6731` by default, then asks each other
+bridge listed for its own domains.
 
 ## Sockets
 
