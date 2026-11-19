@@ -100,6 +100,9 @@ typedef enum {
    the base plus the domain: 239.192.<domain high byte>.<domain low byte>. */
 #define RANT_DISCOVERY_GROUP_BASE 0xEFC00000u  /* 239.192.0.0 */
 #define RANT_DISCOVERY_PORT       6730         /* Rant's ports are 6730 to 6739, docs/discovery.md */
+/* Every node's census copies go here, on the discovery port plus the offset. spec/discovery.md */
+#define RANT_CENSUS_GROUP         0xEFC10000u  /* 239.193.0.0 */
+#define RANT_CENSUS_PORT_OFFSET   3
 #define RANT_ANNOUNCE_INTERVAL_US 3000000u     /* 3 s. The peer timeout defaults to 4 of them */
 #define RANT_MAX_PEERS            16
 

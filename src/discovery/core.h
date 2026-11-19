@@ -61,6 +61,9 @@ typedef enum {
 size_t i_rant_discovery_encode(const i_RantDiscoveryWire *w, uint8_t *out, size_t cap);
 /* Views of the datagram's bytes, valid while the datagram is. */
 i_RantDiscoveryDecode i_rant_discovery_decode(RantBytes datagram, i_RantDiscoveryWire *out);
+/* The census copy of a datagram we send: no blob and no flag but BYE. 0 when it does not
+ * decode or fit. */
+size_t i_rant_discovery_census_copy(RantBytes datagram, uint8_t *out, size_t cap);
 
 #define RANT_DISCOVERY_MAX_SUBNETS 16
 /* One IPv4 subnet this host is on, network order bytes. */

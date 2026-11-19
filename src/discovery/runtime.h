@@ -15,6 +15,28 @@ extern "C" {
 
 typedef struct i_RantDiscovery i_RantDiscovery;
 
+/* One group joined on one socket out of every interface, or the one a pin names, and
+ * rejoined as links come and go. Discovery and the census watch share it. */
+typedef struct {
+    i_RantTunnel *tunnel;
+    i_RantSock    fd;
+    uint32_t      group_naddr;
+    i_RantIface   ifs[RANT_DISCOVERY_MAX_SUBNETS];    /* joined and sent out of */
+    uint8_t       n_ifs;          /* 0 = none usable, the OS picks */
+    uint8_t       pinned;         /* never rescanned */
+    uint64_t      scan_us;        /* next interface re enumeration */
+} i_RantGroupJoin;
+/* Joins group_naddr on fd. pin NULL is every interface. The live membership count, 0 when
+ * none took, even through the INADDR_ANY fallback. */
+uint8_t  i_rant_group_join(i_RantGroupJoin *g, i_RantTunnel *tunnel, i_RantSock fd,
+                           uint32_t group_naddr, const char *pin);
+/* Re enumerates the interfaces when due. 1 when the joined set changed. */
+int      i_rant_group_rescan(i_RantGroupJoin *g, uint64_t now_us);
+/* Sends to any group and port out of every joined interface. */
+void     i_rant_group_send(const i_RantGroupJoin *g, const uint8_t *out, size_t n_bytes,
+                           uint32_t group_naddr, uint16_t port);
+uint32_t i_rant_census_group_naddr(void);
+
 /* The live peer list by pointer, valid until the next service pass. Each .user is
  * writable in place. */
 const i_RantDiscoveryPeerView *i_rant_discovery_peers(i_RantDiscovery *d, uint16_t *count);

@@ -216,6 +216,14 @@ i_RantDiscoveryDecode i_rant_discovery_decode(RantBytes datagram, i_RantDiscover
     return I_RANT_DISC_OK;
 }
 
+size_t i_rant_discovery_census_copy(RantBytes datagram, uint8_t *out, size_t cap){
+    i_RantDiscoveryWire w;
+    if (i_rant_discovery_decode(datagram, &w) != I_RANT_DISC_OK) return 0;
+    w.flags &= RANT_DISCOVERY_FLAG_BYE;
+    w.overlay = rant_bytes(NULL, 0);
+    return i_rant_discovery_encode(&w, out, cap);
+}
+
 /* The one arena layout. Measure mode feeds required_memory and build mode feeds init. */
 typedef struct {
     i_RantDiscoveryState *st; uint8_t *slots, *meta_pool, *user_pool;

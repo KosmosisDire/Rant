@@ -432,6 +432,31 @@ static void wire_checks(void){
           "wire: an overlay without BLOB is malformed");
 }
 
+/* The census copy keeps who and where, drops the blob and every flag but BYE. */
+static void census_checks(void){
+    static const uint8_t uuid[16] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 };
+    static const uint8_t ov[5] = { 9, 8, 7, 6, 5 };
+    uint8_t buf[256], copy[RANT_DISCOVERY_HEAD_MAX]; size_t n, c; i_RantDiscoveryWire w, r;
+    memset(&w, 0, sizeof w);
+    w.flags = RANT_DISCOVERY_FLAG_REQ | RANT_DISCOVERY_FLAG_ALL | RANT_DISCOVERY_FLAG_BLOB;
+    w.domain = 77; w.uuid = uuid; w.version = 3; w.data_port = 6801;
+    w.name = rant_cstr("census-node"); w.overlay = rant_bytes(ov, sizeof ov);
+    n = i_rant_discovery_encode(&w, buf, sizeof buf);
+    c = i_rant_discovery_census_copy(rant_bytes(buf, n), copy, sizeof copy);
+    CHECK(c == RANT_DISCOVERY_FIXED_LEN + 11u && i_rant_discovery_decode(rant_bytes(copy, c), &r) == I_RANT_DISC_OK
+          && r.flags == 0 && r.domain == 77 && !memcmp(r.uuid, uuid, 16) && r.version == 3 && r.data_port == 6801
+          && r.name.len == 11 && r.overlay.len == 0,
+          "census: a copy keeps the domain, uuid and name without the blob or flags (%u)", (unsigned)c);
+    w.flags = RANT_DISCOVERY_FLAG_BYE | RANT_DISCOVERY_FLAG_UNI;
+    n = i_rant_discovery_encode(&w, buf, sizeof buf);
+    c = i_rant_discovery_census_copy(rant_bytes(buf, n), copy, sizeof copy);
+    CHECK(c && i_rant_discovery_decode(rant_bytes(copy, c), &r) == I_RANT_DISC_OK && r.flags == RANT_DISCOVERY_FLAG_BYE,
+          "census: a BYE stays a BYE");
+    buf[4] = (uint8_t)(RANT_WIRE_VERSION + 1);
+    CHECK(i_rant_discovery_census_copy(rant_bytes(buf, n), copy, sizeof copy) == 0,
+          "census: no copy of what does not decode");
+}
+
 /* Every datagram says how long ago our blob changed: from the start, then from each change,
    saturating rather than wrapping. */
 static void change_age_checks(void){
@@ -1730,6 +1755,7 @@ static const TestCase cases[] = {
     { "too_big",        too_big_checks },
     { "bulk",           bulk_checks },
     { "wire",           wire_checks },
+    { "census",         census_checks },
     { "change_age",     change_age_checks },
     { "discovery_core", disc_core_checks },
     { "node_core", node_core_checks },

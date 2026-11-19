@@ -350,3 +350,26 @@ workspace puts every node on one domain, while a tool that picks its domain on p
 like a test program or the explorer, keeps it. A value that is not a decimal number from 0
 to 65535 refuses the open with `RANT_E_BAD_DOMAIN`, never a silent fall back to 0. An
 empty value counts as unset.
+
+## Census
+
+A domain's announces stay on its own group, so nothing on the network hears every domain.
+The census is the one place that does. Every group datagram a node sends also goes, cut to
+its fixed part and name, to `RANT_CENSUS_GROUP` (239.193.0.0) on the census port, three above
+the discovery port (6733 by default). The copy keeps only the BYE flag and carries no blob,
+so it is at most `RANT_DISCOVERY_HEAD_MAX` bytes. It leaves out of every interface the group
+send does, and a census send that fails changes nothing else.
+
+A node never joins the census group or binds the census port, so census copies cost a node
+nothing to receive, and a census socket never takes a unicast announce meant for a node.
+The group sits outside the domain /16 but inside the same organization local scope.
+
+`RantDomains` (`node/domains.h`) is the census watch. It is no node: it announces nothing
+and holds no peer. It binds the census port on any address, joins the census group on every
+interface the way discovery does (Interfaces and locator ranking), and keeps one entry per
+uuid heard: its domain and when it was last heard. A census copy of this wire version only
+counts, since a node of another one could not join us anyway. A BYE drops its uuid at once,
+and an entry silent past the peer timeout (12 s) is dropped. Its walk drains the socket and
+expires entries first, so a caller that walks often reads the network within one announce
+interval. Entries live in a table that doubles on the allocator, up to
+`RANT_DOMAINS_MAX_NODES`, and a full table counts no new uuid until one leaves.

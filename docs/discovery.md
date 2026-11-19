@@ -105,6 +105,29 @@ RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){
 - The other network options apply on the bridge's host: `multicast_interface` names one
   of its interfaces, `127.0.0.1` its loopback.
 
+## Domains in use
+
+`RantDomains` lists the domains that have nodes on this network, without being a node. Every
+node also sends a small copy of its announces to one census group, 239.193.0.0, on the census
+port, which the watch hears.
+
+```c
+RantAllocator a = rant_allocator_heap(0);
+RantDomains *w = rant_domains_open(&a, NULL);
+RantIter it = {0}; RantDomainInfo d;
+while (rant_domains_next(w, &it, &d)) printf("domain %u: %u nodes
+", d.domain, d.nodes);
+rant_domains_close(w);
+```
+
+- A walk lists every domain heard within the peer timeout, in ascending order. A node that
+  closes leaves its count at once.
+- The first call of a walk reads what arrived since the last, so walk at least every 3 s.
+  Right after open the list fills over one announce interval.
+- `RantDomainsOpts.discovery_port` is the nodes' discovery port, and the census port is three
+  above it. `multicast_interface` hears on one interface, `127.0.0.1` this host alone.
+- Nodes of a Rant older than the census are not counted.
+
 ## Ports
 
 Rant's ports sit in 6730 to 6739, clear of DDS (7400 and up), Zenoh (7446, 7447) and LCM
@@ -115,6 +138,7 @@ Rant's ports sit in 6730 to 6739, clear of DDS (7400 and up), Zenoh (7446, 7447)
 | 6730 udp | discovery |
 | 6731 tcp | a bridge (`rant bridge enable`) |
 | 6732 tcp | the web explorer page (`rant explore web`) |
+| 6733 udp | the census of every domain, three above the discovery port |
 | 6739 tcp | the HMI designer |
 
 Tools that ship with Rant take the next free port up from 6733. Separate packages take
