@@ -6,7 +6,8 @@ import dgram from "node:dgram";
 import os from "node:os";
 import { dotted, naddr, type Interface, type NetObject, type Sink } from "./net.js";
 
-interface Socket { sink: Sink; sock: dgram.Socket | null; ready: boolean; pending: (() => void)[] }
+/* sending counts the datagrams Node has not handed to the OS yet, which a close waits for */
+interface Socket { sink: Sink; sock: dgram.Socket | null; ready: boolean; pending: (() => void)[]; sending: number; closing: boolean }
 
 export interface UdpNetOptions {
     /* sockets bound ahead, one for each node opened before the next refill lands */
@@ -54,7 +55,7 @@ export class UdpNet implements NetObject {
 
     open(sink: Sink): number {
         const id = this.nextId++;
-        this.sockets.set(id, { sink, sock: null, ready: false, pending: [] });
+        this.sockets.set(id, { sink, sock: null, ready: false, pending: [], sending: 0, closing: false });
         return id;
     }
 
@@ -102,14 +103,26 @@ export class UdpNet implements NetObject {
     send(id: number, bytes: Uint8Array, to: number, port: number): number {
         const s = this.sockets.get(id);
         if (!s?.sock) return -1;
-        s.sock.send(Buffer.from(bytes), port, dotted(to));
+        const sock = s.sock;
+        s.sending++;
+        sock.send(Buffer.from(bytes), port, dotted(to), () => {
+            if (--s.sending === 0 && s.closing) UdpNet.end(sock);
+        });
         return bytes.length;
     }
 
+    /* A send is asynchronous, so a socket closes once its last datagram left: a node's BYE goes
+     * out as it closes. */
     close(id: number): void {
         const s = this.sockets.get(id);
         this.sockets.delete(id);
-        try { s?.sock?.close(); } catch { /* already closed */ }
+        if (!s?.sock) return;
+        if (s.sending) s.closing = true;
+        else UdpNet.end(s.sock);
+    }
+
+    private static end(sock: dgram.Socket): void {
+        try { sock.close(); } catch { /* already closed */ }
     }
 
     interfaces(): Interface[] {
@@ -127,7 +140,8 @@ export class UdpNet implements NetObject {
     private adopt(id: number, s: Socket, sock: dgram.Socket, ready: boolean): void {
         s.sock = sock;
         s.ready = ready;
-        sock.on("message", (msg, from) => s.sink.deliver(id, naddr(from.address), from.port, msg));
+        /* a closing socket only finishes its sends, it hands the node nothing more */
+        sock.on("message", (msg, from) => { if (!s.closing) s.sink.deliver(id, naddr(from.address), from.port, msg); });
         sock.on("error", (e) => console.warn(`rant: udp socket ${id}: ${e.message}`));
     }
 
