@@ -63,8 +63,8 @@ Every bridge with `advertise` on (the default) speaks mDNS on the interfaces it 
   minutes, and says goodbye when it stops.
 
 `{"op":"bridges","seq":1}`, before or after `open` and from any page, answers
-`{"bridges":[{"name","url","version","self"}]}`: this bridge once per interface, then the
-others. The list is no secret, since mDNS tells anyone on the network. `findBridges(url)`
+`{"bridges":[{"name","url","version","self"}]}`: this bridge once, at its address on the
+asker's network, then the others. The list is no secret, since mDNS tells anyone on the network. `findBridges(url)`
 beside `TunnelNet` asks it, `ws://rant-bridges.local:6731` by default.
 
 ## Sockets
