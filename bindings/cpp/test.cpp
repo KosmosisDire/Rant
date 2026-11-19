@@ -2286,6 +2286,28 @@ static bool bulk_leg() {
     return g_failures == before;
 }
 
+/* The census watch counts a node on its domain and drops it when it leaves. */
+static bool domains_leg() {
+    int before = g_failures;
+    rant::DomainsOptions wo;
+    wo.multicast_interface = "127.0.0.1";
+    rant::Domains watch(wo);
+    chk("domains: a watch opens", watch.valid());
+    rant::NodeOptions opts;
+    opts.domain = test_domain(18);
+    opts.multicast_interface = "127.0.0.1";
+    auto count = [&] {
+        for (const rant::DomainInfo& d : watch.list()) if (d.domain == opts.domain) return int(d.nodes);
+        return 0;
+    };
+    {
+        rant::Node n("domains-node", opts);
+        chk("domains: a node is counted", wait_for(3000, [&] { return count() == 1; }));
+    }
+    chk("domains: a closed node leaves", wait_for(3000, [&] { return count() == 0; }));
+    return g_failures == before;
+}
+
 /* A third node sees a function's call and answer by field, and a task's whole life. */
 static bool call_observer_leg() {
     rant::NodeOptions opts;
@@ -2410,6 +2432,7 @@ static const Leg LEGS[] = {
     { "tails",      tails_leg },
     { "tasks",      tasks_leg },
     { "call_observer", call_observer_leg },
+    { "domains",    domains_leg },
     { "queue",      queue_leg },
     { "status",     status_leg },
     { "lifetime",   lifetime_leg },

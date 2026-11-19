@@ -24,6 +24,7 @@ extern crate self as rant;
 mod ffi;
 
 mod callback;
+mod domains;
 mod error;
 mod function;
 mod gate;
@@ -42,6 +43,7 @@ mod topic;
 pub mod types;
 mod variable;
 
+pub use domains::{DomainInfo, Domains, DomainsOptions};
 pub use error::{Error, ErrorKind, SendError};
 pub use function::{Deferred, FunctionDefinition, FunctionOptions, RemoteFunction, Request};
 pub use logs::{Level, LogLine, Origin};

@@ -5,6 +5,7 @@
 import * as L from "./layout.js";
 import { decode, encode, namesOf, SchemaError, Table, type FieldInfo, type Names } from "./codec.js";
 import type { NetObject } from "./net.js";
+import type { DomainInfo } from "./tunnel.js";
 import { dsl, type Infer, type Schema } from "./schema.js";
 import { encodeUtf8, Native, scoped, type Scope } from "./wasm.js";
 
@@ -246,6 +247,69 @@ export async function openNode(name?: string | null, opts: NodeOptions = {}): Pr
     } catch (e) {
         release?.();
         throw e;
+    }
+}
+
+/* The census watch's options. net as openNode's: a page passes a TunnelNet, Node.js may leave it out. */
+export interface DomainsOptions {
+    net?: NetObject;
+    /* the nodes' discovery port, 0 = 6730 */
+    discoveryPort?: number;
+    /* hear on this interface only, "127.0.0.1" this host alone */
+    multicastInterface?: string;
+}
+
+/* Which domains have nodes on this network, without being a node. docs/discovery.md, Domains in use. */
+export async function openDomains(opts: DomainsOptions = {}): Promise<Domains> {
+    let net = opts.net, release: (() => void) | null = null;
+    if (!net) ({ net, release } = await defaultNet(opts.multicastInterface === "127.0.0.1" ? "127.0.0.1" : "0.0.0.0"));
+    try {
+        return new Domains(await Native.load(net), opts, release);
+    } catch (e) {
+        release?.();
+        throw e;
+    }
+}
+
+/* The census watch from openDomains. */
+export class Domains {
+    private h: number;
+
+    /** @internal */
+    constructor(private readonly n: Native, opts: DomainsOptions, private release: (() => void) | null) {
+        this.h = scoped(n, (sc) => {
+            const o = sc.alloc(L.RantDomainsOpts.sizeof), D = L.RantDomainsOpts;
+            n.setU16(o + D.discovery_port, opts.discoveryPort ?? 0);
+            if (opts.multicastInterface) n.setU32(o + D.multicast_interface, sc.cstr(opts.multicastInterface));
+            const alloc = sc.alloc(L.RantAllocator.sizeof);
+            n.c.rant_allocator_heap(alloc, 0);
+            return n.c.rant_domains_open(alloc, o);
+        });
+        if (!this.h) {
+            const e = lastError(n, 0);
+            throw new RantError(`openDomains failed: ${e.text}`, e);
+        }
+    }
+
+    /* Every domain heard within the peer timeout, ascending. Call it at least every 3 s, and
+     * expect the first call after open to be partial. */
+    list(): DomainInfo[] {
+        if (!this.h) throw new RantError("the domains watch is closed");
+        const n = this.n, h = this.h, I = L.RantDomainInfo;
+        return scoped(n, (sc) => {
+            const it = sc.alloc(L.RantIter.sizeof), out = sc.alloc(I.sizeof), list: DomainInfo[] = [];
+            while (n.c.rant_domains_next(h, it, out)) list.push({ domain: n.u16(out + I.domain), nodes: n.u16(out + I.nodes) });
+            return list;
+        });
+    }
+
+    /* Stops hearing the census. A second close does nothing. */
+    close(): void {
+        if (!this.h) return;
+        this.n.c.rant_domains_close(this.h);
+        this.h = 0;
+        this.release?.();
+        this.release = null;
     }
 }
 

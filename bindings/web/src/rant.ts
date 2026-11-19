@@ -2,7 +2,7 @@
  * shows how to use it. */
 
 export {
-    openNode, version, RantNode, Reflection, CompiledSchema, Handle, Publisher, Subscriber, FunctionDefinition, RemoteFunction,
+    openNode, openDomains, Domains, type DomainsOptions, version, RantNode, Reflection, CompiledSchema, Handle, Publisher, Subscriber, FunctionDefinition, RemoteFunction,
     TaskDefinition, RemoteTask, Variable, VariableDefinition, RemoteVariable, CallObserver, RantError, CancelledError, AppError, MetaSection,
     type SchemaArg, type NodeOptions, type TopicOptions, type FunctionOptions, type TaskOptions, type VariableOptions,
     type Message, type Request, type TaskContext, type TaskCall, type Response, type Progress, type VariableUpdate,
@@ -20,3 +20,4 @@ export * from "./stdtypes.js";
 
 export { SchemaError, type FieldInfo, type FieldKind } from "./codec.js";
 export type { NetObject } from "./net.js";
+export type { DomainInfo } from "./tunnel.js";

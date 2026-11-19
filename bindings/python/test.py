@@ -1888,6 +1888,29 @@ def version_leg():
     return ok
 
 
+def domains_leg():
+    """The census watch counts a node on its domain and drops it when it closes."""
+    domain = DOMAIN + 20
+
+    def count(watch):
+        return next((d.nodes for d in watch.list() if d.domain == domain), 0)
+
+    def wait(cond, seconds=3.0):
+        end = time.monotonic() + seconds
+        while not cond() and time.monotonic() < end:
+            time.sleep(0.02)
+        return cond()
+
+    with rant.Domains(multicast_interface="127.0.0.1") as watch:
+        node = rant.Node("domains-node", domain=domain, multicast_interface="127.0.0.1")
+        counted = wait(lambda: count(watch) == 1)
+        node.close()
+        left = wait(lambda: count(watch) == 0)
+    ok = counted and left
+    print("domains: counted %s, left %s %s\n" % (counted, left, "PASS" if ok else "FAIL"))
+    return ok
+
+
 def layout_leg():
     """Every ctypes mirror against the C layout the build writes: a stale mirror crashes
     every node open, so a size or offset that drifted fails here first."""
@@ -2068,6 +2091,7 @@ LEGS = [
     ("patterns", patterns),
     ("tasks", tasks),
     ("call_observer", call_observer_leg),
+    ("domains", domains_leg),
     ("dispatch", dispatch_leg),
     ("array_buffers", array_buffers),
     ("log_status", log_status),

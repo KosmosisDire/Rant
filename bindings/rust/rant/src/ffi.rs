@@ -10,6 +10,8 @@ pub const RANT_TOPIC_NAME_MAX: u32 = 64;
 pub const RANT_NODE_NAME_MAX: u32 = 32;
 pub const RANT_DISCOVERY_GROUP_BASE: u32 = 4022337536;
 pub const RANT_DISCOVERY_PORT: u32 = 6730;
+pub const RANT_CENSUS_GROUP: u32 = 4022403072;
+pub const RANT_CENSUS_PORT_OFFSET: u32 = 3;
 pub const RANT_ANNOUNCE_INTERVAL_US: u32 = 3000000;
 pub const RANT_MAX_PEERS: u32 = 16;
 pub const RANT_ALLOCATOR_PAGE: u32 = 65536;
@@ -67,6 +69,7 @@ pub const RANT_META_NODE: u32 = 1;
 pub const RANT_META_PROC: u32 = 2;
 pub const RANT_META_TOPICS: u32 = 4;
 pub const RANT_META_PEERS: u32 = 8;
+pub const RANT_DOMAINS_MAX_NODES: u32 = 4096;
 pub const RANT_SHM_CHUNK_BYTES: u32 = 4194304;
 pub const RANT_SHM_CHUNKS: u32 = 4;
 pub const RANT_SHM_NAME_MAX: u32 = 64;
@@ -1204,6 +1207,32 @@ pub type RantOrigin = ::std::os::raw::c_uint;
 pub struct RantStatusOpts {
     pub clearable: u8,
 }
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RantDomainsOpts {
+    pub discovery_port: u16,
+    pub multicast_interface: *const ::std::os::raw::c_char,
+}
+impl Default for RantDomainsOpts {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct RantDomainInfo {
+    pub domain: u16,
+    pub nodes: u16,
+}
+#[repr(C)]
+#[derive(Debug)]
+pub struct RantDomains {
+    _unused: [u8; 0],
+}
 pub const RANT_CALL_OK: RantCallStatus = 0;
 pub const RANT_CALL_APP_ERROR: RantCallStatus = 1;
 pub const RANT_CALL_NO_HANDLER: RantCallStatus = 2;
@@ -1964,6 +1993,16 @@ unsafe extern "C" {
         since_us: u64,
     ) -> ::std::os::raw::c_int;
     pub fn rant_node_status_topic(n: *mut RantNode) -> *mut RantTopic;
+    pub fn rant_domains_open(
+        alloc: *mut RantAllocator,
+        opts: *const RantDomainsOpts,
+    ) -> *mut RantDomains;
+    pub fn rant_domains_next(
+        w: *mut RantDomains,
+        it: *mut RantIter,
+        out: *mut RantDomainInfo,
+    ) -> ::std::os::raw::c_int;
+    pub fn rant_domains_close(w: *mut RantDomains);
     pub fn rant_node_create_function_definition(
         n: *mut RantNode,
         name: *const ::std::os::raw::c_char,

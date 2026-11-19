@@ -237,6 +237,9 @@ for peer in node.reflection().peers() {
 - `meta(peer, sections, timeout)` asks a peer for its runtime snapshot, and `meta_async`
   returns a Future of it.
 - `node.stats()` shows memory use and send counters.
+- `Domains::new(DomainsOptions::new())` lists the domains with nodes on this network
+  without being a node, `list()` each as a `DomainInfo` in ascending order. Call it at least
+  every 3 s (docs/discovery.md, Domains in use).
 
 ## Static memory
 

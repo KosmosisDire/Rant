@@ -241,6 +241,17 @@ scalars are fields and whose full body is `info`. The schemas on an `Entity` are
 copies, None when untyped or not fetched, and `fetch_details` on the node is what makes
 them arrive.
 
+`rant.Domains()` lists the domains with nodes on this network without being a node
+(docs/discovery.md, Domains in use). `list()` returns `DomainInfo(domain, nodes)` in
+ascending order. Call it at least every 3 s. It takes `discovery_port` and
+`multicast_interface`, and closes on `close()` or at the end of a with block.
+
+```python
+with rant.Domains() as watch:
+    for d in watch.list():
+        print(d.domain, d.nodes)
+```
+
 ## Log and status
 
 `node.log(level, text)` publishes a line at a `rant.Level`, truncated at RANT_LOG_MAX, and

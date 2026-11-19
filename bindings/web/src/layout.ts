@@ -9,6 +9,10 @@ export const RantBytes = { sizeof: 8, data: 0, len: 4 } as const;
 
 export const RantCallOpts = { sizeof: 16, provider: 0, on_progress: 4, progress_user: 8, id_out: 12 } as const;
 
+export const RantDomainInfo = { sizeof: 4, domain: 0, nodes: 2 } as const;
+
+export const RantDomainsOpts = { sizeof: 8, discovery_port: 0, multicast_interface: 4 } as const;
+
 export const RantEntityInfo = { sizeof: 96, kind: 0, name: 4, hash: 12, provides: 16, consumes: 17, reliable: 18, writable: 19, forceable: 20, cancellable: 21, exclusive: 22, multi: 23, incomplete: 24, conflict: 25, providers: 26, consumers: 28, provider: 32, from: 36, schema: 44, schema_hash: 48, rsp_schema: 56, rsp_schema_hash: 64, progress_schema: 72, progress_schema_hash: 80, generation: 88 } as const;
 
 export const RantEvent = { sizeof: 96, kind: 0, error: 4, topic_name: 8, user: 12, peer: 16, topic: 20, os_error: 24, ip: 28, ip_len: 44, port: 46, lost_first: 48, lost_count: 56, too_big_bytes: 64, identity: 72, publish_topics: 80, receive_topics: 82, detail: 84, peer_name: 88 } as const;

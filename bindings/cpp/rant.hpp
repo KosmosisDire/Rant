@@ -5445,6 +5445,51 @@ RemoteVariable<T> Node::remote_variable(std::string_view name, const VariableOpt
 
 #endif /* !RANT_NO_PATTERNS */
 
+/* One domain with nodes on it, from Domains::list. */
+struct DomainInfo {
+    uint16_t domain = 0;
+    uint16_t nodes  = 0;     /* nodes heard on it within the peer timeout */
+};
+
+struct DomainsOptions {
+    uint16_t    discovery_port = 0;     /* the nodes' discovery port, 0 = 6730 */
+    std::string multicast_interface;    /* empty = every interface, "127.0.0.1" = this host alone */
+};
+
+/* Which domains have nodes on this network, without being a node. One thread at a time. */
+class Domains {
+public:
+    explicit Domains(const DomainsOptions& o = {}) {
+        detail::RantAllocator a = detail::rant_allocator_heap(0);
+        detail::RantDomainsOpts co;
+        std::memset(&co, 0, sizeof co);
+        co.discovery_port      = o.discovery_port;
+        co.multicast_interface = o.multicast_interface.empty() ? nullptr : o.multicast_interface.c_str();
+        w_ = detail::rant_domains_open(&a, &co);
+        if (!w_) priv::raise_last(nullptr, "rant::Domains");
+    }
+    ~Domains() { detail::rant_domains_close(w_); }
+    Domains(Domains&& o) noexcept : w_(o.w_) { o.w_ = nullptr; }
+    Domains& operator=(Domains&& o) noexcept {
+        if (this != &o) { detail::rant_domains_close(w_); w_ = o.w_; o.w_ = nullptr; }
+        return *this;
+    }
+    Domains(const Domains&) = delete;
+    Domains& operator=(const Domains&) = delete;
+    bool valid() const noexcept { return w_ != nullptr; }
+    explicit operator bool() const noexcept { return valid(); }
+    /* Every domain heard within the peer timeout, ascending. Call it at least every 3 s. */
+    std::vector<DomainInfo> list() {
+        std::vector<DomainInfo> out;
+        detail::RantIter it; std::memset(&it, 0, sizeof it);
+        detail::RantDomainInfo d;
+        while (w_ && detail::rant_domains_next(w_, &it, &d)) out.push_back({ d.domain, d.nodes });
+        return out;
+    }
+private:
+    detail::RantDomains* w_ = nullptr;
+};
+
 }   /* namespace rant */
 
 /* RANT_SCHEMA(T, fields...): make a struct a message type. Invoke at global scope after the

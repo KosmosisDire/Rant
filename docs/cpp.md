@@ -284,3 +284,16 @@ for (auto& p : r.peers()) std::printf("%s\n", p.name.c_str());
   anything does.
 - `meta(peer)` asks a peer for its details.
 - `node.stats()` shows memory use and send counters.
+
+## Domains in use
+
+```cpp
+rant::Domains watch;     // no node, it hears the census
+for (const rant::DomainInfo& d : watch.list()) std::printf("%u: %u nodes
+", d.domain, d.nodes);
+```
+
+- `list()` gives every domain with nodes, ascending. Call it at least every 3 s, and expect
+  the first call after open to be partial.
+- `DomainsOptions` takes the nodes' `discovery_port` and a `multicast_interface`.
+  docs/discovery.md, Domains in use.

@@ -371,6 +371,19 @@ class MetaSnapshot:
     heap_min_free: int
     heap_largest_free_block: int
 
+class DomainInfo(NamedTuple):
+    """A domain with nodes on it, from Domains.list()."""
+    domain: int
+    nodes: int
+
+class Domains:
+    """Which domains have nodes on this network, without being a node. One thread at a time."""
+    def __init__(self, *, discovery_port: int = 0, multicast_interface: str | None = None) -> None: ...
+    def list(self) -> list[DomainInfo]: ...
+    def close(self) -> None: ...
+    def __enter__(self) -> Domains: ...
+    def __exit__(self, *exc: object) -> None: ...
+
 class Reflection:
     """The walks of docs/reflection.md, from node.reflection. Every result is a copied
     snapshot, so it outlives the poll and needs no lock."""

@@ -1511,6 +1511,27 @@ static class Program
 
     // reflect_from_mesh: a handle carrying no type of its own takes the provider's from the
     // mesh, which is what an observer tool or a generic HMI needs.
+    static bool DomainsLeg()
+    {
+        Console.WriteLine("domains leg: the census watch on loopback");
+        ushort domain = (ushort)(DomainBase + 20);
+        using var watch = new Domains(multicastInterface: "127.0.0.1");
+        int Count() { foreach (DomainInfo d in watch.List()) if (d.Domain == domain) return d.Nodes; return 0; }
+        bool Wait(Func<bool> cond)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(3);
+            while (!cond() && DateTime.UtcNow < deadline) Thread.Sleep(20);
+            return cond();
+        }
+        var node = new RantNode("domains-node", new NodeOptions { Domain = domain, MulticastInterface = "127.0.0.1" });
+        bool counted = Wait(() => Count() == 1);
+        node.Dispose();
+        bool left = Wait(() => Count() == 0);
+        Console.WriteLine((counted ? "  ok  " : " FAIL ") + "a node is counted on its domain");
+        Console.WriteLine((left ? "  ok  " : " FAIL ") + "a closed node leaves the count");
+        return counted && left;
+    }
+
     static bool ReflectLeg()
     {
         Console.WriteLine("reflect leg: two nodes, loopback");
@@ -2112,6 +2133,7 @@ static class Program
         ("status", StatusLeg),
         ("pull", PullLeg),
         ("reflect", ReflectLeg),
+        ("domains", DomainsLeg),
         ("dispose", DisposeLeg),
         ("rebind", RebindLeg),
         ("close_race", CloseRaceLeg),

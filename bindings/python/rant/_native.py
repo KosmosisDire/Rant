@@ -382,6 +382,16 @@ class RantIter(Structure):
     _fields_ = [("a", c_uint32), ("b", c_uint32), ("c", c_uint16), ("d", c_uint16)]
 
 
+# the census watch of src/node/domains.h
+
+class RantDomainsOpts(Structure):
+    _fields_ = [("discovery_port", c_uint16), ("multicast_interface", c_char_p)]
+
+
+class RantDomainInfo(Structure):
+    _fields_ = [("domain", c_uint16), ("nodes", c_uint16)]
+
+
 class RantPeerInfo(Structure):
     _fields_ = [
         ("id", c_uint32),
@@ -495,6 +505,9 @@ def bind(lib):
     F("rant_node_unlock", [c_void_p], None)
     # reflection
     F("rant_node_peers_next", [c_void_p, POINTER(RantIter), POINTER(RantPeerInfo)], c_int)
+    F("rant_domains_open", [POINTER(RantAllocator), POINTER(RantDomainsOpts)], c_void_p)
+    F("rant_domains_next", [c_void_p, POINTER(RantIter), POINTER(RantDomainInfo)], c_int)
+    F("rant_domains_close", [c_void_p], None)
     F("rant_node_entities_next", [c_void_p, c_uint32, POINTER(RantIter),
                                   POINTER(RantEntityInfo)], c_int)
     F("rant_node_mesh_next", [c_void_p, POINTER(RantIter), POINTER(RantEntityInfo)], c_int)

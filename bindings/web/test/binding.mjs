@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-    openNode, version, struct, f64, f32, bool, u8, u16, u32, u64, i16, i32, i64, string, array, enumOf, map, types, CancelledError, AppError,
+    openNode, openDomains, version, struct, f64, f32, bool, u8, u16, u32, u64, i16, i32, i64, string, array, enumOf, map, types, CancelledError, AppError,
 } from "../dist/rant.js";
 
 const domain = 190 + (process.pid % 10);
@@ -361,7 +361,22 @@ await check("a third node sees a function's call and a task's whole life", async
         assert.deepEqual([steps[3].kind, steps[3].message], ["cancel", "b"]);
         assert.deepEqual([steps[4].kind, steps[4].status, steps[4].message], ["end", "cancelled", "stopped"]);
         assert.throws(() => a.callObserver("obs/job", () => {}));
+        /* the refusal also comes as an error event, which the last check must not count */
+        const at = await until(() => events.findIndex((e) => e.kind === "error" && e.text.includes("obs/job")) + 1);
+        events.splice(at - 1, 1);
     } finally { w.close(); }
+});
+
+await check("the census counts a node on its domain", async () => {
+    const watch = await openDomains({ multicastInterface: "127.0.0.1" });
+    try {
+        const count = (d) => watch.list().find((x) => x.domain === d)?.nodes ?? 0;
+        const other = domain + 30;
+        const n = await openNode("census", { ...opts, domain: other });
+        await until(() => count(other) === 1, 3000);
+        n.close();
+        await until(() => count(other) === 0, 3000);
+    } finally { watch.close(); }
 });
 
 const errors = events.filter((e) => e.kind === "error");

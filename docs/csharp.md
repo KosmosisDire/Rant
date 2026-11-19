@@ -257,6 +257,11 @@ null when untyped or not fetched, and `FetchDetails` on the node makes them arri
 `CallException` when the peer did not answer. `Meta(peer, sections, timeoutMs)` is the
 blocking form.
 
+`new Domains(discoveryPort, multicastInterface)` lists the domains with nodes on this
+network without being a node (docs/discovery.md, Domains in use). `List()` returns each as a
+`DomainInfo` (`Domain`, `Nodes`) in ascending order. Call it at least every 3 s, and dispose
+of it when done.
+
 `Schema.Fields` is the flat depth first field table as `SchemaField` rows, and
 `Schema.EnumVariants(field)` the options of an enum field, for a tool that renders a
 schema it has never seen.

@@ -122,6 +122,10 @@ const r = await add.call({ a: 2, b: 3 });     // r.status "ok", r.value { sum: 5
   clearable condition, whose app then sees a `"status_cleared"` event.
 - `node.reflection`: `peers()`, `entities(peer = 0)`, `mesh()`, `find(kind, name)`,
   `epoch`, `meta(peer, { sections, timeoutMs })`.
+- `openDomains({ net?, discoveryPort?, multicastInterface? })` lists the domains with nodes
+  on this network without being a node (docs/discovery.md, Domains in use). `list()` returns
+  `{ domain, nodes }` in ascending order. Call it at least every 3 s, then `close()`.
+  `findBridges()` in a page gives each bridge's domains with no watch of its own.
 - `stats`, `lastError`, `close(sendBye?)`. Every handle has `name`, `closed`, `close()` and
   `[Symbol.dispose]`, and a closed one answers `"no_topic"`.
 - A failed open or factory throws `RantError` with the event behind it. `take()` throws

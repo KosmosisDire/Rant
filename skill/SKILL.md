@@ -76,6 +76,10 @@ task_definition, remote_task, call_observer (PascalCase in C#). A subscriber wit
 with `take`, in Rust one from `pulled_subscriber`. A function or task handler returns its
 answer, and in Rust a value answers Ok and an `Err` fails the call with its text.
 
+To list the domains that have nodes on the network, open a domains watch (`rant_domains_open`,
+`rant::Domains`, `rant.Domains`, `Domains` in C# and Rust, `openDomains` in TypeScript). It is
+no node: it hears the census every node sends and shows nothing on the mesh.
+
 TypeScript has the same names in the npm package `rant-middleware` each Rant release
 attaches, with every pattern and reflection. In Node.js a node joins the mesh directly. A
 page has no UDP sockets, so it goes through a bridge, and so does a node on another network:

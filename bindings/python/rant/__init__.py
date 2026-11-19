@@ -31,6 +31,7 @@ __all__ = [
     "Variable", "VariableDefinition", "RemoteVariable", "VariableUpdate",
     "CallObserver", "CallEvent", "CallEventKind",
     "LogLine", "Condition", "StatusUpdate", "Reflection", "Peer", "Entity", "MetaSnapshot", "version",
+    "Domains", "DomainInfo",
 ]
 
 
@@ -2606,6 +2607,58 @@ class Reflection:
 
 # The patterns over topic kinds, then Publisher and Subscriber. Every handle comes from
 # the node method of the same name, and Handle[T] is the annotation for the checker.
+
+class DomainInfo(_typing.NamedTuple):
+    """A domain with nodes on it, from Domains.list()."""
+    domain: int
+    nodes: int
+
+
+class Domains:
+    """Which domains have nodes on this network, without being a node (docs/discovery.md,
+    Domains in use). One thread at a time. It closes on close(), at the end of a with block
+    and when the last reference goes."""
+
+    def __init__(self, *, discovery_port=0, multicast_interface=None):
+        """discovery_port is the nodes' own, 0 = 6730. multicast_interface hears on one
+                interface, "127.0.0.1" this host alone, None every interface."""
+        self._h = None
+        lib = self._lib = _c.load()
+        co = _c.RantDomainsOpts()
+        co.discovery_port = discovery_port
+        co.multicast_interface = multicast_interface.encode("utf-8") if multicast_interface else None
+        self._alloc = lib.rant_allocator_heap(_c.RANT_ALLOCATOR_PAGE)
+        h = lib.rant_domains_open(_c.byref(self._alloc), _c.byref(co))
+        if not h:
+            err = Event._from_c(lib.rant_last_error(None))
+            raise Error("Domains(...) failed: %s" % err, err)
+        self._h = h
+
+    def list(self):
+        """Every domain heard within the peer timeout, ascending, as DomainInfo. Call it at
+                least every 3 s, and expect the first call after open to be partial."""
+        if not self._h:
+            raise Error("Domains is closed")
+        out, it, d = [], _c.RantIter(), _c.RantDomainInfo()
+        while self._lib.rant_domains_next(self._h, _c.byref(it), _c.byref(d)):
+            out.append(DomainInfo(d.domain, d.nodes))
+        return out
+
+    def close(self):
+        """Stops hearing the census. A second close does nothing."""
+        if self._h:
+            self._lib.rant_domains_close(self._h)
+            self._h = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        self.close()
+
 
 class Request:
     """A function call as seen by the definition's two argument handler: the request metadata

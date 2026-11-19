@@ -484,6 +484,13 @@ namespace Rant
     [StructLayout(LayoutKind.Sequential)]
     internal struct RantIter { public uint a, b; public ushort c, d; }
 
+    // the census watch of src/node/domains.h
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RantDomainsOpts { public ushort discovery_port; public IntPtr multicast_interface; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RantDomainInfoNative { public ushort domain, nodes; }
+
     [StructLayout(LayoutKind.Sequential)]
     internal struct RantPeerInfoNative
     {
@@ -838,6 +845,12 @@ namespace Rant
         internal static extern void rant_node_unlock(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_node_peers_next(IntPtr node, ref RantIter it, out RantPeerInfoNative info);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern IntPtr rant_domains_open(ref RantAllocator alloc, ref RantDomainsOpts opts);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_domains_next(IntPtr watch, ref RantIter it, out RantDomainInfoNative info);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern void rant_domains_close(IntPtr watch);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_node_entities_next(IntPtr node, uint peer, ref RantIter it,
             out RantEntityInfoNative info);
@@ -1267,6 +1280,57 @@ namespace Rant
             /// <summary>The time now on the Timestamp clock.</summary>
             public static long Now() => Native.rant_timestamp_now();
         }
+    }
+
+    /// <summary>A domain with nodes on it, from Domains.List.</summary>
+    public readonly struct DomainInfo
+    {
+        public readonly ushort Domain;
+        /// <summary>Nodes heard on it within the peer timeout.</summary>
+        public readonly ushort Nodes;
+        public DomainInfo(ushort domain, ushort nodes) { Domain = domain; Nodes = nodes; }
+    }
+
+    /// <summary>Which domains have nodes on this network, without being a node
+    /// (docs/discovery.md, Domains in use). One thread at a time.</summary>
+    public sealed class Domains : IDisposable
+    {
+        private IntPtr _handle;
+        private RantAllocator _alloc;
+
+        /// <summary>discoveryPort is the nodes' own, 0 = 6730. multicastInterface hears on one
+        /// interface, "127.0.0.1" this host alone, null every interface.</summary>
+        public Domains(ushort discoveryPort = 0, string multicastInterface = null)
+        {
+            IntPtr mcastIf = Codec.CStrPtr(multicastInterface);     // read by open only
+            var co = new RantDomainsOpts { discovery_port = discoveryPort, multicast_interface = mcastIf };
+            _alloc = Codec.DefaultAllocator();
+            _handle = Native.rant_domains_open(ref _alloc, ref co);
+            Codec.FreeCStr(mcastIf);
+            if (_handle == IntPtr.Zero)
+                throw new RantException("domains open failed", RantEvent.FromValue(Native.rant_last_error(IntPtr.Zero)));
+        }
+
+        /// <summary>Every domain heard within the peer timeout, ascending. Call it at least every
+        /// 3 s, and expect the first call after open to be partial.</summary>
+        public List<DomainInfo> List()
+        {
+            var list = new List<DomainInfo>();
+            if (_handle == IntPtr.Zero) throw new ObjectDisposedException(nameof(Domains));
+            var it = new RantIter();
+            while (Native.rant_domains_next(_handle, ref it, out RantDomainInfoNative d) != 0)
+                list.Add(new DomainInfo(d.domain, d.nodes));
+            return list;
+        }
+
+        public void Dispose()
+        {
+            if (_handle != IntPtr.Zero) Native.rant_domains_close(_handle);
+            _handle = IntPtr.Zero;
+            GC.SuppressFinalize(this);
+        }
+
+        ~Domains() { if (_handle != IntPtr.Zero) Native.rant_domains_close(_handle); }
     }
 
     /// <summary>The library refused something, and the base of every exception it throws. A
