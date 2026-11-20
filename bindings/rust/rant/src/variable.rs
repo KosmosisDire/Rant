@@ -92,7 +92,7 @@ impl<T: Payload> VariableOptions<T> {
     }
 
     /// Run on_change and on_write at [`Queue::dispatch`] of `queue` instead of where the
-    /// node's callbacks run.
+    /// node's callbacks run. Remotes of one name share the first one's queue.
     pub fn queue(mut self, queue: &Queue) -> Self {
         self.queue = Some(queue.clone());
         self
@@ -352,8 +352,9 @@ impl VarShared {
         // still while it is decoded, since another thread's write may move it
         let value = unsafe {
             ffi::rant_node_lock(node);
-            let has = ffi::rant_variable_get(p.raw, &mut out) == 1;
-            let value = if has { T::__owned(self.codec.as_deref(), rbytes(out), std::ptr::null()).map(Some) } else { Ok(None) };
+            let mut schema = std::ptr::null();
+            let has = ffi::rant_variable_get(p.raw, &mut out, &mut schema) == 1;
+            let value = if has { T::__owned(self.codec.as_deref(), rbytes(out), schema).map(Some) } else { Ok(None) };
             ffi::rant_node_unlock(node);
             value
         };

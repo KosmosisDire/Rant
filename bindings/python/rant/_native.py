@@ -546,7 +546,7 @@ def bind(lib):
                                                POINTER(RantVariableOpts)], c_void_p)
     F("rant_node_create_remote_variable", [c_void_p, c_char_p, c_void_p,
                                            POINTER(RantVariableOpts)], c_void_p)
-    F("rant_variable_get", [c_void_p, POINTER(RantBytes)], c_int)
+    F("rant_variable_get", [c_void_p, POINTER(RantBytes), POINTER(c_void_p)], c_int)
     F("rant_variable_set", [c_void_p, RantBytes], c_int)
     F("rant_variable_force", [c_void_p, RantBytes], c_int)
     F("rant_variable_unforce", [c_void_p], c_int)

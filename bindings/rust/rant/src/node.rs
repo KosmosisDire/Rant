@@ -18,7 +18,7 @@ use crate::status::StatusFn;
 use crate::message::{Codec, Payload};
 use crate::options::{Qos, options, to_ms, to_us};
 use crate::schema::{MessageView, Schema};
-use crate::topic::{Publisher, Received, SubHandler, Subscriber, TopicCore, TopicRec};
+use crate::topic::{Publisher, Received, SubHandler, Subscriber, TopicCore};
 
 /// Who runs the node loop and where callbacks fire, chosen at open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -394,10 +394,10 @@ pub(crate) struct NodeInner {
     queue: AtomicPtr<ffi::RantQueue>,
     net: Net,
     on_event: Mutex<Option<Arc<Callback<EventFn>>>>,
-    /// name to shared topic slot, also the lock that serializes creates and closes
-    pub(crate) topics: Registry<HashMap<String, TopicRec>>,
-    /// subscriber handlers per topic index, read by the message trampoline
-    pub(crate) handlers: Mutex<HashMap<u16, Arc<[SubHandler]>>>,
+    /// serializes topic creates and closes
+    pub(crate) creates: Registry<()>,
+    /// the subscriber handler per topic index, read by the message trampoline
+    pub(crate) handlers: Mutex<HashMap<u16, Arc<SubHandler>>>,
     next_id: AtomicU64,
     /// the typed codecs, one per type
     pub(crate) codecs: Registry<HashMap<TypeId, Arc<Codec>>>,
@@ -582,14 +582,12 @@ unsafe extern "C" fn on_message(msg: *const ffi::RantMsg) {
     // SAFETY: the C hands a message valid for this call, and user is our NodeInner
     let msg = unsafe { &*msg };
     let inner = unsafe { &*(msg.user as *const NodeInner) };
-    let list = lock(&inner.handlers).get(&msg.topic_index).cloned();
-    let Some(list) = list else { return };
-    for h in list.iter() {
-        // SAFETY: the message is valid for the whole trampoline
-        let view = unsafe { MessageView::delivered(inner, msg) };
-        if let Err(refused) = h.cb.run(inner.key(), |f| f(inner, view)) {
-            inner.report_refused(Some(&h.name), refused);
-        }
+    let h = lock(&inner.handlers).get(&msg.topic_index).cloned();
+    let Some(h) = h else { return };
+    // SAFETY: the message is valid for the whole trampoline
+    let view = unsafe { MessageView::delivered(inner, msg) };
+    if let Err(refused) = h.cb.run(inner.key(), |f| f(inner, view)) {
+        inner.report_refused(Some(&h.name), refused);
     }
 }
 
@@ -630,7 +628,7 @@ impl Node {
             queue: AtomicPtr::new(null_mut()),
             net: Net::new(&o)?,
             on_event: Mutex::new(None),
-            topics: Registry::new(HashMap::new()),
+            creates: Registry::new(()),
             handlers: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             codecs: Registry::new(HashMap::new()),
@@ -843,7 +841,7 @@ impl Node {
     ) -> Result<Subscriber<T>, Error> {
         let codec = T::__codec(&self.inner, qos.schema.as_ref(), qos.reflect_from_mesh, "rant::Node::subscriber")?;
         let mut core = TopicCore::open(&self.inner, name, TopicCore::SUB, codec.as_deref(), &qos, false)?;
-        core.add_handler(Received::<T>::adapt(handler, codec.clone(), name));
+        core.set_handler(Received::<T>::adapt(handler, codec.clone(), name));
         Ok(Subscriber::new(core, codec))
     }
 

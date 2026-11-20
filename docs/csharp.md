@@ -60,7 +60,8 @@ OnWrite and awaited call results.
 
 A handle that wants its own thread takes a queue from `node.CreateQueue()` as the `Queue`
 of its options, `Qos.Queue` on a subscriber, and that thread calls `queue.Dispatch()`.
-One thread drains a queue at a time, and same name handles share their slot's queue.
+One thread drains a queue at a time. Remote variables of one name share the first one's
+queue.
 State applies at receipt either way: a variable holds its newest value before its
 `OnChange` runs, and `Call()` completes without a dispatch.
 
@@ -174,9 +175,10 @@ clock at receipt, `WrittenUs` the sender's wall clock, 0 when it opted out, and
 `Send(value, captureUs)` sets that last one.
 
 `Qos.QueueBytes` caps a queued subscriber's ring, 0 meaning 1 MB, and `QueueStats()` reads
-it. Same name handles on one node share the topic slot: `Dispose()` on one leaves its
-siblings receiving, and the last one retires the slot so the name can carry another
-schema. `Ready` on a publisher is true when a send would not wait, `Drain(timeoutMs)` waits
+it. A node may hold many handles of one name, each with its own type: `Dispose()` on one
+leaves the others receiving, and the last one retires the topic so the name can carry
+another schema. A name may end in a field path to receive one field, such as
+`node.Subscriber<bool>("Gp12/RobotState.servo_power", on => ...)`. `Ready` on a publisher is true when a send would not wait, `Drain(timeoutMs)` waits
 until every reliable subscriber acknowledged what was sent, the flush before `Dispose`, and
 `MatchCount` counts its matched subscribers. A subscriber has no count, since the C gives none on that side.
 
@@ -236,7 +238,8 @@ docs/patterns.md. The handler takes a `CallEvent` (`Kind`, `Name`, `ProviderName
 `TryGet` reads a copy of the value, `Set` returns the status, `Force` needs `AllowForce`
 in the definition's options and `Unforce` ends it, and `Wait` blocks until a value exists.
 The `Value` getter throws while no value exists and its setter throws `RantException` on a
-refused set.
+refused set. A remote name may end in a field path, and that remote then reads and sets
+only its field: `node.RemoteVariable<bool>("Gp12/RobotState.servo_power")`.
 
 `OnChange` and `OnWrite` are events whose handlers take the value and the
 `VariableUpdate` envelope, on the thread the node's threading gives every callback.

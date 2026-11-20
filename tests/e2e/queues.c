@@ -518,9 +518,9 @@ static void callback_pattern_checks(void){
     rant_function_on_cancel(cp_tdef, cp_on_cancel, NULL);
     rant_variable_on_write(pvar, cp_on_write, NULL);
     for (t=0;t<2000 && (rant_function_match_count(cadd)==0 || rant_function_match_count(ctask)==0
-                        || rant_function_match_count(cinl)==0 || !rant_variable_get(cvar, NULL));t++)
+                        || rant_function_match_count(cinl)==0 || !rant_variable_get(cvar, NULL, NULL));t++)
         test_pump(P,C,2);
-    CHECK(rant_function_match_count(cadd)==1 && rant_variable_get(cvar, NULL),
+    CHECK(rant_function_match_count(cadd)==1 && rant_variable_get(cvar, NULL, NULL),
              "cpat: providers matched, the initial value cached (%d)", rant_function_match_count(cadd));
 
     /* CP1: the request parks at the provider, the reply parks at the caller */
@@ -604,14 +604,14 @@ static void callback_pattern_checks(void){
     i_rant_le_w32(val, 8); cp_write_n=0;
     r = rant_variable_set(cvar, rant_bytes(val,4));
     waiting = cp_wait_parked(P, C, cp_pq);
-    {   RantBytes cur; int has = rant_variable_get(pvar, &cur);
+    {   RantBytes cur; int has = rant_variable_get(pvar, &cur, NULL);
         CHECK(r==RANT_OK && waiting==1 && cp_write_n==0 && has && cur.len==4 && i_rant_le_r32(cur.data)==8,
                  "cpat: owner applied the write at receipt, on_write parked (waiting=%u)", waiting); }
     r = rant_queue_dispatch(cp_pq, 0, 0);
     CHECK(r==1 && cp_write_n==1 && cp_write_val==8 && cp_write_src!=0,
              "cpat: on_write dispatched with the write's value and source (val=%u src=%u)", cp_write_val, cp_write_src);
     waiting = cp_wait_parked(P, C, cp_cq);
-    {   RantBytes cur; rant_variable_get(cvar, &cur);
+    {   RantBytes cur; rant_variable_get(cvar, &cur, NULL);
         CHECK(waiting==1 && cp_change_n==1 && cur.len==4 && i_rant_le_r32(cur.data)==8,
                  "cpat: remote cached 8 at receipt, on_change parked (waiting=%u)", waiting); }
     r = rant_queue_dispatch(cp_cq, 0, 0);

@@ -167,6 +167,43 @@ await check("variables replicate and force", async () => {
     assert.deepEqual(changes.map((c) => c[0]), [1.5, 2.5, 9, 2.5]);
 });
 
+const Gauge = struct("Gauge", { origin: Point, id: u8, level: f32 });
+
+await check("field handles read their field of a topic", async () => {
+    const whole = [], ids = [], xs = [];
+    const pub = a.publisher("Field/Gauge", Gauge, { reliable: true });
+    const sw = b.subscriber("Field/Gauge", Gauge, (v) => whole.push(v), { reliable: true });
+    b.subscriber("Field/Gauge.id", u8, (v) => ids.push(v), { reliable: true });
+    b.subscriber("Field/Gauge.origin", Point, (v) => xs.push(v.x), { reliable: true });
+    await until(() => pub.matchCount > 0 && pub.ready);
+    pub.send({ origin: { x: 1.5, y: 2 }, id: 9, level: 3 });
+    await until(() => whole.length === 1 && ids.length === 1 && xs.length === 1);
+    assert.deepEqual([ids, xs], [[9], [1.5]]);
+    assert.equal(sw.close(), true);
+    pub.send({ origin: { x: 5, y: 0 }, id: 4, level: 0 });
+    await until(() => ids.at(-1) === 4 && xs.at(-1) === 5);
+    assert.equal(whole.length, 1);
+});
+
+await check("field remotes read and write their part", async () => {
+    const owned = a.variableDefinition("Field/Var", Gauge, { initial: { origin: { x: 1, y: 1 }, id: 3, level: 2 } });
+    const whole = b.remoteVariable("Field/Var", Gauge);
+    const id = b.remoteVariable("Field/Var.id", u8);
+    const at = b.remoteVariable("Field/Var.origin", Point);
+    assert.equal(await id.wait(5000), true);
+    assert.equal(id.get(), 3);
+    assert.deepEqual(at.get(), { x: 1, y: 1 });
+    const changes = [];
+    id.onChange((v) => changes.push(v));
+    assert.equal(id.set(7), "ok");
+    await until(() => owned.get()?.id === 7);
+    assert.equal(owned.get().origin.x, 1);
+    assert.equal(at.set({ x: 6, y: 8 }), "ok");
+    await until(() => owned.get()?.origin.y === 8 && whole.get()?.origin.y === 8);
+    assert.equal(owned.get().id, 7);
+    assert.deepEqual(changes, [3, 7]);
+});
+
 await check("reflection sees the other node", async () => {
     const peer = (await until(() => b.reflection.peers().find((p) => p.name === "a" && p.active)));
     const topic = b.reflection.find("topic", "Line1/Conveyor");
@@ -381,6 +418,11 @@ await check("the census counts a node on its domain", async () => {
 
 const errors = events.filter((e) => e.kind === "error");
 await check("no errors were reported", async () => assert.deepEqual(errors.map((e) => e.text), []));
+
+await check("a field handle never publishes and a definition takes no path", async () => {
+    assert.throws(() => a.publisher("Field/Gauge.id", u8));
+    assert.throws(() => a.variableDefinition("Field/Other.id", u8));
+});
 
 assert.equal(a.close(), true);
 assert.equal(b.close(), true);

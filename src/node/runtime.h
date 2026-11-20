@@ -152,8 +152,8 @@ RANT_API RantStdType rant_std_recognize_field(RantNode *n, const RantSchema *s, 
 #endif
 
 /* Creates a topic. name is the identity, schema is registered in this node, NULL means raw
- * bytes. A retired slot is reused. NULL when the reserve is full, the name is bad or out of
- * memory. */
+ * bytes. A name already created here adds a handle to it, and a field path after a '.'
+ * reads one field (docs/topics.md). NULL when refused, rant_last_error says why. */
 RANT_API RantTopic *rant_node_create_topic(RantNode *n, const char *name, RantRole role,
                                                const RantSchema *schema, const RantTopicOpts *opts);
 
@@ -436,8 +436,14 @@ int      i_rant_node_sys_poll    (RantNode *n, int timeout_ms);
  * -1 refused from a callback. */
 typedef int (*i_RantSysWaitFn)(RantNode *n, void *ctx, uint64_t now_us, uint64_t *deadline_us);
 int      i_rant_node_sys_wait    (RantNode *n, i_RantSysWaitFn done, void *ctx);
-/* Fires a topic scoped RANT_ERROR through the node's normal event path. Under the node lock. */
-void     i_rant_node_sys_error (RantNode *n, RantErrorKind error, RantTopic *topic, uint32_t peer);
+/* Fires a topic scoped RANT_ERROR through the node's normal event path, under name when
+ * not NULL, with detail. Under the node lock. */
+void     i_rant_node_sys_error (RantNode *n, RantErrorKind error, RantTopic *topic, uint32_t peer,
+                                const char *name, const char *detail);
+/* The node's own copy of a schema, which lives until close. Lock held. */
+const RantSchema *i_rant_node_schema_own(RantNode *n, const RantSchema *s);
+/* The schema peer writes the topic with, NULL when untyped or not matched. Lock held. */
+const RantSchema *i_rant_topic_writer_schema(RantTopic *topic, uint32_t peer);
 /* A peer's node name, "unknown-peer" when it has none. */
 RantString i_rant_node_sys_peer_name(RantNode *n, uint32_t peer);
 /* A line of Rant's own on @rant/log, coalesced by text and sent by the next poll. Lock held. */

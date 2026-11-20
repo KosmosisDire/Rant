@@ -995,6 +995,450 @@ static void schema_nested_checks(void){
     rant_allocator_reset(&pa); rant_allocator_reset(&sa);
 }
 
+/* Field handles: several handles on one entity in one node, each reading its own field of
+   the writer's sample through a view resolved once per writer schema */
+#define FP_MAX 8
+static int      fp_recv[FP_MAX];
+static double   fp_val[FP_MAX];
+static char     fp_name[FP_MAX][64];
+static unsigned long fp_mismatch[FP_MAX];
+static int      fp_idx[FP_MAX];          /* the topic index of each test slot, -1 = unused */
+static int fp_slot(uint16_t index){
+    int i;
+    for (i = 0; i < FP_MAX; i++) if (fp_idx[i] == (int)index) return i;
+    return -1;
+}
+static void fp_on_message(const RantMsg *msg){
+    int k = fp_slot(msg->topic_index); RantValue v;
+    if (k < 0) return;
+    fp_recv[k]++;
+    snprintf(fp_name[k], sizeof fp_name[k], "%.*s", (int)msg->topic_name.len, msg->topic_name.data);
+    if (!msg->schema) return;
+    if (rant_schema_field_index(msg->schema, "stamp") >= 0)
+        fp_val[k] = (double)rant_get_uint(msg->data, msg->schema, "stamp");
+    else if (rant_schema_field_index(msg->schema, "y") >= 0)
+        fp_val[k] = rant_get_f64(msg->data, msg->schema, "y");
+    else if (rant_get_value(msg->data, msg->schema, 0, &v))
+        fp_val[k] = v.kind == RANT_BOOL ? (double)v.v.u : v.v.f;
+}
+static void fp_on_event(const RantEvent *ev){
+    int k;
+    if (ev->kind != RANT_ERROR || ev->error != RANT_E_SCHEMA_MISMATCH) return;
+    if ((k = fp_slot(ev->topic)) >= 0) fp_mismatch[k]++;
+}
+static void fp_send(RantTopic *pc, const RantSchema *W, uint64_t stamp){
+    uint8_t m[64]; int ok = rant_schema_message_default(W, m, sizeof m);
+    ok &= rant_set_uint(m, sizeof m, W, "stamp", stamp);
+    ok &= rant_set_uint(m, sizeof m, W, "servo", 1);
+    ok &= rant_set_f64(m, sizeof m, W, "spot.y", 4.5);
+    ok &= rant_set_f64(m, sizeof m, W, "axes[1].vel", -2.0);
+    CHECK(ok, "fields: the writer's message builds");
+    rant_topic_send(pc, rant_bytes(m, rant_schema_msg_len(W, m, sizeof m)), NULL);
+}
+static void schema_fields_checks(void){
+    RantAllocator pa = rant_allocator_heap(0), sa = rant_allocator_heap(0), ma = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *P = NULL, *S = NULL; RantAddr seed; RantMsg tm;
+    RantTopic *pc, *servo, *vel, *spot, *nope, *whole, *bad;
+    RantSchema *W, *F32, *SPOT, *HEAD;
+    int i;
+    W = test_compile(&ma, "Spot { x: f32, y: f32 } Axis { pos: f32, vel: f32 } "
+                          "Arm { stamp: u64, servo: bool, spot: Spot, axes: Axis[3] }", NULL);
+    F32  = test_compile(&ma, "f32", NULL);
+    SPOT = test_compile(&ma, "Spot { y: f32 }", NULL);
+    HEAD = test_compile(&ma, "Arm { stamp: u64 }", NULL);
+    CHECK(W && F32 && SPOT && HEAD, "fields: schemas compile");
+    if (!(W && F32 && SPOT && HEAD)){ rant_allocator_reset(&ma); return; }
+    memset(fp_recv, 0, sizeof fp_recv); memset(fp_mismatch, 0, sizeof fp_mismatch);
+    memset(fp_val, 0, sizeof fp_val); memset(fp_name, 0, sizeof fp_name);
+    for (i = 0; i < FP_MAX; i++) fp_idx[i] = -1;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+30; o.discovery.max_peers=4;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    P = rant_node_open(&pa, "fp-pub", NULL, NULL, &o);
+    S = rant_node_open(&sa, "fp-sub", fp_on_message, fp_on_event, &o);
+    CHECK(P && S, "fields: nodes open");
+    if (!(P && S)){ if(P)rant_node_close(P,0); if(S)rant_node_close(S,0); rant_allocator_reset(&ma); return; }
+    pc    = rant_node_create_topic(P, "fp/arm", RANT_PUB_ONLY, W, NULL);
+    servo = rant_node_create_topic(S, "fp/arm.servo", RANT_SUB_ONLY, NULL, NULL);
+    vel   = rant_node_create_topic(S, "fp/arm.axes[1].vel", RANT_SUB_ONLY, F32, NULL);
+    spot  = rant_node_create_topic(S, "fp/arm.spot", RANT_SUB_ONLY, SPOT, &(RantTopicOpts){ .pull = 1 });
+    nope  = rant_node_create_topic(S, "fp/arm.nope", RANT_SUB_ONLY, NULL, NULL);
+    whole = rant_node_create_topic(S, "fp/arm", RANT_SUB_ONLY, HEAD, NULL);
+    CHECK(pc && servo && vel && spot && nope && whole, "fields: the writer and five handles on one entity");
+    if (!(pc && servo && vel && spot && nope && whole)) goto done;
+    fp_idx[0] = rant_topic_index(servo); fp_idx[1] = rant_topic_index(vel);
+    fp_idx[2] = rant_topic_index(spot);  fp_idx[3] = rant_topic_index(nope);
+    fp_idx[4] = rant_topic_index(whole);
+    CHECK(fp_idx[0] != fp_idx[1] && fp_idx[1] != fp_idx[4] && rant_node_topic(S, (uint16_t)fp_idx[3]) == nope,
+             "fields: each handle has its own index");
+
+    bad = rant_node_create_topic(S, "fp/arm.servo", RANT_PUB_ONLY, NULL, NULL);
+    CHECK(!bad && rant_last_error(S).detail && strstr(rant_last_error(S).detail, "only subscribes"),
+             "fields: a field handle that writes is refused (%s)",
+             rant_last_error(S).detail ? rant_last_error(S).detail : "null");
+    bad = rant_node_create_topic(S, "fp/arm.", RANT_SUB_ONLY, NULL, NULL);
+    CHECK(!bad && rant_last_error(S).error == RANT_E_BAD_NAME, "fields: an empty path is refused");
+    bad = rant_node_create_topic(S, "fp/arm.stamp", RANT_SUB_ONLY, NULL,
+                                 &(RantTopicOpts){ .qos.reliability = RANT_RELIABLE });
+    CHECK(!bad && rant_last_error(S).error == RANT_E_QOS_INCOMPATIBLE,
+             "fields: a reliable handle on a best effort topic is refused (%d)", (int)rant_last_error(S).error);
+    CHECK(!rant_node_create_variable_definition(S, "fp/var.x", NULL, NULL)
+             && rant_last_error(S).error == RANT_E_BAD_NAME, "fields: a definition takes no field path");
+
+    PUMP_UNTIL(P, S, 6400, rant_topic_match_count(pc) != 0);
+    CHECK(rant_topic_match_count(pc) == 1, "fields: the writer matches the entity once (%d)",
+             rant_topic_match_count(pc));
+    fp_send(pc, W, 77);
+    PUMP_UNTIL(P, S, 2400, fp_recv[0] && fp_recv[1] && fp_recv[4]);
+    CHECK(fp_recv[0] == 1 && fp_val[0] == 1.0 && strcmp(fp_name[0], "fp/arm.servo") == 0,
+             "fields: an untyped field handle reads its bool under its own name (%s)", fp_name[0]);
+    CHECK(fp_recv[1] == 1 && fp_val[1] == -2.0, "fields: a typed handle reads an indexed field (%.1f)", fp_val[1]);
+    CHECK(fp_recv[4] == 1 && fp_val[4] == 77.0, "fields: a whole handle reads its subset (%.0f)", fp_val[4]);
+    CHECK(rant_topic_take(spot, &tm, 0) == 1 && tm.schema && rant_get_f64(tm.data, tm.schema, "y") == 4.5
+             && tm.topic_index == (uint16_t)fp_idx[2],
+             "fields: a pull handle takes its view of a struct field");
+    CHECK(fp_recv[3] == 0 && fp_mismatch[3] == 1, "fields: a path the writer lacks is reported on its handle (%lu)",
+             fp_mismatch[3]);
+    fp_send(pc, W, 78);
+    PUMP_UNTIL(P, S, 2400, fp_recv[4] == 2);
+    CHECK(fp_mismatch[3] == 1, "fields: the refusal is reported once per writer schema (%lu)", fp_mismatch[3]);
+
+    /* the first handle's slot carries the wire: closing it leaves the others riding it */
+    CHECK(rant_topic_retire(servo) == RANT_OK && rant_node_topic(S, (uint16_t)fp_idx[0]) == NULL,
+             "fields: the first handle closes and its index reads empty");
+    fp_idx[0] = -1;
+    fp_send(pc, W, 79);
+    PUMP_UNTIL(P, S, 2400, fp_recv[4] == 3);
+    CHECK(fp_recv[4] == 3 && fp_recv[1] == 3, "fields: the others still receive (%d %d)", fp_recv[4], fp_recv[1]);
+    CHECK(rant_topic_retire(vel) == RANT_OK && rant_topic_retire(spot) == RANT_OK
+             && rant_topic_retire(nope) == RANT_OK && rant_topic_retire(whole) == RANT_OK,
+             "fields: the rest close");
+    PUMP_UNTIL(P, S, 4000, rant_topic_match_count(pc) == 0);
+    CHECK(rant_topic_match_count(pc) == 0, "fields: the last close takes the entity off the mesh");
+done:
+    rant_node_close(P,1); rant_node_close(S,1);
+    rant_allocator_reset(&ma);
+}
+
+/* Handles on one topic share its delivery: a reliable ring that is full parks the lane
+   for all of them, so a retry delivers each handle every message exactly once. A writer
+   joining untyped readers types the wire */
+static void schema_shared_checks(void){
+    RantAllocator pa = rant_allocator_heap(0), sa = rant_allocator_heap(0), ma = rant_allocator_heap(0);
+    RantNodeOpts o; RantNode *P = NULL, *S = NULL; RantAddr seed; RantMsg tm;
+    RantTopic *pc, *small, *big, *raw, *out, *in;
+    RantSchema *T; uint64_t got_small = 0, got_big = 0, ahead = 0; int bad_order = 0, t;
+    RantTopicOpts rel; memset(&rel, 0, sizeof rel); rel.qos.reliability = RANT_RELIABLE; rel.qos.keep_last = 16;
+    T = test_compile(&ma, "Tick { n: u64 }", NULL);
+    CHECK(T != NULL, "shared: schema compiles");
+    if (!T) return;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+31; o.discovery.max_peers=4;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    P = rant_node_open(&pa, "sh-pub", NULL, NULL, &o);
+    S = rant_node_open(&sa, "sh-sub", NULL, NULL, &o);
+    CHECK(P && S, "shared: nodes open");
+    if (!(P && S)){ if(P)rant_node_close(P,0); if(S)rant_node_close(S,0); rant_allocator_reset(&ma); return; }
+    pc = rant_node_create_topic(P, "sh/tick", RANT_PUB_ONLY, T, &rel);
+    rel.pull = 1; rel.qos.queue_bytes = 256;          /* a few records */
+    small = rant_node_create_topic(S, "sh/tick", RANT_SUB_ONLY, T, &rel);
+    rel.qos.queue_bytes = 0;
+    big = rant_node_create_topic(S, "sh/tick", RANT_SUB_ONLY, T, &rel);
+    CHECK(pc && small && big, "shared: a writer and two reliable pull handles");
+    if (!(pc && small && big)) goto done;
+    PUMP_UNTIL(P, S, 6400, rant_topic_match_count(pc) != 0);
+    for (t = 1; t <= 12; t++){
+        uint8_t m[8]; i_rant_le_w64(m, (uint64_t)t);
+        rant_topic_send(pc, rant_bytes(m, 8), NULL);
+    }
+    /* drain the big one freely and the small one slowly: the big one never runs ahead of
+       what the small one took plus its ring, and both see every message once in order */
+    for (t = 0; t < 4000 && (got_small < 12 || got_big < 12); t++){
+        test_pump(P, S, 0);
+        while (rant_topic_take(big, &tm, 0) == 1){
+            uint64_t v = rant_get_uint(tm.data, tm.schema, "n");
+            if (v != got_big + 1) bad_order = 1;
+            got_big = v;
+            if (got_big - got_small > ahead) ahead = got_big - got_small;
+        }
+        if ((t % 50) == 0 && rant_topic_take(small, &tm, 0) == 1){
+            uint64_t v = rant_get_uint(tm.data, tm.schema, "n");
+            if (v != got_small + 1) bad_order = 1;
+            got_small = v;
+        }
+    }
+    CHECK(got_small == 12 && got_big == 12 && !bad_order,
+             "shared: each handle takes every message once in order (%llu %llu)",
+             (unsigned long long)got_small, (unsigned long long)got_big);
+    CHECK(ahead > 0 && ahead < 8, "shared: the full ring held the other handle back (ahead %llu)",
+             (unsigned long long)ahead);
+    /* closing the full handle while the lane waits on it lets the other take the rest */
+    for (t = 13; t <= 24; t++){
+        uint8_t m[8]; i_rant_le_w64(m, (uint64_t)t);
+        rant_topic_send(pc, rant_bytes(m, 8), NULL);
+    }
+    test_pump(P, S, 200);
+    CHECK(rant_topic_retire(small) == RANT_OK, "shared: the full handle closes");
+    for (t = 0; t < 3000 && got_big < 24; t++){
+        test_pump(P, S, 0);
+        while (rant_topic_take(big, &tm, 0) == 1){
+            uint64_t v = rant_get_uint(tm.data, tm.schema, "n");
+            if (v != got_big + 1) bad_order = 1;
+            got_big = v;
+        }
+    }
+    CHECK(got_big == 24 && !bad_order, "shared: the other takes the rest in order (%llu)",
+             (unsigned long long)got_big);
+
+    /* untyped readers first, then a typed writer of the same node types the wire */
+    raw = rant_node_create_topic(S, "sh/up", RANT_SUB_ONLY, NULL, NULL);
+    out = rant_node_create_topic(S, "sh/up", RANT_PUB_ONLY, T, NULL);
+    in  = rant_node_create_topic(P, "sh/up", RANT_SUB_ONLY, T, &(RantTopicOpts){ .pull = 1 });
+    CHECK(raw && out && in, "shared: a writer joins untyped readers");
+    CHECK(out && !rant_node_create_topic(S, "sh/up", RANT_PUB_ONLY,
+                                         test_compile(&ma, "Tock { m: u32 }", NULL), NULL)
+             && rant_last_error(S).error == RANT_E_SCHEMA_MISMATCH,
+             "shared: a second writer of another type is refused");
+    PUMP_UNTIL(P, S, 6400, out && rant_topic_match_count(out) != 0);
+    CHECK(out && rant_topic_match_count(out) == 1, "shared: a typed reader matches the retyped wire");
+    if (out){
+        uint8_t m[8]; i_rant_le_w64(m, 5);
+        rant_topic_send(out, rant_bytes(m, 8), NULL);
+        PUMP_UNTIL(P, S, 2400, rant_topic_take(in, &tm, 0) == 1);
+        CHECK(tm.schema && rant_get_uint(tm.data, tm.schema, "n") == 5, "shared: the typed reader reads it");
+    }
+done:
+    rant_node_close(P,1); rant_node_close(S,1);
+    rant_allocator_reset(&ma);
+}
+
+/* Variable handles: the remotes of one name on a node share its value. A field remote reads
+   and writes its field, a subset remote its own fields, and the owner merges each write */
+#define FV_MAX 8
+static int fv_change[FV_MAX], fv_write[FV_MAX];
+static double fv_val[FV_MAX];
+static unsigned long fv_mismatch;
+static void fv_on_change(const RantVariableUpdate *u, void *user){
+    int k = (int)(intptr_t)user; RantValue v;
+    fv_change[k]++;
+    if (u->schema && rant_get_value(u->value, u->schema, 0, &v))
+        fv_val[k] = v.kind == RANT_BOOL || v.kind == RANT_U64 ? (double)v.v.u : v.v.f;
+}
+static void fv_on_write(const RantVariableUpdate *u, void *user){ (void)u; fv_write[(int)(intptr_t)user]++; }
+static void fv_on_event(const RantEvent *ev){
+    if (ev->kind == RANT_ERROR && ev->error == RANT_E_SCHEMA_MISMATCH && ev->topic_name
+        && strstr(ev->topic_name, "/arm.nope")) fv_mismatch++;
+}
+/* the owner's value now, a view until the next pump */
+static RantBytes fv_owner(RantVariable *def, const RantSchema **s){
+    RantBytes b; memset(&b, 0, sizeof b);
+    (void)rant_variable_get(def, &b, s);
+    return b;
+}
+static double fv_field(RantVariable *h){
+    RantBytes b; const RantSchema *s = NULL; RantValue v;
+    if (rant_variable_get(h, &b, &s) != 1 || !s || !rant_get_value(b, s, 0, &v)) return -999.0;
+    return v.kind == RANT_BOOL || v.kind == RANT_U64 ? (double)v.v.u : v.v.f;
+}
+static int fv_label_is(RantBytes b, const RantSchema *s, const char *want){
+    RantString l = rant_get_string(b, s, "label");
+    return l.len == strlen(want) && memcmp(l.data, want, l.len) == 0;
+}
+static void fv_open(RantNode **P, RantNode **S, RantAllocator *pa, RantAllocator *sa, int domain){
+    RantNodeOpts o; RantAddr seed;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=domain; o.discovery.max_peers=4;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    *P = rant_node_open(pa, "fv-owner", NULL, NULL, &o);
+    *S = rant_node_open(sa, "fv-remote", NULL, fv_on_event, &o);
+}
+static uint32_t fv_initial(const RantSchema *W, uint8_t *m, size_t cap){
+    int ok = rant_schema_message_default(W, m, cap);
+    ok &= rant_set_uint(m, cap, W, "stamp", 1);
+    ok &= rant_set_uint(m, cap, W, "servo", 1);
+    ok &= rant_set_string(m, cap, W, "label", rant_cstr("a"));
+    ok &= rant_set_f64(m, cap, W, "spot.y", 4.5);
+    ok &= rant_set_f64(m, cap, W, "axes[0].pos", 3.0);
+    ok &= rant_set_f64(m, cap, W, "axes[1].vel", -2.0);
+    CHECK(ok, "var_fields: the owner's value builds");
+    return rant_schema_msg_len(W, m, cap);
+}
+#define FV_ARM "Spot { x: f32, y: f32 } Axis { pos: f32, vel: f32 } " \
+               "Arm { stamp: u64, servo: bool, label: string, spot: Spot, axes: Axis[3] }"
+
+static void schema_var_fields_checks(void){
+    RantAllocator pa = rant_allocator_heap(0), sa = rant_allocator_heap(0), ma = rant_allocator_heap(0);
+    RantNode *P = NULL, *S = NULL; RantQueue *q;
+    RantVariable *def, *whole, *servo, *vel, *label, *head, *nope;
+    RantSchema *W, *F32, *HEAD; const RantSchema *ws = NULL;
+    uint8_t m[256], hm[8]; RantBytes b; uint32_t len; float f; uint8_t flag;
+    int i;
+    W = test_compile(&ma, FV_ARM, NULL);
+    F32  = test_compile(&ma, "f32", NULL);
+    HEAD = test_compile(&ma, "Arm { stamp: u64 }", NULL);
+    CHECK(W && F32 && HEAD, "var_fields: schemas compile");
+    if (!(W && F32 && HEAD)){ rant_allocator_reset(&ma); return; }
+    memset(fv_change, 0, sizeof fv_change); memset(fv_write, 0, sizeof fv_write); fv_mismatch = 0;
+    fv_open(&P, &S, &pa, &sa, TEST_DOMAIN+32);
+    CHECK(P && S, "var_fields: nodes open");
+    if (!(P && S)){ if(P)rant_node_close(P,0); if(S)rant_node_close(S,0); rant_allocator_reset(&ma); return; }
+    len = fv_initial(W, m, sizeof m);
+    def   = rant_node_create_variable_definition(P, "fv/arm", W,
+                                                 &(RantVariableOpts){ .initial = rant_bytes(m, len) });
+    whole = rant_node_create_remote_variable(S, "fv/arm", NULL, NULL);
+    servo = rant_node_create_remote_variable(S, "fv/arm.servo", NULL, NULL);
+    vel   = rant_node_create_remote_variable(S, "fv/arm.axes[1].vel", F32, NULL);
+    label = rant_node_create_remote_variable(S, "fv/arm.label", NULL, NULL);
+    head  = rant_node_create_remote_variable(S, "fv/arm", HEAD, NULL);
+    nope  = rant_node_create_remote_variable(S, "fv/arm.nope", NULL, NULL);
+    CHECK(def && whole && servo && vel && label && head && nope, "var_fields: an owner and six remotes of one name");
+    if (!(def && whole && servo && vel && label && head && nope)) goto done;
+    CHECK(!rant_node_create_variable_definition(P, "fv/other.x", NULL, NULL)
+             && rant_last_error(P).error == RANT_E_BAD_NAME, "var_fields: a definition takes no field path");
+    CHECK(!rant_node_create_variable_definition(S, "fv/arm", W, NULL)
+             && rant_last_error(S).error == RANT_E_NAME_COLLISION,
+             "var_fields: a definition beside remotes of its name is refused (%d)", (int)rant_last_error(S).error);
+    q = rant_node_create_queue(S);
+    CHECK(q && !rant_node_create_remote_variable(S, "fv/arm.stamp", NULL, &(RantVariableOpts){ .queue = q })
+             && rant_last_error(S).error == RANT_E_STATE, "var_fields: a later handle on another queue is refused");
+
+    PUMP_UNTIL(P, S, 6400, rant_variable_get(servo, NULL, NULL) && rant_variable_get(head, NULL, NULL)
+                           && fv_mismatch);
+    CHECK(fv_field(servo) == 1.0 && fv_field(vel) == -2.0, "var_fields: field remotes read their fields (%.1f %.1f)",
+             fv_field(servo), fv_field(vel));
+    {   const RantSchema *s = NULL; RantValue v;
+        CHECK(rant_variable_get(label, &b, &s) == 1 && s && rant_get_value(b, s, 0, &v) && v.bytes.len == 1
+                 && v.bytes.data[0] == 'a', "var_fields: a string field reads through its view");
+        CHECK(rant_variable_get(head, &b, &s) == 1 && s && rant_get_uint(b, s, "stamp") == 1,
+                 "var_fields: a subset remote reads its fields");
+        CHECK(rant_variable_get(whole, &b, &s) == 1 && s && rant_get_f64(b, s, "spot.y") == 4.5,
+                 "var_fields: an untyped remote reads with the owner's schema");
+    }
+    CHECK(!rant_variable_get(nope, NULL, NULL) && fv_mismatch == 1,
+             "var_fields: a field the owner lacks reads nothing and is reported once (%lu)", fv_mismatch);
+
+    for (i = 0; i < 5; i++){
+        RantVariable *h = i == 0 ? servo : i == 1 ? vel : i == 2 ? label : i == 3 ? head : whole;
+        rant_variable_on_change(h, fv_on_change, (void*)(intptr_t)i);
+    }
+    rant_variable_on_write(servo, fv_on_write, (void*)(intptr_t)0);
+    CHECK(fv_change[0] == 1 && fv_change[1] == 1 && fv_change[2] == 1 && fv_change[3] == 1 && fv_change[4] == 1,
+             "var_fields: each registration replays once");
+
+    /* the owner moves only the stamp: only the handles that read it see a change */
+    b = fv_owner(def, &ws); memcpy(m, b.data, b.len); len = (uint32_t)b.len;
+    rant_set_uint(m, sizeof m, W, "stamp", 2);
+    CHECK(rant_variable_set(def, rant_bytes(m, len)) == RANT_OK, "var_fields: the owner writes");
+    PUMP_UNTIL(P, S, 2400, fv_change[3] == 2 && fv_write[0] == 1);
+    CHECK(fv_change[3] == 2 && fv_change[4] == 2 && fv_val[3] == 2.0, "var_fields: the stamp readers see it");
+    CHECK(fv_change[0] == 1 && fv_change[1] == 1 && fv_change[2] == 1 && fv_write[0] == 1,
+             "var_fields: field handles fire on_write but no on_change (%d %d %d %d)",
+             fv_change[0], fv_change[1], fv_change[2], fv_write[0]);
+
+    /* a field write lands on its field and leaves the rest */
+    f = 7.5f;
+    CHECK(rant_variable_set(vel, rant_bytes(&f, 4)) == RANT_OK, "var_fields: a field remote writes");
+    PUMP_UNTIL(P, S, 2400, (b = fv_owner(def, &ws), rant_get_f64(b, ws, "axes[1].vel") == 7.5) && fv_change[1] == 2);
+    b = fv_owner(def, &ws);
+    CHECK(rant_get_f64(b, ws, "axes[1].vel") == 7.5 && rant_get_uint(b, ws, "stamp") == 2
+             && rant_get_uint(b, ws, "servo") == 1 && fv_label_is(b, ws, "a")
+             && rant_get_f64(b, ws, "spot.y") == 4.5 && rant_get_f64(b, ws, "axes[0].pos") == 3.0,
+             "var_fields: the owner merged only the field");
+    CHECK(fv_change[1] == 2 && fv_val[1] == 7.5 && fv_change[0] == 1, "var_fields: only its readers changed");
+
+    /* a variable length field */
+    {   uint8_t sm[16]; i_rant_le_w32(sm, 5); memcpy(sm + 4, "hello", 5);
+        CHECK(rant_variable_set(label, rant_bytes(sm, 9)) == RANT_OK, "var_fields: a string field writes");
+    }
+    PUMP_UNTIL(P, S, 2400, (b = fv_owner(def, &ws), fv_label_is(b, ws, "hello")));
+    b = fv_owner(def, &ws);
+    CHECK(fv_label_is(b, ws, "hello") && rant_get_f64(b, ws, "axes[1].vel") == 7.5 && rant_get_uint(b, ws, "stamp") == 2,
+             "var_fields: the string field merged, the rest kept");
+
+    /* a subset remote writes its own fields */
+    i_rant_le_w64(hm, 99);
+    CHECK(rant_variable_set(head, rant_bytes(hm, 8)) == RANT_OK, "var_fields: a subset remote writes");
+    /* two writers back to back, neither reverting the other's field */
+    flag = 0; f = 1.25f;
+    CHECK(rant_variable_set(servo, rant_bytes(&flag, 1)) == RANT_OK
+             && rant_variable_set(vel, rant_bytes(&f, 4)) == RANT_OK, "var_fields: two field writes back to back");
+    PUMP_UNTIL(P, S, 2400, (b = fv_owner(def, &ws), rant_get_f64(b, ws, "axes[1].vel") == 1.25
+                                                   && rant_get_uint(b, ws, "servo") == 0
+                                                   && rant_get_uint(b, ws, "stamp") == 99));
+    b = fv_owner(def, &ws);
+    CHECK(rant_get_uint(b, ws, "stamp") == 99 && rant_get_uint(b, ws, "servo") == 0
+             && rant_get_f64(b, ws, "axes[1].vel") == 1.25 && fv_label_is(b, ws, "hello")
+             && rant_get_f64(b, ws, "spot.y") == 4.5,
+             "var_fields: every write kept, none reverted another");
+    CHECK(rant_variable_set(vel, rant_bytes(m, 3)) == RANT_ERR_SCHEMA, "var_fields: a value not of the field's type is refused");
+    CHECK(rant_variable_set(nope, rant_bytes(&f, 4)) == RANT_ERR_SCHEMA, "var_fields: a field the owner lacks takes no write");
+
+    /* handles close one by one, the last takes the variable off the mesh */
+    i = fv_change[0];
+    CHECK(rant_variable_retire(whole) == RANT_OK && rant_variable_retire(servo) == RANT_OK,
+             "var_fields: the first handles close");
+    b = fv_owner(def, &ws); memcpy(m, b.data, b.len); len = (uint32_t)b.len;
+    rant_set_uint(m, sizeof m, W, "stamp", 100);
+    rant_variable_set(def, rant_bytes(m, len));
+    PUMP_UNTIL(P, S, 2400, fv_val[3] == 100.0);
+    CHECK(fv_val[3] == 100.0 && fv_change[0] == i, "var_fields: the others still read, the closed ones are silent");
+    CHECK(rant_variable_retire(vel) == RANT_OK && rant_variable_retire(label) == RANT_OK
+             && rant_variable_retire(head) == RANT_OK && rant_variable_retire(nope) == RANT_OK,
+             "var_fields: the rest close");
+    PUMP_UNTIL(P, S, 4000, rant_variable_match_count(def) == 0);
+    CHECK(rant_variable_match_count(def) == 0, "var_fields: the last close takes the remotes off the mesh");
+done:
+    rant_node_close(P,1); rant_node_close(S,1);
+    rant_allocator_reset(&ma);
+}
+
+/* Queued variable handles: one parked record per write names every handle it reaches, and
+   each runs at dispatch with its own view */
+static void schema_var_queue_checks(void){
+    RantAllocator pa = rant_allocator_heap(0), sa = rant_allocator_heap(0), ma = rant_allocator_heap(0);
+    RantNode *P = NULL, *S = NULL; RantQueue *q = NULL;
+    RantVariable *def, *servo, *vel; RantSchema *W, *F32; const RantSchema *ws = NULL;
+    uint8_t m[256]; RantBytes b; uint32_t len; int t;
+    W = test_compile(&ma, FV_ARM, NULL);
+    F32 = test_compile(&ma, "f32", NULL);
+    CHECK(W && F32, "var_queue: schemas compile");
+    if (!(W && F32)){ rant_allocator_reset(&ma); return; }
+    memset(fv_change, 0, sizeof fv_change); memset(fv_write, 0, sizeof fv_write); memset(fv_val, 0, sizeof fv_val);
+    fv_open(&P, &S, &pa, &sa, TEST_DOMAIN+33);
+    CHECK(P && S, "var_queue: nodes open");
+    if (!(P && S)){ if(P)rant_node_close(P,0); if(S)rant_node_close(S,0); rant_allocator_reset(&ma); return; }
+    q = rant_node_create_queue(S);
+    len = fv_initial(W, m, sizeof m);
+    def   = rant_node_create_variable_definition(P, "fq/arm", W,
+                                                 &(RantVariableOpts){ .initial = rant_bytes(m, len) });
+    servo = rant_node_create_remote_variable(S, "fq/arm.servo", NULL, &(RantVariableOpts){ .queue = q });
+    vel   = rant_node_create_remote_variable(S, "fq/arm.axes[1].vel", F32, &(RantVariableOpts){ .queue = q });
+    CHECK(q && def && servo && vel, "var_queue: two queued field remotes");
+    if (!(q && def && servo && vel)) goto done;
+    rant_variable_on_change(servo, fv_on_change, (void*)(intptr_t)0);
+    rant_variable_on_change(vel, fv_on_change, (void*)(intptr_t)1);
+    rant_variable_on_write(servo, fv_on_write, (void*)(intptr_t)0);
+    rant_variable_on_write(vel, fv_on_write, (void*)(intptr_t)1);
+    for (t = 0; t < 400 && !(fv_change[0] && fv_change[1]); t++){
+        test_pump(P, S, 5); rant_queue_dispatch(q, 0, 0);
+    }
+    CHECK(fv_change[0] == 1 && fv_val[0] == 1.0 && fv_change[1] == 1 && fv_val[1] == -2.0,
+             "var_queue: each handle runs at dispatch with its own field (%.1f %.1f)", fv_val[0], fv_val[1]);
+    b = fv_owner(def, &ws); memcpy(m, b.data, b.len); len = (uint32_t)b.len;
+    rant_set_f64(m, sizeof m, W, "axes[1].vel", 6.0);
+    rant_variable_set(def, rant_bytes(m, len));
+    for (t = 0; t < 400 && fv_change[1] < 2; t++){
+        test_pump(P, S, 5); rant_queue_dispatch(q, 0, 0);
+    }
+    test_pump(P, S, 20); rant_queue_dispatch(q, 0, 0);
+    CHECK(fv_change[1] == 2 && fv_val[1] == 6.0 && fv_change[0] == 1 && fv_write[0] >= 1 && fv_write[1] >= 1,
+             "var_queue: one write reaches both, only the changed field's on_change runs (%d %d %d %d)",
+             fv_change[0], fv_change[1], fv_write[0], fv_write[1]);
+done:
+    rant_node_close(P,1); rant_node_close(S,1);
+    rant_allocator_reset(&ma);
+}
+
 static const TestCase cases[] = {
     { "advert", schema_advert_checks },
     { "bind", schema_bind_checks },
@@ -1003,6 +1447,10 @@ static const TestCase cases[] = {
     { "stdtypes", stdtypes_checks },
     { "pattern_schema", pattern_schema_checks },
     { "nested", schema_nested_checks },
+    { "fields", schema_fields_checks },
+    { "shared", schema_shared_checks },
+    { "var_fields", schema_var_fields_checks },
+    { "var_queue", schema_var_queue_checks },
 };
 
 TEST_MAIN(cases)

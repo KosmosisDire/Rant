@@ -35,7 +35,10 @@ Where anything else disagrees about a wrapper API, this file wins.
   `rant_variable_schema`.
 - Variable reads are local and status free. Writes return a status. C# `Value` has a
   setter that throws on a non OK status. A remote set round trips through the definition.
-  The cache is authoritative only, never an optimistic echo.
+  The cache is authoritative only, never an optimistic echo. A read decodes with the
+  schema `rant_variable_get` returns, which reads the handle's part of the whole value.
+- Same name handles and field paths are C's. A binding passes the name through and keeps
+  no registry of its own, so every handle is its own C handle.
 - Every handle comes from a factory on the node named after it: `publisher`,
   `subscriber`, `function_definition`, `remote_function`, `task_definition`, `remote_task`,
   `variable_definition`, `remote_variable`, `call_observer`, PascalCase in C#. Only a raw handle takes a
@@ -212,8 +215,8 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   remain, through the gate above (`priv::Gate`, `priv::Pass`, `priv::InCallback`). A
   typed handle holds one pass across encode, call and decode, since its codec's schema
   lives in the node. Handles are move only and `close()` or scope end
-  retires them. A topic name keeps a hold count per side, the role follows the live
-  holds and the last close retires the topic. A close refused inside the handle's own
+  retires them. Every handle is its own C handle, and C shares same name handles, so
+  subscriber handlers are kept by topic index. A close refused inside the handle's own
   callback raises a `State` event. Pattern handler boxes hold the state weakly, since the
   node owns them.
 - A function, task or variable handle keeps its C pointer in a `priv::HandleState` with a
@@ -240,12 +243,12 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
 - Every handle comes from a method on `RantNode` named after it, such as
   `node.Publisher<T>(name, qos)`, with one options object per kind (`NodeOptions`,
   `FunctionOptions`, `TaskOptions`, `VariableOptions`). Creation throws on failure. Every
-  handle is `IDisposable`, and same name topic handles share one native slot whose role
-  follows the live handles and which the last dispose retires. `NodeOptions.Threading` is
+  handle is `IDisposable`, and the last dispose of a name retires the topic in C.
+  `NodeOptions.Threading` is
   ServiceThread, Manual or Dispatch: Dispatch creates one `RantQueue` at open, hands it to
   every handle and to the events, and `node.Dispatch()` drains it. `RantQueue` from
   `CreateQueue()` goes into a handle's options (`Qos.Queue` on a topic) for a thread of
-  its own, and same name handles must agree on it. Continuations of an awaited call are
+  its own. Continuations of an awaited call are
   kept off the loop thread unless the handle is queued. Every throw is a `RantException`:
   a failed create carries the `rant_last_error` event, `CallException` and
   `SchemaException` derive from it, and `LastError` is null while the C reads no error. A
@@ -319,8 +322,7 @@ platform serves every interpreter.
   never constructed by the user. `Schema(source)` compiles DSL text, a class or a bare
   type. Options are keyword only and spelled out, no option objects. Durations and
   timeouts are float seconds (`_ms` and `_us` convert), timestamps stay integer
-  microseconds. Every handle has `close()`, which returns False where C# would throw, and
-  same name topic handles share one slot with a hold count per role. Queries with no
+  microseconds. Every handle has `close()`, which returns False where C# would throw. Queries with no
   argument are properties (`match_count`, `ready`, `forced`, `counts`, `stats`,
   `last_error`), actions are methods. Variables are methods only. Handlers are arity
   dispatched and single: a subscriber's in the factory, `on_change`, `on_write` and

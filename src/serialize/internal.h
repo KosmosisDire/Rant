@@ -151,6 +151,22 @@ int i_rant_registry_ref(i_RantRegistry *r, const char *name, const uint8_t **typ
  * or on OOM. Free with i_rant_schema_free. */
 RantSchema *i_rant_schema_rebase(const RantSchema *sub, const RantSchema *pub,
                                  RantAllocFn alloc, void *user);
+/* The writer's field at path as a schema of its own type that reads the writer's messages.
+ * Indices reach only into fixed arrays of fixed elements. NULL with *why when refused. */
+RantSchema *i_rant_schema_at(const RantSchema *pub, const char *path, RantAllocFn alloc,
+                             void *user, const char **why);
+/* A field view: the reader's type over the writer's field at path, or the field's own type
+ * when reader is NULL. NULL with the reason in why when refused. See spec/schema.md. */
+RantSchema *i_rant_schema_view(const RantSchema *reader, const RantSchema *pub, const char *path,
+                               RantAllocFn alloc, void *user, char *why, size_t cap);
+/* A reader's views, one per writer schema it met, made on first sight and kept. */
+typedef struct { const RantSchema *pub, *view; uint8_t owned; } i_RantView;
+typedef struct { i_RantView *v; uint16_t n, cap; } i_RantViews;
+/* The schema a reader of type sub, at path when not NULL, reads pub's messages with: 1 with
+ * *out, NULL for raw bytes, or 0 refused, with the reason in why the first time only. */
+int  i_rant_views_get(i_RantViews *m, const RantSchema *sub, const char *path, const RantSchema *pub,
+                      RantAllocFn alloc, void *user, const RantSchema **out, char *why, size_t cap);
+void i_rant_views_drop(i_RantViews *m, RantAllocFn alloc, void *user);
 
 #ifndef RANT_NO_STDTYPES
 /* stdtypes.c: the name and the shape must both match the registry's. */
@@ -162,5 +178,19 @@ RantStdType i_rant_std_recognize_field(i_RantRegistry *r, const RantSchema *s, u
 uint64_t i_rant_schema_read_uint(uint8_t kind, const uint8_t *p);
 int64_t i_rant_schema_read_int(uint8_t kind, const uint8_t *p);
 double i_rant_schema_read_f64(uint8_t kind, const uint8_t *p);
+/* One piece of a message a variable write carries (spec/patterns.md): a range of the fixed
+ * section, or with len 0 the whole frame of the message record whose ordinal is off. */
+typedef struct { uint32_t off, len; } i_RantUnit;
+/* The next unit of s from row *k on, read through a view where its rows sit in the writer's
+ * layout. 0 past the last. */
+int i_rant_schema_unit(const RantSchema *s, uint16_t *k, i_RantUnit *u);
+/* Writes a message of s into out: base, with unit dst[i] taken from unit src[i] of top, a
+ * message of ts, src NULL for the same units. A cap of base.len plus top.len always fits.
+ * 1 with *out_len, 0 when a message runs short or a unit does not fit. */
+int i_rant_msg_merge(const RantSchema *s, RantBytes base, const RantSchema *ts, RantBytes top,
+                     const i_RantUnit *dst, const i_RantUnit *src, uint32_t n,
+                     uint8_t *out, size_t cap, uint32_t *out_len);
+/* 1 when every unit of a under view va equals that of b under vb. The views share a hash. */
+int i_rant_msg_units_equal(const RantSchema *va, RantBytes a, const RantSchema *vb, RantBytes b);
 
 #endif /* RANT_SERIALIZE_INTERNAL_H */

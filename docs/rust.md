@@ -111,6 +111,8 @@ conveyor.send(&Conveyor { speed: 0.5, running: true, part: "A7".parse()? })?;
 - `pulled_subscriber` has no handler: `take(timeout)` returns the oldest waiting message,
   `take_latest(timeout)` the newest.
 - `match_count()`, `ready()` and `drain(timeout)` on a publisher, as in docs/topics.md.
+- A name may end in a field path to receive one field. The whole sample still travels:
+  `node.subscriber::<bool>("Gp12/RobotState.servo_power", Qos::new(), |on| ...)`.
 
 ## Functions
 
@@ -195,6 +197,8 @@ remote.set(&2.0)?;
   every write, even one with the same value.
 - `wait(timeout)` blocks until a value exists. `force`, `unforce` and `forced` as in
   docs/patterns.md.
+- A remote name may end in a field path, and that remote then reads and sets only its
+  field: `node.remote_variable::<bool>("Gp12/RobotState.servo_power", VariableOptions::new())`.
 
 ## Names and schemas
 

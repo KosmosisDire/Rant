@@ -1,5 +1,5 @@
 /* queuebench: the callback queue cost against inline callbacks, one started pair on loopback
- * per payload size and mode, flat out reliable (spec/testing.md). */
+ * per payload size, mode and handle count, flat out reliable (spec/testing.md). */
 #include "bench.h"
 
 #include <stdio.h>
@@ -11,6 +11,8 @@
 static volatile unsigned long g_qb_recv;
 static void qb_on_message(const RantMsg *m){ (void)m; g_qb_recv++; }
 
+#define QB_MAX_HANDLES 3u
+
 static volatile int g_qb_stop;
 static uint32_t     g_qb_len;
 static void qb_sender(void *arg){
@@ -21,16 +23,18 @@ static void qb_sender(void *arg){
         rant_topic_send(ch, rant_bytes(payload, g_qb_len), NULL);
 }
 
-static void qb_run(uint32_t size, int queued, int disable_shm){
+static void qb_run(uint32_t size, int queued, int disable_shm, unsigned handles){
     RantAllocator aw = rant_allocator_heap(0);
     RantAllocator ar = rant_allocator_heap(0);
     RantNodeOpts o; RantTopicOpts co;
     RantNode *w, *r; RantTopic *cw, *cr; RantQueue *qq = NULL;
+    unsigned k;
     i_RantThread th;
     uint64_t t0, t_end;
     unsigned long recv = 0;
     double wall, rate;
     uint32_t shm_rx0 = 0, shm_rx1 = 0;
+    uint64_t cpu0 = 0, cpu1 = 0; int have_cpu = 0;
 
     memset(&o, 0, sizeof o);
     o.domain = 52; o.disable_shm = (uint8_t)disable_shm;
@@ -54,7 +58,9 @@ static void qb_run(uint32_t size, int queued, int disable_shm){
         co.qos.queue_bytes = queued ? qb : 0;
         co.queue = qq;
     }
-    cr = rant_node_create_topic(r, "qb/t", RANT_SUB_ONLY, NULL, &co);
+    /* same name handles share one wire, and each queued one parks its own copy */
+    for (k = 0, cr = cw; k < handles && cr; k++)
+        cr = rant_node_create_topic(r, "qb/t", RANT_SUB_ONLY, NULL, &co);
     if (!cw || !cr){ fprintf(stderr, "queuebench: topic create failed\n"); exit(1); }
     rant_node_start(w); rant_node_start(r);
     {   uint64_t end = bench_now_ns() + 5000000000ull;
@@ -67,6 +73,7 @@ static void qb_run(uint32_t size, int queued, int disable_shm){
     g_qb_len = size; g_qb_stop = 0; g_qb_recv = 0;
     if (!i_rant_plat_thread_start(&th, qb_sender, cw)){ fprintf(stderr, "queuebench: thread\n"); exit(1); }
     t0 = bench_now_ns(); t_end = t0 + 2000000000ull;
+    (void)i_rant_plat_proc_stats(&cpu0, NULL, NULL, &have_cpu);
     if (queued){
         while (bench_now_ns() < t_end) (void)rant_queue_dispatch(qq, 0, 5);
     } else {
@@ -74,37 +81,42 @@ static void qb_run(uint32_t size, int queued, int disable_shm){
     }
     recv = g_qb_recv;
     wall = (double)(bench_now_ns() - t0) / 1e9;
+    (void)i_rant_plat_proc_stats(&cpu1, NULL, NULL, &have_cpu);
     g_qb_stop = 1;
     i_rant_plat_thread_join(&th);
 #ifdef RANT_SHM
     rant_node_shm_stats(r, NULL, &shm_rx1);
 #endif
-    rate = wall > 0.0 ? recv / wall : 0.0;
-    printf("%9u  %-7s  %12.0f  %10.1f  %11lu  %9u\n",
-           size, queued ? "queued" : "inline", rate, rate * size / 1e6, recv, shm_rx1 - shm_rx0);
+    rate = wall > 0.0 ? recv / handles / wall : 0.0;   /* messages, not deliveries */
+    /* both nodes run in this process, so this is a message's whole cost, send to callback */
+    printf("%9u  %-7s  %7u  %12.0f  %10.1f  %11lu  %9u  %10.2f\n", size, queued ? "queued" : "inline",
+           handles, rate, rate * size / 1e6, recv, shm_rx1 - shm_rx0,
+           have_cpu && recv ? (double)(cpu1 - cpu0) * handles / recv : 0.0);
     rant_node_close(r, 1);
     rant_node_close(w, 1);
 }
 
-int queuebench_main(void){
+static void qb_path(const char *title, int disable_shm){
     static const uint32_t sizes[] = { 1024, 16384, 65536, 262144, 1048576 };
-    unsigned k;
+    unsigned k, h;
+    printf("\n== %s ==\n", title);
+    printf("%9s  %-7s  %7s  %12s  %10s  %11s  %9s  %10s\n", "payload", "mode", "handles", "msg/s",
+           "MB/s", "delivered", "shm_rx", "cpu us/msg");
+    for (k = 0; k < sizeof sizes / sizeof sizes[0]; k++)
+        for (h = 1; h <= QB_MAX_HANDLES; h += QB_MAX_HANDLES - 1u){
+            qb_run(sizes[k], 0, disable_shm, h);
+            qb_run(sizes[k], 1, disable_shm, h);
+        }
+}
+
+int queuebench_main(void){
     printf("Rant callback queue throughput: inline callback (service thread) against queue dispatch\n"
-           "(flat out reliable, keep_last 64, backpressure paced so lossless goodput, loopback, 2s per run)\n");
+           "(flat out reliable, keep_last 64, backpressure paced so lossless goodput, loopback, 2s per run,\n"
+           " msg/s counts messages, each delivered once per same name handle)\n");
 #ifdef RANT_SHM
-    printf("\n== SHM same host path ==\n");
-    printf("%9s  %-7s  %12s  %10s  %11s  %9s\n", "payload", "mode", "msg/s", "MB/s", "delivered", "shm_rx");
-    for (k = 0; k < sizeof sizes / sizeof sizes[0]; k++){
-        qb_run(sizes[k], 0, 0);
-        qb_run(sizes[k], 1, 0);
-    }
+    qb_path("SHM same host path", 0);
 #endif
-    printf("\n== UDP loopback path (shm off) ==\n");
-    printf("%9s  %-7s  %12s  %10s  %11s  %9s\n", "payload", "mode", "msg/s", "MB/s", "delivered", "shm_rx");
-    for (k = 0; k < sizeof sizes / sizeof sizes[0]; k++){
-        qb_run(sizes[k], 0, 1);
-        qb_run(sizes[k], 1, 1);
-    }
+    qb_path("UDP loopback path (shm off)", 1);
     return 0;
 }
 

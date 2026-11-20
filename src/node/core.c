@@ -136,10 +136,14 @@ static char *i_rant_event_error_str(char *p, char *end, const RantEvent *ev){
         p=i_rant_event_append_str(p,end,"cross-thread waker unavailable (wakes at next tick)"); break;
     case RANT_E_BAD_NAME:
         p=i_rant_event_append_str(p,end,"bad-name "); p=i_rant_event_append_topic(p,end,ev);
-        p=i_rant_event_append_str(p,end,": empty, too long or '@' outside a pattern channel, create refused"); break;
+        p=i_rant_event_append_str(p,end,": ");
+        p=i_rant_event_append_str(p,end,ev->detail && ev->detail[0] ? ev->detail
+                                  : "empty, too long or '@' outside a pattern channel, create refused"); break;
     case RANT_E_STATE:
         p=i_rant_event_append_str(p,end,"state "); p=i_rant_event_append_topic(p,end,ev);
-        p=i_rant_event_append_str(p,end,": create refused from a callback or the topic reserve is full"); break;
+        p=i_rant_event_append_str(p,end,": ");
+        p=i_rant_event_append_str(p,end,ev->detail && ev->detail[0] ? ev->detail
+                                  : "create refused from a callback or the topic reserve is full"); break;
     case RANT_E_BAD_SCHEMA:
         if (ev->detail){     /* a refused text or wire, see rant_node_schema */
             p=i_rant_event_append_str(p,end,"bad-schema: "); p=i_rant_event_append_str(p,end,ev->detail); break;
@@ -260,7 +264,8 @@ typedef struct {
    until close, so a schema a message carries lives as long as the node. */
 typedef struct { uint64_t hash; RantSchema *parsed; } i_RantNodeSchemaIntern;
 typedef struct { uint64_t writer, reader; RantSchema *rebased; } i_RantNodeSchemaBind;
-typedef struct { uint32_t peer; uint16_t topic; const RantSchema *schema; } i_RantNodePeerSchema;
+/* schema reads the peer's messages for our slot, pub is the peer's own schema whole */
+typedef struct { uint32_t peer; uint16_t topic; const RantSchema *schema, *pub; } i_RantNodePeerSchema;
 #ifndef RANT_NO_DIAG
 /* why the gate refused (peer, topic, direction), recorded at detail intake for the event */
 #define RANT__SCHEMA_WHY_MAX 128
@@ -471,11 +476,12 @@ static RantSchema *i_rant_node_core_bind(i_RantNodeCore *c, uint64_t hash,
    our compiled copy is freed and re parsed across a retire and reuse. */
 #define i_RANT_NODE_SCHEMA_OURS ((const RantSchema *)(uintptr_t)1)
 static void i_rant_node_core_peer_schema_set(i_RantNodeCore *c, uint32_t peer, uint16_t topic_index,
-                                             const RantSchema *schema){
+                                             const RantSchema *schema, const RantSchema *pub){
     uint32_t i;
     for (i = 0; i < c->n_peer_schemas; i++)
         if (c->peer_schemas[i].peer == peer && c->peer_schemas[i].topic == topic_index){
             c->peer_schemas[i].schema = schema;
+            c->peer_schemas[i].pub = pub;
             return;
         }
     if (!schema) return;
@@ -484,6 +490,7 @@ static void i_rant_node_core_peer_schema_set(i_RantNodeCore *c, uint32_t peer, u
     c->peer_schemas[c->n_peer_schemas].peer = peer;
     c->peer_schemas[c->n_peer_schemas].topic = topic_index;
     c->peer_schemas[c->n_peer_schemas].schema = schema;
+    c->peer_schemas[c->n_peer_schemas].pub = pub;
     c->n_peer_schemas++;
 }
 
@@ -578,6 +585,19 @@ const RantSchema *i_rant_node_core_msg_schema(i_RantNodeCore *c, uint32_t peer, 
         if (c->peer_schemas[i].peer == peer && c->peer_schemas[i].topic == topic_index){
             const RantSchema *s = c->peer_schemas[i].schema;
             if (s == i_RANT_NODE_SCHEMA_OURS)     /* an identical schema entry: resolve live */
+                return topic_index < c->n_topics ? c->chan_compiled[topic_index] : NULL;
+            return s;
+        }
+    return NULL;
+}
+
+const RantSchema *i_rant_node_core_writer_schema(i_RantNodeCore *c, uint32_t peer, uint16_t topic_index){
+    uint32_t i;
+    if (!c) return NULL;
+    for (i = 0; i < c->n_peer_schemas; i++)
+        if (c->peer_schemas[i].peer == peer && c->peer_schemas[i].topic == topic_index){
+            const RantSchema *s = c->peer_schemas[i].pub;
+            if (s == i_RANT_NODE_SCHEMA_OURS)
                 return topic_index < c->n_topics ? c->chan_compiled[topic_index] : NULL;
             return s;
         }
@@ -1338,8 +1358,8 @@ static int i_rant_node_core_schema_verdict(i_RantNodeCore *c, uint32_t peer, uin
     int peer_has = hash != 0;
     if (peer_is_pub){                                   /* their publish side: we would read */
         if (!ours){                                     /* a generic reader decodes with theirs */
-            i_rant_node_core_peer_schema_set(c, peer, topic_index,
-                peer_has ? i_rant_node_core_intern(c, hash, wire) : NULL);
+            const RantSchema *theirs = peer_has ? i_rant_node_core_intern(c, hash, wire) : NULL;
+            i_rant_node_core_peer_schema_set(c, peer, topic_index, theirs, theirs);
             return 1;
         }
         if (!peer_has){                                 /* a typed reader refuses untyped */
@@ -1347,7 +1367,8 @@ static int i_rant_node_core_schema_verdict(i_RantNodeCore *c, uint32_t peer, uin
             *p = '\0'; return 0;
         }
         if (hash == rant_schema_hash(ours)){              /* identical: our own view works */
-            i_rant_node_core_peer_schema_set(c, peer, topic_index, i_RANT_NODE_SCHEMA_OURS);
+            i_rant_node_core_peer_schema_set(c, peer, topic_index, i_RANT_NODE_SCHEMA_OURS,
+                                             i_RANT_NODE_SCHEMA_OURS);
             return 1;
         }
         {   RantSchema *pub = i_rant_node_core_intern(c, hash, wire);       /* the wire verifies it */
@@ -1362,7 +1383,7 @@ static int i_rant_node_core_schema_verdict(i_RantNodeCore *c, uint32_t peer, uin
                 p = i_rant_event_append_str(p, end, "out of memory binding the reader view");
                 *p = '\0'; return 0;
             }
-            i_rant_node_core_peer_schema_set(c, peer, topic_index, view);
+            i_rant_node_core_peer_schema_set(c, peer, topic_index, view, pub);
             return 1;
         }
     } else {                                            /* their subscribe side: we would write */

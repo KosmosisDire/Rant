@@ -92,7 +92,7 @@ rant_node_create_topic(n, "/Clock", RANT_SUB_ONLY, NULL, NULL);  /* Clock */
 
 - A name starting with `/` skips the prefix, to reach a shared name or another prefix.
 - The full name counts toward `RANT_TOPIC_NAME_MAX` (64). Too long fires `RANT_E_BAD_NAME`.
-- A prefix holding `@`, starting or ending with `/`, or too long refuses the open with
+- A prefix holding `@` or `.`, starting or ending with `/`, or too long refuses the open with
   `RANT_E_BAD_PREFIX`.
 - Messages, reflection and `rant_node_mesh_find` use full names, with no prefix applied.
 - Node names are not prefixed. `RANT_NODE_NAME_PREFIX` does that separately.
@@ -112,7 +112,7 @@ rant_node_create_function_definition(n, "Home", NULL, NULL, NULL, NULL, NULL);  
 - `from` is the name exactly as the code wrote it, a leading `/` included.
 - `to` then takes the prefix like any name, or skips it with a leading `/`.
 - A name holding `=` or `,` cannot be remapped.
-- An entry with no `=`, an empty side, `@` in a name, or a name remapped twice refuses the
+- An entry with no `=`, an empty side, `@` or `.` in a name, or a name remapped twice refuses the
   open with `RANT_E_BAD_REMAP`, whose `.detail` names the entry.
 - An entry no create matches does nothing.
 
@@ -193,6 +193,6 @@ A `NO` flag always wins. An embedded target with its own sockets and clock defin
 | `RANT_DISCOVERY_META_MAX` | 64 | default per peer announce blob capacity |
 | `RANT_RECORDS_PER_PEER` | 4 | peers a static node can know per matched peer slot (docs/discovery.md) |
 | `RANT_DISCOVERY_FILTER_BYTES` | 32 | bytes per known peer that let a new topic ask only the peers it may meet |
-| `RANT_WIRE_VERSION` | 10 | the wire version: nodes on another one report each other, never pair |
+| `RANT_WIRE_VERSION` | 11 | the wire version: nodes on another one report each other, never pair |
 
 Shared memory tunables are in spec/shm.md.

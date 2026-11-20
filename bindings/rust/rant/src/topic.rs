@@ -16,40 +16,17 @@ use crate::types::Timestamp;
 
 pub(crate) type MsgFn = dyn for<'a> FnMut(&NodeInner, MessageView<'a>) + Send;
 
-/// A subscriber handler and the id its handle removes it by.
+/// A subscriber handler, kept by its topic's index.
 pub(crate) struct SubHandler {
-    pub(crate) id: u64,
     pub(crate) name: String,
-    pub(crate) cb: Arc<Callback<MsgFn>>,
+    pub(crate) cb: Callback<MsgFn>,
 }
 
-/// One name's C topic and how many live handles hold each side of it.
-pub(crate) struct TopicRec {
-    raw: *mut ffi::RantTopic,
-    bits: u8,
-    schema_hash: u64,
-    queue: *mut ffi::RantQueue,
-    pull: bool,
-    pubs: u32,
-    subs: u32,
-}
-
-fn role(bits: u8) -> ffi::RantRole {
-    match bits {
-        3 => ffi::RANT_PUBSUB,
-        1 => ffi::RANT_PUB_ONLY,
-        2 => ffi::RANT_SUB_ONLY,
-        _ => ffi::RANT_INACTIVE,
-    }
-}
-
-/// The name slot under every publisher and subscriber: one C topic per name, its role
-/// following the live handles, retired by the last one closed.
+/// The C topic under every publisher and subscriber. Same name handles are separate C
+/// handles of one entity, which the C shares.
 pub(crate) struct TopicCore {
     inner: Arc<NodeInner>,
     raw: *mut ffi::RantTopic,
-    bits: u8,
-    handler: u64,
     name: String,
     open: bool,
 }
@@ -62,7 +39,7 @@ impl TopicCore {
     pub(crate) const PUB: u8 = 1;
     pub(crate) const SUB: u8 = 2;
 
-    /// Creates the name's topic, or shares its slot and widens its role.
+    /// Creates a C topic handle of the name.
     pub(crate) fn open(inner: &Arc<NodeInner>, name: &str, bits: u8, codec: Option<&Codec>, qos: &Qos, pull: bool) -> Result<TopicCore, Error> {
         let what = match (bits, pull) {
             (Self::PUB, _) => "rant::Node::publisher",
@@ -75,60 +52,36 @@ impl TopicCore {
                 return Err(fail(ErrorKind::State, &format!("the {item} belongs to another node")));
             }
         }
-        let (schema, schema_hash) = match (codec, &qos.schema) {
-            (Some(c), _) => (c.schema, c.hash),
-            (None, Some(s)) => (s.raw, s.hash()),
-            (None, None) => (std::ptr::null(), 0),
+        let schema = match (codec, &qos.schema) {
+            (Some(c), _) => c.schema,
+            (None, Some(s)) => s.raw,
+            (None, None) => std::ptr::null(),
         };
         let named = qos.queue.as_ref().map_or(null_mut(), |q| q.raw);
-        let want_q = if pull || !named.is_null() { named } else { inner.node_queue() };
+        let queue = if pull || !named.is_null() { named } else { inner.node_queue() };
         let cname = CString::new(name).map_err(|_| fail(ErrorKind::BadName, "the name holds a NUL"))?;
+        let role = if bits == Self::PUB { ffi::RANT_PUB_ONLY } else { ffi::RANT_SUB_ONLY };
 
-        let mut topics = inner.topics.enter().ok_or_else(|| fail(ErrorKind::State, "a handle cannot be made inside a callback"))?;
+        let _creates = inner.creates.enter().ok_or_else(|| fail(ErrorKind::State, "a handle cannot be made inside a callback"))?;
         let (_pass, raw) = inner.enter_for(what)?;
-        if let Some(rec) = topics.get_mut(name) {
-            if schema_hash != 0 && rec.schema_hash != 0 && schema_hash != rec.schema_hash {
-                return Err(fail(ErrorKind::SchemaMismatch, "the name already exists with another schema, close every handle on it to retype it"));
-            }
-            // a publisher has no callbacks, so only a subscriber must agree on where they run
-            if bits == Self::SUB {
-                if pull && rec.pull {
-                    return Err(fail(ErrorKind::State, "a name has one pulled subscriber per node"));
-                }
-                if want_q != rec.queue || pull != rec.pull {
-                    return Err(fail(ErrorKind::State, "the name already exists with another queue or pull choice, same name handles share one slot"));
-                }
-            }
-            let merged = rec.bits | bits;
-            if merged != rec.bits {
-                // SAFETY: the pass keeps the topic alive
-                SendError::check(unsafe { ffi::rant_topic_set_role(rec.raw, role(merged)) }).map_err(|e| fail(ErrorKind::State, &e.to_string()))?;
-                rec.bits = merged;
-            }
-            rec.pubs += u32::from(bits == Self::PUB);
-            rec.subs += u32::from(bits == Self::SUB);
-            return Ok(TopicCore { inner: Arc::clone(inner), raw: rec.raw, bits, handler: 0, name: name.to_owned(), open: true });
-        }
-        let co = ffi::RantTopicOpts { qos: qos.to_c(), reflect_from_mesh: qos.reflect_from_mesh as u8, queue: want_q, pull: pull as u8 };
+        let co = ffi::RantTopicOpts { qos: qos.to_c(), reflect_from_mesh: qos.reflect_from_mesh as u8, queue, pull: pull as u8 };
         // SAFETY: the pass keeps the node open, and the schema is node owned
-        let t = unsafe { ffi::rant_node_create_topic(raw, cname.as_ptr(), role(bits), schema, &co) };
+        let t = unsafe { ffi::rant_node_create_topic(raw, cname.as_ptr(), role, schema, &co) };
         if t.is_null() {
             return Err(Error::last(raw, &format!("{what} \"{name}\"")));
         }
-        let (pubs, subs) = (u32::from(bits == Self::PUB), u32::from(bits == Self::SUB));
-        topics.insert(name.to_owned(), TopicRec { raw: t, bits, schema_hash, queue: want_q, pull, pubs, subs });
-        Ok(TopicCore { inner: Arc::clone(inner), raw: t, bits, handler: 0, name: name.to_owned(), open: true })
+        Ok(TopicCore { inner: Arc::clone(inner), raw: t, name: name.to_owned(), open: true })
     }
 
-    /// Runs `f` for every message on this topic until this handle closes.
-    pub(crate) fn add_handler(&mut self, f: Box<MsgFn>) {
+    /// Runs `f` for every message on this handle until it closes.
+    pub(crate) fn set_handler(&mut self, f: Box<MsgFn>) {
         let Ok((_pass, _)) = self.inner.enter() else { return };
         // SAFETY: the pass keeps the topic alive
         let index = unsafe { ffi::rant_topic_index(self.raw) };
-        self.handler = self.inner.add_handler(index, &self.name, f);
+        self.inner.set_handler(index, &self.name, f);
     }
 
-    /// Drops this handle's side of the name. The last handle retires the topic.
+    /// Retires this handle. The C retires the entity with its last handle.
     pub(crate) fn close(&mut self) -> Result<(), SendError> {
         if !std::mem::replace(&mut self.open, false) {
             return Ok(());
@@ -136,36 +89,19 @@ impl TopicCore {
         let Some(pass) = self.inner.gate.enter() else { return Ok(()) };
         // SAFETY: the pass keeps the topic alive
         let index = unsafe { ffi::rant_topic_index(self.raw) };
-        if self.handler != 0 {
-            // the handler leaves first, so a refused retire still stops its deliveries
-            self.inner.remove_handler(index, self.handler);
-        }
-        let Some(mut topics) = self.inner.topics.enter() else {
+        // the handler leaves first, so a refused retire still stops its deliveries
+        lock(&self.inner.handlers).remove(&index);
+        let Some(creates) = self.inner.creates.enter() else {
             self.inner.report_close_refused(&self.name);
             return Err(SendError::State);
         };
-        let Some(rec) = topics.get_mut(&self.name) else { return Ok(()) };
-        rec.pubs -= u32::from(self.bits == Self::PUB && rec.pubs > 0);
-        rec.subs -= u32::from(self.bits == Self::SUB && rec.subs > 0);
-        if rec.pubs == 0 && rec.subs == 0 {
-            // SAFETY: the pass keeps the topic alive, and it is freed only on success
-            let rc = unsafe { ffi::rant_topic_retire(self.raw) };
-            if rc != 0 {
-                drop(topics);
-                drop(pass);
-                self.inner.report_close_refused(&self.name);
-                return SendError::check(rc).map(|_| ());
-            }
-            topics.remove(&self.name);
-            lock(&self.inner.handlers).remove(&index);
-            return Ok(());
-        }
-        let narrowed = u8::from(rec.pubs > 0) | (u8::from(rec.subs > 0) << 1);
-        if narrowed != rec.bits {
-            // SAFETY: as above. A refusal inside a callback leaves the wider role, which is harmless
-            if unsafe { ffi::rant_topic_set_role(self.raw, role(narrowed)) } == 0 {
-                rec.bits = narrowed;
-            }
+        // SAFETY: the pass keeps the topic alive, and it is freed only on success
+        let rc = unsafe { ffi::rant_topic_retire(self.raw) };
+        if rc != 0 {
+            drop(creates);
+            drop(pass);
+            self.inner.report_close_refused(&self.name);
+            return SendError::check(rc).map(|_| ());
         }
         Ok(())
     }
@@ -229,32 +165,10 @@ impl TopicCore {
     }
 }
 
-impl SubHandler {
-    fn share(&self) -> SubHandler {
-        SubHandler { id: self.id, name: self.name.clone(), cb: Arc::clone(&self.cb) }
-    }
-}
-
 impl NodeInner {
-    /// Runs `f` for every message on the topic at `index`, beside its other handlers. The
-    /// handler's id, which removes it.
-    pub(crate) fn add_handler(&self, index: u16, name: &str, f: Box<MsgFn>) -> u64 {
-        let id = self.next_id();
-        let h = SubHandler { id, name: name.to_owned(), cb: Arc::new(Callback::new(f)) };
-        let mut handlers = lock(&self.handlers);
-        let mut list: Vec<SubHandler> = handlers.get(&index).map(|l| l.iter().map(SubHandler::share).collect()).unwrap_or_default();
-        list.push(h);
-        handlers.insert(index, list.into());
-        id
-    }
-
-    /// Drops the handler `id` from the topic at `index`.
-    pub(crate) fn remove_handler(&self, index: u16, id: u64) {
-        let mut handlers = lock(&self.handlers);
-        if let Some(list) = handlers.get(&index) {
-            let rest: Vec<SubHandler> = list.iter().filter(|h| h.id != id).map(SubHandler::share).collect();
-            handlers.insert(index, rest.into());
-        }
+    /// Runs `f` for every message on the topic at `index`.
+    pub(crate) fn set_handler(&self, index: u16, name: &str, f: Box<MsgFn>) {
+        lock(&self.handlers).insert(index, Arc::new(SubHandler { name: name.to_owned(), cb: Callback::new(f) }));
     }
 }
 

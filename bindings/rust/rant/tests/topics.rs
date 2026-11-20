@@ -1,5 +1,5 @@
 // Raw topics: Bytes handles with schemas, MessageBuilder and MessageView, pulled
-// subscribers, shared name slots, schema reflection and maps.
+// subscribers, same name handles, schema reflection and maps.
 
 mod common;
 
@@ -53,8 +53,7 @@ fn pulled_subscribers_take_in_order_and_latest() {
     let b = node("pull_sub", 11);
     let schema = b.schema("Reading { n: u32 }").unwrap();
     let mut sub = b.pulled_subscriber::<Bytes>("pull", Qos::new().reliable(true).keep_last(8).schema(&schema)).unwrap();
-    let e = b.pulled_subscriber::<Bytes>("pull", Qos::new().reliable(true).schema(&schema)).err().unwrap();
-    assert_eq!(e.kind(), ErrorKind::State, "a second pulled subscriber on a name is refused: {e}");
+    let mut twin = b.pulled_subscriber::<Bytes>("pull", Qos::new().reliable(true).keep_last(8).schema(&schema)).unwrap();
     let sa = a.schema("Reading { n: u32 }").unwrap();
     let p = a.publisher::<Bytes>("pull", Qos::new().reliable(true).keep_last(8).schema(&sa)).unwrap();
     assert!(wait_for(4000, None, || p.match_count() > 0 && p.ready()));
@@ -69,13 +68,15 @@ fn pulled_subscribers_take_in_order_and_latest() {
     let latest = sub.take_latest(Duration::from_millis(500)).unwrap().map(|m| m.get_uint("n"));
     assert_eq!(latest, Some(4), "take_latest reads the newest and drops the rest");
     assert!(sub.take(Duration::ZERO).unwrap().is_none());
+    let twin_first = twin.take(Duration::from_millis(500)).unwrap().map(|m| m.get_uint("n"));
+    assert_eq!(twin_first, Some(1), "a second pulled subscriber of the name has its own ring");
 
     let mut pushed = b.subscriber::<Bytes>("pushed", Qos::new(), |_| {}).unwrap();
     assert!(pushed.take(Duration::ZERO).is_err(), "a subscriber with a handler cannot take");
 }
 
 #[test]
-fn same_name_handles_share_one_slot() {
+fn same_name_handles_close_apart() {
     let a = node("slot", 12);
     let b = node("slot_feeder", 12);
     let schema = a.schema("Slot { v: f64 }").unwrap();

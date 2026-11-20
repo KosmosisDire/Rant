@@ -783,7 +783,7 @@ static void rant_conditions_checks(void){
       RantVariable *va = rant_node_create_variable_definition(A, "rc/v", NULL,
                              &(RantVariableOpts){ .allow_force = 1, .initial = rant_bytes(&one, 1) });
       RantVariable *vb = rant_node_create_remote_variable(B, "rc/v", NULL, NULL);
-      PUMP_UNTIL(A, B, 6000, vb && rant_variable_get(vb, &got) == 1 && rant_variable_match_count(vb) > 0);
+      PUMP_UNTIL(A, B, 6000, vb && rant_variable_get(vb, &got, NULL) == 1 && rant_variable_match_count(vb) > 0);
       CHECK(va && vb && rant_variable_force(vb, rant_bytes(&two, 1)) == RANT_OK, "rantcond: B forces A's variable");
       PUMP_UNTIL(A, B, 6000, rc_kind(A, "forced", NULL, 0, NULL) == 1);
       na = rc_kind(A, "forced", tx, sizeof tx, &lv);

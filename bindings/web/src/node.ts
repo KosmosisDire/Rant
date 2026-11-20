@@ -344,10 +344,8 @@ async function defaultNet(address: string): Promise<{ net: NetObject; release: (
     };
 }
 
-interface TopicRec {
-    h: number; index: number; name: string; schema: number; pull: boolean; pubs: number; subs: number;
-    subscribers: Set<Subscriber<any>>;
-}
+/* One C topic handle. Same name handles are separate C handles of one entity, which the C shares. */
+interface TopicRec { h: number; index: number; name: string; subscriber: Subscriber<any> | null }
 
 interface Waiter { done: () => boolean; resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> | null }
 
@@ -364,7 +362,6 @@ export class RantNode {
     private statusIndex = -1;
     /* peers whose last status set was not empty */
     private statusPeers = new Set<number>();
-    private topics = new Map<string, TopicRec>();
     private byIndex = new Map<number, TopicRec>();
     private tables = new Map<number, Table>();
     private compiled = new Map<number, CompiledSchema>();
@@ -529,26 +526,22 @@ export class RantNode {
         const index = n.u16(p + M.topic_index);
         if (index === this.logIndex) { this.deliverLog(p); return; }
         if (index === this.statusIndex) { this.statusFrom(p); return; }
-        const rec = this.byIndex.get(index);
-        if (!rec) return;
+        const rec = this.byIndex.get(index), sub = rec?.subscriber;
+        if (!rec || !sub?.handler) return;
         const data = n.u32(p + M.data), len = n.u32(p + M.data + 4), schema = n.u32(p + M.schema);
-        let base: Omit<Message<unknown>, "value"> | null = null;
-        for (const sub of [...rec.subscribers]) {
-            if (!sub.handler) continue;
-            base ??= {
-                data: n.copy(data, len), publisherId: n.u32(p + M.publisher_id), publisherName: n.strAt(p + M.publisher_name),
-                topicName: n.strAt(p + M.topic_name), recvUs: n.us(p + M.recv_us), writtenUs: n.us(p + M.written_us),
-                captureUs: n.us(p + M.capture_us),
-            };
-            let value: unknown;
-            try { value = schema ? this.decodeAt(schema, data, len, sub.names) : base.data; }
-            catch (e) {
-                this.report("schema_mismatch", `a message on '${rec.name}' did not decode: ${errorText(e)}`, rec.name, errorText(e));
-                continue;
-            }
-            try { sub.handler(value, { ...base, value }); }
-            catch (e) { this.report("none", `the handler of '${rec.name}' threw: ${errorText(e)}`, rec.name); }
+        const base: Omit<Message<unknown>, "value"> = {
+            data: n.copy(data, len), publisherId: n.u32(p + M.publisher_id), publisherName: n.strAt(p + M.publisher_name),
+            topicName: n.strAt(p + M.topic_name), recvUs: n.us(p + M.recv_us), writtenUs: n.us(p + M.written_us),
+            captureUs: n.us(p + M.capture_us),
+        };
+        let value: unknown;
+        try { value = schema ? this.decodeAt(schema, data, len, sub.names) : base.data; }
+        catch (e) {
+            this.report("schema_mismatch", `a message on '${rec.name}' did not decode: ${errorText(e)}`, rec.name, errorText(e));
+            return;
         }
+        try { sub.handler(value, { ...base, value }); }
+        catch (e) { this.report("none", `the handler of '${rec.name}' threw: ${errorText(e)}`, rec.name); }
     }
 
     /* a builtin message's fields, empty when it does not decode */
@@ -662,20 +655,9 @@ export class RantNode {
 
     /* ---- topics ---- */
 
-    /** @internal */ acquire(name: string, bit: number, schema: number, opts: TopicOptions, pull: boolean): TopicRec {
+    /** @internal */ acquire(name: string, role: number, schema: number, opts: TopicOptions, pull: boolean): TopicRec {
         const h = this.live();
-        let rec = this.topics.get(name);
-        if (rec) {
-            if (schema && rec.schema && schema !== rec.schema) throw new RantError(`'${name}' is already open on this node with another schema`);
-            if (pull !== rec.pull) throw new RantError(`'${name}' is already open on this node as a ${rec.pull ? "pulled" : "pushed"} topic`);
-            const bits = rolesOf(rec) | bit;
-            if (bits !== rolesOf(rec)) {
-                const r = this.n.c.rant_topic_set_role(rec.h, roleFor(bits));
-                if (r !== 0) throw new RantError(`'${name}' refused the role change: ${sendStatus(r)}`, this.lastError);
-            }
-            if (!rec.schema) rec.schema = schema;
-        } else {
-            const t = scoped(this.n, (sc) => {
+        const t = scoped(this.n, (sc) => {
                 const o = sc.alloc(L.RantTopicOpts.sizeof), Q = L.RantQos, T = L.RantTopicOpts, n = this.n;
                 n.setU32(o + Q.reliability, opts.reliable ? 1 : 0);
                 n.setU16(o + Q.keep_last, opts.keepLast ?? 0);
@@ -690,33 +672,19 @@ export class RantNode {
                 n.setU8(o + T.reflect_from_mesh, opts.reflectFromMesh ? 1 : 0);
                 n.setU32(o + T.queue, pull ? 0 : this.queue);
                 n.setU8(o + T.pull, pull ? 1 : 0);
-                return n.c.rant_node_create_topic(h, sc.cstr(name), roleFor(bit), schema, o);
-            });
-            if (!t) throw new RantError(`'${name}' could not be created: ${this.lastError.text}`, this.lastError);
-            rec = { h: t, index: this.n.c.rant_topic_index(t), name, schema, pull, pubs: 0, subs: 0, subscribers: new Set() };
-            this.topics.set(name, rec);
-            this.byIndex.set(rec.index, rec);
-        }
-        if (bit === PUB) rec.pubs++; else rec.subs++;
+                return n.c.rant_node_create_topic(h, sc.cstr(name), role, schema, o);
+        });
+        if (!t) throw new RantError(`'${name}' could not be created: ${this.lastError.text}`, this.lastError);
+        const rec: TopicRec = { h: t, index: this.n.c.rant_topic_index(t), name, subscriber: null };
+        this.byIndex.set(rec.index, rec);
         return rec;
     }
 
-    /* Drops one hold, and retires the topic with its last. */
-    /** @internal */ releaseTopic(rec: TopicRec, bit: number): boolean {
-        if (!this.h || this.topics.get(rec.name) !== rec) return true;
-        const before = rolesOf(rec);
-        if (bit === PUB) rec.pubs--; else rec.subs--;
-        const after = rolesOf(rec);
-        const r = after === 0 ? this.n.c.rant_topic_retire(rec.h)
-                : after !== before ? this.n.c.rant_topic_set_role(rec.h, roleFor(after)) : 0;
-        if (r !== 0) {
-            if (bit === PUB) rec.pubs++; else rec.subs++;
-            return false;
-        }
-        if (after === 0) {
-            this.topics.delete(rec.name);
-            this.byIndex.delete(rec.index);
-        }
+    /* Retires one handle. The C may give its index to the next create, so the record goes too. */
+    /** @internal */ releaseTopic(rec: TopicRec): boolean {
+        if (!this.h || this.byIndex.get(rec.index) !== rec) return true;
+        if (this.n.c.rant_topic_retire(rec.h) !== 0) return false;
+        this.byIndex.delete(rec.index);
         this.n.wake();
         return true;
     }
@@ -870,7 +838,6 @@ export class RantNode {
         for (const w of [...this.waiters]) this.endWait(w, false);
         this.unboxAll();
         this.tables.clear();
-        this.topics.clear();
         this.byIndex.clear();
         this.release?.();
         this.release = null;
@@ -880,9 +847,7 @@ export class RantNode {
 }
 
 /* Events reach the node's box like messages do, so the event trampoline marks them first. */
-const PUB = 1, SUB = 2;
-const rolesOf = (r: TopicRec) => (r.pubs ? PUB : 0) | (r.subs ? SUB : 0);
-const roleFor = (bits: number) => bits === 3 ? 0 : bits === PUB ? 1 : bits === SUB ? 2 : 3;
+const PUB_ONLY = 1, SUB_ONLY = 2;   /* RantRole */
 const us = (ms?: number) => Math.round((ms ?? 0) * 1000);
 const errorText = (e: unknown) => e instanceof Error ? e.message : String(e);
 const isThenable = (v: unknown): v is PromiseLike<unknown> =>
@@ -1007,15 +972,16 @@ abstract class TopicHandle extends Handle {
     /** @internal */ readonly names: Names | null;
 
     /** @internal */
-    constructor(node: RantNode, name: string, s: { ptr: number; names: Names | null }, opts: TopicOptions, bit: number, pull: boolean) {
+    constructor(node: RantNode, name: string, s: { ptr: number; names: Names | null }, opts: TopicOptions, role: number, pull: boolean) {
         super(node, name);
         this.names = s.names;
-        this.rec = node.acquire(name, bit, s.ptr, opts, pull);
+        this.rec = node.acquire(name, role, s.ptr, opts, pull);
         node.track(this);
     }
     get closed(): boolean { return !this.rec; }
     /** @internal */ forget(): void { this.rec = null; }
     protected t(): number { return this.rec ? this.rec.h : 0; }
+    protected retire(): boolean { return !this.rec || this.node.releaseTopic(this.rec); }
 
     /* the schema in use now, the mesh's for a reflectFromMesh handle */
     get schema(): CompiledSchema | null { const t = this.t(); return t ? this.node.compiledAt(this.node.n.c.rant_topic_schema(t)) : null; }
@@ -1035,9 +1001,8 @@ abstract class TopicHandle extends Handle {
 export class Publisher<T> extends TopicHandle {
     /** @internal */
     constructor(node: RantNode, name: string, s: { ptr: number; names: Names | null }, opts: TopicOptions) {
-        super(node, name, s, opts, PUB, false);
+        super(node, name, s, opts, PUB_ONLY, false);
     }
-    protected retire(): boolean { return !this.rec || this.node.releaseTopic(this.rec, PUB); }
 
     /* Publishes to every matched subscriber. captureUs is when the data was true, if not now. */
     send(value: T, captureUs = 0): SendStatus {
@@ -1072,16 +1037,9 @@ export class Subscriber<T> extends TopicHandle {
     /** @internal */
     constructor(node: RantNode, name: string, s: { ptr: number; names: Names | null },
                 handler: ((value: T, msg: Message<T>) => void) | null, opts: TopicOptions) {
-        super(node, name, s, opts, SUB, !handler);
+        super(node, name, s, opts, SUB_ONLY, !handler);
         this.handler = handler;
-        this.rec!.subscribers.add(this);
-    }
-    protected retire(): boolean {
-        if (!this.rec) return true;
-        this.rec.subscribers.delete(this);
-        if (this.node.releaseTopic(this.rec, SUB)) return true;
-        this.rec.subscribers.add(this);
-        return false;
+        this.rec!.subscriber = this;
     }
 
     /* A pulled subscriber's oldest waiting message, or null. */
@@ -1521,9 +1479,10 @@ export class Variable<T> extends Handle {
         const h = this.h, node = this.node, n = node.n;
         if (!h) return undefined;
         return scoped(n, (sc) => {
-            const b = sc.alloc(L.RantBytes.sizeof);
-            if (n.c.rant_variable_get(h, b) !== 1) return undefined;
-            const data = n.u32(b), len = n.u32(b + 4), schema = n.c.rant_variable_schema(h);
+            const b = sc.alloc(L.RantBytes.sizeof), sp = sc.alloc(4);
+            if (n.c.rant_variable_get(h, b, sp) !== 1) return undefined;
+            /* the returned schema reads this handle's part of the whole value */
+            const data = n.u32(b), len = n.u32(b + 4), schema = n.u32(sp);
             return (schema ? node.decodeAt(schema, data, len, this.names) : n.copy(data, len)) as T;
         });
     }

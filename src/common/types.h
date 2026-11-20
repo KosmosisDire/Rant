@@ -175,12 +175,12 @@ typedef enum {
     RANT_E_POLL,               /* the socket wait failed */
     RANT_E_WAKER,              /* no cross thread waker, wakes come at the next tick */
     RANT_E_BAD_ADDRESS,        /* a configured address could not be parsed, refused at open */
-    RANT_E_BAD_NAME,           /* a create's name is empty, too long or carries '@': .topic_name */
+    RANT_E_BAD_NAME,           /* a create's name is empty, too long, carries '@' or a bad field path: .topic_name */
     RANT_E_STATE,              /* a create refused in this state: from a callback, or the reserve is full */
     RANT_E_BAD_SCHEMA,         /* rant_node_schema refused a text or wire: .detail says why and where.
                                   Or a create's schema failed to parse: .topic_name */
     RANT_E_BAD_DOMAIN,         /* RANT_DOMAIN is not a number from 0 to 65535, refused at open */
-    RANT_E_BAD_PREFIX,         /* RANT_PREFIX or opts.prefix holds '@', starts or ends with '/' or
+    RANT_E_BAD_PREFIX,         /* RANT_PREFIX or opts.prefix holds '@' or '.', starts or ends with '/' or
                                   leaves no room for a name, refused at open */
     RANT_E_BAD_REMAP,          /* RANT_REMAP holds a bad entry, refused at open: .detail says which */
     RANT_E_BAD_LOG_LEVEL,      /* RANT_LOG_LEVEL or opts.log_level is not a level, refused at open */

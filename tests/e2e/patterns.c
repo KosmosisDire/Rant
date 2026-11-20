@@ -310,32 +310,32 @@ static void patterns_checks(void){
       CHECK(ov && av, "var: created/opened");
       PUMP_UNTIL(P, C, 8000, rant_variable_match_count(ov)!=0);
       CHECK(rant_variable_match_count(ov)==1, "var: accessor matched (%d)", rant_variable_match_count(ov));
-      PUMP_UNTIL(P, C, 2400, rant_variable_get(av,&gv));
-      CHECK(rant_variable_get(av,&gv) && gv.len==4 && i_rant_le_r32(gv.data)==20, "var: catch_up initial=20");
+      PUMP_UNTIL(P, C, 2400, rant_variable_get(av,&gv, NULL));
+      CHECK(rant_variable_get(av,&gv, NULL) && gv.len==4 && i_rant_le_r32(gv.data)==20, "var: catch_up initial=20");
       i_rant_le_w32(b,25); rant_variable_set(ov, rant_bytes(b,4));
-      PUMP_UNTIL(P, C, 2400, rant_variable_get(av,&gv)&&gv.len==4&&i_rant_le_r32(gv.data)==25);
-      CHECK(rant_variable_get(av,&gv)&&i_rant_le_r32(gv.data)==25, "var: owner set converges (25)");
+      PUMP_UNTIL(P, C, 2400, rant_variable_get(av,&gv, NULL)&&gv.len==4&&i_rant_le_r32(gv.data)==25);
+      CHECK(rant_variable_get(av,&gv, NULL)&&i_rant_le_r32(gv.data)==25, "var: owner set converges (25)");
       i_rant_le_w32(b,30);
       { int sr = rant_variable_set(av, rant_bytes(b,4)); CHECK(sr==RANT_OK, "var: accessor set ok (%d)", sr); }
-      PUMP_UNTIL(P, C, 2400, rant_variable_get(ov,&gv)&&gv.len==4&&i_rant_le_r32(gv.data)==30);
-      CHECK(rant_variable_get(ov,&gv)&&i_rant_le_r32(gv.data)==30, "var: accessor set applied at owner (30)");
+      PUMP_UNTIL(P, C, 2400, rant_variable_get(ov,&gv, NULL)&&gv.len==4&&i_rant_le_r32(gv.data)==30);
+      CHECK(rant_variable_get(ov,&gv, NULL)&&i_rant_le_r32(gv.data)==30, "var: accessor set applied at owner (30)");
       i_rant_le_w32(b,99); rant_variable_force(ov, rant_bytes(b,4));
-      PUMP_UNTIL(P, C, 2400, rant_variable_forced(av)&&rant_variable_get(av,&gv)&&i_rant_le_r32(gv.data)==99);
-      CHECK(rant_variable_forced(av)&&rant_variable_get(av,&gv)&&i_rant_le_r32(gv.data)==99,
+      PUMP_UNTIL(P, C, 2400, rant_variable_forced(av)&&rant_variable_get(av,&gv, NULL)&&i_rant_le_r32(gv.data)==99);
+      CHECK(rant_variable_forced(av)&&rant_variable_get(av,&gv, NULL)&&i_rant_le_r32(gv.data)==99,
                "var: force visible at accessor (99, forced)");
       i_rant_le_w32(b,50); rant_variable_set(av, rant_bytes(b,4));         /* absorbed into the shadow */
       test_pump(P,C,80);
-      CHECK(rant_variable_get(av,&gv)&&i_rant_le_r32(gv.data)==99, "var: set absorbed while forced (still 99)");
+      CHECK(rant_variable_get(av,&gv, NULL)&&i_rant_le_r32(gv.data)==99, "var: set absorbed while forced (still 99)");
       rant_variable_unforce(ov);
-      PUMP_UNTIL(P, C, 2400, !rant_variable_forced(av)&&rant_variable_get(av,&gv)&&i_rant_le_r32(gv.data)==50);
-      CHECK(!rant_variable_forced(av)&&rant_variable_get(av,&gv)&&i_rant_le_r32(gv.data)==50,
+      PUMP_UNTIL(P, C, 2400, !rant_variable_forced(av)&&rant_variable_get(av,&gv, NULL)&&i_rant_le_r32(gv.data)==50);
+      CHECK(!rant_variable_forced(av)&&rant_variable_get(av,&gv, NULL)&&i_rant_le_r32(gv.data)==50,
                "var: unforce restores latest absorbed (50)"); }
     { RantVariable *ro_o, *ro_a; RantBytes gv; uint8_t b[4]; int sr; i_rant_le_w32(b,7);
       ro_o = rant_node_create_variable_definition(P, "rovar", NULL, &(RantVariableOpts){ .initial=rant_bytes(b,4), .access=RANT_VAR_READONLY });
       ro_a = rant_node_create_remote_variable(C, "rovar", NULL, NULL);
       CHECK(ro_o&&ro_a, "var: read-only created/opened");
       /* the owner's value arrives only once the accessor verified it, read only included */
-      PUMP_UNTIL(P, C, 4000, rant_variable_get(ro_a, &gv));
+      PUMP_UNTIL(P, C, 4000, rant_variable_get(ro_a, &gv, NULL));
       i_rant_le_w32(b,8); sr = rant_variable_set(ro_a, rant_bytes(b,4));
       CHECK(sr==RANT_ERR_ROLE, "var: read-only set refused (%d)", sr); }
     { RantVariable *orphan = rant_node_create_remote_variable(C, "nobody-owns-this", NULL, NULL);
@@ -354,11 +354,11 @@ static void patterns_checks(void){
       ta = rant_node_create_remote_variable(C, "ttemp", ts, NULL);
       CHECK(to && ta, "var: typed created/opened");
       PUMP_UNTIL(P, C, 8000, rant_variable_match_count(to)!=0);
-      PUMP_UNTIL(P, C, 2400, rant_variable_get(ta,&gv));
+      PUMP_UNTIL(P, C, 2400, rant_variable_get(ta,&gv, NULL));
       i_rant_le_w32(b,777); fr = rant_variable_force(ta, rant_bytes(b,4));         /* remote force */
       CHECK(fr==RANT_OK, "var: typed remote force sent (%d)", fr);
-      PUMP_UNTIL(P, C, 2400, rant_variable_forced(ta)&&rant_variable_get(ta,&gv)&&i_rant_le_r32(gv.data)==777);
-      CHECK(rant_variable_forced(ta)&&rant_variable_get(ta,&gv)&&i_rant_le_r32(gv.data)==777,
+      PUMP_UNTIL(P, C, 2400, rant_variable_forced(ta)&&rant_variable_get(ta,&gv, NULL)&&i_rant_le_r32(gv.data)==777);
+      CHECK(rant_variable_forced(ta)&&rant_variable_get(ta,&gv, NULL)&&i_rant_le_r32(gv.data)==777,
                "var: typed force pins (777, forced)");
       ur = rant_variable_unforce(ta);     /* remote, op only payload */
       CHECK(ur==RANT_OK, "var: typed remote unforce sent (%d)", ur);
@@ -487,15 +487,15 @@ static void patterns_checks(void){
       i_rant_le_w32(b,100);
       rant_variable_set(ro, rant_bytes(b,4));
       CHECK(pf_reent_done, "var: reentrant set ran inside on_write");
-      { RantBytes ov; int have = rant_variable_get(ro, &ov);
+      { RantBytes ov; int have = rant_variable_get(ro, &ov, NULL);
         CHECK(have && ov.len>=4 && i_rant_le_r32(ov.data)==200,
                  "var: owner store holds the newest"); }
-      PUMP_UNTIL(P, C, 8000, rant_variable_get(ra, &cur) && cur.len>=4 && i_rant_le_r32(cur.data)==200);
-      { int have = rant_variable_get(ra, &cur);
+      PUMP_UNTIL(P, C, 8000, rant_variable_get(ra, &cur, NULL) && cur.len>=4 && i_rant_le_r32(cur.data)==200);
+      { int have = rant_variable_get(ra, &cur, NULL);
         CHECK(have && cur.len>=4 && i_rant_le_r32(cur.data)==200,
                  "var: remote reached the newest value"); }
       test_pump(P,C,60);   /* nothing stale may follow: the owner skipped the outer publish */
-      { int have = rant_variable_get(ra, &cur);
+      { int have = rant_variable_get(ra, &cur, NULL);
         CHECK(have && cur.len>=4 && i_rant_le_r32(cur.data)==200,
                  "var: stale outer publish skipped, remote stays newest (%u)",
                  (have && cur.len>=4) ? i_rant_le_r32(cur.data) : 0u); }
@@ -534,8 +534,8 @@ static void patterns_checks(void){
       for (i2=0;i2<200;i2++){ i_rant_le_w32(b,1000u+i2); rant_variable_set(lo, rant_bytes(b,4)); }
       el = i_rant_plat_now_us() - t0;
       CHECK(el < 500000u, "var: 200 writes past a silent reader never wait (%.1f ms)", el/1000.0);
-      PUMP_UNTIL(P, C, 8000, rant_variable_get(la, &cur) && cur.len>=4 && i_rant_le_r32(cur.data)==1199u);
-      { int have = rant_variable_get(la, &cur);
+      PUMP_UNTIL(P, C, 8000, rant_variable_get(la, &cur, NULL) && cur.len>=4 && i_rant_le_r32(cur.data)==1199u);
+      { int have = rant_variable_get(la, &cur, NULL);
         CHECK(have && cur.len>=4 && i_rant_le_r32(cur.data)==1199u,
                  "var: the reader ends on the newest value (%u)",
                  (have && cur.len>=4) ? i_rant_le_r32(cur.data) : 0u); } }
@@ -682,21 +682,21 @@ static void retire_checks(void){
                 &(RantVariableOpts){ .initial = rant_bytes(b,4) });
       acc = rant_node_create_remote_variable(B, "dial", NULL, NULL);
       CHECK(def && acc, "retire: variable pair created");
-      PUMP_UNTIL(A, B, 8000, rant_variable_get(acc,&gv));
-      CHECK(rant_variable_get(acc,&gv) && gv.len==4 && i_rant_le_r32(gv.data)==20,
+      PUMP_UNTIL(A, B, 8000, rant_variable_get(acc,&gv, NULL));
+      CHECK(rant_variable_get(acc,&gv, NULL) && gv.len==4 && i_rant_le_r32(gv.data)==20,
                "retire: first accessor got the value");
       rr = rant_variable_retire(acc);
       CHECK(rr==RANT_OK, "retire: accessor retired (%d)", rr);
       acc2 = rant_node_create_remote_variable(B, "dial", NULL, NULL);
       CHECK(acc2 != NULL, "retire: successor accessor created");
-      PUMP_UNTIL(A, B, 8000, rant_variable_get(acc2,&gv));
-      CHECK(rant_variable_get(acc2,&gv) && gv.len==4 && i_rant_le_r32(gv.data)==20,
+      PUMP_UNTIL(A, B, 8000, rant_variable_get(acc2,&gv, NULL));
+      CHECK(rant_variable_get(acc2,&gv, NULL) && gv.len==4 && i_rant_le_r32(gv.data)==20,
                "retire: successor RECEIVES where a live twin would be shadowed");
       i_rant_le_w32(b, 33);
       { int sr = rant_variable_set(acc2, rant_bytes(b,4));
         CHECK(sr==RANT_OK, "retire: successor set accepted (%d)", sr); }
-      PUMP_UNTIL(A, B, 8000, rant_variable_get(def,&gv)&&gv.len==4&&i_rant_le_r32(gv.data)==33);
-      CHECK(rant_variable_get(def,&gv)&&gv.len==4&&i_rant_le_r32(gv.data)==33,
+      PUMP_UNTIL(A, B, 8000, rant_variable_get(def,&gv, NULL)&&gv.len==4&&i_rant_le_r32(gv.data)==33);
+      CHECK(rant_variable_get(def,&gv, NULL)&&gv.len==4&&i_rant_le_r32(gv.data)==33,
                "retire: successor write reached the definition (33)");
       /* definition retire + recreate: the restart-shaped recipe (the old channel must
          stop matching-and-refusing so the successor can serve) */
@@ -706,8 +706,8 @@ static void retire_checks(void){
       def = rant_node_create_variable_definition(A, "dial", NULL,
                 &(RantVariableOpts){ .initial = rant_bytes(b,4) });
       CHECK(def != NULL, "retire: successor definition created");
-      PUMP_UNTIL(A, B, 8000, rant_variable_get(acc2,&gv)&&gv.len==4&&i_rant_le_r32(gv.data)==77);
-      CHECK(rant_variable_get(acc2,&gv)&&gv.len==4&&i_rant_le_r32(gv.data)==77,
+      PUMP_UNTIL(A, B, 8000, rant_variable_get(acc2,&gv, NULL)&&gv.len==4&&i_rant_le_r32(gv.data)==77);
+      CHECK(rant_variable_get(acc2,&gv, NULL)&&gv.len==4&&i_rant_le_r32(gv.data)==77,
                "retire: successor definition serves the accessor (77)");
       /* retire from inside a callback: refused, handle stays valid (on_change replays
          inline at registration, so the attempt runs right here on this thread) */
@@ -716,7 +716,7 @@ static void retire_checks(void){
       CHECK(pf_retire_in_cb_rc==RANT_ERR_STATE,
                "retire: refused from a callback (%d)", pf_retire_in_cb_rc);
       rant_variable_on_change(def, NULL, NULL);
-      { RantBytes chk; CHECK(rant_variable_get(def,&chk)==1,
+      { RantBytes chk; CHECK(rant_variable_get(def,&chk, NULL)==1,
                "retire: handle survives the refused attempt"); } }
 
     /* function: an outstanding call cancels at retire, a retired then recreated remote calls */
@@ -795,13 +795,14 @@ static void loud_checks(void){
     CHECK(pose != NULL, "loud: schema compiled");
     {   RantTopic *tp = rant_node_create_topic(A, "loud/pose", RANT_PUB_ONLY, pose, NULL);
         RantTopic *twin = rant_node_create_topic(A, "loud/pose", RANT_SUB_ONLY, pose, NULL);
-        RantTopic *parked;
+        RantVariable *other;
         uint8_t junk[3] = {1,2,3}, good[8] = {0};
         int rc_junk, rc_good;
-        CHECK(tp && twin==NULL && rant_last_error(A).error==RANT_E_NAME_COLLISION,
-                 "loud: a live same name topic is refused as NAME_COLLISION (%d)", (int)rant_last_error(A).error);
-        parked = rant_node_create_topic(A, "loud/pose", RANT_INACTIVE, pose, NULL);
-        CHECK(parked != NULL, "loud: an INACTIVE twin is still accepted (the QoS switch)");
+        CHECK(tp && twin && rant_topic_index(twin) != rant_topic_index(tp),
+                 "loud: a second handle of one name shares the topic under its own index");
+        other = rant_node_create_variable_definition(A, "loud/pose", NULL, NULL);
+        CHECK(other==NULL && rant_last_error(A).error==RANT_E_NAME_COLLISION,
+                 "loud: the name under another kind is refused as NAME_COLLISION (%d)", (int)rant_last_error(A).error);
         le = rant_last_error(A);
         rant_event_str(&le, txt, sizeof txt);
         CHECK(le.peer==0 && strstr(txt,"already created")!=NULL,
@@ -824,8 +825,8 @@ static void loud_checks(void){
         acc  = rant_node_create_remote_variable(B, "loud/dial", NULL, NULL);
         kacc = rant_node_create_remote_variable(B, "loud/knob", NULL, NULL);
         CHECK(knob && acc && kacc, "loud: variable pairs created");
-        PUMP_UNTIL(A, B, 8000, rant_variable_get(acc,&gv) && rant_variable_get(kacc,&gv));
-        CHECK(rant_variable_get(acc,&gv) && rant_variable_get(kacc,&gv), "loud: accessors got the values");
+        PUMP_UNTIL(A, B, 8000, rant_variable_get(acc,&gv, NULL) && rant_variable_get(kacc,&gv, NULL));
+        CHECK(rant_variable_get(acc,&gv, NULL) && rant_variable_get(kacc,&gv, NULL), "loud: accessors got the values");
         i_rant_le_w32(b, 99);
         rc = rant_variable_force(acc, rant_bytes(b,4));
         CHECK(rc==RANT_ERR_ROLE, "loud: force against an owner without allow_force refused ROLE (%d)", rc);
@@ -1002,8 +1003,8 @@ static void varwait_checks(void){
       sr = rant_variable_set(va, rant_bytes(b,4));
       CHECK(sr==RANT_OK, "varwait: first write waits out the forming match (%d)", sr);
       rant_node_stop(P);
-      PUMP_UNTIL(P, C, 8000, rant_variable_get(vd,&gv)&&gv.len==4&&i_rant_le_r32(gv.data)==5);
-      CHECK(rant_variable_get(vd,&gv)&&gv.len==4&&i_rant_le_r32(gv.data)==5,
+      PUMP_UNTIL(P, C, 8000, rant_variable_get(vd,&gv, NULL)&&gv.len==4&&i_rant_le_r32(gv.data)==5);
+      CHECK(rant_variable_get(vd,&gv, NULL)&&gv.len==4&&i_rant_le_r32(gv.data)==5,
                "varwait: the write reached the owner (5)"); }
 
     /* converged verdicts stay instant: an owner nobody offers fails NO_TOPIC without
@@ -1331,7 +1332,7 @@ static void refresh_live_checks(void){
         while (own && rem && !rant_variable_schema(rem) && i_rant_plat_now_us() < end){
             RantBytes v; int i;
             for (i = 0; i < 20; i++){ y += 1; rant_variable_set(own, rant_bytes(&y, sizeof y)); }
-            if (rant_variable_get(rem, &v) == 1) saw = 1;
+            if (rant_variable_get(rem, &v, NULL) == 1) saw = 1;
             r = rant_variable_refresh(rem);
         }
         typed = rem && rant_variable_schema(rem);

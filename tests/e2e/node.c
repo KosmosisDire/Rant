@@ -292,7 +292,7 @@ static int st_name_is(RantTopic *t, const char *want){
 /* The name prefix phase: RANT_PREFIX stacks outside opts.prefix on every create, a leading
  * '/' skips both, a bad prefix refuses the open and RANT_NODE_NAME_PREFIX names the node. */
 static void prefix_checks(void){
-    static const char *bad_code[] = { "/x", "x/", "a@b", "012345678901234567890123456789012345678901234567890123456789012" };
+    static const char *bad_code[] = { "/x", "x/", "a@b", "a.b", "012345678901234567890123456789012345678901234567890123456789012" };
     RantAllocator a = rant_allocator_heap(0);
     RantNodeOpts o; RantNode *n; RantTopic *t; RantEntityInfo info; RantEvent err; size_t i;
     memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+41; o.net.multicast_interface="127.0.0.1";
@@ -344,7 +344,7 @@ static void prefix_checks(void){
 /* The remap phase: RANT_REMAP renames what the code wrote on every kind before the prefix, a
  * value past the Windows short read works, and a bad entry refuses the open. */
 static void remap_checks(void){
-    static const char *bad[] = { "Wrench", "=x", "a=", "a=b@c", "a=b,a=c", "a=b,", "a=/" };
+    static const char *bad[] = { "Wrench", "=x", "a=", "a=b@c", "a=b.c", "a.b=c", "a=b,a=c", "a=b,", "a=/" };
     RantAllocator a = rant_allocator_heap(0);
     RantNodeOpts o; RantNode *n; RantTopic *t; RantEntityInfo info; RantEvent err;
     char longmap[512]; size_t i, at = 0;
@@ -578,7 +578,7 @@ static void bulk_pools_checks(void){
     WAIT_UNTIL(5000, down_pub && up_pub && rant_topic_match_count(down_pub) == 1 && rant_topic_match_count(up_pub) == 1
                      && rem && rant_variable_match_count(rem) == 1);
     CHECK(q && down_sub && up_sub && def && rem && rant_variable_wait(rem, 3000) == 1
-          && rant_variable_get(rem, &got) == 1 && got.len == 1000,
+          && rant_variable_get(rem, &got, NULL) == 1 && got.len == 1000,
           "bulk pools: the streams match and the variable's first value arrives (%u bytes)", (unsigned)got.len);
     test_sleep_ms(300);
     rant_node_mem_stats(P, &p0, NULL, NULL); rant_node_mem_stats(S, &s0, NULL, NULL);
@@ -586,7 +586,7 @@ static void bulk_pools_checks(void){
     rant_topic_send(down_pub, rant_bytes(big, sizeof big), NULL);
     rant_topic_send(up_pub, rant_bytes(big, sizeof big), NULL);
     rant_variable_set(def, rant_bytes(value, sizeof value));
-    for (k = 0; k < 500 && !(bk_got_down && bk_got_up && rant_variable_get(rem, &got) == 1 && got.len == sizeof value); k++)
+    for (k = 0; k < 500 && !(bk_got_down && bk_got_up && rant_variable_get(rem, &got, NULL) == 1 && got.len == sizeof value); k++)
         rant_queue_dispatch(q, 0, 10);
     r = rant_function_call(rant_node_meta_function(S), rant_bytes(mask, 4), &out, 3000,
                            &(RantCallOpts){ .provider = bk_peer_id(S, "bk-p") });

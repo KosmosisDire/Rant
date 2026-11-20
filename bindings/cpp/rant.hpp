@@ -251,18 +251,6 @@ inline void raise_msg(const char* what) {
 #endif
 }
 
-inline uint8_t role_bits(Role r) {   /* pub = 1, sub = 2 */
-    switch (r) {
-    case Role::PubSub:  return 3;
-    case Role::PubOnly: return 1;
-    case Role::SubOnly: return 2;
-    default:            return 0;
-    }
-}
-inline Role role_from_bits(uint8_t b) {
-    return b == 3 ? Role::PubSub : b == 1 ? Role::PubOnly : b == 2 ? Role::SubOnly : Role::Inactive;
-}
-
 /* base for the type-erased handler boxes the Node's Impl keeps alive until close */
 struct HandlerBox { virtual ~HandlerBox() = default; };
 
@@ -456,7 +444,7 @@ struct Qos {
     uint16_t    max_rate_hz          = 0;   /* best effort sub: kept samples per second, 0 = all */
     bool        no_timestamp         = false;   /* omit the source stamp, written_us() reads 0 */
     /* Where a subscriber's handler runs: this queue, else the node queue under
-     * Threading::Dispatch, else inline. Same name handles share one slot and must agree. */
+     * Threading::Dispatch, else inline. */
     const Queue* queue               = nullptr;
     /* A rant::Bytes handle made without a schema takes its type from the mesh: a reader
      * its provider's, a writer the widest every reader accepts. refresh() re types it. */
@@ -1909,13 +1897,6 @@ using EventHandler   = std::function<void(const Event&)>;
 using LogHandler     = std::function<void(const LogLine&)>;
 using StatusHandler  = std::function<void(const StatusUpdate&)>;
 
-/* One name's topic slot and how many live handles hold each side of it. */
-struct TopicRec {
-    detail::RantTopic* ch; uint8_t bits; uint64_t schema_hash; detail::RantQueue* queue; bool pull;
-    int pubs = 0, subs = 0;
-};
-/* A subscriber handler and the id its handle removes it by, 0 for the node's own. */
-struct SubHandler { uint64_t id; MessageHandler fn; };
 
 /* The state behind a Node. Handles share it, so one that outlives its node finds the gate
  * closed instead of freed memory. */
@@ -1939,9 +1920,7 @@ struct NodeImpl : std::enable_shared_from_this<NodeImpl> {
      * leaf lock, never call into C while holding it. */
     std::mutex               create_mu;
     std::mutex               reg_mu;
-    std::map<std::string, TopicRec, std::less<>> topics;   /* name to shared slot */
-    std::unordered_map<uint16_t, std::shared_ptr<const std::vector<SubHandler>>> sub_handlers;
-    uint64_t                 next_handler_id = 1;
+    std::unordered_map<uint16_t, std::shared_ptr<const MessageHandler>> sub_handlers;   /* by topic index */
     std::vector<std::unique_ptr<HandlerBox>> boxes;  /* pattern handler boxes */
 #ifndef RANT_NO_PATTERNS
     std::unordered_set<void*> async_live;            /* outstanding AsyncBox* */
@@ -2091,13 +2070,12 @@ inline SendStatus close_handle(HandleState<C>* st, NodeImpl* impl, bool owned, i
 }
 #endif
 
-/* The name slot under Publisher<Bytes> and Subscriber<Bytes>: one C topic per name, its
- * role following the live handles. Each handle holds one side, and the last close retires
- * the topic. */
+/* The C topic under Publisher<Bytes> and Subscriber<Bytes>. Same name handles are separate
+ * C handles of one entity, which C shares. */
 class TopicCore {
 public:
     TopicCore() = default;
-    /* Create (or share) a topic on `node`. Throws rant::Error on failure (with
+    /* Create a topic handle on `node`. Throws rant::Error on failure (with
      * -fno-exceptions: check valid()). schema is copied into the node. */
     TopicCore(Node& node, std::string_view name, Role role, const Schema* schema, const Qos& qos)
         : TopicCore(node, name, role, schema, qos, false) {}
@@ -2146,12 +2124,12 @@ public:
         return static_cast<SendStatus>(
             detail::rant_topic_send(ch_, detail::rant_bytes(data.data(), data.size()), &o));
     }
-    /* Drop this handle's side of the name. The last handle on a name retires the topic, so
-     * the name can be created again with another schema. State from the topic's own inline
-     * callback, and the handle stays valid then. */
+    /* Retire this handle. The last handle on a name retires the topic, so the name can be
+     * created again with another schema. State from the topic's own inline callback, and the
+     * handle stays valid then. */
     SendStatus close();
-    /* Run h for every message on this topic until this handle closes. */
-    void add_handler(MessageHandler h);
+    /* Run h for every message on this handle until it closes. */
+    void set_handler(MessageHandler h);
     /* The schema the topic uses now, empty when untyped. A reflect_from_mesh topic reports
      * what it adopted. */
     Schema schema() const {
@@ -2159,7 +2137,7 @@ public:
         return Schema(p ? detail::rant_topic_schema(ch_) : nullptr);
     }
     /* The topic's name, empty once closed. */
-    std::string name() const;
+    std::string name() const { return impl_ ? name_ : std::string(); }
     uint16_t index() const {
         Pass p = pass();
         return p ? detail::rant_topic_index(ch_) : 0xffff;
@@ -2196,14 +2174,13 @@ private:
     TopicCore(Node& node, std::string_view name, Role role, const Schema* schema, const Qos& qos,
               bool pull);
     void move_from(TopicCore& o) noexcept {
-        ch_ = o.ch_; impl_ = std::move(o.impl_); bits_ = o.bits_; handler_id_ = o.handler_id_;
-        o.ch_ = nullptr; o.bits_ = 0; o.handler_id_ = 0;
+        ch_ = o.ch_; impl_ = std::move(o.impl_); name_ = std::move(o.name_);
+        o.ch_ = nullptr;
     }
 
     detail::RantTopic*        ch_ = nullptr;
     std::shared_ptr<NodeImpl> impl_;
-    uint8_t                   bits_ = 0;         /* the side this handle holds: pub 1, sub 2 */
-    uint64_t                  handler_id_ = 0;   /* this handle's subscriber handler, 0 = none */
+    std::string               name_;
     friend class ::rant::Node;
 };
 
@@ -3086,15 +3063,15 @@ private:
         Impl* impl = static_cast<Impl*>(m->user);
         if (!impl) return;
         priv::InCallback mark(impl);
-        std::shared_ptr<const std::vector<priv::SubHandler>> hs;
+        std::shared_ptr<const priv::MessageHandler> h;
         {
             std::lock_guard<std::mutex> g(impl->reg_mu);
             auto it = impl->sub_handlers.find(m->topic_index);
-            if (it != impl->sub_handlers.end()) hs = it->second;
+            if (it != impl->sub_handlers.end()) h = it->second;
         }
-        if (!hs) return;
+        if (!h) return;
         MessageView msg(m);
-        for (const priv::SubHandler& h : *hs) priv::guarded(impl, [&] { h.fn(msg); });
+        priv::guarded(impl, [&] { (*h)(msg); });
     }
     static void on_evt_tramp(const detail::RantEvent* e) {
         Impl* impl = static_cast<Impl*>(e->user);
@@ -3131,15 +3108,11 @@ private:
         uint16_t idx = detail::rant_topic_index(ch);
         {
             std::lock_guard<std::mutex> g(impl_->reg_mu);   /* leaf lock: never call C while held */
-            auto& slot = impl_->sub_handlers[idx];
-            auto nv = slot ? std::make_shared<std::vector<priv::SubHandler>>(*slot)
-                           : std::make_shared<std::vector<priv::SubHandler>>();
-            nv->push_back(priv::SubHandler{ 0, std::move(mh) });
-            slot = std::move(nv);
+            impl_->sub_handlers[idx] = std::make_shared<const priv::MessageHandler>(std::move(mh));
         }
         if (detail::rant_topic_set_role(ch, detail::RANT_PUBSUB) != 0) {
             std::lock_guard<std::mutex> g(impl_->reg_mu);
-            impl_->sub_handlers.erase(idx);   /* only ours: a builtin has no other handler */
+            impl_->sub_handlers.erase(idx);
             priv::raise_last(impl_->node, what);
             return false;
         }
@@ -3340,8 +3313,6 @@ private:
 
 inline Reflection Node::reflection() const { return Reflection(impl_); }
 
-/* Create, or share the same name slot with a widened role. A live same name topic with a
- * different schema refuses, since two modules disagreeing is a bug. Close its handles first. */
 namespace priv {
 template <class T> inline const char codec_key = 0;   /* one address per T, the codec map key */
 }
@@ -3363,113 +3334,42 @@ inline priv::TopicCore::TopicCore(Node& node, std::string_view name, Role role,
     if (!p) { priv::raise_msg("rant topic create: node is not valid"); return; }
     std::lock_guard<std::mutex> g(impl->create_mu);
     std::string nm(name);
-    uint64_t sh = schema ? schema->hash() : 0;
-    detail::RantQueue* want_q = pull ? priv::to_c(qos.queue) : impl->queue_for(qos.queue);
-    uint8_t rb = priv::role_bits(role);
-    auto it = impl->topics.find(nm);
-    if (it != impl->topics.end()) {
-        if (sh && it->second.schema_hash && sh != it->second.schema_hash) {
-            priv::raise_msg("rant topic create: the name already exists with a different schema"
-                            " (close every handle on it to retype the name)");
-            return;
-        }
-        if (want_q != it->second.queue || pull != it->second.pull) {
-            priv::raise_msg("rant topic create: the name already exists with a different queue"
-                            " (same name handles share one slot and its queue)");
-            return;
-        }
-        uint8_t bits = (uint8_t)(it->second.bits | rb);
-        if (bits != it->second.bits) {
-            detail::rant_topic_set_role(it->second.ch, static_cast<detail::RantRole>(priv::role_from_bits(bits)));
-            it->second.bits = bits;
-        }
-        it->second.pubs += rb & 1;
-        it->second.subs += (rb >> 1) & 1;
-        ch_ = it->second.ch;
-        impl_ = impl;
-        bits_ = rb;
-        return;
-    }
     detail::RantTopicOpts co;
     std::memset(&co, 0, sizeof co);
     co.qos = Node::to_c(qos);
     co.reflect_from_mesh = qos.reflect_from_mesh ? 1 : 0;
-    co.queue = want_q;
+    co.queue = pull ? priv::to_c(qos.queue) : impl->queue_for(qos.queue);
     co.pull = pull ? 1 : 0;
     detail::RantTopic* ch = detail::rant_node_create_topic(impl->node, nm.c_str(),
               static_cast<detail::RantRole>(role), schema ? schema->raw() : nullptr, &co);
     if (!ch) { priv::raise_last(impl->node, "rant topic create"); return; }
-    impl->topics.emplace(std::move(nm), TopicRec{ ch, rb, sh, want_q, pull, rb & 1, (rb >> 1) & 1 });
     ch_ = ch;
     impl_ = impl;
-    bits_ = rb;
+    name_ = std::move(nm);
 }
 
-inline std::string priv::TopicCore::name() const {
-    if (!impl_) return {};
-    std::lock_guard<std::mutex> g(impl_->create_mu);
-    for (const auto& kv : impl_->topics) if (kv.second.ch == ch_) return kv.first;
-    return {};
-}
-
-inline void priv::TopicCore::add_handler(MessageHandler h) {
+inline void priv::TopicCore::set_handler(MessageHandler h) {
     Pass p = pass();
     if (!p) return;
     uint16_t idx = detail::rant_topic_index(ch_);
     std::lock_guard<std::mutex> g(impl_->reg_mu);
-    handler_id_ = impl_->next_handler_id++;
-    auto& slot = impl_->sub_handlers[idx];
-    auto nv = slot ? std::make_shared<std::vector<SubHandler>>(*slot)
-                   : std::make_shared<std::vector<SubHandler>>();
-    nv->push_back(SubHandler{ handler_id_, std::move(h) });
-    slot = std::move(nv);
+    impl_->sub_handlers[idx] = std::make_shared<const MessageHandler>(std::move(h));
 }
 
-/* The last side on the name retires the topic and forgets its handlers, since the slot may
- * be reused by another name. Otherwise the role narrows to the sides still held. */
+/* The handler goes with the handle, since C may give its index to the next create. */
 inline SendStatus priv::TopicCore::close() {
     if (!ch_) return SendStatus::NoTopic;
     std::shared_ptr<NodeImpl> keep = impl_;   /* outlives the pass and the lock below */
     Pass p(keep.get());
-    if (!p) {   /* the node closed and freed the topic */
-        ch_ = nullptr; bits_ = 0; handler_id_ = 0; impl_.reset();
-        return SendStatus::Ok;
-    }
-    NodeImpl& impl = *keep;
-    std::lock_guard<std::mutex> g(impl.create_mu);
-    uint16_t idx = detail::rant_topic_index(ch_);
-    auto it = impl.topics.begin();
-    while (it != impl.topics.end() && it->second.ch != ch_) ++it;
-    int pubs = 0, subs = 0;
-    if (it != impl.topics.end()) {
-        pubs = it->second.pubs - (bits_ & 1);
-        subs = it->second.subs - ((bits_ >> 1) & 1);
-    }
-    if (pubs <= 0 && subs <= 0) {
+    if (p) {   /* else the node closed and freed the topic */
+        std::lock_guard<std::mutex> g(keep->create_mu);
+        uint16_t idx = detail::rant_topic_index(ch_);
         int rc = detail::rant_topic_retire(ch_);
         if (rc != 0) return static_cast<SendStatus>(rc);
-        if (it != impl.topics.end()) impl.topics.erase(it);
-        std::lock_guard<std::mutex> g2(impl.reg_mu);
-        impl.sub_handlers.erase(idx);
-    } else {
-        uint8_t bits = (uint8_t)((pubs > 0 ? 1 : 0) | (subs > 0 ? 2 : 0));
-        if (bits != it->second.bits) {
-            detail::rant_topic_set_role(ch_, static_cast<detail::RantRole>(priv::role_from_bits(bits)));
-            it->second.bits = bits;
-        }
-        it->second.pubs = pubs;
-        it->second.subs = subs;
-        if (handler_id_) {
-            std::lock_guard<std::mutex> g2(impl.reg_mu);
-            auto hit = impl.sub_handlers.find(idx);
-            if (hit != impl.sub_handlers.end() && hit->second) {
-                auto nv = std::make_shared<std::vector<SubHandler>>();
-                for (const SubHandler& sh : *hit->second) if (sh.id != handler_id_) nv->push_back(sh);
-                hit->second = std::move(nv);
-            }
-        }
+        std::lock_guard<std::mutex> g2(keep->reg_mu);
+        keep->sub_handlers.erase(idx);
     }
-    ch_ = nullptr; bits_ = 0; handler_id_ = 0; impl_.reset();
+    ch_ = nullptr; impl_.reset();
     return SendStatus::Ok;
 }
 
@@ -4114,6 +4014,24 @@ private:
     const detail::RantVariableUpdate* u_;
 };
 
+/* A variable's value copied out by get(), read by field name. The bytes are the whole value
+ * and the schema reads the part the handle names, a field remote's field included. */
+class VariableValue : public FieldView {
+public:
+    VariableValue(const VariableValue& o) : buf_(o.buf_) { aim(o.s_); }
+    VariableValue(VariableValue&& o) noexcept : buf_(std::move(o.buf_)) { aim(o.s_); }
+    VariableValue& operator=(VariableValue o) noexcept { buf_.swap(o.buf_); aim(o.s_); return *this; }
+
+private:
+    VariableValue(detail::RantBytes b, const detail::RantSchema* s) {
+        if (b.len) buf_.assign(b.data, b.data + b.len);
+        aim(s);
+    }
+    void aim(const detail::RantSchema* s) { d_ = detail::rant_bytes(buf_.data(), buf_.size()); s_ = s; }
+    std::vector<uint8_t> buf_;
+    friend class VariableDefinition<Bytes>;
+};
+
 /* VariableDefinition<Bytes> (untyped): this node holds the authoritative value. */
 template <> class VariableDefinition<Bytes> {
 public:
@@ -4135,16 +4053,14 @@ public:
     explicit operator bool() const noexcept { return valid(); }
 
     /* the current value, copied out under the node lock (nullopt = none yet) */
-    std::optional<std::vector<uint8_t>> get() const {
+    std::optional<VariableValue> get() const {
         auto p = pass();
         if (!p) return std::nullopt;
         detail::rant_node_lock(node_);
         detail::RantBytes b;
-        std::optional<std::vector<uint8_t>> out;
-        if (detail::rant_variable_get(p.raw(), &b) == 1) {
-            out.emplace();
-            if (b.len) out->assign(b.data, b.data + b.len);
-        }
+        const detail::RantSchema* s = nullptr;
+        std::optional<VariableValue> out;
+        if (detail::rant_variable_get(p.raw(), &b, &s) == 1) out = VariableValue(b, s);
         detail::rant_node_unlock(node_);
         return out;
     }
@@ -4467,7 +4383,7 @@ private:
                Node::MessageHandler on_message, const Qos& qos)
         : t_(on_message ? priv::TopicCore(n, name, Role::SubOnly, schema, qos) : priv::TopicCore()) {
         if (!on_message) { priv::raise_msg("rant::Subscriber: the handler is empty, make a pulled subscriber without one"); return; }
-        t_.add_handler(std::move(on_message));
+        t_.set_handler(std::move(on_message));
     }
     /* A pulled subscriber: messages wait until take() or take_latest() reads them. */
     Subscriber(Node& n, std::string_view name, const Schema* schema, const Qos& qos)
@@ -5018,7 +4934,7 @@ public:
         if (!p) return std::nullopt;
         auto b = core_.get();
         if (!b) return std::nullopt;
-        return priv::decode_payload<T>(*c_, Bytes(b->data(), b->size()), nullptr, core_.impl_.get(),
+        return priv::decode_payload<T>(*c_, b->data(), b->raw_schema(), core_.impl_.get(),
                                        core_.name_, "the variable's value did not decode into T");
     }
     /* Write v. */
@@ -5118,7 +5034,7 @@ public:
         if (!p) return std::nullopt;
         auto b = core_.get();
         if (!b) return std::nullopt;
-        return priv::decode_payload<T>(*c_, Bytes(b->data(), b->size()), nullptr, core_.impl_.get(),
+        return priv::decode_payload<T>(*c_, b->data(), b->raw_schema(), core_.impl_.get(),
                                        core_.name_, "the variable's value did not decode into T");
     }
     /* Wait until a value exists, up to timeout. false when timeout passed first. */

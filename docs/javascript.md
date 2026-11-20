@@ -67,7 +67,10 @@ node.subscriber("Line1/Conveyor", Conveyor, (c) => console.log(c.speed));
   `repairDelayMs`, `backpressureWaitMs`, `queueBytes`, `maxRateHz`, `noTimestamp`,
   `reflectFromMesh`.
 - `schema` is the schema in use, and `refresh()` takes the mesh's again for a
-  `reflectFromMesh` handle. Same name handles on one node share one topic.
+  `reflectFromMesh` handle. A node may hold many handles of one name, each with its own
+  type.
+- A name may end in a field path to receive one field. The whole sample still travels:
+  `node.subscriber("Gp12/RobotState.servo_power", bool, (on) => ...)`.
 - SendStatus: `"ok"`, `"no_topic"`, `"too_big"`, `"role"`, `"oom"`, `"state"`, `"nosys"`,
   `"schema"`.
 
@@ -108,6 +111,8 @@ const r = await add.call({ a: 2, b: 3 });     // r.status "ok", r.value { sum: 5
   SendStatus. `forced`, `wait(timeoutMs)`, `matchCount`.
 - `onChange(handler)` fires with the current value, then on each change. `onWrite(handler)`
   fires on every applied write. Both get `(value, update)`, and null stops them.
+- A remote name may end in a field path, and that remote then reads and sets only its
+  field: `node.remoteVariable("Gp12/RobotState.servo_power", bool)`.
 
 ## The rest
 

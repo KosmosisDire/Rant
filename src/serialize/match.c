@@ -141,7 +141,7 @@ static char *i_rant_why_type(char *p, char *end, const RantSchema *s, uint16_t i
     }
 }
 static int i_rant_why_done(char *buf, char *p){     /* NUL terminate the reason and refuse */
-    if (buf) *p = '\0';
+    if (buf && p) *p = '\0';
     return 0;
 }
 /* a schema's root in DSL words: a bare type's spelling, or struct 'Name' */
@@ -228,4 +228,117 @@ RantSchema *i_rant_schema_rebase(const RantSchema *sub, const RantSchema *pub,
     r->n_var = pub->n_var;   /* validate and walk see pub's messages */
     r->msg_min = pub->msg_min;
     return r;
+}
+
+RantSchema *i_rant_schema_at(const RantSchema *pub, const char *path, RantAllocFn alloc,
+                             void *user, const char **why){
+    uint32_t elems[RANT_SCHEMA_MAX_DEPTH]; uint16_t chain[RANT_SCHEMA_MAX_DEPTH];
+    uint16_t k = 0, depth = 0, brackets = 0, a, i, fi, first;
+    uint64_t base = 0; const i_Field *f; const char *c; const uint8_t *t;
+    size_t tl, nl = 0, body; uint8_t *w; RantSchema *s;
+    *why = "schema missing";
+    if (!pub || !path || !alloc) return NULL;
+    *why = "no such field in the writer";
+    if (!(f = i_rant_schema_field_by_path(pub, path, elems, &k))) return NULL;
+    for (c = path; *c; c++) if (*c == '[') brackets++;
+    *why = "a path needs an index for each array it crosses";
+    if (brackets != k) return NULL;
+    for (a = f->arr_parent; a != I_RANT_NO_PARENT; a = pub->fields[a].arr_parent) chain[depth++] = a;
+    for (i = 0; i < depth; i++){                     /* outermost first: the record starts add up */
+        const i_Field *arr = &pub->fields[chain[depth - 1u - i]];
+        *why = "an index reaches only into fixed arrays of fixed elements";
+        if (arr->kind != RANT_ARR || arr[1].var) return NULL;
+        *why = "an index is past the array's end";
+        if (elems[i] >= arr->count) return NULL;
+        base += arr->offset + (uint64_t)elems[i] * arr[1].size;
+    }
+    /* the field's type as a schema wire of its own: its name moves into the header */
+    t = pub->wire.data + f->type_off; tl = f->type_len;
+    if (tl >= 2u && t[0] == RANT_NAMED) nl = t[1];
+    body = nl ? 2u + nl : 0u;
+    *why = "out of memory";
+    if (!(w = (uint8_t *)alloc(user, NULL, 2u + nl + tl - body))) return NULL;
+    w[0] = RANT_SCHEMA_WIRE_VERSION; w[1] = (uint8_t)nl;
+    memcpy(w + 2, t + 2, nl);
+    memcpy(w + 2 + nl, t + body, tl - body);
+    s = i_rant_schema_parse(w, 2u + nl + tl - body, alloc, user);
+    alloc(user, w, 0);
+    if (!s) return NULL;
+    /* then the writer's layout: a bare root is the field's own row, a struct its members */
+    fi = (uint16_t)(f - pub->fields);
+    first = s->value_root ? fi : (uint16_t)(fi + 1u);
+    if (s->nfields != (uint16_t)(f->next - first)){ i_rant_schema_free(s, alloc, user); return NULL; }
+    for (i = 0; i < s->nfields; i++){
+        const i_Field *pf = &pub->fields[first + i];
+        s->fields[i].offset = pf->offset + (pf->arr_parent == f->arr_parent ? (uint32_t)base : 0u);
+        s->fields[i].var_ord = pf->var_ord;
+    }
+    s->size = pub->size; s->n_var = pub->n_var; s->msg_min = pub->msg_min;
+    *why = NULL;
+    return s;
+}
+
+RantSchema *i_rant_schema_view(const RantSchema *reader, const RantSchema *pub, const char *path,
+                               RantAllocFn alloc, void *user, char *why, size_t cap){
+    char *buf = (why && cap) ? why : NULL, *p = buf, *end = p ? why + cap - 1 : NULL;
+    const char *at_why; RantSchema *at, *v;
+    if (p) *p = '\0';
+    p = i_rant_why_str(p, end, "field '");
+    p = i_rant_why_str(p, end, path ? path : "");
+    p = i_rant_why_str(p, end, "': ");
+    if (!(at = i_rant_schema_at(pub, path, alloc, user, &at_why))){
+        i_rant_why_done(buf, i_rant_why_str(p, end, at_why));
+        return NULL;
+    }
+    if (!reader) return at;
+    if (!rant_schema_subset_why(reader, at, p, p ? (size_t)(end - p) + 1u : 0u)){
+        i_rant_schema_free(at, alloc, user);
+        return NULL;
+    }
+    v = i_rant_schema_rebase(reader, at, alloc, user);
+    i_rant_schema_free(at, alloc, user);
+    if (!v) i_rant_why_done(buf, i_rant_why_str(p, end, "out of memory"));
+    return v;
+}
+
+int i_rant_views_get(i_RantViews *m, const RantSchema *sub, const char *path, const RantSchema *pub,
+                     RantAllocFn alloc, void *user, const RantSchema **out, char *why, size_t cap){
+    char *p = (why && cap) ? why : NULL, *end = p ? why + cap - 1 : NULL;
+    i_RantView *v; uint16_t i;
+    if (p) *p = '\0';
+    *out = NULL;
+    if (!pub && !path && !sub) return 1;                   /* raw bytes for a raw reader */
+    for (i = 0; i < m->n; i++)
+        if (m->v[i].pub == pub){ *out = m->v[i].view; return *out != NULL; }
+    if (m->n == m->cap){
+        uint16_t nc = m->cap ? (uint16_t)(m->cap * 2u) : 2u;
+        i_RantView *nv = (i_RantView *)alloc(user, m->v, (size_t)nc * sizeof *nv);
+        if (!nv) return i_rant_why_done(p, i_rant_why_str(p, end, "out of memory"));
+        m->v = nv; m->cap = nc;
+    }
+    v = &m->v[m->n++];
+    v->pub = pub; v->view = NULL; v->owned = 0;
+    if (!pub)
+        return i_rant_why_done(p, i_rant_why_str(p, end,
+                               "their writer has no schema, a field or typed reader refuses"));
+    if (path){
+        v->view = i_rant_schema_view(sub, pub, path, alloc, user, p, p ? cap : 0u);
+        v->owned = 1;
+    } else if (!sub || rant_schema_hash(sub) == rant_schema_hash(pub))
+        v->view = sub ? sub : pub;
+    else if (rant_schema_subset_why(sub, pub, p, p ? cap : 0u)){
+        v->view = i_rant_schema_rebase(sub, pub, alloc, user);
+        v->owned = 1;
+        if (!v->view) i_rant_why_done(p, i_rant_why_str(p, end, "out of memory binding the reader view"));
+    }
+    *out = v->view;
+    return v->view != NULL;
+}
+
+void i_rant_views_drop(i_RantViews *m, RantAllocFn alloc, void *user){
+    uint16_t i;
+    for (i = 0; i < m->n; i++)
+        if (m->v[i].owned && m->v[i].view) i_rant_schema_free((RantSchema *)m->v[i].view, alloc, user);
+    if (m->v) alloc(user, m->v, 0);
+    m->v = NULL; m->n = m->cap = 0;
 }

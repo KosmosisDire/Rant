@@ -83,7 +83,7 @@ RantVariable *owner    = rant_node_create_variable_definition(n, "Speed", schema
                            &(RantVariableOpts){ .initial = rant_bytes(&v, sizeof v) });
 RantVariable *remote = rant_node_create_remote_variable(n, "Speed", schema, NULL);
 rant_variable_set(remote, value);            /* pushed to the owner, no response */
-rant_variable_get(remote, &bytes);           /* the latest replicated value */
+rant_variable_get(remote, &bytes, &schema);  /* the latest value and the schema to read it */
 rant_variable_wait(remote, 1000);            /* until the first value arrives */
 ```
 
@@ -109,6 +109,31 @@ queue.
 
 A remote's first write waits for the owner match like a first topic send, so
 `RANT_ERR_NO_TOPIC` means the owner is really absent.
+
+### Field remotes
+
+A remote name may end in a field path after a `.` to read and write one field, as on a
+topic (docs/topics.md). The whole value still travels.
+
+```c
+RantVariable *power = rant_node_create_remote_variable(n, "Gp12/RobotState.servo_power",
+                                                       rant_node_schema(n, "bool"), NULL);
+uint8_t on = 1;
+rant_variable_set(power, rant_bytes(&on, 1));   /* sets servo_power, leaves the rest */
+```
+
+- A node may hold many remotes of one name, whole or field. They share one copy of the
+  value, and each reads it with its own schema.
+- `rant_variable_get` returns the whole value and the schema that reads this handle's part.
+- `on_change` fires only when the part a handle reads changes.
+- A write sets only the fields its handle names: a field remote its field, a remote with a
+  smaller type its fields, a whole remote everything. Writes to different fields never undo
+  each other.
+- A value that is not of the handle's type, or a field the owner lacks, returns
+  `RANT_ERR_SCHEMA`.
+- A definition holds the whole value and takes no path.
+- Every remote of one name uses the first one's `queue`, and only the first takes
+  `reflect_from_mesh`.
 
 ## Call observers
 
@@ -162,8 +187,9 @@ after. From inside a callback, or while one of the handle's queued callbacks run
 another thread, the call is refused with `RANT_ERR_STATE` and the handle stays valid. A
 queued handle's parked callbacks are dropped, and a parked reply is answered CANCELLED
 inline. A re created entity with the same name takes its old slots back. A second
-same name handle while the first lives is refused: the create returns `NULL` and
-`rant_last_error` says `RANT_E_NAME_COLLISION`. Retire the first.
+same name definition or function remote while the first lives is refused: the create
+returns `NULL` and `rant_last_error` says `RANT_E_NAME_COLLISION`. Retire the first.
+Variable remotes of one name share, and the last retire takes them off the mesh.
 Complete or abandon outstanding defer tokens before retiring a definition.
 
 Like `rant_node_close` for the node, a retire assumes no other thread is inside a call on

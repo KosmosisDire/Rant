@@ -3,7 +3,7 @@
 `src/serialize/` is an independent schema layer over the transport. Both ends share the
 schema, so the wire carries no tags or keys: a value's meaning is its byte position. It
 depends only on `common/` and works standalone. The schema wire version is 8, and the
-message layout below belongs to node wire version 10 (`RANT_WIRE_VERSION`). The user facing
+message layout below belongs to node wire version 11 (`RANT_WIRE_VERSION`). The user facing
 DSL and the standard type roster are in docs/stdtypes.md.
 
 ## Layout
@@ -133,6 +133,29 @@ refused pair forms no proxy on either side. The node validates the message lengt
 the sender's schema before delivery and fires `RANT_E_SCHEMA_MISMATCH` with a per field
 `detail` from `rant_schema_subset_why`. There is deliberately no boot time
 validator API.
+
+## Field views
+
+A field view reads one field of a writer's message as if the field were the whole message,
+for a handle named `Entity.path` (spec/node.md). `i_rant_schema_at` makes a schema of the
+field's own type, its name moved into the header as a root's name rides there, then copies
+the writer's offsets and frame ordinals onto its rows and takes the writer's size, frame
+count and default length. `i_rant_schema_view` then rebases a reader's type onto it with
+the subset rule, or returns it as is for an untyped handle. So a view validates and walks
+the writer's whole message like any rebased schema, and its hash is the reader's, or the
+field type's when untyped.
+
+- The path syntax is the accessors': names, then `[N]` for each array it crosses. A name
+  under an array without its index is refused here, though the accessors step into
+  element 0.
+- An index reaches only into a fixed array of fixed elements, so every record on the path
+  is the message and the field's offset is static: each array adds its offset plus the
+  index times the element size. A variable array, or a fixed array of variable elements,
+  is refused.
+- The field itself may be any type, variable ones included. A variable field rides a frame
+  of the message, which the copied ordinal finds.
+- A refusal names the field and the rule, or the subset reason for a reader that does not
+  fit, for `RANT_E_SCHEMA_MISMATCH`.
 
 ## DSL
 

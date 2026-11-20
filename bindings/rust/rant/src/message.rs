@@ -638,7 +638,6 @@ fn resolve(ops: &[Op], s: *const ffi::RantSchema, base: &str, stop: u16, room: u
 /// incoming schema.
 pub(crate) struct Codec {
     pub(crate) schema: *const ffi::RantSchema,
-    pub(crate) hash: u64,
     name: &'static str,
     ops: Vec<Op>,
     own: Arc<Plan>,
@@ -675,13 +674,11 @@ impl Codec {
             return Err(Error::last(raw, &what));
         }
         // SAFETY: as above
-        let (hash, size, msg_min) =
-            unsafe { (ffi::rant_schema_hash(schema), ffi::rant_schema_size(schema), ffi::rant_schema_msg_min(schema)) };
+        let (size, msg_min) = unsafe { (ffi::rant_schema_size(schema), ffi::rant_schema_msg_min(schema)) };
         let places = resolve(&ops, schema, "", NO_PARENT, size)
             .ok_or_else(|| Error::new(ErrorKind::BadSchema, format!("{what}: the type does not fit its own schema")))?;
         let codec = Arc::new(Codec {
             schema,
-            hash,
             name: type_name::<T>(),
             ops,
             own: Arc::new(Plan { places, size }),

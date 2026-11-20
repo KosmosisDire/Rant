@@ -637,3 +637,68 @@ int rant_set_array_count_at(void *buf, size_t cap, const RantSchema *s, uint16_t
         return 0;
     return i_rant_set_count(s, (uint8_t *)buf, cap, &cr, f, sp, count);
 }
+
+/* units, merges and compares for variable writes (spec/patterns.md) */
+
+int i_rant_schema_unit(const RantSchema *s, uint16_t *k, i_RantUnit *u){
+    while (s && *k < s->nfields){
+        const i_Field *f = &s->fields[*k];
+        if (i_rant_row_framed(s, f)){ u->off = f->var_ord; u->len = 0; *k = f->next; return 1; }
+        if (f->kind == RANT_STRUCT && f->var){ (*k)++; continue; }   /* its members, fixed and framed */
+        *k = f->next;
+        if (f->size){ u->off = f->offset; u->len = f->size; return 1; }
+    }
+    return 0;
+}
+
+int i_rant_msg_merge(const RantSchema *s, RantBytes base, const RantSchema *ts, RantBytes top,
+                     const i_RantUnit *dst, const i_RantUnit *src, uint32_t n,
+                     uint8_t *out, size_t cap, uint32_t *out_len){
+    i_Span all, sp; uint64_t at = s->size, pos = s->size; uint32_t i; uint16_t ord;
+    if (!src) src = dst;
+    if (base.len < s->size || cap < s->size) return 0;
+    if (s->size) memcpy(out, base.data, s->size);
+    for (i = 0; i < n; i++){
+        if (!dst[i].len) continue;
+        if (src[i].len != dst[i].len || (uint64_t)dst[i].off + dst[i].len > s->size
+            || (uint64_t)src[i].off + src[i].len > ts->size || top.len < ts->size) return 0;
+        memcpy(out + dst[i].off, top.data + src[i].off, dst[i].len);
+    }
+    all.off = 0; all.len = top.len;
+    for (ord = 0; ord < s->n_var; ord++){
+        const uint8_t *from; uint32_t flen;
+        if (pos + 4u > base.len) return 0;
+        flen = i_rant_le_r32(base.data + pos);
+        if (pos + 4u + flen > base.len) return 0;
+        from = base.data + pos + 4u;
+        pos += 4u + (uint64_t)flen;
+        for (i = 0; i < n; i++) if (!dst[i].len && dst[i].off == ord) break;
+        if (i < n){                                        /* the frame comes from top */
+            if (src[i].len || !i_rant_record_frame(ts, top, all, -1, (uint16_t)src[i].off, &sp)) return 0;
+            from = top.data + sp.off; flen = (uint32_t)sp.len;
+        }
+        if (at + 4u + flen > cap) return 0;
+        i_rant_le_w32(out + at, flen);
+        if (flen) memcpy(out + at + 4u, from, flen);
+        at += 4u + (uint64_t)flen;
+    }
+    if (at > 0xFFFFFFFFu) return 0;
+    *out_len = (uint32_t)at;
+    return 1;
+}
+
+int i_rant_msg_units_equal(const RantSchema *va, RantBytes a, const RantSchema *vb, RantBytes b){
+    uint16_t ka = 0, kb = 0; i_RantUnit ua, ub; i_Span sa, sb, all_a, all_b;
+    all_a.off = 0; all_a.len = a.len; all_b.off = 0; all_b.len = b.len;
+    while (i_rant_schema_unit(va, &ka, &ua)){
+        if (!i_rant_schema_unit(vb, &kb, &ub) || ua.len != ub.len) return 0;
+        if (ua.len){
+            if ((uint64_t)ua.off + ua.len > a.len || (uint64_t)ub.off + ub.len > b.len
+                || memcmp(a.data + ua.off, b.data + ub.off, ua.len) != 0) return 0;
+        } else if (!i_rant_record_frame(va, a, all_a, -1, (uint16_t)ua.off, &sa)
+                   || !i_rant_record_frame(vb, b, all_b, -1, (uint16_t)ub.off, &sb)
+                   || sa.len != sb.len
+                   || (sa.len && memcmp(a.data + sa.off, b.data + sb.off, sa.len) != 0)) return 0;
+    }
+    return !i_rant_schema_unit(vb, &kb, &ub);
+}

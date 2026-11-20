@@ -2,6 +2,7 @@
  * knows nothing of what these patterns mean. The rules are in spec/patterns.md. */
 #include "core.h"
 #include "../common/bytes.h"
+#include "../serialize/internal.h"   /* field views, units and merges */
 #include <string.h>
 #include <stddef.h>            /* offsetof */
 #include <stdio.h>             /* snprintf for the duplicate authority condition text */
@@ -24,7 +25,7 @@ enum { I_RANT_META_SHUT = 0, I_RANT_META_DUE, I_RANT_META_OPEN };
 typedef struct i_RantPatterns {
     RantNode              *n;
     struct RantFunction *funcs;     /* linked lists for the tick and event fanout */
-    struct RantVariable *vars;
+    struct i_RantVar    *vars;
     /* the authorities sorted by (kind, hash), rebuilt lazily after a create or retire */
     i_RantPatAuth         *auth; uint16_t auth_n, auth_cap; uint8_t auth_dirty;
     struct RantFunction *meta;      /* the built in @rant/meta endpoint, both sides in one handle */
@@ -166,8 +167,9 @@ static void i_rant_pat_unlink(void **head, void *elem, size_t next_off){
 #define RANT__REC_PROGRESS   5u   /* prg: one progress update */
 #define RANT__REC_OBSERVED   6u   /* obs: one step of a call, on_event runs at dispatch */
 #define RANT__REC_OUTCOME  (I_RANT_REC_SYNTH | 1u)   /* [u32 call_id][u8 status][text] */
-#define RANT__REC_VAR       (I_RANT_REC_SYNTH | 2u)   /* [u32 write_seq][u8 forced][u8 flags][2][value] */
-#define RANT__VAR_REC_CHANGED 0x01u
+#define RANT__REC_VAR       (I_RANT_REC_SYNTH | 2u)   /* [u32 write_seq][u8 forced][u8 0][u16 n],
+                                   n handles [u16 id][u8 flags][u8 0], then the value */
+#define RANT__VAR_REC_CHANGED 0x01u   /* a handle's flags */
 #define RANT__VAR_REC_REPLAY  0x02u   /* the on_change replay at registration: no on_write */
 #define RANT__VAR_REC_HDR     8u
 
@@ -1523,67 +1525,130 @@ RantFunction *rant_node_meta_function(RantNode *n){
 
 #define RANT__VAR_PREFIX        5u    /* value channel: [u8 flags][u32 write_seq] */
 #define RANT__VAR_FLAG_FORCED 0x01u
-#define RANT__SET_PREFIX        1u    /* set channel: [u8 op] */
+#define RANT__SET_PREFIX        9u    /* set channel: [u8 op][u64 layout], then [u16 len][units] */
 #define RANT__SET_OP_FORCE      0x01u
 #define RANT__SET_OP_UNFORCE    0x02u
+#define RANT__SET_HDR_STACK   267u    /* a write's header on the stack: 32 units */
+/* a handle's part in the write being applied, which a parked record carries as its flags */
+#define RANT__VAR_DUE_CHANGED   RANT__VAR_REC_CHANGED   /* what it reads changed */
+#define RANT__VAR_DUE_WRITE     0x04u                   /* it reads this write */
 
-struct RantVariable {
+/* One variable on this node: its channels and its value, which every handle of the name
+ * shares. A definition is its only handle, remotes share. See spec/patterns.md. */
+typedef struct i_RantVar {
     RantNode         *n;
     i_RantPatterns *pm;
     volatile uint32_t cb_out;      /* its observers out with the lock released: a store write and
                                       retire wait on 0, since the update views the store */
-    struct RantVariable *next;     /* the manager list */
+    struct i_RantVar *next;        /* the manager list */
+    RantVariable     *handles;     /* in create order */
     RantTopic        *value;   /* owner PUB_ONLY, accessor SUB_ONLY */
     RantTopic        *set;     /* owner SUB_ONLY, accessor PUB_ONLY, NULL = a read only owner */
     uint8_t         is_owner, allow_force, readonly, forced, has_value;
+    uint8_t         reflect;        /* created with reflect_from_mesh */
+    uint16_t        next_id;        /* the next handle's id, which queued records name */
     uint32_t        write_seq;
     uint8_t        *store;  uint32_t store_len,  store_cap;    /* the value or the cache */
     uint8_t        *shadow; uint32_t shadow_len, shadow_cap;   /* owner: the source while forced */
-    RantVariableUpdateFn on_change; void *on_change_user;     /* fires only on a state change */
-    RantVariableUpdateFn on_write;    void *on_write_user;    /* fires on every applied write */
-    const RantSchema *cur_schema;    /* what store decodes with */
+    uint8_t        *scratch; uint32_t scratch_cap;             /* owner: a merge builds here */
+    i_RantUnit     *units;   uint32_t units_cap;               /* owner: a write's units */
+    const RantSchema *cur_schema;    /* what store decodes with: the owner's own, or its writer's */
     uint32_t        last_source;     /* the peer behind the current state, 0 = a local call */
     uint32_t        forced_by;       /* owner: the peer that forced it last, 0 = a local call */
     uint64_t        last_write_us;   /* when the current state applied, node clock */
     uint64_t        last_written_us;   /* the writer's wall clock for that write, 0 = unstamped */
     uint32_t       *dup_peers;      /* owner: peers already reported for duplicate authority */
     uint16_t        dup_n, dup_cap;
-    uint8_t         reflect;        /* created with reflect_from_mesh */
     uint64_t        generation;     /* the mesh generation the schema was taken at */
+} i_RantVar;
+
+struct RantVariable {
+    i_RantVar        *v;
+    RantVariable     *next;        /* the variable's next handle */
+    const RantSchema *schema;      /* as declared, registered in the node, NULL = untyped */
+    const RantSchema *view;        /* what it reads the store with now, NULL = raw bytes */
+    i_RantViews       views;       /* remote: its view of each writer schema met */
+    uint16_t          id;
+    uint8_t           readable;    /* remote: its view reads the store's writer */
+    uint8_t           due;         /* RANT__VAR_DUE_* */
+    uint8_t           path_at;     /* where the field path starts in name, 0 = the whole value */
+    uint8_t           name_len;
+    char              name[RANT_TOPIC_NAME_MAX + 1];
+    RantVariableUpdateFn on_change; void *on_change_user;     /* fires only on a state change */
+    RantVariableUpdateFn on_write;    void *on_write_user;    /* fires on every applied write */
 };
+
+static void *i_rant_pat_alloc(void *user, void *ptr, size_t size){
+    return i_rant_node_sys_alloc((RantNode*)user, ptr, size);
+}
+
+/* grows a buffer to hold len bytes, keeping what it holds. 0 on OOM with it unchanged */
+static int i_rant_buf_room(RantNode *n, uint8_t **buf, uint32_t *cap, size_t len){
+    uint8_t *nb;
+    if (*cap >= len) return 1;
+    if (len > 0xFFFFFFFFu || !(nb = (uint8_t*)i_rant_node_sys_bulk(n, *buf, len))) return 0;
+    *buf = nb; *cap = (uint32_t)len;
+    return 1;
+}
 
 /* copies v into a grown buffer, 0 on OOM with the buffer unchanged */
 static int i_rant_buf_put(RantNode *n, uint8_t **buf, uint32_t *len, uint32_t *cap, RantBytes v){
-    if (*cap < v.len){
-        uint8_t *nb = (uint8_t*)i_rant_node_sys_bulk(n, *buf, v.len ? v.len : 1u);
-        if (!nb) return 0;
-        *buf = nb; *cap = (uint32_t)(v.len ? v.len : 1u);
-    }
+    if (!i_rant_buf_room(n, buf, cap, v.len ? v.len : 1u)) return 0;
     if (v.len) memcpy(*buf, v.data, v.len);
     *len = (uint32_t)v.len;
     return 1;
 }
 
-static void i_rant_var_hdr(const RantVariable *v, uint8_t hdr[RANT__VAR_PREFIX]){
+/* room for n units in a grown array, 0 on OOM */
+static int i_rant_units_room(RantNode *n, i_RantUnit **u, uint32_t *cap, uint32_t want){
+    i_RantUnit *nu;
+    if (*cap >= want) return 1;
+    if (!(nu = (i_RantUnit*)i_rant_node_sys_alloc(n, *u, (size_t)want * sizeof *nu))) return 0;
+    *u = nu; *cap = want;
+    return 1;
+}
+
+static void i_rant_var_hdr(const i_RantVar *v, uint8_t hdr[RANT__VAR_PREFIX]){
     hdr[0] = (uint8_t)(v->forced ? RANT__VAR_FLAG_FORCED : 0);
     i_rant_le_w32(hdr + 1, v->write_seq);
 }
 
 /* under the lock, before the store is overwritten: would applying (val, forced_now) change
  * the observed state? The first value, different bytes, or a forced flag flip. */
-static int i_rant_var_would_change(const RantVariable *v, RantBytes val, int forced_now){
+static int i_rant_var_would_change(const i_RantVar *v, RantBytes val, int forced_now){
     if (!v->has_value) return 1;
     if ((v->forced != 0) != (forced_now != 0)) return 1;
     if (v->store_len != val.len) return 1;
     return val.len ? memcmp(v->store, val.data, val.len) != 0 : 0;
 }
 
-/* the current state as a RantVariableUpdate, views into manager memory */
-static void i_rant_var_update_view(RantVariable *v, RantVariableUpdate *u){
-    u->variable   = v;
-    u->name       = i_rant_topic_name(v->value);
+/* Does h read the same in two values: a through view va, b through vb? Lock held. */
+static int i_rant_var_same(const RantSchema *va, RantBytes a, const RantSchema *vb, RantBytes b,
+                           int whole){
+    if (whole || (!va && !vb))
+        return a.len == b.len && (!a.len || memcmp(a.data, b.data, a.len) == 0);
+    if (!va || !vb || rant_schema_hash(va) != rant_schema_hash(vb)) return 0;
+    return i_rant_msg_units_equal(va, a, vb, b);
+}
+
+/* h's view of the writer schema pub, a refusal reported once on h's name. Lock held. */
+static int i_rant_var_view(RantVariable *h, uint32_t peer, const RantSchema *pub,
+                           const RantSchema **out){
+    char why[160];
+    if (i_rant_views_get(&h->views, h->schema, h->path_at ? h->name + h->path_at : NULL, pub,
+                         i_rant_pat_alloc, h->v->n, out, why, sizeof why))
+        return 1;
+    if (why[0]) i_rant_node_sys_error(h->v->n, RANT_E_SCHEMA_MISMATCH, h->v->value, peer, h->name, why);
+    return 0;
+}
+
+/* the current state as h reads it, views into manager memory */
+static void i_rant_var_update_view(RantVariable *h, RantVariableUpdate *u){
+    i_RantVar *v = h->v;
+    u->variable   = h;
+    u->name       = rant_string(h->name, h->name_len);
     u->value      = rant_bytes(v->store, v->store_len);
-    u->schema     = v->cur_schema;
+    u->schema     = h->view;
     u->forced     = v->forced;
     u->write_seq  = v->write_seq;
     u->source     = v->last_source;
@@ -1591,62 +1656,102 @@ static void i_rant_var_update_view(RantVariable *v, RantVariableUpdate *u){
     u->written_us = v->last_written_us;
 }
 
-/* parks the current state as one RANT__REC_VAR record on the value channel, lock held */
-static void i_rant_var_park(RantVariable *v, uint8_t flags, uint32_t source, uint64_t when_us,
-                            uint64_t written_us){
-    uint8_t hdr[RANT__VAR_REC_HDR];
-    i_rant_le_w32(hdr, v->write_seq); hdr[4] = v->forced; hdr[5] = flags; hdr[6] = hdr[7] = 0;
-    (void)i_rant_topic_park(v->value, RANT__REC_VAR, source, rant_bytes(hdr, sizeof hdr),
+/* Parks the current state as one RANT__REC_VAR record on the value channel for the handles
+ * with due flags, or for only when not NULL with flags. Lock held. */
+static void i_rant_var_park(i_RantVar *v, RantVariable *only, uint8_t flags, uint32_t source,
+                            uint64_t when_us, uint64_t written_us){
+    uint8_t stack[RANT__VAR_REC_HDR + 4u * 16u], *hdr = stack;
+    RantVariable *h; uint32_t n = 0, k = 0;
+    for (h = v->handles; h; h = h->next) if (only ? h == only : h->due != 0) n++;
+    if (!n || n > 0xFFFFu) return;
+    if (n > 16u && !(hdr = (uint8_t*)i_rant_node_sys_alloc(v->n, NULL, RANT__VAR_REC_HDR + 4u * n))) return;
+    i_rant_le_w32(hdr, v->write_seq); hdr[4] = v->forced; hdr[5] = 0;
+    i_rant_le_w16(hdr + 6, (uint16_t)n);
+    for (h = v->handles; h; h = h->next){
+        uint8_t *e;
+        if (only ? h != only : h->due == 0) continue;
+        e = hdr + RANT__VAR_REC_HDR + 4u * k++;
+        i_rant_le_w16(e, h->id); e[2] = only ? flags : h->due; e[3] = 0;
+    }
+    (void)i_rant_topic_park(v->value, RANT__REC_VAR, source, rant_bytes(hdr, RANT__VAR_REC_HDR + 4u * n),
                             rant_bytes(v->store, v->store_len), written_us, when_us);
+    if (hdr != stack) i_rant_node_sys_alloc(v->n, hdr, 0);
 }
 
-/* A write just applied, lock held: stamp the write context, then fire on_write always and
- * on_change when the state changed, inline on this thread or parked for the queue. */
-static void i_rant_var_notify(RantVariable *v, int changed, uint32_t source, uint64_t when_us,
-                              uint64_t written_us){
-    RantVariableUpdate u;
+/* A write just applied, lock held: stamp the write context, then fire each due handle's
+ * on_write, and on_change where what it reads changed, inline on this thread or parked for
+ * the queue. A write from inside a callback fires its own round and clears the rest. */
+static void i_rant_var_notify(i_RantVar *v, uint32_t source, uint64_t when_us, uint64_t written_us){
+    RantVariable *h; int any = 0;
     v->last_source = source; v->last_write_us = when_us; v->last_written_us = written_us;
-    if (!v->on_write && !(changed && v->on_change)) return;
+    for (h = v->handles; h; h = h->next){
+        if (h->due && !h->on_write && !((h->due & RANT__VAR_DUE_CHANGED) && h->on_change)) h->due = 0;
+        if (h->due) any = 1;
+    }
+    if (!any) return;
     if (i_rant_topic_queue(v->value)){
-        i_rant_var_park(v, changed ? RANT__VAR_REC_CHANGED : 0u, source, when_us, written_us);
+        i_rant_var_park(v, NULL, 0, source, when_us, written_us);
+        for (h = v->handles; h; h = h->next) h->due = 0;
         return;
     }
-    i_rant_var_update_view(v, &u);
     {   i_RantCallbackScope cs;
         i_rant_node_sys_callback_begin(v->n, &cs, &v->cb_out);
-        if (v->on_write)             v->on_write(&u, v->on_write_user);
-        if (changed && v->on_change) v->on_change(&u, v->on_change_user);
+        for (h = v->handles; h; h = h->next){
+            RantVariableUpdate u; uint8_t due = h->due;
+            if (!due) continue;
+            h->due = 0;
+            i_rant_var_update_view(h, &u);
+            if (h->on_write) h->on_write(&u, h->on_write_user);
+            if ((due & RANT__VAR_DUE_CHANGED) && h->on_change) h->on_change(&u, h->on_change_user);
+        }
         i_rant_node_sys_callback_end(v->n, &cs, &v->cb_out);
     }
 }
 
-/* dispatch: the parked write with the value it carried, the observers as they are now */
+/* dispatch: the parked write with the value it carried, each named handle's observers as
+ * they are now */
 static void i_rant_var_dispatch(void *user, const RantMsg *msg, uint8_t kind){
-    RantVariable *v = (RantVariable*)user;
-    RantVariableUpdate u; uint8_t flags;
-    RantVariableUpdateFn on_write, on_change; void *write_user, *change_user;
-    int acquired;
+    i_RantVar *v = (i_RantVar*)user;
+    uint32_t n, k;
     if (kind != RANT__REC_VAR || msg->data.len < RANT__VAR_REC_HDR) return;
-    acquired = i_rant_node_sys_lock(v->n);
-    on_write = v->on_write; write_user = v->on_write_user;
-    on_change = v->on_change; change_user = v->on_change_user;
-    u.schema = v->cur_schema;
-    i_rant_node_sys_unlock(v->n, acquired);
-    flags = msg->data.data[5];
-    u.variable   = v;
-    u.name       = i_rant_topic_name(v->value);
-    u.value      = rant_bytes(msg->data.data + RANT__VAR_REC_HDR, msg->data.len - RANT__VAR_REC_HDR);
-    u.forced     = msg->data.data[4];
-    u.write_seq  = i_rant_le_r32(msg->data.data);
-    u.source     = msg->publisher_id;
-    u.recv_us    = msg->recv_us;
-    u.written_us = msg->written_us;
-    if (on_write && !(flags & RANT__VAR_REC_REPLAY)) on_write(&u, write_user);
-    if (on_change && (flags & RANT__VAR_REC_CHANGED)) on_change(&u, change_user);
+    n = i_rant_le_r16(msg->data.data + 6);
+    if (msg->data.len < RANT__VAR_REC_HDR + 4u * n) return;
+    for (k = 0; k < n; k++){
+        const uint8_t *e = msg->data.data + RANT__VAR_REC_HDR + 4u * k;
+        uint16_t id = i_rant_le_r16(e); uint8_t flags = e[2];
+        RantVariableUpdateFn on_write = NULL, on_change = NULL; void *write_user = NULL, *change_user = NULL;
+        RantVariableUpdate u; RantVariable *h; int acquired;
+        acquired = i_rant_node_sys_lock(v->n);
+        for (h = v->handles; h && h->id != id; h = h->next) {}
+        if (h){
+            on_write = h->on_write; write_user = h->on_write_user;
+            on_change = h->on_change; change_user = h->on_change_user;
+            u.schema = h->view;
+            u.name = rant_string(h->name, h->name_len);
+        }
+        i_rant_node_sys_unlock(v->n, acquired);
+        if (!h) continue;               /* retired since */
+        u.variable   = h;
+        u.value      = rant_bytes(msg->data.data + RANT__VAR_REC_HDR + 4u * n,
+                                  msg->data.len - RANT__VAR_REC_HDR - 4u * n);
+        u.forced     = msg->data.data[4];
+        u.write_seq  = i_rant_le_r32(msg->data.data);
+        u.source     = msg->publisher_id;
+        u.recv_us    = msg->recv_us;
+        u.written_us = msg->written_us;
+        if (on_write && !(flags & RANT__VAR_REC_REPLAY)) on_write(&u, write_user);
+        if (on_change && (flags & RANT__VAR_REC_CHANGED)) on_change(&u, change_user);
+    }
+}
+
+/* owner: marks its one handle due for the write being applied */
+static void i_rant_var_owner_due(i_RantVar *v, int changed){
+    if (v->handles)
+        v->handles->due = (uint8_t)(RANT__VAR_DUE_WRITE | (changed ? RANT__VAR_DUE_CHANGED : 0u));
 }
 
 /* owner: publishes the store under a held lock, a reentrant send with no wait */
-static void i_rant_var_publish_locked(RantVariable *v){
+static void i_rant_var_publish_locked(i_RantVar *v){
     uint8_t hdr[RANT__VAR_PREFIX];
     i_rant_var_hdr(v, hdr);
     (void)i_rant_topic_send_hdr(v->value, rant_bytes(hdr, RANT__VAR_PREFIX),
@@ -1655,7 +1760,7 @@ static void i_rant_var_publish_locked(RantVariable *v){
 
 /* owner: a dumb write from a held lock context. Absorbed into the shadow while forced,
  * with no event, else stored, published and notified. */
-static void i_rant_var_owner_apply(RantVariable *v, RantBytes val, uint32_t source,
+static void i_rant_var_owner_apply(i_RantVar *v, RantBytes val, uint32_t source,
                                    uint64_t when_us, uint64_t written_us){
     int changed;
     i_rant_node_sys_settle(v->n, &v->cb_out);
@@ -1664,11 +1769,12 @@ static void i_rant_var_owner_apply(RantVariable *v, RantBytes val, uint32_t sour
     if (!i_rant_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, val)) return;
     v->has_value = 1; v->write_seq++;
     i_rant_var_publish_locked(v);
-    i_rant_var_notify(v, changed, source, when_us, written_us);
+    i_rant_var_owner_due(v, changed);
+    i_rant_var_notify(v, source, when_us, written_us);
 }
 /* owner: force to val. Without allow_force this is a silent no op, force is opaque on the
  * wire and the local API refuses loudly before reaching here. */
-static void i_rant_var_owner_force(RantVariable *v, RantBytes val, uint32_t source,
+static void i_rant_var_owner_force(i_RantVar *v, RantBytes val, uint32_t source,
                                    uint64_t when_us, uint64_t written_us){
     int changed;
     if (!v->allow_force) return;
@@ -1680,9 +1786,10 @@ static void i_rant_var_owner_force(RantVariable *v, RantBytes val, uint32_t sour
     v->forced = 1; v->has_value = 1; v->write_seq++; v->forced_by = source;
     i_rant_var_publish_locked(v);
     if (v->pm) i_rant_pat_problems(v->pm);    /* a forced value stays visible on the status */
-    i_rant_var_notify(v, changed, source, when_us, written_us);
+    i_rant_var_owner_due(v, changed);
+    i_rant_var_notify(v, source, when_us, written_us);
 }
-static void i_rant_var_owner_unforce(RantVariable *v, uint32_t source, uint64_t when_us,
+static void i_rant_var_owner_unforce(i_RantVar *v, uint32_t source, uint64_t when_us,
                                      uint64_t written_us){
     if (!v->forced) return;
     i_rant_node_sys_settle(v->n, &v->cb_out);
@@ -1691,50 +1798,181 @@ static void i_rant_var_owner_unforce(RantVariable *v, uint32_t source, uint64_t 
     v->write_seq++;
     i_rant_var_publish_locked(v);
     if (v->pm) i_rant_pat_problems(v->pm);
-    i_rant_var_notify(v, 1, source, when_us, written_us);     /* a flag flip is always a change */
+    i_rant_var_owner_due(v, 1);     /* a flag flip is always a change */
+    i_rant_var_notify(v, source, when_us, written_us);
 }
 
-/* owner: a set, force or unforce op arrived, lock held. A plain set must carry a value,
- * an empty one is ignored. */
+/* owner: a patch's units merged over the value it lands on, the shadow while a plain set is
+ * absorbed, else the store, or the default before any value. Into scratch. Lock held. */
+static int i_rant_var_owner_merge(i_RantVar *v, RantBytes patch, const uint8_t *units, uint32_t n,
+                                  int absorbed, RantBytes *out){
+    const RantSchema *s = v->cur_schema;
+    RantBytes base = absorbed ? rant_bytes(v->shadow, v->shadow_len)
+                   : rant_bytes(v->store, v->has_value ? v->store_len : 0u);
+    uint32_t k, len, def = rant_schema_msg_min(s), at = base.len ? 0u : def;
+    if (!i_rant_buf_room(v->n, &v->scratch, &v->scratch_cap, (size_t)at + (base.len ? base.len : def) + patch.len + 1u)
+        || !i_rant_units_room(v->n, &v->units, &v->units_cap, n)) return 0;
+    for (k = 0; k < n; k++){
+        v->units[k].off = i_rant_le_r32(units + 8u * k);
+        v->units[k].len = i_rant_le_r32(units + 8u * k + 4u);
+    }
+    if (at){                        /* no value yet: the units land on the default */
+        if (!rant_schema_message_default(s, v->scratch, def)) return 0;
+        base = rant_bytes(v->scratch, def);
+    }
+    if (!i_rant_msg_merge(s, base, s, patch, v->units, NULL, n, v->scratch + at,
+                          v->scratch_cap - at, &len)) return 0;
+    *out = rant_bytes(v->scratch + at, len);
+    return 1;
+}
+
+/* owner: a set, force or unforce op arrived, lock held. A write in a layout other than the
+ * owner's, or not one of its messages, is dropped. An empty plain set is ignored. */
 static void i_rant_var_on_set(void *user, const RantMsg *msg){
-    RantVariable *v = (RantVariable*)user;
-    uint8_t op = msg->header.len >= 1 ? msg->header.data[0] : 0;
-    if (op & RANT__SET_OP_UNFORCE)      i_rant_var_owner_unforce(v, msg->publisher_id, msg->recv_us, msg->written_us);
-    else if (op & RANT__SET_OP_FORCE) { if (msg->data.len) i_rant_var_owner_force(v, msg->data, msg->publisher_id, msg->recv_us, msg->written_us); }
-    else                              { if (msg->data.len) i_rant_var_owner_apply(v, msg->data, msg->publisher_id, msg->recv_us, msg->written_us); }
+    i_RantVar *v = (i_RantVar*)user;
+    const uint8_t *hd = msg->header.data; RantBytes val = msg->data;
+    uint8_t op = msg->header.len >= 1 ? hd[0] : 0;
+    uint32_t ulen;
+    if (op & RANT__SET_OP_UNFORCE){
+        i_rant_var_owner_unforce(v, msg->publisher_id, msg->recv_us, msg->written_us);
+        return;
+    }
+    if (!val.len || msg->header.len < RANT__SET_PREFIX + 2u) return;
+    if (i_rant_le_r64(hd + 1) != (v->cur_schema ? rant_schema_hash(v->cur_schema) : 0u)) return;
+    ulen = i_rant_le_r16(hd + RANT__SET_PREFIX);
+    if (ulen % 8u || RANT__SET_PREFIX + 2u + ulen > msg->header.len) return;
+    if (v->cur_schema && !rant_schema_validate(v->cur_schema, val)) return;
+    if (ulen && (!v->cur_schema || !i_rant_var_owner_merge(v, val, hd + RANT__SET_PREFIX + 2u, ulen / 8u,
+                                                         !(op & RANT__SET_OP_FORCE) && v->forced, &val)))
+        return;
+    if (op & RANT__SET_OP_FORCE) i_rant_var_owner_force(v, val, msg->publisher_id, msg->recv_us, msg->written_us);
+    else                         i_rant_var_owner_apply(v, val, msg->publisher_id, msg->recv_us, msg->written_us);
 }
 
-/* accessor: a new value arrived. Cache it with its forced flag and write_seq, then notify
- * with the owner as the source. */
+/* accessor: a new value arrived. Cache it with its forced flag and write_seq, mark each
+ * handle that reads it due, changed where its own part changed, then notify. */
 static void i_rant_var_on_value(void *user, const RantMsg *msg){
-    RantVariable *v = (RantVariable*)user;
-    int forced_in, changed; uint32_t seq_in;
+    i_RantVar *v = (i_RantVar*)user;
+    RantVariable *h; const RantSchema *pub; RantBytes old;
+    int forced_in; uint32_t seq_in;
     if (msg->header.len < RANT__VAR_PREFIX) return;
     /* the stale order guard: a same owner value behind the cached seq is dropped (signed
        distance, wrap safe). A different publisher always applies. See spec/patterns.md */
     seq_in = i_rant_le_r32(msg->header.data + 1);
     if (v->has_value && msg->publisher_id == v->last_source
         && (int32_t)(seq_in - v->write_seq) < 0) return;
+    /* the views read the writer's whole message, which a narrower gate binding checked in part */
+    pub = i_rant_topic_writer_schema(v->value, msg->publisher_id);
+    if (pub && msg->schema != pub && !rant_schema_validate(pub, msg->data)) return;
     forced_in = (msg->header.data[0] & RANT__VAR_FLAG_FORCED) ? 1 : 0;
     i_rant_node_sys_settle(v->n, &v->cb_out);
-    changed = i_rant_var_would_change(v, msg->data, forced_in);
-    if (i_rant_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, msg->data)){
-        v->has_value = 1;
-        v->forced = (uint8_t)forced_in;
-        v->write_seq = i_rant_le_r32(msg->header.data + 1);
-        v->cur_schema = msg->schema;
-        i_rant_var_notify(v, changed, msg->publisher_id, msg->recv_us, msg->written_us);
+    /* grown first, so the compare below sees the old value and the copy cannot fail */
+    if (!i_rant_buf_room(v->n, &v->store, &v->store_cap, msg->data.len ? msg->data.len : 1u)) return;
+    old = rant_bytes(v->store, v->has_value ? v->store_len : 0u);
+    for (h = v->handles; h; h = h->next){
+        const RantSchema *view; int changed;
+        h->due = 0;
+        if (!i_rant_var_view(h, msg->publisher_id, pub, &view)){ h->readable = 0; continue; }
+        changed = !v->has_value || !h->readable || (v->forced != 0) != (forced_in != 0)
+               || !i_rant_var_same(h->view, old, view, msg->data, !h->path_at && v->cur_schema == pub
+                                   && (view == pub || (view && rant_schema_hash(view) == rant_schema_hash(pub))));
+        h->view = view; h->readable = 1;
+        h->due = (uint8_t)(RANT__VAR_DUE_WRITE | (changed ? RANT__VAR_DUE_CHANGED : 0u));
     }
+    if (msg->data.len) memcpy(v->store, msg->data.data, msg->data.len);
+    v->store_len = (uint32_t)msg->data.len;
+    v->has_value = 1;
+    v->forced = (uint8_t)forced_in;
+    v->write_seq = seq_in;
+    v->cur_schema = pub;
+    i_rant_var_notify(v, msg->publisher_id, msg->recv_us, msg->written_us);
+}
+
+/* the variable named name on this node, NULL when none. Lock held. */
+static i_RantVar *i_rant_var_find(i_RantPatterns *pm, const char *name, size_t len){
+    i_RantVar *v;
+    for (v = pm->vars; v; v = v->next){
+        RantString nm = i_rant_topic_name(v->value);
+        if (nm.len == len && memcmp(nm.data, name, len) == 0) return v;
+    }
+    return NULL;
+}
+
+/* A create refused for a reason the detail names, NULL. Lock held. */
+static RantVariable *i_rant_var_refuse(RantNode *n, RantErrorKind err, const char *name, const char *why){
+    i_rant_node_sys_error(n, err, NULL, 0, name, why);
+    return NULL;
+}
+
+/* Fills in a handle of v named name, path after path_at, and links it last, reading the
+ * value already cached. Lock held. */
+static void i_rant_var_link(i_RantVar *v, RantVariable *h, const char *name, size_t path_at,
+                            const RantSchema *schema){
+    RantVariable **pp;
+    size_t nl = strlen(name);
+    h->v = v;
+    h->id = v->next_id++;
+    h->schema = schema;
+    h->view = v->is_owner ? schema : NULL;
+    h->path_at = (uint8_t)path_at;
+    memcpy(h->name, name, nl); h->name[nl] = '\0'; h->name_len = (uint8_t)nl;
+    for (pp = &v->handles; *pp; pp = &(*pp)->next) {}
+    *pp = h;
+    if (!v->is_owner && v->has_value && i_rant_var_view(h, v->last_source, v->cur_schema, &h->view))
+        h->readable = 1;
+}
+
+/* A later remote of a variable this node has: a handle on its channels and value. Lock held
+ * and the variable's observers settled. */
+static RantVariable *i_rant_var_join(i_RantVar *v, const char *name, size_t path_at,
+                                     const RantSchema *schema, const RantVariableOpts *opts){
+    RantVariable *h;
+    if ((opts ? opts->queue : NULL) != i_rant_topic_queue(v->value))
+        return i_rant_var_refuse(v->n, RANT_E_STATE, name, "every handle of a variable uses the first one's queue");
+    if (opts && opts->reflect_from_mesh)
+        return i_rant_var_refuse(v->n, RANT_E_STATE, name, "reflect_from_mesh needs the variable's first handle");
+    if (!(h = (RantVariable*)i_rant_node_sys_alloc(v->n, NULL, sizeof *h)))
+        return i_rant_var_refuse(v->n, RANT_E_OOM, name, NULL);
+    memset(h, 0, sizeof *h);
+    i_rant_var_link(v, h, name, path_at, schema);
+    return h;
 }
 
 static RantVariable *i_rant_variable_open(RantNode *n, const char *name, const RantSchema *schema,
                                           const RantVariableOpts *opts, int owner){
-    i_RantPatterns *pm; RantVariable *v;
-    char sn[RANT_TOPIC_NAME_MAX + 1]; size_t nl;
+    i_RantPatterns *pm; i_RantVar *v; RantVariable *h;
+    char ent[RANT_TOPIC_NAME_MAX + 1], sn[RANT_TOPIC_NAME_MAX + 1];
+    const char *dot; size_t nl, el;
     RantTopicOpts vopt, sopt; int acquired, readonly, make_set;
     if (!n || !name) return NULL;
     nl = strlen(name);
-    if (nl == 0 || nl + 4 > RANT_TOPIC_NAME_MAX) return NULL;     /* room for "@set" */
+    dot = strchr(name, '.');
+    el = dot ? (size_t)(dot - name) : nl;
+    if (nl == 0 || el + 4 > RANT_TOPIC_NAME_MAX) return NULL;     /* room for "@set" */
+    memcpy(ent, name, el); ent[el] = '\0';
+    acquired = i_rant_node_sys_lock(n);
+    if (!acquired){        /* from a callback, as a channel create is */
+        i_rant_node_sys_unlock(n, acquired);
+        return i_rant_var_refuse(n, RANT_E_STATE, name, "a variable is never created from a callback");
+    }
+    if (dot && (owner || !el || !dot[1])){
+        i_rant_node_sys_unlock(n, acquired);
+        return i_rant_var_refuse(n, RANT_E_BAD_NAME, name, owner
+            ? "a definition holds the whole value, only a remote takes a field path"
+            : "a field path needs a name before and after the '.'");
+    }
+    if (schema) schema = i_rant_node_schema_own(n, schema);
+    pm = i_rant_patterns_get(n);
+    v = (pm && !owner) ? i_rant_var_find(pm, ent, el) : NULL;
+    if (v && !v->is_owner){
+        i_rant_node_sys_settle(n, &v->cb_out);
+        h = i_rant_var_join(v, name, dot ? el + 1u : 0u, schema, opts);
+        i_rant_node_sys_unlock(n, acquired);
+        return h;
+    }
+    i_rant_node_sys_unlock(n, acquired);
+    if (dot && opts && opts->reflect_from_mesh)
+        return i_rant_var_refuse(n, RANT_E_STATE, name, "reflect_from_mesh needs the whole value");
     readonly = (opts && opts->access == RANT_VAR_READONLY);
     make_set = owner ? !readonly : 1;   /* a read only owner has no set channel */
 
@@ -1754,20 +1992,26 @@ static RantVariable *i_rant_variable_open(RantNode *n, const char *name, const R
     sopt = vopt; sopt.qos.catch_up = 0;   /* the set channel: no replay, the same repair depth */
     sopt.queue = NULL;
 
-    v = (RantVariable*)i_rant_pat_handle_new(n, sizeof *v, &pm);
+    v = (i_RantVar*)i_rant_pat_handle_new(n, sizeof *v + sizeof *h, &pm);
     if (!v) return NULL;
+    h = (RantVariable*)(v + 1);      /* the first handle shares the variable's block */
     if (opts && opts->reflect_from_mesh){
         const RantSchema *ms;
         v->reflect = 1;
-        i_rant_node_reflect_pick(n, RANT_ENTITY_VARIABLE, name, 0, owner, &ms, NULL, &v->generation);
-        if (!schema) schema = ms;
+        i_rant_node_reflect_pick(n, RANT_ENTITY_VARIABLE, ent, 0, owner, &ms, NULL, &v->generation);
+        if (!schema && ms){
+            acquired = i_rant_node_sys_lock(n);
+            schema = i_rant_node_schema_own(n, ms);
+            i_rant_node_sys_unlock(n, acquired);
+        }
     }
     v->n = n; v->pm = pm; v->is_owner = (uint8_t)owner;
     v->allow_force = (uint8_t)(opts && opts->allow_force);
     v->readonly = (uint8_t)readonly;
-    v->cur_schema = schema;
-    v->value = i_rant_node_create_pattern_topic(n, name, owner ? RANT_PUB_ONLY : RANT_SUB_ONLY,
-                              schema, &vopt, RANT_KIND_VARIABLE, RANT__VAR_PREFIX, 0,
+    v->cur_schema = owner ? schema : NULL;
+    /* a field handle first leaves the channel untyped, each handle reads with its own view */
+    v->value = i_rant_node_create_pattern_topic(n, ent, owner ? RANT_PUB_ONLY : RANT_SUB_ONLY,
+                              dot ? NULL : schema, &vopt, RANT_KIND_VARIABLE, RANT__VAR_PREFIX, 0,
                               (uint8_t)((owner && v->allow_force) ? RANT_ATTR_FORCEABLE : 0u),
                               owner ? NULL : i_rant_var_on_value, v);
     if (!v->value) return NULL;   /* v stays pool allocated: nothing routes into it yet */
@@ -1777,22 +2021,24 @@ static RantVariable *i_rant_variable_open(RantNode *n, const char *name, const R
            first write orders above its predecessor's last. See spec/patterns.md */
         v->write_seq = (uint32_t)i_rant_topic_seqno(v->value);
     if (make_set){
-        memcpy(sn, name, nl); memcpy(sn + nl, "@set", 5);
+        /* untyped: a write carries the owner's layout in its header, the owner checks it */
+        memcpy(sn, ent, el); memcpy(sn + el, "@set", 5);
         v->set = i_rant_node_create_pattern_topic(n, sn, owner ? RANT_SUB_ONLY : RANT_PUB_ONLY,
-                              schema, &sopt, RANT_KIND_VAR_SET, RANT__SET_PREFIX, 0, 0,
+                              NULL, &sopt, RANT_KIND_VAR_SET, RANT__SET_PREFIX, 0, 0,
                               owner ? i_rant_var_on_set : NULL, v);
         if (!v->set)   /* the value topic may route to v: keep the handle */
             return (RantVariable*)i_rant_pat_half_create_fail(v->value);
     }
     acquired = i_rant_node_sys_lock(n);         /* publish into the manager list */
+    i_rant_var_link(v, h, name, dot ? el + 1u : 0u, schema);
     v->next = pm->vars; pm->vars = v; pm->auth_dirty = 1;
     if (owner)      /* a rival owner may already be on the network */
         i_rant_pat_dup_sweep(n, v->value, RANT_ENTITY_VARIABLE,
                              &v->dup_peers, &v->dup_n, &v->dup_cap);
     i_rant_node_sys_unlock(n, acquired);
     if (owner && opts && opts->initial.len)   /* seed the store and history */
-        rant_variable_set(v, opts->initial);
-    return v;
+        rant_variable_set(h, opts->initial);
+    return h;
 }
 
 /* The value and set channels reach peers in one announce, as a function's do. */
@@ -1821,139 +2067,237 @@ RantVariable *rant_node_create_remote_variable(RantNode *n, const char *name,
     return i_rant_variable_new(n, mesh_name, schema, opts, 0);
 }
 
-int rant_variable_get(RantVariable *var, RantBytes *out){
+int rant_variable_get(RantVariable *var, RantBytes *out, const RantSchema **schema){
     int acquired, has;
     if (!var) return 0;
-    acquired = i_rant_node_sys_lock(var->n);
-    has = var->has_value;
-    if (out){ out->data = var->store; out->len = has ? var->store_len : 0; }
-    i_rant_node_sys_unlock(var->n, acquired);
+    acquired = i_rant_node_sys_lock(var->v->n);
+    has = var->v->has_value && (var->v->is_owner || var->readable);
+    if (out){ out->data = var->v->store; out->len = has ? var->v->store_len : 0; }
+    if (schema) *schema = has ? var->view : NULL;
+    i_rant_node_sys_unlock(var->v->n, acquired);
     return has;   /* out views manager memory */
 }
 
 /* accessor write routing: no owner at all versus a read only owner */
-static int i_rant_var_accessor_route(RantVariable *var){
-    if (i_rant_topic_source_match_count(var->value) == 0) return RANT_ERR_NO_TOPIC;
-    if (!var->set || i_rant_topic_all_match_count(var->set) == 0) return RANT_ERR_ROLE;
+static int i_rant_var_accessor_route(i_RantVar *v){
+    if (i_rant_topic_source_match_count(v->value) == 0) return RANT_ERR_NO_TOPIC;
+    if (!v->set || i_rant_topic_all_match_count(v->set) == 0) return RANT_ERR_ROLE;
     return RANT_OK;
 }
 
 /* The routed form every accessor write goes through: while the owner match is still
  * forming, wait on the set channel like a first send does, then re derive the verdict. */
-static int i_rant_var_accessor_route_wait(RantVariable *var){
-    int r = i_rant_var_accessor_route(var);
-    if (r == RANT_OK || !var->set) return r;
-    (void)i_rant_topic_match_wait(var->set);
-    return i_rant_var_accessor_route(var);
+static int i_rant_var_accessor_route_wait(i_RantVar *v){
+    int r = i_rant_var_accessor_route(v);
+    if (r == RANT_OK || !v->set) return r;
+    (void)i_rant_topic_match_wait(v->set);
+    return i_rant_var_accessor_route(v);
+}
+
+/* An accessor's write through h, built in the owner's layout: the header in hdr (cap
+ * RANT__SET_HDR_STACK) or *heap, the payload value itself or *heap. Lock held. */
+static int i_rant_var_build(RantVariable *h, uint8_t op, RantBytes value, uint8_t *hdr,
+                            RantBytes *hdr_out, RantBytes *body, uint8_t **heap){
+    i_RantVar *v = h->v;
+    const RantSchema *own = v->cur_schema, *view, *nat;
+    uint32_t def, n = 0, k, len, peer = v->last_source; uint16_t kn = 0, kv = 0;
+    i_RantUnit uv, *src, *dst;
+    size_t hl, need; uint8_t *buf;
+    if (!v->has_value){          /* no value cached yet: the owner the set channel reaches */
+        peer = i_rant_topic_oldest_match(v->set);
+        own = peer ? i_rant_topic_writer_schema(v->value, peer) : NULL;
+    }
+    hdr[0] = op;
+    i_rant_le_w64(hdr + 1, own ? rant_schema_hash(own) : 0u);
+    i_rant_le_w16(hdr + RANT__SET_PREFIX, 0);
+    *hdr_out = rant_bytes(hdr, RANT__SET_PREFIX + 2u);
+    *body = value;
+    if (!own){                   /* an untyped owner takes the whole value as it comes */
+        if (h->path_at || h->schema) return RANT_ERR_SCHEMA;
+        return RANT_OK;
+    }
+    if (!i_rant_var_view(h, peer, own, &view)) return RANT_ERR_SCHEMA;
+    /* the value's own layout: what h declared, else the field's or the owner's type */
+    nat = h->schema ? h->schema : h->path_at ? i_rant_node_schema_own(v->n, view) : own;
+    if (!nat || !rant_schema_validate(nat, value)) return RANT_ERR_SCHEMA;
+    if (!h->path_at && rant_schema_hash(nat) == rant_schema_hash(own)) return RANT_OK;
+    while (i_rant_schema_unit(view, &kv, &uv)) n++;
+    if (!n) return RANT_ERR_SCHEMA;         /* no units would read as the whole value */
+    def = rant_schema_msg_min(own);
+    hl = RANT__SET_PREFIX + 2u + 8u * (size_t)n;
+    need = 2u * sizeof(i_RantUnit) * n + def + def + value.len + (hl > RANT__SET_HDR_STACK ? hl : 0u);
+    if (n > 0x1FFFu || !(buf = (uint8_t*)i_rant_node_sys_bulk(v->n, NULL, need ? need : 1u)))
+        return RANT_ERR_OOM;
+    *heap = buf;
+    dst = (i_RantUnit*)buf; src = dst + n;
+    for (k = 0, kv = 0; k < n; k++){
+        (void)i_rant_schema_unit(view, &kv, &dst[k]);
+        (void)i_rant_schema_unit(nat, &kn, &src[k]);
+    }
+    buf += 2u * sizeof(i_RantUnit) * n;
+    if (!rant_schema_message_default(own, buf, def)
+        || !i_rant_msg_merge(own, rant_bytes(buf, def), nat, value, dst, src, n,
+                             buf + def, def + value.len, &len)) return RANT_ERR_SCHEMA;
+    *body = rant_bytes(buf + def, len);
+    if (hl > RANT__SET_HDR_STACK){ memcpy(buf + def + def + value.len, hdr, RANT__SET_PREFIX); hdr = buf + def + def + value.len; }
+    i_rant_le_w16(hdr + RANT__SET_PREFIX, (uint16_t)(8u * n));
+    for (k = 0; k < n; k++){
+        i_rant_le_w32(hdr + RANT__SET_PREFIX + 2u + 8u * k, dst[k].off);
+        i_rant_le_w32(hdr + RANT__SET_PREFIX + 6u + 8u * k, dst[k].len);
+    }
+    *hdr_out = rant_bytes(hdr, hl);
+    return RANT_OK;
+}
+
+/* An accessor's set or force: routed, built under the lock, sent outside it. */
+static int i_rant_var_send(RantVariable *h, uint8_t op, RantBytes value){
+    i_RantVar *v = h->v;
+    uint8_t hdr[RANT__SET_HDR_STACK], *heap = NULL;
+    RantBytes hb, body; int r, acquired;
+    acquired = i_rant_node_sys_lock(v->n);
+    r = i_rant_var_build(h, op, value, hdr, &hb, &body, &heap);
+    i_rant_node_sys_unlock(v->n, acquired);
+    if (r == RANT_OK) r = i_rant_topic_send_hdr(v->set, hb, body);
+    if (heap){
+        acquired = i_rant_node_sys_lock(v->n);
+        i_rant_node_sys_bulk(v->n, heap, 0);
+        i_rant_node_sys_unlock(v->n, acquired);
+    }
+    return r;
 }
 
 int rant_variable_set(RantVariable *var, RantBytes value){
+    i_RantVar *v;
     int acquired, r = RANT_OK, publish = 0;
     uint32_t my_seq = 0;
     uint8_t hdr[RANT__VAR_PREFIX];
     if (!var) return RANT_ERR_NO_TOPIC;
-    if (var->is_owner){
+    v = var->v;
+    if (v->is_owner){
         /* mutate the store under the lock, publish outside it from the caller's buffer so
            the send engages backpressure */
-        acquired = i_rant_node_sys_lock(var->n);
-        if (var->forced){
-            i_rant_buf_put(var->n, &var->shadow, &var->shadow_len, &var->shadow_cap, value);
+        acquired = i_rant_node_sys_lock(v->n);
+        if (v->forced){
+            i_rant_buf_put(v->n, &v->shadow, &v->shadow_len, &v->shadow_cap, value);
         } else {
-            int changed = i_rant_var_would_change(var, value, 0);
-            if (!i_rant_buf_put(var->n, &var->store, &var->store_len, &var->store_cap, value)){
+            int changed = i_rant_var_would_change(v, value, 0);
+            if (!i_rant_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, value)){
                 r = RANT_ERR_OOM;
             } else {
-                var->has_value = 1; var->write_seq++;
-                my_seq = var->write_seq;
-                i_rant_var_hdr(var, hdr);
+                v->has_value = 1; v->write_seq++;
+                my_seq = v->write_seq;
+                i_rant_var_hdr(v, hdr);
                 publish = 1;
-                i_rant_var_notify(var, changed, 0, i_rant_node_now_us(var->n),
-                                  i_rant_node_wall_us(var->n));     /* a local write: our clock */
+                i_rant_var_owner_due(v, changed);
+                i_rant_var_notify(v, 0, i_rant_node_now_us(v->n),
+                                  i_rant_node_wall_us(v->n));     /* a local write: our clock */
                 /* a reentrant set inside the callback committed first, so sending ours now
                    would put stale bytes newest in history. Skip, the write itself stands */
-                if (var->write_seq != my_seq) publish = 0;
+                if (v->write_seq != my_seq) publish = 0;
             }
         }
-        i_rant_node_sys_unlock(var->n, acquired);
-        return publish ? i_rant_topic_send_hdr(var->value, rant_bytes(hdr, RANT__VAR_PREFIX), value) : r;
+        i_rant_node_sys_unlock(v->n, acquired);
+        return publish ? i_rant_topic_send_hdr(v->value, rant_bytes(hdr, RANT__VAR_PREFIX), value) : r;
     }
-    r = i_rant_var_accessor_route_wait(var);
+    r = i_rant_var_accessor_route_wait(v);
     if (r != RANT_OK) return r;
-    {   uint8_t op = 0;
-        return i_rant_topic_send_hdr(var->set, rant_bytes(&op, 1), value);
-    }
+    return i_rant_var_send(var, 0, value);
 }
 
 /* The owner's declared attrs gate an accessor's force locally: no FORCEABLE bit refuses
  * with nothing sent, as cancel does for no_cancel. An owner the mesh has not detailed yet
  * passes, and its own gate then drops the op. */
-static int i_rant_var_owner_forceable(RantVariable *var){
+static int i_rant_var_owner_forceable(i_RantVar *v){
     RantEntityInfo ei; char name[RANT_TOPIC_NAME_MAX + 1];
-    RantString nm = i_rant_topic_name(var->value);
+    RantString nm = i_rant_topic_name(v->value);
     size_t len = nm.len < RANT_TOPIC_NAME_MAX ? nm.len : RANT_TOPIC_NAME_MAX;
     memcpy(name, nm.data, len); name[len] = '\0';
-    if (!rant_node_mesh_find(var->n, RANT_ENTITY_VARIABLE, name, &ei)) return 1;
+    if (!rant_node_mesh_find(v->n, RANT_ENTITY_VARIABLE, name, &ei)) return 1;
     return ei.forceable;
 }
 
 int rant_variable_force(RantVariable *var, RantBytes value){
+    i_RantVar *v;
     int acquired, r = RANT_OK;
     if (!var) return RANT_ERR_NO_TOPIC;
-    if (var->is_owner){
-        if (!var->allow_force) return RANT_ERR_STATE;     /* locally checkable: refuse loudly */
-        acquired = i_rant_node_sys_lock(var->n);
-        i_rant_var_owner_force(var, value, 0, i_rant_node_now_us(var->n),
-                               i_rant_node_wall_us(var->n));     /* a rare debug op, reentrant */
-        i_rant_node_sys_unlock(var->n, acquired);
+    v = var->v;
+    if (v->is_owner){
+        if (!v->allow_force) return RANT_ERR_STATE;     /* locally checkable: refuse loudly */
+        acquired = i_rant_node_sys_lock(v->n);
+        i_rant_var_owner_force(v, value, 0, i_rant_node_now_us(v->n),
+                               i_rant_node_wall_us(v->n));     /* a rare debug op, reentrant */
+        i_rant_node_sys_unlock(v->n, acquired);
         return RANT_OK;
     }
-    r = i_rant_var_accessor_route_wait(var);
+    r = i_rant_var_accessor_route_wait(v);
     if (r != RANT_OK) return r;
-    if (!i_rant_var_owner_forceable(var)) return RANT_ERR_ROLE;
-    {   uint8_t op = RANT__SET_OP_FORCE;
-        return i_rant_topic_send_hdr(var->set, rant_bytes(&op, 1), value);
-    }
+    if (!i_rant_var_owner_forceable(v)) return RANT_ERR_ROLE;
+    return i_rant_var_send(var, RANT__SET_OP_FORCE, value);
 }
 
 int rant_variable_unforce(RantVariable *var){
+    i_RantVar *v;
     int acquired, r = RANT_OK;
     if (!var) return RANT_ERR_NO_TOPIC;
-    if (var->is_owner){
-        if (!var->allow_force) return RANT_ERR_STATE;
-        acquired = i_rant_node_sys_lock(var->n);
-        i_rant_var_owner_unforce(var, 0, i_rant_node_now_us(var->n), i_rant_node_wall_us(var->n));
-        i_rant_node_sys_unlock(var->n, acquired);
+    v = var->v;
+    if (v->is_owner){
+        if (!v->allow_force) return RANT_ERR_STATE;
+        acquired = i_rant_node_sys_lock(v->n);
+        i_rant_var_owner_unforce(v, 0, i_rant_node_now_us(v->n), i_rant_node_wall_us(v->n));
+        i_rant_node_sys_unlock(v->n, acquired);
         return RANT_OK;
     }
-    r = i_rant_var_accessor_route_wait(var);
+    r = i_rant_var_accessor_route_wait(v);
     if (r != RANT_OK) return r;
-    if (!i_rant_var_owner_forceable(var)) return RANT_ERR_ROLE;
-    {   uint8_t op = RANT__SET_OP_UNFORCE;
-        return i_rant_topic_send_hdr(var->set, rant_bytes(&op, 1), rant_bytes(NULL,0));
+    if (!i_rant_var_owner_forceable(v)) return RANT_ERR_ROLE;
+    {   uint8_t hdr[RANT__SET_PREFIX + 2u];
+        memset(hdr, 0, sizeof hdr); hdr[0] = RANT__SET_OP_UNFORCE;
+        return i_rant_topic_send_hdr(v->set, rant_bytes(hdr, sizeof hdr), rant_bytes(NULL, 0));
     }
 }
 
-int rant_variable_forced(RantVariable *var){ return var ? var->forced : 0; }
+int rant_variable_forced(RantVariable *var){ return var ? var->v->forced : 0; }
+
+/* Frees what a handle holds, and the handle unless it rides in the variable's block. Lock held. */
+static void i_rant_var_handle_free(RantVariable *h){
+    i_RantVar *v = h->v;
+    i_rant_views_drop(&h->views, i_rant_pat_alloc, v->n);
+    if (h != (RantVariable*)(v + 1)) i_rant_node_sys_alloc(v->n, h, 0);
+}
 
 int rant_variable_retire(RantVariable *var){
-    i_RantPatterns *pm; RantNode *n; int acquired, r;
+    i_RantPatterns *pm; RantNode *n; i_RantVar *v; int acquired, r;
     RantTopic *value, *set;
     if (!var) return RANT_ERR_NO_TOPIC;
-    pm = var->pm; n = var->n;
-    if (i_rant_topic_busy(var->value)) return RANT_ERR_STATE;   /* its dispatched callback runs */
+    v = var->v; pm = v->pm; n = v->n;
+    if (i_rant_topic_busy(v->value)) return RANT_ERR_STATE;   /* its dispatched callback runs */
+    if (v->handles != var || var->next){      /* others still read it: only this handle goes */
+        RantVariable **pp;
+        acquired = i_rant_node_sys_lock(n);
+        if (!acquired){ i_rant_node_sys_unlock(n, acquired); return RANT_ERR_STATE; }
+        i_rant_node_sys_settle(n, &v->cb_out);      /* an observer out on another thread */
+        for (pp = &v->handles; *pp != var; pp = &(*pp)->next) {}
+        *pp = var->next;
+        i_rant_var_handle_free(var);
+        i_rant_node_sys_unlock(n, acquired);
+        return RANT_OK;
+    }
     i_rant_node_advertise_hold(n);
-    r = i_rant_pat_park_channels(var->value, var->set);     /* set is NULL on a read only owner */
+    r = i_rant_pat_park_channels(v->value, v->set);     /* set is NULL on a read only owner */
     i_rant_node_advertise_release(n);
     if (r != 0) return r;
     acquired = i_rant_node_sys_lock(n);
-    i_rant_node_sys_settle(n, &var->cb_out);      /* an observer out on another thread */
-    i_rant_pat_clear_channels(var->value, var->set);
-    if (pm){ i_rant_pat_unlink((void**)&pm->vars, var, offsetof(RantVariable, next)); pm->auth_dirty = 1; }
-    value = var->value; set = var->set;   /* outlive var, see phase 3 */
-    if (var->store)     i_rant_node_sys_bulk(n, var->store, 0);
-    if (var->shadow)    i_rant_node_sys_bulk(n, var->shadow, 0);
-    if (var->dup_peers) i_rant_node_sys_alloc(n, var->dup_peers, 0);
-    i_rant_node_sys_alloc(n, var, 0);
+    i_rant_node_sys_settle(n, &v->cb_out);      /* an observer out on another thread */
+    i_rant_pat_clear_channels(v->value, v->set);
+    if (pm){ i_rant_pat_unlink((void**)&pm->vars, v, offsetof(i_RantVar, next)); pm->auth_dirty = 1; }
+    value = v->value; set = v->set;   /* outlive v, see phase 3 */
+    i_rant_var_handle_free(var);
+    if (v->store)     i_rant_node_sys_bulk(n, v->store, 0);
+    if (v->shadow)    i_rant_node_sys_bulk(n, v->shadow, 0);
+    if (v->scratch)   i_rant_node_sys_bulk(n, v->scratch, 0);
+    if (v->units)     i_rant_node_sys_alloc(n, v->units, 0);
+    if (v->dup_peers) i_rant_node_sys_alloc(n, v->dup_peers, 0);
+    i_rant_node_sys_alloc(n, v, 0);
     if (pm) i_rant_pat_problems(pm);           /* its rivals' conditions go with it */
     i_rant_node_sys_unlock(n, acquired);
     i_rant_node_advertise_hold(n);
@@ -1963,61 +2307,72 @@ int rant_variable_retire(RantVariable *var){
 }
 
 const RantSchema *rant_variable_schema(const RantVariable *var){
-    return var ? rant_topic_schema(var->value) : NULL;
+    return var ? var->schema : NULL;
 }
 
 int rant_variable_refresh(RantVariable *var){
-    RantNode *n; uint64_t gen = 0; int acquired, r;
+    RantNode *n; i_RantVar *v; uint64_t gen = 0; int acquired, r;
     const RantSchema *ms = NULL;
     if (!var) return RANT_ERR_NO_TOPIC;
-    if (!var->reflect) return RANT_ERR_ROLE;
-    n = var->n;
-    if (!i_rant_node_reflect_pick(n, RANT_ENTITY_VARIABLE, i_rant_pat_base_name(var->value), 0,
-                                  var->is_owner, &ms, NULL, &gen)
-        || gen == var->generation) return 0;
-    /* held through the retypes, which free lanes the service thread reads under the lock */
+    v = var->v;
+    if (!v->reflect) return RANT_ERR_ROLE;
+    n = v->n;
+    if (!i_rant_node_reflect_pick(n, RANT_ENTITY_VARIABLE, i_rant_pat_base_name(v->value), 0,
+                                  v->is_owner, &ms, NULL, &gen)
+        || gen == v->generation) return 0;
+    /* held through the retype, which frees lanes the service thread reads under the lock */
     acquired = i_rant_node_sys_lock(n);
-    if (!acquired || i_rant_topic_busy(var->value)){
+    if (!acquired || i_rant_topic_busy(v->value) || v->handles != var || var->next){
         i_rant_node_sys_unlock(n, acquired); return RANT_ERR_STATE;
     }
     i_rant_node_advertise_hold(n);
-    r = i_rant_topic_retype(var->value, ms, RANT_RELIABLE);
-    if (r == 0 && var->set) r = i_rant_topic_retype(var->set, ms, RANT_RELIABLE);
+    r = i_rant_topic_retype(v->value, ms, RANT_RELIABLE);
     i_rant_node_advertise_release(n);
+    if (r == 0){
+        var->schema = ms ? i_rant_node_schema_own(n, ms) : NULL;
+        i_rant_views_drop(&var->views, i_rant_pat_alloc, n);
+        if (v->is_owner){ v->cur_schema = var->schema; var->view = var->schema; }
+        else var->readable = 0;      /* the next value views it afresh */
+    }
     i_rant_node_sys_unlock(n, acquired);
     if (r != 0) return r;
-    var->generation = gen;
+    v->generation = gen;
     return 1;
 }
 
 int rant_variable_on_change(RantVariable *var, RantVariableUpdateFn on_change, void *user){
-    int acquired;
+    i_RantVar *v; int acquired;
     if (!var) return RANT_ERR_NO_TOPIC;
-    acquired = i_rant_node_sys_lock(var->n);
+    v = var->v;
+    acquired = i_rant_node_sys_lock(v->n);
     var->on_change = on_change; var->on_change_user = user;
-    if (on_change && var->has_value){
+    if (on_change && v->has_value && (v->is_owner || var->readable)){
         /* replay the current state once, right here or at the next dispatch, so a value
            that arrived between create and register is never missed */
         RantVariableUpdate u;
-        if (i_rant_topic_queue(var->value)){
-            i_rant_var_park(var, RANT__VAR_REC_CHANGED | RANT__VAR_REC_REPLAY, var->last_source,
-                            var->last_write_us, var->last_written_us);
+        if (i_rant_topic_queue(v->value)){
+            i_rant_var_park(v, var, RANT__VAR_REC_CHANGED | RANT__VAR_REC_REPLAY, v->last_source,
+                            v->last_write_us, v->last_written_us);
         } else {
             i_rant_var_update_view(var, &u);
             on_change(&u, user);
         }
     }
-    i_rant_node_sys_unlock(var->n, acquired);
+    i_rant_node_sys_unlock(v->n, acquired);
     return RANT_OK;
 }
 
 int rant_variable_on_write(RantVariable *var, RantVariableUpdateFn on_write, void *user){
     int acquired;
     if (!var) return RANT_ERR_NO_TOPIC;
-    acquired = i_rant_node_sys_lock(var->n);
+    acquired = i_rant_node_sys_lock(var->v->n);
     var->on_write = on_write; var->on_write_user = user;
-    i_rant_node_sys_unlock(var->n, acquired);
+    i_rant_node_sys_unlock(var->v->n, acquired);
     return RANT_OK;     /* writes are events, not state: no replay */
+}
+
+static int i_rant_var_has(const RantVariable *var){
+    return var->v->has_value && (var->v->is_owner || var->readable);
 }
 
 typedef struct { RantVariable *var; uint64_t deadline; } i_RantVarWait;
@@ -2025,23 +2380,23 @@ static int i_rant_var_wait_done(RantNode *n, void *user, uint64_t now, uint64_t 
     i_RantVarWait *w = (i_RantVarWait*)user;
     (void)n; (void)now;
     *deadline = w->deadline;
-    return w->var->has_value;
+    return i_rant_var_has(w->var);
 }
 
 int rant_variable_wait(RantVariable *var, int timeout_ms){
     i_RantVarWait w;
     if (!var) return 0;
-    if (var->has_value) return 1;
+    if (i_rant_var_has(var)) return 1;
     w.var = var;
-    w.deadline = timeout_ms >= 0 ? i_rant_node_now_us(var->n) + (uint64_t)timeout_ms * 1000u
+    w.deadline = timeout_ms >= 0 ? i_rant_node_now_us(var->v->n) + (uint64_t)timeout_ms * 1000u
                                  : RANT__NO_DEADLINE;
-    (void)i_rant_node_sys_wait(var->n, i_rant_var_wait_done, &w);   /* -1 from a callback */
-    return var->has_value;
+    (void)i_rant_node_sys_wait(var->v->n, i_rant_var_wait_done, &w);   /* -1 from a callback */
+    return i_rant_var_has(var);
 }
 
 int rant_variable_match_count(RantVariable *var){
     if (!var) return 0;
-    return rant_topic_match_count(var->is_owner ? var->value : var->set);
+    return rant_topic_match_count(var->v->is_owner ? var->v->value : var->v->set);
 }
 
 /* Duplicate authority detection. Two authorities never match each other, so the announce
@@ -2080,7 +2435,7 @@ static void i_rant_pat_dup_check(RantNode *n, uint32_t peer, RantTopic *primary,
     if (i_rant_pat_dup_reported(*ids, *n_ids, peer)) return;
     if (!i_rant_pat_peer_entity(n, peer, primary, kind, &ei) || !ei.provides) return;
     i_rant_pat_dup_remember(n, ids, n_ids, cap, peer);
-    i_rant_node_sys_error(n, RANT_E_DUPLICATE_AUTHORITY, primary, peer);
+    i_rant_node_sys_error(n, RANT_E_DUPLICATE_AUTHORITY, primary, peer, NULL, NULL);
 }
 
 static RantEntityKind i_rant_pat_fn_entity_kind(const RantFunction *fn){
@@ -2108,7 +2463,7 @@ static uint32_t i_rant_pat_auth_hash(RantTopic *primary){
 
 /* rebuilds the sorted authority index from the entity lists, a shell sort. 0 on OOM */
 static int i_rant_pat_auth_rebuild(i_RantPatterns *pm){
-    RantFunction *fn; RantVariable *v; uint16_t want = 0, gap, i, j;
+    RantFunction *fn; i_RantVar *v; uint16_t want = 0, gap, i, j;
     for (fn = pm->funcs; fn; fn = fn->next) if ((fn->is_provider || fn->both) && !fn->multi) want++;
     for (v = pm->vars; v; v = v->next) if (v->is_owner) want++;
     if (want > pm->auth_cap){
@@ -2169,7 +2524,7 @@ static void i_rant_pat_dup_check_peer(i_RantPatterns *pm, uint32_t peer){
             a->hit = 1;
             if (i_rant_pat_dup_reported(*a->ids, *a->n_ids, peer)) continue;
             i_rant_pat_dup_remember(pm->n, a->ids, a->n_ids, a->cap, peer);
-            i_rant_node_sys_error(pm->n, RANT_E_DUPLICATE_AUTHORITY, a->primary, peer);
+            i_rant_node_sys_error(pm->n, RANT_E_DUPLICATE_AUTHORITY, a->primary, peer, NULL, NULL);
             changed = 1;
         }
     }
@@ -2197,7 +2552,7 @@ static void i_rant_pat_dup_sweep(RantNode *n, RantTopic *primary, RantEntityKind
 }
 
 static void i_rant_pat_dup_forget_peer(i_RantPatterns *pm, uint32_t peer){
-    RantFunction *fn; RantVariable *v;
+    RantFunction *fn; i_RantVar *v;
     for (fn = pm->funcs; fn; fn = fn->next) i_rant_pat_dup_drop(fn->dup_peers, &fn->dup_n, peer);
     for (v = pm->vars; v; v = v->next)      i_rant_pat_dup_drop(v->dup_peers, &v->dup_n, peer);
     i_rant_pat_problems(pm);
@@ -2220,7 +2575,7 @@ static void i_rant_pat_problem(i_RantPatterns *pm, i_RantProblems *ps, RantTopic
 /* Rebuilds this layer's Rant conditions: duplicate_authority from the reported rivals, and
  * forced for each owned variable left forced, since forcing is for debugging only. Lock held. */
 static void i_rant_pat_problems(i_RantPatterns *pm){
-    i_RantProblems ps; RantFunction *fn; RantVariable *v; uint16_t i;
+    i_RantProblems ps; RantFunction *fn; i_RantVar *v; uint16_t i;
     i_rant_node_problems_begin(pm->n, &ps, I_RANT_PROB_DUPLICATE_AUTHORITY);
     for (fn = pm->funcs; fn; fn = fn->next)
         for (i = 0; i < fn->dup_n; i++) i_rant_pat_problem(pm, &ps, fn->req, fn->dup_peers[i], "provided");
@@ -2331,7 +2686,7 @@ static void i_rant_patterns_on_event(void *user, const RantEvent *ev){
     i_RantPatterns *pm = (i_RantPatterns*)user;
     RantFunction *fn;
     if (ev->kind == RANT_PEER_INTEREST){
-        RantVariable *v;
+        i_RantVar *v;
         /* a match may just have formed: flush calls queued while no provider was matched */
         for (fn = pm->funcs; fn; fn = fn->next)
             if (!fn->is_provider && fn->pending) i_rant_func_flush_queued(fn);

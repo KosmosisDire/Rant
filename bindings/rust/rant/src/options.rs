@@ -83,7 +83,7 @@ options! {
 
 impl Qos {
     /// Run this handle's callbacks at [`Queue::dispatch`] of `queue` instead of where the
-    /// node's callbacks run. Handles on one name share one slot and must agree.
+    /// node's callbacks run.
     pub fn queue(mut self, queue: &Queue) -> Self {
         self.queue = Some(queue.clone());
         self

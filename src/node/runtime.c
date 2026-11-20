@@ -78,6 +78,15 @@ struct RantQueue {
 
 struct RantTopic {
     RantNode *n; uint16_t index; const RantSchema *schema;     /* registered in the node */
+    /* the handles of one entity share a wire: the first handle's slot, advertised with the
+       roles combined. A later handle's own slot stays INACTIVE. See spec/node.md */
+    RantTopic *wire;                      /* the handle whose slot carries the entity, itself for the first */
+    RantTopic *next;                      /* the wire's next handle, in create order */
+    const RantSchema *adv;                /* on the wire: the schema its slot advertises */
+    i_RantViews views;                    /* each writer schema read so far, with this handle's view */
+    uint8_t   slot_role;                  /* on the wire: its slot's role, every handle's combined */
+    uint8_t   carrier;                    /* on the wire: its own handle closed, others still ride it */
+    uint8_t   path_at;                    /* where the field path starts in name, 0 = the whole entity */
     i_RantMsgQueue *q;                    /* its ring on the callback queue, NULL = inline */
     RantQueue *queue;                     /* the callback queue the topic was created with, or NULL */
     uint8_t   pull;                      /* created with pull: q waits for rant_topic_take */
@@ -90,7 +99,8 @@ struct RantTopic {
     uint64_t  came_up_us;                /* our last create, role change or retype: the match wait's anchor */
     uint8_t   fresh;                     /* its first match window is open in the transport */
     uint8_t   prefix_bytes;             /* pattern header bytes split into .header, 0 = plain */
-    uint8_t   prefix_string;             /* [u8 len][bytes] follows the prefix on a response kind */
+    uint8_t   prefix_string;             /* the length word's bytes of a tail after the prefix:
+                                            1 on a response kind, 2 on a variable set, else 0 */
     uint8_t   kind;                      /* i_RantTopicKind */
     uint8_t   role;                      /* RantRole, mirrored at create and set_role */
     uint8_t   attrs, directed;           /* the def's declared facts, kept so refresh can redefine */
@@ -98,7 +108,7 @@ struct RantTopic {
     uint64_t  generation;                /* the mesh generation the schema was taken at */
     RantQos qos;
     uint8_t   name_len;                  /* stable copy, queued views never point into the arena */
-    char      name[RANT_TOPIC_NAME_MAX];
+    char      name[RANT_TOPIC_NAME_MAX + 1];
 };
 
 /* One pending line of Rant's own, a mirrored error or a note. Errors fire deep inside
@@ -495,10 +505,12 @@ static void i_rant_node_emit(RantNode *n, RantEvent *e){
     else n->on_event(e);
 }
 
-/* our topic's name as a C string, NULL if undefined: the topic_name view on events */
+/* our topic's name as a C string, NULL if undefined: the topic_name view on events. A
+ * handle's name holds its field path, a carrier's slot only the entity. */
 static const char *i_rant_node_topic_name(RantNode *n, uint16_t topic_index){
-    RantString s = i_rant_transport_topic_name(n->transport, topic_index);
-    return (const char*)s.data;
+    RantTopic *h = topic_index < i_rant_node_topic_hi(n) ? n->handles[topic_index] : NULL;
+    if (h && !h->carrier) return h->name;
+    return (const char*)i_rant_transport_topic_name(n->transport, topic_index).data;
 }
 
 /* Strips the stamps a stamped publisher prepends, filling *written_us and *capture_us.
@@ -524,9 +536,10 @@ static RantBytes i_rant_node_strip_ts(RantBytes wire, int stamped, uint64_t *wri
  * validates a message free payload. A plain topic yields an empty header. */
 static void i_rant_node_split(RantTopic *h, RantBytes wire, RantBytes *hdr, RantBytes *payload){
     size_t pfx = (h && (uint32_t)wire.len >= h->prefix_bytes) ? h->prefix_bytes : 0u;
-    if (pfx && h->prefix_string && wire.len > pfx){
-        size_t ml = wire.data[pfx], avail = wire.len - pfx - 1u;
-        pfx += 1u + (ml <= avail ? ml : avail);
+    if (pfx && h->prefix_string && wire.len >= pfx + h->prefix_string){
+        size_t lb = h->prefix_string, avail = wire.len - pfx - lb;
+        size_t ml = lb == 2u ? i_rant_le_r16(wire.data + pfx) : wire.data[pfx];
+        pfx += lb + (ml <= avail ? ml : avail);
     }
     hdr->data = pfx ? wire.data : NULL; hdr->len = pfx;
     payload->data = wire.data ? wire.data + pfx : NULL;    /* an empty sample has no bytes */
@@ -609,6 +622,26 @@ static void i_rant_node_queue_lost(RantNode *n, uint16_t topic_index, uint32_t f
     i_rant_node_emit(n, &e);
 }
 
+/* the publisher name a record copies, cut to the node name bound */
+static uint32_t i_rant_q_name_len(RantNode *n, uint32_t from){
+    RantString name = i_rant_node_core_peer_name(n->core, from);
+    return name.len > RANT_NODE_NAME_MAX ? (uint32_t)RANT_NODE_NAME_MAX : (uint32_t)name.len;
+}
+
+/* the ring bytes one record from from takes for a body of body_len */
+static uint32_t i_rant_q_need(RantNode *n, uint32_t from, uint32_t body_len){
+    return RANT__QALIGN(RANT__QALIGN(sizeof(i_RantQRec) + i_rant_q_name_len(n, from)) + body_len);
+}
+
+/* 1 when need bytes fit now or after a grow, so a push then stores them */
+static int i_rant_q_room(RantNode *n, i_RantMsgQueue *q, uint32_t need){
+    uint32_t at;
+    for (;;){
+        if (i_rant_q_fit(q, need, &at)) return 1;
+        if (!i_rant_q_grow(n, q, q->bytes + need, need)) return 0;
+    }
+}
+
 /* Enqueues one record, hdr then data as one body. 0 = accepted (stored, or dropped per
  * the best effort contract), 1 = refused, a reliable queue at cap: the transport parks and
  * flow control backpressures. kind 0 is a delivered message. recv_us 0 = now. */
@@ -617,11 +650,10 @@ static int i_rant_node_queue_push(RantNode *n, uint16_t topic_index, i_RantMsgQu
                                   uint64_t written_us, uint64_t capture_us,
                                   uint8_t kind, uint64_t recv_us){
     RantString name = i_rant_node_core_peer_name(n->core, from);
-    uint32_t name_len = name.len > RANT_NODE_NAME_MAX ? (uint32_t)RANT_NODE_NAME_MAX
-                                                      : (uint32_t)name.len;
+    uint32_t name_len = i_rant_q_name_len(n, from);
     uint32_t payload_off = RANT__QALIGN(sizeof(i_RantQRec) + name_len);
     uint32_t body_len = (uint32_t)(hdr.len + data.len);
-    uint32_t need = RANT__QALIGN(payload_off + body_len);
+    uint32_t need = i_rant_q_need(n, from, body_len);
     uint32_t at = 0, evicted = 0;
     for (;;){
         if (i_rant_q_fit(q, need, &at)) break;
@@ -683,6 +715,33 @@ static void i_rant_node_queue_event(RantNode *n, const i_RantQRec *rec, RantEven
     }
 }
 
+/* The schema h reads a message from the peer from with into *out: the gate's binding when h
+ * is the reader its wire advertises, else h's view of the writer's schema, made once per
+ * writer schema. 0 when h cannot read that writer, reported once. Lock held. */
+static int i_rant_node_view(RantNode *n, RantTopic *h, uint32_t from, const RantSchema **out){
+    RantTopic *w = h->wire; char why[160];
+    if (!h->path_at && h->schema == w->adv){
+        *out = i_rant_node_core_msg_schema(n->core, from, w->index);
+        return 1;
+    }
+    if (i_rant_views_get(&h->views, h->schema, h->path_at ? h->name + h->path_at : NULL,
+                         i_rant_node_core_writer_schema(n->core, from, w->index),
+                         i_rant_node_alloc, n, out, why, sizeof why))
+        return 1;
+    if (why[0]){
+        RantEvent e; memset(&e, 0, sizeof e);
+        e.kind = RANT_ERROR; e.error = RANT_E_SCHEMA_MISMATCH;
+        e.peer = from; e.topic = h->index; e.topic_name = h->name; e.detail = why;
+        i_rant_node_emit(n, &e);
+    }
+    return 0;
+}
+
+/* Frees the views a handle made. Lock held. */
+static void i_rant_node_views_drop(RantNode *n, RantTopic *h){
+    i_rant_views_drop(&h->views, i_rant_node_alloc, n);
+}
+
 /* A queued RantMsg: every view points into the record, valid for the dispatched callback
  * or until the pull topic's next take.
  * The schema is re resolved now, since the delivery map may repoint. */
@@ -701,7 +760,7 @@ static void i_rant_node_queue_msg(RantNode *n, RantTopic *h, const i_RantQRec *r
     } else {
         i_rant_node_split(h, rant_bytes((const uint8_t*)rec + RANT__QALIGN(sizeof *rec + rec->name_len),
                              rec->data_len), &m->header, &m->data);
-        m->schema = i_rant_node_core_msg_schema(n->core, rec->publisher_id, h->index);
+        (void)i_rant_node_view(n, h, rec->publisher_id, &m->schema);
         if (h->prefix_bytes && m->data.len == 0) m->schema = NULL;   /* an op only pattern message */
     }
     m->recv_us = rec->t_recv_us;
@@ -745,7 +804,7 @@ static void i_rant_node_queue_release(RantNode *n, RantTopic *h, i_RantMsgQueue 
         i_rant_q_pop(q);
     }
     if (q->parked){
-        q->parked = i_rant_transport_deliver_parked(n->transport, h->index,
+        q->parked = i_rant_transport_deliver_parked(n->transport, h->wire->index,
                                                   i_rant_plat_now_us()) ? 1u : 0u;
         i_rant_node_kick(n);
     }
@@ -779,50 +838,17 @@ static RantNode *i_rant_node_open_fail_why(RantEventFn on_event, void *user, Ran
 
 RantEvent rant_last_error(RantNode *n){ return n ? n->last_error : g_last_error; }
 
-/* Builds a RantMsg and hands it to the app, inline or copied into its queue ring.
- * Returns 0 accepted, nonzero refused (a reliable queue at cap, the transport parks). */
-static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from, RantBytes data){
+/* Hands one message to the patterns layer's routing on h, or inline to the app. */
+static void i_rant_node_hand(RantNode *n, RantTopic *h, uint16_t topic_index, uint32_t from,
+                             RantBytes hdr, RantBytes payload, const RantSchema *schema,
+                             uint64_t written_us, uint64_t capture_us){
     RantMsg m;
-    RantTopic *h = (topic_index < i_rant_node_topic_hi(n)) ? n->handles[topic_index] : NULL;
-    RantBytes hdr, payload, body;
-    uint64_t written_us, capture_us;
-    const RantSchema *schema = i_rant_node_core_msg_schema(n->core, from, topic_index);
-    /* the stamps first, then the header split, then the schema validates the payload */
-    body = i_rant_node_strip_ts(data,
-              i_rant_transport_peer_timestamped(n->transport, topic_index, from),
-              &written_us, &capture_us);
-    i_rant_node_split(h, body, &hdr, &payload);
-    /* an op only pattern message (a zero payload, or a task op that is not CALL) skips
-       the schema, the pattern layer judges it. See spec/node.md */
-    if (h && h->prefix_bytes
-        && (payload.len == 0
-            || (h->kind == RANT_KIND_TASK_REQ && hdr.len >= 5 && hdr.data[4] != 0)))
-        schema = NULL;
-    if (schema && !rant_schema_validate(schema, payload)){
-        RantEvent e; memset(&e, 0, sizeof e);
-        e.kind = RANT_ERROR; e.error = RANT_E_SCHEMA_MISMATCH;
-        e.peer = from; e.topic = topic_index; e.topic_name = i_rant_node_topic_name(n, topic_index);
-        e.detail = i_rant_node_core_note_size_mismatch(n->core, from, topic_index,
-                                            payload.len, rant_schema_msg_min(schema));
-        i_rant_node_emit(n, &e);
-        return 0;
-    }
-    if (h && h->q && h->kind == RANT_KIND_TOPIC){
-        /* store the wire minus the stamps, the stamps ride the record */
-        if (i_rant_node_queue_push(n, topic_index, h->q, from, rant_bytes(NULL, 0), body,
-                                   written_us, capture_us, 0, 0))
-            return 1;   /* parked: the accepted retry re counts */
-        h->rx_msgs++; h->rx_bytes += data.len;
-        return 0;
-    }
-    if (h){ h->rx_msgs++; h->rx_bytes += data.len; }
-    if (!(h && h->sys_on_message) && !n->user_on_message) return 0;
     memset(&m, 0, sizeof m);
     m.node = n; m.user = n->user_data;
     m.topic_index = topic_index; m.publisher_id = from;
     m.publisher_name = i_rant_node_core_peer_name(n->core, from);            /* a discovery view */
     if (!m.publisher_name.data) m.publisher_name = rant_cstr("unknown-peer"); /* never NULL */
-    m.topic_name = i_rant_transport_topic_name(n->transport, topic_index);
+    m.topic_name = h ? rant_string(h->name, h->name_len) : i_rant_transport_topic_name(n->transport, topic_index);
     m.header = hdr; m.data = payload;
     m.schema = schema;
     m.recv_us = i_rant_plat_now_us();
@@ -834,6 +860,71 @@ static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from,
         i_rant_node_callback_begin(n, &cs, 1, NULL);
         n->user_on_message(&m);
         i_rant_node_callback_end(n, &cs, NULL);
+    }
+}
+
+static void i_rant_node_mismatch(RantNode *n, uint16_t topic_index, uint32_t from,
+                                 const RantSchema *schema, size_t got){
+    RantEvent e; memset(&e, 0, sizeof e);
+    e.kind = RANT_ERROR; e.error = RANT_E_SCHEMA_MISMATCH;
+    e.peer = from; e.topic = topic_index; e.topic_name = i_rant_node_topic_name(n, topic_index);
+    e.detail = i_rant_node_core_note_size_mismatch(n->core, from, topic_index,
+                                                   got, rant_schema_msg_min(schema));
+    i_rant_node_emit(n, &e);
+}
+
+/* Builds a RantMsg and hands it to the app, inline or copied into its queue ring, for each
+ * handle on the wire with its own view. Returns 0 accepted, nonzero refused (a reliable
+ * queue at cap, the transport parks). */
+static int i_rant_node_deliver(RantNode *n, uint16_t topic_index, uint32_t from, RantBytes data){
+    RantTopic *h = (topic_index < i_rant_node_topic_hi(n)) ? n->handles[topic_index] : NULL, *x;
+    RantBytes hdr, payload, body;
+    uint64_t written_us, capture_us;
+    const RantSchema *schema;
+    /* the stamps first, then the header split, then the schema validates the payload */
+    body = i_rant_node_strip_ts(data,
+              i_rant_transport_peer_timestamped(n->transport, topic_index, from),
+              &written_us, &capture_us);
+    i_rant_node_split(h, body, &hdr, &payload);
+    if (!h || h->kind != RANT_KIND_TOPIC || h->sys_on_message){
+        schema = i_rant_node_core_msg_schema(n->core, from, topic_index);
+        /* an op only pattern message (a zero payload, or a task op that is not CALL) skips
+           the schema, the pattern layer judges it. See spec/node.md */
+        if (h && h->prefix_bytes
+            && (payload.len == 0
+                || (h->kind == RANT_KIND_TASK_REQ && hdr.len >= 5 && hdr.data[4] != 0)))
+            schema = NULL;
+        if (schema && !rant_schema_validate(schema, payload)){
+            i_rant_node_mismatch(n, topic_index, from, schema, payload.len);
+            return 0;
+        }
+        if (h){ h->rx_msgs++; h->rx_bytes += data.len; }
+        if (!(h && h->sys_on_message) && !n->user_on_message) return 0;
+        i_rant_node_hand(n, h, topic_index, from, hdr, payload, schema, written_us, capture_us);
+        return 0;
+    }
+    /* a plain topic: every reliable ring takes the message or none does, so a retry after
+       the park delivers each handle once */
+    {   uint32_t need = i_rant_q_need(n, from, (uint32_t)body.len);
+        for (x = h; x; x = x->next)
+            if (!x->carrier && i_rant_role_subs(x->role) && x->q && x->q->reliable
+                && !i_rant_q_room(n, x->q, need)){
+                x->q->parked = 1;
+                return 1;   /* parked: the accepted retry re counts */
+            }
+    }
+    for (x = h; x; x = x->next){
+        if (x->carrier || !i_rant_role_subs(x->role) || !i_rant_node_view(n, x, from, &schema)) continue;
+        if (schema && !rant_schema_validate(schema, payload)){
+            i_rant_node_mismatch(n, x->index, from, schema, payload.len);
+            continue;
+        }
+        x->rx_msgs++; x->rx_bytes += data.len;
+        if (x->q)     /* the wire minus the stamps, the stamps ride the record */
+            (void)i_rant_node_queue_push(n, x->index, x->q, from, rant_bytes(NULL, 0), body,
+                                         written_us, capture_us, 0, 0);
+        else if (n->user_on_message)
+            i_rant_node_hand(n, x, x->index, from, hdr, payload, schema, written_us, capture_us);
     }
     return 0;
 }
@@ -859,7 +950,20 @@ static void i_rant_node_on_event(const RantEvent *ev){
     /* a refused or too big source repeats every announce, so the app hears each one once */
     if (ev->kind == RANT_ERROR && (ev->error == RANT_E_PEER_REFUSED || ev->error == RANT_E_PEER_META_TOO_BIG)
         && !i_rant_discovery_trouble_new(i_rant_discovery_state(n->discovery))) return;
-    { RantEvent e = *ev; i_rant_node_emit(n, &e); }
+    {   /* a plain topic's event reaches each handle on its wire, under the handle's index */
+        RantTopic *w = (ev->topic_name && ev->topic < i_rant_node_topic_hi(n)) ? n->handles[ev->topic] : NULL, *x;
+        RantEvent e = *ev;
+        if (!w || w->wire != w || w->kind != RANT_KIND_TOPIC || w->sys_on_message){
+            i_rant_node_emit(n, &e);
+            return;
+        }
+        for (x = w; x; x = x->next){
+            if (x->carrier) continue;
+            e = *ev;
+            e.topic = x->index; e.topic_name = x->name;
+            i_rant_node_emit(n, &e);
+        }
+    }
 }
 
 /* the transport's schema gate, answered by the node core. u is the node */
@@ -1121,13 +1225,13 @@ static size_t i_rant_mem_default(size_t floor){
     return lim > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)lim;
 }
 
-/* Appends one prefix part behind a '/'. 0 when it holds '@', starts or ends with '/', or the
- * whole leaves no room for a '/' and a one byte name. */
+/* Appends one prefix part behind a '/'. 0 when it holds '@' or '.', starts or ends with '/',
+ * or the whole leaves no room for a '/' and a one byte name. */
 static int i_rant_prefix_join(char *out, size_t *len, const char *part, size_t part_len){
     size_t i, at = *len ? *len + 1u : 0u;
     if (!part_len) return 1;
     if (part[0] == '/' || part[part_len - 1] == '/') return 0;
-    for (i = 0; i < part_len; i++) if (part[i] == '@') return 0;
+    for (i = 0; i < part_len; i++) if (part[i] == '@' || part[i] == '.') return 0;
     if (at + part_len + 2u > RANT_TOPIC_NAME_MAX) return 0;
     if (*len) out[*len] = '/';
     memcpy(out + at, part, part_len);
@@ -1135,13 +1239,13 @@ static int i_rant_prefix_join(char *out, size_t *len, const char *part, size_t p
     return 1;
 }
 
-/* 1 when one side of a remap entry could be a name in code: not empty past a leading '/',
- * no '@', '=' or ',' and not too long. */
+/* 1 when one side of a remap entry could be an entity name in code: not empty past a leading
+ * '/', no '@', '.', '=' or ',' and not too long. */
 static int i_rant_remap_side_ok(const char *s, size_t len){
     size_t i;
     if (len && s[0] == '/'){ s++; len--; }
     if (!len || len > RANT_TOPIC_NAME_MAX) return 0;
-    for (i = 0; i < len; i++) if (s[i] == '@' || s[i] == '=' || s[i] == ',') return 0;
+    for (i = 0; i < len; i++) if (s[i] == '@' || s[i] == '.' || s[i] == '=' || s[i] == ',') return 0;
     return 1;
 }
 
@@ -1155,7 +1259,7 @@ static const char *i_rant_remap_check(const char *s, size_t len, const char **ba
         eq = (const char*)memchr(p, '=', (size_t)(stop - p));
         if (!eq) return "has no '='";
         if (!i_rant_remap_side_ok(p, (size_t)(eq - p)) || !i_rant_remap_side_ok(eq + 1, (size_t)(stop - eq - 1)))
-            return "has a side that is empty, too long or holds '@', '=' or ','";
+            return "has a side that is empty, too long or holds '@', '.', '=' or ','";
         for (q = s; q < p; q = (const char*)memchr(q, ',', (size_t)(p - q)) + 1){
             qeq = (const char*)memchr(q, '=', (size_t)(p - q));
             if (qeq - q == eq - p && memcmp(q, p, (size_t)(eq - p)) == 0) return "remaps a name twice";
@@ -1599,11 +1703,11 @@ static void i_rant_node_reflect_self(RantNode *n){
     for (i = 0; i < n->max_topics; i++){
         RantTopic *h = n->handles[i];
         const RantQos *q;
-        if (!h) continue;
+        if (!h || h->wire != h) continue;       /* a later handle's slot is unadvertised */
         q = i_rant_transport_topic_qos(n->transport, i);
-        i_rant_node_core_self_channel(n->core, i, rant_string(h->name, h->name_len), h->kind, h->role,
-                                      (uint8_t)(q ? q->reliability : 0),
-                                      i_rant_transport_topic_attrs(n->transport, i), h->schema);
+        i_rant_node_core_self_channel(n->core, i, i_rant_transport_topic_name(n->transport, i), h->kind,
+                                      h->slot_role, (uint8_t)(q ? q->reliability : 0),
+                                      i_rant_transport_topic_attrs(n->transport, i), h->adv);
     }
     i_rant_node_core_self_end(n->core);
 }
@@ -1654,8 +1758,6 @@ void i_rant_node_advertise_release(RantNode *n){
     i_rant_node_unlock(n, acquired);
 }
 
-/* The shared topic create: the public create and the patterns layer's both funnel here.
- * kind, prefix_bytes and directed stamp the entity, allow_at permits the reserved '@'. */
 /* Records why a create refused: the last error slot, and the RANT_ERROR event when the
  * lock is held. From a callback only the slot is written, since an event must not nest
  * inside the handler that is running. */
@@ -1700,12 +1802,75 @@ static void i_rant_node_fresh_close(RantNode *n, uint64_t now){
     n->fresh_next_us = next;
 }
 
+/* A create refused for a reason the detail names. Lock held, never from a callback. */
+static void i_rant_node_create_refuse(RantNode *n, RantErrorKind err, const char *name, const char *why){
+    RantEvent e; memset(&e, 0, sizeof e);
+    e.kind = RANT_ERROR; e.error = err; e.topic_name = name; e.detail = why;
+    i_rant_node_emit(n, &e);
+}
+
+/* The live wire of the plain topic named ent, NULL when this node has none. Lock held. */
+static RantTopic *i_rant_node_wire_find(RantNode *n, const char *ent, size_t len){
+    uint16_t i, hi = i_rant_node_topic_hi(n);
+    for (i = 0; i < hi; i++){
+        RantTopic *h = n->handles[i]; RantString s;
+        if (!h || h->wire != h || h->kind != RANT_KIND_TOPIC || h->sys_on_message) continue;
+        s = i_rant_transport_topic_name(n->transport, i);
+        if (s.len == len && !memcmp(s.data, ent, len)) return h;
+    }
+    return NULL;
+}
+
+/* Sets the wire's slot role to its live handles' roles combined. Lock held. */
+static int i_rant_node_wire_role(RantNode *n, RantTopic *w){
+    RantTopic *x; int pubs = 0, subs = 0, r; uint8_t role;
+    for (x = w; x; x = x->next)
+        if (!x->carrier){ pubs |= i_rant_role_pubs(x->role); subs |= i_rant_role_subs(x->role); }
+    role = (uint8_t)(pubs ? (subs ? RANT_PUBSUB : RANT_PUB_ONLY) : (subs ? RANT_SUB_ONLY : RANT_INACTIVE));
+    r = i_rant_transport_set_role(n->transport, w->index, role);
+    if (r != 0) return r;
+    w->slot_role = role;
+    i_rant_node_topic_came_up(n, w);
+    i_rant_node_interest_changed(n);     /* a role flip may raise fresh candidates */
+    return 0;
+}
+
+/* Rebinds the wire's slot to a registered schema in place: retired and reused at the same
+ * index under a bumped generation, the handles and queues kept. Lock held. */
+static int i_rant_node_rebind(RantNode *n, RantTopic *w, const RantSchema *schema, uint8_t reliability){
+    i_RantTopicDef def; char slot[RANT_TOPIC_NAME_MAX + 1]; uint16_t idx = w->index;
+    RantString s = i_rant_transport_topic_name(n->transport, idx);
+    uint32_t rb; int rc;
+    memcpy(slot, s.data, s.len); slot[s.len] = '\0';      /* reuse rewrites the slot's own copy */
+    if (i_rant_transport_topic_retire(n->transport, idx) != 0) return RANT_ERR_STATE;
+    i_rant_node_core_retire_topic_schema(n->core, idx);
+    w->adv = schema;
+    w->qos.reliability = (RantReliability)reliability;
+    memset(&def, 0, sizeof def);
+    def.name = slot; def.role = w->slot_role; def.kind = w->kind;
+    def.prefix_bytes = w->prefix_bytes; def.directed = w->directed; def.attrs = w->attrs;
+    def.qos = w->qos;
+    rb = i_rant_discovery_meta_version(i_rant_discovery_state(n->discovery)) + 1u;
+    rc = i_rant_transport_topic_reuse(n->transport, idx, &def, 1, rb);
+    if (rc != 0) return rc == -4 ? RANT_ERR_OOM : RANT_ERR_STATE;
+    i_rant_node_core_topic_rebound(n->core, idx);
+    i_rant_node_core_set_topic_schema(n->core, idx, w->adv);
+    i_rant_node_topic_came_up(n, w);
+    i_rant_node_interest_changed(n);
+    return RANT_OK;
+}
+
+/* Creates a handle. A plain topic's later handle on an entity rides the first handle's wire:
+ * its own slot, under its whole name, stays INACTIVE and keeps the index meaning one handle. */
 static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRole role,
                               const RantSchema *schema, const RantTopicOpts *opts,
                               uint8_t kind, uint8_t prefix_bytes, uint8_t directed, uint8_t attrs,
                               i_RantSysMsgFn sys_msg, void *sys_user, int allow_at){
-    i_RantTopicDef def; RantTopic *h; uint16_t idx; int acquired;
-    int reuse = 0;
+    i_RantTopicDef def; RantTopic *h, *w = NULL; uint16_t idx; int acquired;
+    int reuse = 0, retype = 0;
+    const char *dot, *why = NULL; RantErrorKind err = RANT_E_STATE;
+    char ent[RANT_TOPIC_NAME_MAX + 1]; size_t ent_len;
+    const RantSchema *adv;
     if (!n || !name) return NULL;
     acquired = i_rant_node_lock(n);
     if (!acquired){   /* from a callback: a grow would move the arena mid delivery */
@@ -1728,6 +1893,16 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
             s++;
         }
     }
+    /* a plain topic's name may end in a field path after the first '.' */
+    dot = strchr(name, '.');
+    ent_len = dot ? (size_t)(dot - name) : strlen(name);
+    if (dot && (kind != RANT_KIND_TOPIC || sys_msg || n->creating_builtin || !ent_len || !dot[1])){
+        i_rant_node_create_refuse(n, RANT_E_BAD_NAME, name, kind != RANT_KIND_TOPIC
+            ? "only a topic takes a field path" : "a field path needs a name before and after the '.'");
+        i_rant_node_unlock(n, acquired); return NULL;
+    }
+    memcpy(ent, name, ent_len); ent[ent_len] = '\0';
+    if (kind == RANT_KIND_TOPIC && !sys_msg && !n->creating_builtin) w = i_rant_node_wire_find(n, ent, ent_len);
     if (n->creating_builtin){
         /* open time builtins fill their block. A full block degrades to no builtin, never a grow */
         idx = (uint16_t)(n->builtin_lo + n->n_builtin);
@@ -1735,7 +1910,7 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
             i_rant_node_create_fail(n, RANT_E_STATE, name, 0, 1);
             i_rant_node_unlock(n, acquired); return NULL;
         }
-    } else if ((reuse = i_rant_transport_topic_reuse_find(n->transport, name, kind, &idx)) != 0){
+    } else if ((reuse = i_rant_transport_topic_reuse_find(n->transport, w ? name : ent, kind, &idx)) != 0){
         /* a retired slot takes this create so churn never grows the table. Same identity,
            kind and schema (find = 2) relinks silently, anything else rebinds. See spec/interest.md */
     } else {
@@ -1762,6 +1937,10 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
         /* fill what the caller left unspecified from the mesh: a reader takes the
            provider's schema, a writer the widest every reader accepts */
         const RantSchema *ms = NULL; uint8_t rel = 0;
+        if (dot || w){
+            why = "reflect_from_mesh needs the entity's first handle, with no field path";
+            goto refuse;
+        }
         h->reflect = 1;
         i_rant_node_core_reflect_pick(n->core, RANT_ENTITY_TOPIC, name, 0,
                                       i_rant_role_pubs((uint8_t)role), &ms, &rel, &h->generation);
@@ -1792,24 +1971,42 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
         if (kind != RANT_KIND_TOPIC) h->q->reliable = 0;   /* state applied at receipt: never park the lane */
     }
     if (schema){   /* registered here, so another node's schema serves as well as our own */
-        RantBytes w = rant_schema_wire(schema);
-        h->schema = i_rant_registry_parse(&n->registry, w.data, w.len);
+        RantBytes sw = rant_schema_wire(schema);
+        h->schema = i_rant_registry_parse(&n->registry, sw.data, sw.len);
         if (!h->schema){
             i_rant_node_create_fail(n, RANT_E_BAD_SCHEMA, name, 0, 1);
             i_rant_node_queue_drop(n, h);
             i_rant_node_alloc(n, h, 0); i_rant_node_unlock(n, acquired); return NULL;
         }
     }
+    /* a field handle only reads, and a later handle must fit the wire's QoS and type */
+    if (dot && i_rant_role_pubs((uint8_t)role)){ why = "a field handle only subscribes"; goto refuse; }
+    if (w){
+        const RantQos *wq = i_rant_transport_topic_qos(n->transport, w->index);
+        if (h->qos.reliability == RANT_RELIABLE && !(wq && wq->reliability == RANT_RELIABLE)){
+            err = RANT_E_QOS_INCOMPATIBLE;
+            why = "a reliable handle cannot share a best effort topic";
+            goto refuse;
+        }
+        if (i_rant_role_pubs((uint8_t)role) && h->schema && h->schema != w->adv){
+            err = RANT_E_SCHEMA_MISMATCH;
+            why = "a writer's type must match the type the topic advertises";
+            if (w->adv || i_rant_role_pubs(w->slot_role)) goto refuse;
+            retype = 1;      /* the first typed writer types a wire of untyped readers */
+        }
+    }
+    adv = (w || dot) ? NULL : h->schema;
     memset(&def, 0, sizeof def);
-    def.name = name; def.role = (uint8_t)role;
+    def.name = w ? name : ent;
+    def.role = (uint8_t)(w ? RANT_INACTIVE : role);
     def.kind = kind; def.prefix_bytes = prefix_bytes; def.directed = directed; def.attrs = attrs;
-    def.qos = h->qos;
+    if (!w) def.qos = h->qos;
     h->attrs = attrs; h->directed = directed;
     {   int rc;
         if (reuse){
             /* an identical binding rebinds silently, anything else bumps the slot's
                generation and publishes the rebind under the version the advertise stamps */
-            uint64_t new_hash = h->schema ? rant_schema_hash(h->schema) : 0;
+            uint64_t new_hash = adv ? rant_schema_hash(adv) : 0;
             int changed = (reuse != 2)
                        || (new_hash != i_rant_node_core_topic_schema_hash(n->core, idx));
             uint32_t rb = changed
@@ -1830,49 +2027,72 @@ static RantTopic *i_rant_node_create_impl(RantNode *n, const char *name, RantRol
         }
     }
     h->n = n; h->index = idx; h->prefix_bytes = prefix_bytes; h->kind = kind;
-    /* a response prefix is followed by [u8 len][message] on the wire, derived from the
-       kind so every creator of the kind splits alike */
-    h->prefix_string = (uint8_t)(kind == RANT_KIND_FUNC_RSP || kind == RANT_KIND_TASK_RSP);
+    /* a response prefix is followed by [u8 len][message] and a set prefix by [u16 len][units],
+       derived from the kind so every creator of the kind splits alike */
+    h->prefix_string = (uint8_t)(kind == RANT_KIND_FUNC_RSP || kind == RANT_KIND_TASK_RSP ? 1u
+                               : kind == RANT_KIND_VAR_SET ? 2u : 0u);
     h->role = (uint8_t)role;
-    i_rant_node_topic_came_up(n, h);
+    h->wire = w ? w : h;
+    h->adv = adv;
+    h->slot_role = def.role;
+    h->path_at = (uint8_t)(dot ? ent_len + 1u : 0u);
+    if (!w) i_rant_node_topic_came_up(n, h);
     h->sys_on_message = sys_msg; h->sys_msg_user = sys_user;
     {   /* the stable name copy, queued views must not point into the arena */
         size_t nl = strlen(name);
-        if (nl > RANT_TOPIC_NAME_MAX) nl = RANT_TOPIC_NAME_MAX;
         memcpy(h->name, name, nl);
         h->name_len = (uint8_t)nl;
     }
-    if (h->schema || reuse)   /* advertise and gate with it. A reused slot must also clear
-                                 the retired occupant's fingerprint when the new topic is untyped */
-        i_rant_node_core_set_topic_schema(n->core, idx, h->schema);
+    if (adv || reuse)   /* advertise and gate with it. A reused slot must also clear
+                           the retired occupant's fingerprint when the new topic is untyped */
+        i_rant_node_core_set_topic_schema(n->core, idx, adv);
     n->handles[idx] = h;
     if (n->creating_builtin) n->n_builtin++;
     else if (!reuse) n->n_created++;   /* a reused slot is already inside the dense region */
+    if (w){
+        RantTopic *t = w;
+        while (t->next) t = t->next;
+        t->next = h;
+        if (retype) (void)i_rant_node_rebind(n, w, h->schema, (uint8_t)w->qos.reliability);
+        (void)i_rant_node_wire_role(n, w);
+    }
     /* the handle is installed before the publish: the replay fires peer events into the
        patterns layer and the app, which must never see a half created topic */
     i_rant_node_interest_changed(n);
     i_rant_node_unlock(n, acquired);
     return h;
+refuse:
+    i_rant_node_create_refuse(n, err, name, why);
+    i_rant_node_queue_drop(n, h);
+    i_rant_node_alloc(n, h, 0);
+    i_rant_node_unlock(n, acquired);
+    return NULL;
 }
 
 const char *i_rant_node_mesh_name(RantNode *n, const char *name, size_t room, char *buf){
-    const char *src, *rel; size_t len, at, nl; int acquired;
+    const char *src, *rel, *dot; size_t len, at, nl, tail; int acquired;
     if (!n || !name) return NULL;
-    len = strlen(name);
-    /* a launcher's remap replaces the code's name, then the prefix applies to the new one */
+    /* a launcher's remap replaces the code's name, then the prefix applies to the new one.
+       Both touch only the entity, a field path after the first '.' rides along */
+    dot = strchr(name, '.');
+    len = dot ? (size_t)(dot - name) : strlen(name);
+    tail = dot ? strlen(dot) : 0u;
     if (!(src = i_rant_remap_find(n, name, len, &len))) src = name;
     rel = (len && src[0] == '/') ? src + 1 : src;
     if (rel != src) len--;
     at = (rel == src && n->prefix_len) ? (size_t)n->prefix_len + 1u : 0u;
     for (nl = 0; nl < len && rel[nl] != '@' && at + nl + room < RANT_TOPIC_NAME_MAX; nl++) {}
-    if (nl == 0 || nl < len){     /* empty, an '@' or too long */
+    if (nl == 0 || nl < len || at + nl + tail + room > RANT_TOPIC_NAME_MAX
+        || (dot && memchr(dot, '@', tail))){     /* empty, an '@' or too long */
         acquired = i_rant_node_lock(n);
         i_rant_node_create_fail(n, RANT_E_BAD_NAME, name, 0, acquired);
         i_rant_node_unlock(n, acquired);
         return NULL;
     }
     if (at){ memcpy(buf, n->prefix, n->prefix_len); buf[n->prefix_len] = '/'; }
-    memcpy(buf + at, rel, nl); buf[at + nl] = '\0';
+    memcpy(buf + at, rel, nl);
+    if (tail) memcpy(buf + at + nl, dot, tail);
+    buf[at + nl + tail] = '\0';
     return buf;
 }
 
@@ -2922,7 +3142,7 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
     {   /* a typed plain topic refuses a payload its schema cannot read, so the fault lands
            on the sender instead of as a schema mismatch at every reader */
         RantTopic *th = topic_index < n->max_topics ? n->handles[topic_index] : NULL;
-        if (th && th->schema && th->kind == RANT_KIND_TOPIC && !rant_schema_validate(th->schema, data))
+        if (th && th->adv && th->kind == RANT_KIND_TOPIC && !rant_schema_validate(th->adv, data))
             return RANT_ERR_SCHEMA;
     }
     matched = i_rant_transport_publisher_match_count(n->transport, topic_index);
@@ -2940,7 +3160,7 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
     if (!matched && topic_index < n->max_topics
         && !(q && q->reliability == RANT_RELIABLE && q->catch_up > 0)){
         RantTopic *h = n->handles[topic_index];
-        if (h && i_rant_role_pubs(h->role)
+        if (h && i_rant_role_pubs(h->slot_role)
               && i_rant_node_topic_unsettled(n, h, i_rant_plat_now_us())){
             if (may_wait && n->match_wait_us){
                 matched = i_rant_node_match_wait(n, topic_index, h, 1);
@@ -3061,7 +3281,7 @@ int rant_topic_send(RantTopic *topic, RantBytes data, const RantSendOpts *opts){
     int acquired, r;
     if (!topic) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_lock(topic->n);
-    r = i_rant_node_do_send(topic->n, topic->index, data,
+    r = i_rant_node_do_send(topic->n, topic->wire->index, data,
                             opts ? opts->capture_us : 0u, acquired);
     i_rant_node_send_tx(topic->n, acquired);
     i_rant_node_unlock(topic->n, acquired);
@@ -3072,14 +3292,14 @@ int i_rant_topic_send_hdr(RantTopic *topic, RantBytes hdr, RantBytes data){
     int acquired, r;
     if (!topic) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_lock(topic->n);
-    r = i_rant_node_do_send_ex(topic->n, topic->index, hdr, data, 0, 0, 0, acquired);
+    r = i_rant_node_do_send_ex(topic->n, topic->wire->index, hdr, data, 0, 0, 0, acquired);
     i_rant_node_send_tx(topic->n, acquired);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
 
 uint64_t i_rant_topic_seqno(RantTopic *topic){
-    return topic ? i_rant_transport_topic_seqno(topic->n->transport, topic->index) : 0;
+    return topic ? i_rant_transport_topic_seqno(topic->n->transport, topic->wire->index) : 0;
 }
 
 void i_rant_node_flush_tx(RantNode *n){
@@ -3202,13 +3422,26 @@ int i_rant_node_sys_wait(RantNode *n, i_RantSysWaitFn done, void *ctx){
 }
 
 /* A topic scoped RANT_ERROR from the patterns layer, through the node's one event path. */
-void i_rant_node_sys_error(RantNode *n, RantErrorKind error, RantTopic *topic, uint32_t peer){
+void i_rant_node_sys_error(RantNode *n, RantErrorKind error, RantTopic *topic, uint32_t peer,
+                           const char *name, const char *detail){
     RantEvent e;
     if (!n) return;
     memset(&e, 0, sizeof e);
-    e.kind = RANT_ERROR; e.error = error; e.peer = peer;
+    e.kind = RANT_ERROR; e.error = error; e.peer = peer; e.detail = detail;
     if (topic){ e.topic = topic->index; e.topic_name = i_rant_node_topic_name(n, topic->index); }
+    if (name) e.topic_name = name;
     i_rant_node_emit(n, &e);
+}
+
+const RantSchema *i_rant_node_schema_own(RantNode *n, const RantSchema *s){
+    RantBytes w;
+    if (!n || !s) return NULL;
+    w = rant_schema_wire(s);
+    return i_rant_registry_parse(&n->registry, w.data, w.len);
+}
+
+const RantSchema *i_rant_topic_writer_schema(RantTopic *topic, uint32_t peer){
+    return topic ? i_rant_node_core_writer_schema(topic->n->core, peer, topic->wire->index) : NULL;
 }
 
 /* Matched subscribers with dropped peers included, since what is sent to one replays when it
@@ -3283,15 +3516,17 @@ void i_rant_node_set_sys_hooks(RantNode *n, i_RantSysEventFn on_event, i_RantSys
     i_rant_node_unlock(n, acquired);
 }
 
+/* A handle's role, which its wire's slot combines with the others'. */
 static int i_rant_topic_set_role_one(RantTopic *topic, RantRole role){
-    int r;
+    uint8_t was = topic->role; int r;
+    if ((unsigned)role > RANT_INACTIVE) return -1;
     if (topic->q && topic->q->busy) return RANT_ERR_STATE;   /* its own dispatched callback runs somewhere */
-    r = i_rant_transport_set_role(topic->n->transport, topic->index, (uint8_t)role);
-    if (r == 0){
-        topic->role = (uint8_t)role;
-        i_rant_node_topic_came_up(topic->n, topic);
-        i_rant_node_interest_changed(topic->n);     /* a role flip may raise fresh candidates */
-    }
+    if (i_rant_role_pubs((uint8_t)role)
+        && (topic->path_at || (topic->wire != topic && topic->schema && topic->schema != topic->wire->adv)))
+        return RANT_ERR_ROLE;           /* a field handle reads, a writer takes the wire's type */
+    topic->role = (uint8_t)role;
+    r = i_rant_node_wire_role(topic->n, topic->wire);
+    if (r != 0) topic->role = was;
     return r;
 }
 
@@ -3329,8 +3564,23 @@ int rant_topic_set_role(RantTopic *topic, RantRole role){
     return r;
 }
 
+/* Retires h's slot, unlinks h from its wire and frees it. The slot keeps its schema hash
+ * as the reuse fingerprint, the registry keeps the schema. Lock held. */
+static int i_rant_node_slot_retire(RantNode *n, RantTopic *h){
+    RantTopic **p;
+    if (i_rant_transport_topic_retire(n->transport, h->index) != 0) return RANT_ERR_STATE;
+    i_rant_node_core_retire_topic_schema(n->core, h->index);
+    for (p = &h->wire->next; *p; p = &(*p)->next)
+        if (*p == h){ *p = h->next; break; }
+    i_rant_node_queue_drop(n, h);
+    i_rant_node_views_drop(n, h);
+    n->handles[h->index] = NULL;
+    i_rant_node_alloc(n, h, 0);
+    return RANT_OK;
+}
+
 int rant_topic_retire(RantTopic *topic){
-    RantNode *n; int acquired; uint16_t idx;
+    RantNode *n; int acquired, parked; RantTopic *w;
     if (!topic) return RANT_ERR_NO_TOPIC;
     n = topic->n;
     acquired = i_rant_node_lock(n);
@@ -3344,16 +3594,25 @@ int rant_topic_retire(RantTopic *topic){
         i_rant_node_unlock(n, acquired);
         return RANT_ERR_STATE;
     }
-    idx = topic->index;
-    if (i_rant_transport_topic_retire(n->transport, idx) != 0){
-        i_rant_node_unlock(n, acquired);
-        return RANT_ERR_STATE;
+    w = topic->wire;
+    /* a lane this ring parked would wait on it forever: the others retry it once it is gone */
+    parked = topic->q && topic->q->parked;
+    if (w == topic && topic->next){
+        /* others ride the wire: it stays as their carrier, unseen by rant_node_topic */
+        topic->carrier = 1;
+        i_rant_node_queue_drop(n, topic);
+        i_rant_node_views_drop(n, topic);
+        (void)i_rant_node_wire_role(n, topic);
+    } else {
+        if (i_rant_node_slot_retire(n, topic) != 0){
+            i_rant_node_unlock(n, acquired);
+            return RANT_ERR_STATE;
+        }
+        if (w == topic) parked = 0;      /* the handle is invalid from here */
+        else if (w->carrier && !w->next){ (void)i_rant_node_slot_retire(n, w); parked = 0; }
+        else (void)i_rant_node_wire_role(n, w);
     }
-    /* the slot keeps its schema hash as the reuse fingerprint, the registry keeps the schema */
-    i_rant_node_core_retire_topic_schema(n->core, idx);
-    i_rant_node_queue_drop(n, topic);
-    n->handles[idx] = NULL;
-    i_rant_node_alloc(n, topic, 0);           /* the handle is invalid from here */
+    if (parked) (void)i_rant_transport_deliver_parked(n->transport, w->index, i_rant_plat_now_us());
     /* the slot rides the announce as a hole from the next blob on */
     i_rant_node_interest_changed(n);
     i_rant_node_unlock(n, acquired);
@@ -3369,6 +3628,7 @@ RantTopic *rant_node_topic(RantNode *n, uint16_t index){
     if (!n) return NULL;
     acquired = i_rant_node_lock(n);
     h = (index < i_rant_node_topic_hi(n)) ? n->handles[index] : NULL;     /* holes yield NULL */
+    if (h && h->carrier) h = NULL;                                        /* its handle closed */
     i_rant_node_unlock(n, acquired);
     return h;
 }
@@ -3430,30 +3690,17 @@ uint32_t rant_node_mesh_epoch(RantNode *n){
 /* Re types a live topic in place: the slot is retired and reused at the same index under
  * a bumped generation, the schema replaced, the handle and queue kept. Lock held. */
 int i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reliability){
-    RantNode *n = topic->n; i_RantTopicDef def; const RantSchema *copy = NULL; uint16_t idx = topic->index;
-    uint32_t rb; int rc;
+    RantNode *n = topic->n; const RantSchema *copy = NULL;
     i_rant_node_callbacks_settle(n);
+    if (topic->wire != topic || topic->next || topic->path_at)
+        return RANT_ERR_STATE;          /* a shared wire and a field handle keep their types */
     if (schema){
         RantBytes w = rant_schema_wire(schema);
         copy = i_rant_registry_parse(&n->registry, w.data, w.len);
         if (!copy) return RANT_ERR_OOM;
     }
-    if (i_rant_transport_topic_retire(n->transport, idx) != 0) return RANT_ERR_STATE;
-    i_rant_node_core_retire_topic_schema(n->core, idx);
     topic->schema = copy;
-    topic->qos.reliability = (RantReliability)reliability;
-    memset(&def, 0, sizeof def);
-    def.name = topic->name; def.role = topic->role; def.kind = topic->kind;
-    def.prefix_bytes = topic->prefix_bytes; def.directed = topic->directed; def.attrs = topic->attrs;
-    def.qos = topic->qos;
-    rb = i_rant_discovery_meta_version(i_rant_discovery_state(n->discovery)) + 1u;
-    rc = i_rant_transport_topic_reuse(n->transport, idx, &def, 1, rb);
-    if (rc != 0) return rc == -4 ? RANT_ERR_OOM : RANT_ERR_STATE;
-    i_rant_node_core_topic_rebound(n->core, idx);
-    i_rant_node_core_set_topic_schema(n->core, idx, topic->schema);
-    i_rant_node_topic_came_up(n, topic);
-    i_rant_node_interest_changed(n);
-    return RANT_OK;
+    return i_rant_node_rebind(n, topic, copy, reliability);
 }
 
 int rant_topic_refresh(RantTopic *topic){
@@ -3576,7 +3823,7 @@ void rant_node_mem_stats(RantNode *n, size_t *in_use, size_t *peak, uint64_t *al
 void rant_topic_repair_stats(RantTopic *topic, RantRepairStats *out){
     if (topic){
         int acquired = i_rant_node_lock(topic->n);
-        i_rant_transport_repair_stats(topic->n->transport, topic->index, out);
+        i_rant_transport_repair_stats(topic->n->transport, topic->wire->index, out);
         i_rant_node_unlock(topic->n, acquired);
     } else if (out) memset(out, 0, sizeof *out);
 }
@@ -3586,7 +3833,8 @@ void rant_topic_counts(RantTopic *topic, uint64_t *tx_msgs, uint64_t *tx_bytes,
     uint64_t tm = 0, tb = 0, rm = 0, rb = 0;
     if (topic){
         int acquired = i_rant_node_lock(topic->n);
-        tm = topic->tx_msgs; tb = topic->tx_bytes; rm = topic->rx_msgs; rb = topic->rx_bytes;
+        tm = topic->wire->tx_msgs; tb = topic->wire->tx_bytes;    /* the entity's sends */
+        rm = topic->rx_msgs; rb = topic->rx_bytes;
         i_rant_node_unlock(topic->n, acquired);
     }
     if (tx_msgs)  *tx_msgs  = tm;
@@ -3686,15 +3934,15 @@ static void i_rant_node_snapshot_fill(RantNode *n, RantMapWriter *w, uint32_t se
             RantTopic *h = n->handles[i];
             const RantQos *q = i_rant_transport_topic_qos(n->transport, i);
             RantRepairStats rs;
-            if (!h) continue;
+            if (!h || h->wire != h) continue;
             if (n->n_builtin && i >= n->builtin_lo
                              && i < (uint16_t)(n->builtin_lo + n->n_builtin)) continue;
             i_rant_transport_repair_stats(n->transport, i, &rs);
             rant_map_open_map(w, NULL);
             rant_map_put_uint(w, "index", i);
-            rant_map_put_string(w, "name", rant_string(h->name, h->name_len));
+            rant_map_put_string(w, "name", i_rant_transport_topic_name(n->transport, i));
             rant_map_put_uint(w, "kind", h->kind);
-            rant_map_put_uint(w, "role", h->role);
+            rant_map_put_uint(w, "role", h->slot_role);
             rant_map_put_bool(w, "reliable", q && q->reliability == RANT_RELIABLE);
             rant_map_put_uint(w, "keep_last", q ? q->keep_last : 0);
             rant_map_put_uint(w, "catch_up", q ? q->catch_up : 0);
@@ -3794,7 +4042,7 @@ int rant_topic_subscriber_progress(RantTopic *topic, uint32_t peer,
     int r, acquired;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = i_rant_transport_subscriber_progress(topic->n->transport, topic->index, peer, base_seqno, have, total);
+    r = i_rant_transport_subscriber_progress(topic->n->transport, topic->wire->index, peer, base_seqno, have, total);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
@@ -3824,7 +4072,7 @@ int rant_topic_drain(RantTopic *topic, int timeout_ms){
     n = topic->n;
     acquired = i_rant_node_lock(n);
     if (!acquired){ i_rant_node_unlock(n, acquired); return 0; }   /* from a callback: can neither pump nor wait */
-    c.index = topic->index;
+    c.index = topic->wire->index;
     c.deadline = i_rant_plat_now_us() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0) * 1000u;
     w.done = i_rant_node_drain_wait_done; w.periodic = i_rant_node_wait_kick; w.ctx = &c;
     w.pump_ms = 1;          /* a nested tick: the lock stays held */
@@ -3838,7 +4086,7 @@ int rant_topic_match_count(RantTopic *topic){
     int r, acquired;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = i_rant_transport_publisher_live_matches(topic->n->transport, topic->index);
+    r = i_rant_transport_publisher_live_matches(topic->n->transport, topic->wire->index);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
@@ -3847,7 +4095,7 @@ int rant_topic_pending_count(RantTopic *topic){
     int r, acquired;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = i_rant_node_core_topic_unresolved(topic->n->core, topic->index);
+    r = i_rant_node_core_topic_unresolved(topic->n->core, topic->wire->index);
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }
@@ -3858,8 +4106,8 @@ int rant_topic_ready(RantTopic *topic){
     int r, acquired;
     if (!topic) return 0;
     acquired = i_rant_node_lock(topic->n);
-    r = i_rant_transport_publisher_match_count(topic->n->transport, topic->index) > 0
-     || !i_rant_node_topic_unsettled(topic->n, topic, i_rant_plat_now_us());
+    r = i_rant_transport_publisher_match_count(topic->n->transport, topic->wire->index) > 0
+     || !i_rant_node_topic_unsettled(topic->n, topic->wire, i_rant_plat_now_us());
     i_rant_node_unlock(topic->n, acquired);
     return r;
 }

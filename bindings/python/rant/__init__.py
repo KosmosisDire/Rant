@@ -1569,14 +1569,8 @@ def _generic(cls, item):
     return _pytypes.GenericAlias(cls, item)
 
 
-# the topic roles, and the pub and sub bit pair behind a shared name slot (bit 0 = pub)
+# the topic roles
 _ROLE_PUBSUB, _ROLE_PUB_ONLY, _ROLE_SUB_ONLY, _ROLE_INACTIVE = 0, 1, 2, 3
-_PUB_BIT, _SUB_BIT = 1, 2
-
-
-def _role_from_bits(bits):
-    return (_ROLE_PUBSUB if bits == 3 else _ROLE_PUB_ONLY if bits == 1
-            else _ROLE_SUB_ONLY if bits == 2 else _ROLE_INACTIVE)
 
 
 class Message:
@@ -1809,42 +1803,17 @@ def _topic_opts(node, reliable=False, keep_last=0, catch_up=0, max_message_bytes
     return co
 
 
-class _TopicRec:
-    """One native topic slot in the node's registry, held once per live handle and role."""
-    __slots__ = ("handle", "index", "schema_hash", "queue", "pull", "pubs", "subs")
-
-    def __init__(self, handle, index, schema_hash, queue, pull):
-        self.handle = handle
-        self.index = index
-        self.schema_hash = schema_hash
-        self.queue = queue
-        self.pull = pull
-        self.pubs = 0
-        self.subs = 0
-
-    @property
-    def bits(self):
-        return (_PUB_BIT if self.pubs else 0) | (_SUB_BIT if self.subs else 0)
-
-    def hold(self, bit, n=1):
-        if bit == _PUB_BIT:
-            self.pubs += n
-        else:
-            self.subs += n
-
-
 class _Topic:
-    """The native slot behind Publisher and Subscriber. Same name handles on one node share
-        it, one hold per role, and the last close retires it."""
-    __slots__ = ("_node", "_h", "_schema", "_name", "_bit", "_open")
+    """The native topic behind Publisher and Subscriber. Same name handles are separate
+        native handles of one entity, which the C shares."""
+    __slots__ = ("_node", "_h", "_schema", "_name", "_open")
 
-    def __init__(self, node, name, schema, bit, opts):
+    def __init__(self, node, name, schema, role, opts):
         sch = _as_schema(node, schema)
         self._node = node
         self._name = name
         self._schema = sch
-        self._bit = bit
-        self._h = node._acquire_topic(name, bit, sch, opts)
+        self._h = node._acquire_topic(name, role, sch, opts)
         self._open = True
 
     def _use(self):
@@ -1921,7 +1890,7 @@ class _Topic:
     def close(self):
         if not self._open:
             return True
-        if not self._node._release_topic(self._name, self._bit):
+        if not self._node._release_topic(self._h):
             return False
         self._open = False
         self._h = None
@@ -1966,7 +1935,7 @@ class Node:
     # No attribute may point back at the node, so dropping the last reference closes it at once
     __slots__ = ("_lib", "_h", "_id", "_alloc", "_on_evt", "_on_log", "_log_bound",
                  "_on_status", "_status_bound", "_status_peers", "_status_lock",
-                 "_topic_specs", "_topics_by_name", "_create_lock",
+                 "_topic_specs", "_create_lock",
                  "_sub_handlers", "_pattern_boxes", "_async_live", "_pat_lock", "_name",
                  "_threading", "_queue", "_pump", "_gate", "_close_lock", "__weakref__")
 
@@ -2003,9 +1972,8 @@ class Node:
         self._status_peers = set()        # peers whose last set was not empty
         self._status_lock = _threading.Lock()
         self._topic_specs = {}
-        self._topics_by_name = {}   # name to _TopicRec
         self._create_lock = _threading.Lock()
-        self._sub_handlers = {}     # topic index to [Message handlers]
+        self._sub_handlers = {}     # topic index to its Message handler
         self._pattern_boxes = []    # pattern handler box ids (reaped at close)
         self._async_live = set()    # in-flight async-call box ids
         self._pat_lock = _threading.Lock()
@@ -2173,70 +2141,32 @@ class Node:
                 best_effort, reflect_from_mesh (needs fetch_details), queue, queue_bytes."""
         return CallObserver(self, name, handler, req_schema, prg_schema, rsp_schema, **opts)
 
-    # The registry behind every Publisher and Subscriber. Same name handles on this node
-    # share the native slot: the role follows the live holds and the last release retires it.
-    def _acquire_topic(self, name, bit, sch, opts):
+    def _acquire_topic(self, name, role, sch, opts):
         if not name:
             raise ValueError("topic name required")
         with self._gate.use(self._h) as live, self._create_lock:
             if not live:
                 raise Error("node is closed")
-            rec = self._topics_by_name.get(name)
-            sh = sch.hash if sch else 0
-            if rec is not None:
-                if sh and rec.schema_hash and sh != rec.schema_hash:
-                    raise Error("topic %r already exists on this node with a different schema"
-                                % name)
-                if opts.queue != rec.queue or opts.pull != rec.pull:
-                    raise Error("topic %r already exists on this node with a different queue "
-                                "or delivery (same name handles share one slot)" % name)
-                bits = rec.bits | bit
-                if bits != rec.bits:
-                    r = self._lib.rant_topic_set_role(rec.handle, _role_from_bits(bits))
-                    if r != 0:
-                        raise Error("topic %r role change refused: %s" % (name, _send_status(r)),
-                                    self.last_error)
-                if sch is not None:
-                    if self._topic_specs.get(rec.index) is None:
-                        self._topic_specs[rec.index] = sch._spec
-                    if not rec.schema_hash:
-                        rec.schema_hash = sh
-            else:
-                h = self._lib.rant_node_create_topic(self._h, name.encode("utf-8"),
-                                                     _role_from_bits(bit),
-                                                     sch._s if sch else None, _c.byref(opts))
-                if not h:
-                    err = self.last_error
-                    raise Error("topic %r create failed: %s" % (name, err), err)
-                rec = _TopicRec(h, self._lib.rant_topic_index(h), sh, opts.queue, opts.pull)
-                self._topic_specs[rec.index] = sch._spec if sch else None
-                self._topics_by_name[name] = rec
-            rec.hold(bit)
-            return rec.handle
+            h = self._lib.rant_node_create_topic(self._h, name.encode("utf-8"), role,
+                                                 sch._s if sch else None, _c.byref(opts))
+            if not h:
+                err = self.last_error
+                raise Error("topic %r create failed: %s" % (name, err), err)
+            self._topic_specs[self._lib.rant_topic_index(h)] = sch._spec if sch else None
+            return h
 
-    def _release_topic(self, name, bit):
-        """Drop one hold. False when the C refused from a callback, where the hold stays."""
+    def _release_topic(self, h):
+        """Retire one handle. False when the C refused from a callback, where it stays live."""
         with self._gate.use(self._h) as live, self._create_lock:
-            rec = self._topics_by_name.get(name)
-            if rec is None or not live:   # the node closed and freed the topic
+            if not live:   # the node closed and freed the topic
                 return True
-            old = rec.bits
-            rec.hold(bit, -1)
-            bits = rec.bits
-            if bits == 0:
-                if self._lib.rant_topic_retire(rec.handle) != 0:
-                    rec.hold(bit)
-                    return False
-                del self._topics_by_name[name]
-                # the slot may be reused by a different topic: its old decode spec and message
-                # handlers must never apply to the successor
-                self._topic_specs.pop(rec.index, None)
-                with self._pat_lock:
-                    self._sub_handlers.pop(rec.index, None)
-            elif bits != old:
-                if self._lib.rant_topic_set_role(rec.handle, _role_from_bits(bits)) != 0:
-                    rec.hold(bit)
-                    return False
+            index = self._lib.rant_topic_index(h)
+            if self._lib.rant_topic_retire(h) != 0:
+                return False
+            # the C may give the index to the next create: its spec and handler must not carry
+            self._topic_specs.pop(index, None)
+            with self._pat_lock:
+                self._sub_handlers.pop(index, None)
             return True
 
     def poll(self, timeout=0.0):
@@ -2391,10 +2321,11 @@ class Node:
                 if rc != 0:
                     raise Error("%s: queue refused: %s" % (what, _send_status(rc)), self.last_error)
             index = self._lib.rant_topic_index(h)
-            self._add_sub_handler(index, deliver)
+            self._set_sub_handler(index, deliver)
             rc = self._lib.rant_topic_set_role(h, _ROLE_PUBSUB)
             if rc != 0:
-                self._remove_sub_handler(index, deliver)
+                with self._pat_lock:
+                    self._sub_handlers.pop(index, None)
                 raise Error("%s: subscribe refused: %s" % (what, _send_status(rc)), self.last_error)
 
     @property
@@ -2443,15 +2374,9 @@ class Node:
         with self._pat_lock:
             self._async_live.discard(box_id)
 
-    def _add_sub_handler(self, index, fn):
+    def _set_sub_handler(self, index, fn):
         with self._pat_lock:
-            self._sub_handlers.setdefault(index, []).append(fn)
-
-    def _remove_sub_handler(self, index, fn):
-        with self._pat_lock:
-            handlers = self._sub_handlers.get(index)
-            if handlers and fn in handlers:
-                handlers.remove(fn)
+            self._sub_handlers[index] = fn
 
     def close(self, send_bye=True):
         """Stop the service thread and tear the node down, once the calls other threads are
@@ -3545,15 +3470,14 @@ class Variable:
                 return None
             lib.rant_node_lock(nh)
             try:
-                b = _c.RantBytes()
-                if lib.rant_variable_get(v, _c.byref(b)) != 1:
+                b, sp = _c.RantBytes(), _c.c_void_p()
+                if lib.rant_variable_get(v, _c.byref(b), _c.byref(sp)) != 1:
                     return None
                 data = _c.string_at(b.data, b.len) if b.data and b.len else b""
             finally:
                 lib.rant_node_unlock(nh)
-            if self._schema is None:
-                return data
-            val, ok = _decode_payload(None, self._schema, data)
+            # as an update: the schema the C returns reads this handle's part of the value
+            val, ok = _decode_payload(sp.value, self._schema, data)
         if not ok:
             raise SchemaError("variable %r: the value did not decode into its type" % self._name)
         return val
@@ -3703,7 +3627,7 @@ class Publisher:
     __slots__ = ("_topic",)
 
     def __init__(self, node, name, schema=None, **qos):
-        self._topic = _Topic(node, name, schema, _PUB_BIT, _topic_opts(node, **qos))
+        self._topic = _Topic(node, name, schema, _ROLE_PUB_ONLY, _topic_opts(node, **qos))
 
     __class_getitem__ = classmethod(_generic)
 
@@ -3750,9 +3674,8 @@ class Publisher:
         return self._topic.refresh()
 
     def close(self):
-        """Stop publishing. The node stops advertising the role no handle holds, and the last
-                handle on the name retires the topic. Returns True, or False when refused from
-                a callback, where the handle stays live."""
+        """Stop publishing. The last handle on the name retires the topic. Returns True, or
+                False when refused from a callback, where the handle stays live."""
         return self._topic.close()
 
     def __enter__(self):
@@ -3775,7 +3698,7 @@ class Subscriber:
                 raise ValueError("a subscriber without a handler is pulled, it takes no queue")
             opts.queue = None
             opts.pull = 1
-        self._topic = _Topic(node, name, schema, _SUB_BIT, opts)
+        self._topic = _Topic(node, name, schema, _ROLE_SUB_ONLY, opts)
         self._fn = None
         if handler is not None:
             if _arity(handler) == 1:
@@ -3783,7 +3706,7 @@ class Subscriber:
             else:
                 fn = lambda m: handler(m.value if m.value is not None else m.data, m)
             self._fn = fn
-            node._add_sub_handler(self._topic.index, fn)
+            node._set_sub_handler(self._topic.index, fn)
 
     __class_getitem__ = classmethod(_generic)
 
@@ -3833,17 +3756,11 @@ class Subscriber:
         return self._topic.refresh()
 
     def close(self):
-        """Stop receiving: the handler is dropped, the node stops advertising the role no
-                handle holds, and the last handle on the name retires the topic. Returns True,
-                or False when refused from a callback, where the handle stays live."""
-        if not self._topic._open:
-            return True
-        index = self._topic.index if self._fn is not None else None
+        """Stop receiving. The last handle on the name retires the topic. Returns True, or
+                False when refused from a callback, where the handle stays live."""
         if not self._topic.close():
             return False
-        if index is not None:
-            self._topic._node._remove_sub_handler(index, self._fn)
-            self._fn = None
+        self._fn = None
         return True
 
     def __enter__(self):
@@ -3877,15 +3794,14 @@ def _on_message(msg_ptr):
         node = _NODES.get(m.user)
         if node is None:
             return
-        handlers = node._sub_handlers.get(m.topic_index)
-        if handlers:
+        fn = node._sub_handlers.get(m.topic_index)
+        if fn is not None:
             msg = Message._from_c(m, node._topic_specs.get(m.topic_index))
             if msg._undecoded:
                 node._report_decode(msg.topic_name, "a message did not decode into the subscriber's type")
                 return
             with node._gate.running():
-                for fn in list(handlers):
-                    fn(msg)
+                fn(msg)
     except Exception:
         _traceback.print_exc()
 

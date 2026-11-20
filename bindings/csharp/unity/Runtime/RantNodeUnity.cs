@@ -100,8 +100,8 @@ namespace Rant
 
         // ---- topics -----------------------------------------------------------------
 
-        /// <summary>The shared topic of this name on the scene node, created on first request.
-        /// The QoS applies only to that first request, later callers share it.</summary>
+        /// <summary>The shared topic of this name and type on the scene node, created on first
+        /// request. The QoS applies only to that first request, later callers share it.</summary>
         public static RantTopic<T> Topic<T>(string name, Qos qos = null)
             => RequireMain().GetTopic<T>(name, qos);
 
@@ -112,46 +112,36 @@ namespace Rant
         /// <summary>The instance form of the static Topic&lt;T&gt;().</summary>
         public RantTopic<T> GetTopic<T>(string name, Qos qos = null)
         {
-            RantTopicBase ch = LookupOrNull(name, qos != null);
-            if (ch != null)
-            {
-                var typed = ch as RantTopic<T>;
-                if (typed == null) throw ShapeMismatch(name, ch, "RantTopic<" + typeof(T).Name + ">");
-                return typed;
-            }
-            var c = new RantTopic<T>(this, name, EffectiveQos(qos));
-            _topics.Add(name, c);
+            string key = typeof(T).FullName + ":" + name;
+            var c = LookupOrNull(key, name, qos != null) as RantTopic<T>;
+            if (c != null) return c;
+            c = new RantTopic<T>(this, name, EffectiveQos(qos));
+            _topics.Add(key, c);
             return c;
         }
 
         /// <summary>Instance form of the static raw Topic().</summary>
         public RantTopic GetTopic(string name, Qos qos = null)
         {
-            RantTopicBase ch = LookupOrNull(name, qos != null);
-            if (ch != null)
-            {
-                var raw = ch as RantTopic;
-                if (raw == null) throw ShapeMismatch(name, ch, "a raw RantTopic");
-                return raw;
-            }
-            var c = new RantTopic(this, name, EffectiveQos(qos));
-            _topics.Add(name, c);
+            string key = "raw:" + name;
+            var c = LookupOrNull(key, name, qos != null) as RantTopic;
+            if (c != null) return c;
+            c = new RantTopic(this, name, EffectiveQos(qos));
+            _topics.Add(key, c);
             return c;
         }
 
-        private RantTopicBase LookupOrNull(string name, bool customQos)
+        // Keyed by name and type: handles of one name with other types are separate topics,
+        // which the native node shares.
+        private RantTopicBase LookupOrNull(string key, string name, bool customQos)
         {
             if (string.IsNullOrEmpty(name)) throw new ArgumentException("topic name required", nameof(name));
             RantTopicBase ch;
-            if (!_topics.TryGetValue(name, out ch)) return null;
+            if (!_topics.TryGetValue(key, out ch)) return null;
             if (customQos)
                 Debug.LogWarning("[Rant] topic '" + name + "' already exists: the QoS passed here is ignored (first request wins)", this);
             return ch;
         }
-
-        private static InvalidOperationException ShapeMismatch(string name, RantTopicBase have, string want)
-            => new InvalidOperationException("topic '" + name + "' already exists as " + have.GetType().Name
-                + ", requested as " + want + ": one name = one message type per node");
 
         private static RantNodeUnity RequireMain()
         {

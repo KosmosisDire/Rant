@@ -39,10 +39,13 @@ public class PoseReceiver : MonoBehaviour {
 }
 ```
 
-`RantNodeUnity.Topic<T>(name)` gives you the topic of that name. Ask for the same name from
-ten scripts and you get the same `RantTopic<T>` back, so a topic is shared across the scene
-rather than duplicated. `RantNodeUnity.Topic(name)` is the raw form carrying `byte[]` or a
-UTF-8 `string`.
+`RantNodeUnity.Topic<T>(name)` gives you the topic of that name. Ask for the same name and
+type from ten scripts and you get the same `RantTopic<T>` back, so a topic is shared across
+the scene rather than duplicated. `RantNodeUnity.Topic(name)` is the raw form carrying
+`byte[]` or a UTF-8 `string`.
+
+A name may end in a field path to receive one field, such as
+`RantNodeUnity.Topic<bool>("Gp12/RobotState.servo_power")`. The whole sample still travels.
 
 A standard type from `Rant.Types`, such as `Pose`, is the same type in every language, so
 any peer reads it. Unity's axes are left handed with y up, and a peer that uses another

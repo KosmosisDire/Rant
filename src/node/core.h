@@ -144,6 +144,8 @@ const char *i_rant_node_core_note_size_mismatch(i_RantNodeCore *c, uint32_t peer
 /* The schema a delivered message decodes with: ours, a rebased view of the publisher's, the
  * publisher's own for an untyped topic, or NULL for raw. */
 const RantSchema *i_rant_node_core_msg_schema(i_RantNodeCore *c, uint32_t peer, uint16_t topic_index);
+/* The writer's own schema whole, NULL for an untyped writer. Lives until the node closes. */
+const RantSchema *i_rant_node_core_writer_schema(i_RantNodeCore *c, uint32_t peer, uint16_t topic_index);
 
 /* Points cfg's peer hooks, error sink and user at this core. The hooks keep the peer table
  * and the transport peer set in lockstep and fire the app's peer events. */

@@ -115,7 +115,7 @@ pub(crate) fn bind_builtin(
     deliver: Box<MsgFn>,
     bound: &std::sync::atomic::AtomicBool,
 ) -> Result<(), Error> {
-    let _topics = inner.topics.enter().ok_or_else(|| Error::new(ErrorKind::State, format!("{what}: the first handler cannot be set inside a callback")))?;
+    let _creates = inner.creates.enter().ok_or_else(|| Error::new(ErrorKind::State, format!("{what}: the first handler cannot be set inside a callback")))?;
     if bound.load(SeqCst) {
         return Ok(());
     }
@@ -132,10 +132,10 @@ pub(crate) fn bind_builtin(
     }
     // SAFETY: as above
     let index = unsafe { ffi::rant_topic_index(t) };
-    let id = inner.add_handler(index, name, deliver);
+    inner.set_handler(index, name, deliver);
     // SAFETY: as above
     if unsafe { ffi::rant_topic_set_role(t, ffi::RANT_PUBSUB) } != 0 {
-        inner.remove_handler(index, id);
+        lock(&inner.handlers).remove(&index);
         return Err(Error::last(raw, what));
     }
     bound.store(true, SeqCst);

@@ -46,6 +46,8 @@ struct Shape
     public Rant.Types.Float3[] Normals;
     public Corner Origin;
 }
+// a fixed record for field handles
+struct Gauge { public Corner Origin; public byte Id; public float Level; }
 // a fixed struct array inside a struct array's element
 struct Outline { [RantArray(4)] public Rant.Types.Float2[] Corners; public byte N; }
 // any type as an element: records with arrays of their own, arrays of arrays, strings, maps
@@ -1629,7 +1631,7 @@ static class Program
                 a.Poll(1);
                 b.Poll(1);
             }
-            Check("two subscribers share one slot", n1 == 1 && n2 == 1 && pub.MatchCount == 1);
+            Check("two subscribers of one name both receive", n1 == 1 && n2 == 1 && pub.MatchCount == 1);
 
             s1.Dispose();
             deadline = DateTime.UtcNow.AddSeconds(5);
@@ -1695,6 +1697,70 @@ static class Program
         Check("the second layout decodes with its own offsets",
               Until(3000, () => Volatile.Read(ref got) == 2) && a == 1 && b == 2);
         if (!ok) Console.WriteLine($"  decoded a={a} b={b}");
+        return ok;
+    }
+
+    // Field handles: same name subscribers typed as one field each, field remotes of one
+    // variable that read and write their own part, and the refusals.
+    static bool FieldsLeg()
+    {
+        bool ok = true;
+        void Check(string n, bool c) { Console.WriteLine((c ? "  ok  " : " FAIL ") + n); ok &= c; }
+        bool Until(int ms, Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddMilliseconds(ms);
+            while (DateTime.UtcNow < deadline && !done()) Thread.Sleep(2);
+            return done();
+        }
+
+        using var a = new RantNode("fa", Local(18));
+        using var b = new RantNode("fb", Local(18));
+        var qos = new Qos { Reliability = Reliability.Reliable };
+        int whole = 0, ids = 0;
+        byte lastId = 0; float lastX = 0;
+        using var pub = a.Publisher<Gauge>("f/gauge", qos);
+        var sWhole = b.Subscriber<Gauge>("f/gauge", g => Interlocked.Increment(ref whole), qos);
+        using var sId = b.Subscriber<byte>("f/gauge.id", v => { lastId = v; Interlocked.Increment(ref ids); }, qos);
+        using var sAt = b.Subscriber<Corner>("f/gauge.origin", c => lastX = c.X, qos);
+        Check("topic matched", Until(4000, () => pub.MatchCount > 0 && pub.Ready));
+        pub.Send(new Gauge { Origin = new Corner { X = 1.5f, Y = 2 }, Id = 9, Level = 3 });
+        Check("every handle gets the sample", Until(3000, () => Volatile.Read(ref whole) == 1 && Volatile.Read(ref ids) == 1));
+        Check("a field handle reads its field", Until(3000, () => lastId == 9 && lastX == 1.5f));
+        sWhole.Dispose();
+        pub.Send(new Gauge { Origin = new Corner { X = 5 }, Id = 4 });
+        Check("the open handles still receive", Until(3000, () => lastId == 4 && lastX == 5f));
+        Check("the disposed handle no longer fires", Volatile.Read(ref whole) == 1);
+        bool refused = false;
+        try { a.Publisher<byte>("f/gauge.id", qos); } catch (RantException) { refused = true; }
+        Check("a field handle never publishes", refused);
+
+        var initial = new Gauge { Origin = new Corner { X = 1, Y = 1 }, Id = 3, Level = 2 };
+        using var def = a.VariableDefinition<Gauge>("f/var", initial);
+        using var rWhole = b.RemoteVariable<Gauge>("f/var");
+        using var rId = b.RemoteVariable<byte>("f/var.id");
+        using var rAt = b.RemoteVariable<Corner>("f/var.origin");
+        Check("a field remote waits for the value", rId.Wait(4000));
+        Check("a field remote reads its field", rId.TryGet(out byte id0) && id0 == 3);
+        Check("a struct field reads", rAt.TryGet(out Corner c0) && c0.X == 1 && c0.Y == 1);
+        int idChanges = 0;
+        rId.OnChange += (v, u) => Interlocked.Increment(ref idChanges);
+        Check("OnChange replays at registration", Volatile.Read(ref idChanges) == 1);
+        Check("a field write is accepted", rId.Set(7) == SendStatus.Ok);
+        Check("it sets only that field at the owner", Until(3000, () =>
+            def.TryGet(out Gauge g) && g.Id == 7 && g.Origin.X == 1 && g.Level == 2));
+        Check("another field write", rAt.Set(new Corner { X = 6, Y = 8 }) == SendStatus.Ok);
+        Check("both writes hold", Until(3000, () =>
+            def.TryGet(out Gauge g) && g.Id == 7 && g.Origin.X == 6 && g.Origin.Y == 8));
+        Check("the whole remote sees both", Until(3000, () =>
+            rWhole.TryGet(out Gauge g) && g.Id == 7 && g.Origin.Y == 8));
+        Check("OnChange fired only for its own field", Volatile.Read(ref idChanges) == 2);
+        refused = false;
+        try { a.VariableDefinition<byte>("f/other.id"); } catch (RantException) { refused = true; }
+        Check("a definition takes no path", refused);
+        var q = b.CreateQueue();
+        refused = false;
+        try { b.RemoteVariable<byte>("f/var.id", new VariableOptions { Queue = q }); } catch (RantException) { refused = true; }
+        Check("a later remote on another queue is refused", refused);
         return ok;
     }
 
@@ -2136,6 +2202,7 @@ static class Program
         ("domains", DomainsLeg),
         ("dispose", DisposeLeg),
         ("rebind", RebindLeg),
+        ("fields", FieldsLeg),
         ("close_race", CloseRaceLeg),
         ("handle_gate", HandleGateLeg),
     };

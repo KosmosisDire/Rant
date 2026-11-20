@@ -179,6 +179,12 @@ if (auto c = sub.take_latest()) show(*c);
 - `drain()` on a publisher waits until every reader has the messages.
 - `Qos` sets reliability, history depth and rate: `{ rant::Reliability::Reliable }`.
 
+A name may end in a field path to receive one field. The whole sample still travels.
+
+```cpp
+auto power = node.subscriber<bool>("Gp12/RobotState.servo_power", [](bool on) { /* ... */ });
+```
+
 ## Functions
 
 ```cpp
@@ -243,6 +249,9 @@ remote.set(2.0f);
 - `on_change` fires once with the current value, then on every change.
 - `on_write` fires on every write, even one with the same value.
 - `wait()` blocks until a value exists.
+- A remote name may end in a field path. `get()`, `set()` and `on_change` then read and
+  write that field alone: `node.remote_variable<bool>("Gp12/RobotState.servo_power")`.
+- `get()` on a `rant::Bytes` remote reads fields by name, as a `MessageView` does.
 
 ## Names and schemas
 

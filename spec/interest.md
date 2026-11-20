@@ -309,6 +309,7 @@ nodes a name verified peer that advertises the name under another kind is refuse
 `RANT_E_KIND_MISMATCH`, never cross wired. Retired slots are exempt from the local check,
 and so is a twin on either side that is `RANT_INACTIVE`.
 
-A node may hold two topics of one identity with different QoS and switch which is live by
-role. Identity lookup prefers the non INACTIVE one, and a verdict bound to the parked twin
-re pends when the other goes live, so its schema gates are re judged against the live one.
+The node never makes a live twin: a second handle of a plain topic shares the first one's
+slot and defines its own as an `RANT_INACTIVE` twin (spec/node.md, Handles and wires).
+Identity lookup prefers the non INACTIVE slot, and a verdict bound to an INACTIVE twin re
+pends when another goes live, so its schema gates are re judged against the live one.

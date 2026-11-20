@@ -30,6 +30,40 @@ schema, then queue or call back. A zero length payload on a pattern channel is a
 message and skips the schema, as does a task request whose op byte is not CALL. A message
 that fails validation is dropped and surfaced, never handed to the app.
 
+## Handles and wires
+
+A node may hold many handles of one plain topic, each its own `RantTopic` with its own
+index, schema, ring and callbacks. The first handle's slot is the wire: the only slot the
+entity advertises. Each later handle defines a slot of its own under its whole name, always
+`RANT_INACTIVE`, so it never reaches the announce and its index still means one handle.
+
+- **Roles.** The wire's slot role is every live handle's role combined. A role change on any
+  handle recomputes it.
+- **QoS and type.** The first handle fixes the wire's QoS and the schema it advertises. A
+  field handle advertises none. A later reliable handle on a best effort wire is refused
+  with `RANT_E_QOS_INCOMPATIBLE`. A later writer must carry the advertised type, except that
+  the first typed writer joining untyped readers rebinds the wire to its type. Anything else
+  is `RANT_E_SCHEMA_MISMATCH` with the reason in `.detail`.
+- **Field handles.** A name with a path after its first `.` reads one field, as
+  spec/schema.md, Field views, describes. Such a handle only subscribes. Functions and
+  tasks take no path, and variable remotes share one entity in the patterns layer
+  (spec/patterns.md).
+- **Delivery.** A message arrives once on the wire and runs once per subscribing handle.
+  Each handle reads it with its own schema: the gate's binding when the handle is the
+  reader the wire advertises, else its view of the writer's schema. Views are made once per
+  writer schema and kept on the handle, and a writer a handle cannot read is reported once
+  with `RANT_E_SCHEMA_MISMATCH` on that handle's index. Each queued handle gets its own
+  copy of the record.
+- **Reliable rings.** Before any handle sees a message, every reliable ring on the wire must
+  have room for it. If one has none the lane parks, and the retry delivers each handle once.
+- **Events.** A transport event on the wire reaches every live handle under its own index
+  and name.
+- **Sends and stats.** Sends, drains, match and repair counts go through the wire's slot.
+  `rant_topic_counts` gives the entity's sends and the handle's own deliveries.
+- **Close.** Closing the first handle while others live leaves the wire as a carrier: its
+  slot stays advertised for them and `rant_node_topic` reads its index as empty. The last
+  close retires it. A handle that shares a wire refuses `rant_topic_refresh`.
+
 ## Growth
 
 In dynamic mode a peer that found no slot and an oversized peer blob are growth signals,
@@ -239,14 +273,16 @@ starved link (an ESP32 out of WiFi buffers reports ENOMEM) says which topic and 
 The prefix is built once at open: `RANT_PREFIX` outermost, then `opts.prefix`, joined with
 `/` into `n->prefix`. A launcher can move a whole program under a cell without the program
 knowing, and the program can still group its own names. Each part is checked at open: no
-`@`, no leading or trailing `/`, and room left for a `/` and a one byte name.
+`@` or `.`, no leading or trailing `/`, and room left for a `/` and a one byte name.
 
 Every public create (topic, function, task, variable, both sides) passes its name through
 `i_rant_node_mesh_name` before anything else sees it. Everything below that point, from the
 pattern channels and their `@` suffixes to reflect_from_mesh and the transport identity
 hash, only ever sees the full mesh name, so there is one name per entity. A leading `/` is
 the way out: it is stripped and the prefix is skipped. A name that holds `@`, is empty, or
-will not fit `RANT_TOPIC_NAME_MAX` with its channel suffix fires `RANT_E_BAD_NAME`.
+will not fit `RANT_TOPIC_NAME_MAX` with its channel suffix fires `RANT_E_BAD_NAME`. A field
+path after the first `.` rides along untouched: the remap and the prefix apply to the part
+before it.
 
 `RANT_REMAP` is read at open into one pool block of any length, checked whole, and kept as
 the text. The resolver looks the code's name up there first and resolves the entry's new name

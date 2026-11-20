@@ -787,9 +787,95 @@ def lifecycle():
     return ok
 
 
+@dataclass
+class Gauge:
+    origin: Velocity = field(default_factory=Velocity)
+    id:     rant.u8 = 0
+    level:  rant.f32 = 0.0
+
+
+def fields():
+    """Same name subscribers typed as one field each, field remotes of one variable that read
+    and write their own part, and the refusals."""
+    print("fields leg: two nodes, loopback")
+    ok = True
+
+    def check(name, cond):
+        nonlocal ok
+        print(("  ok  " if cond else " FAIL ") + name)
+        ok = ok and cond
+
+    def until(secs, done):
+        deadline = time.time() + secs
+        while time.time() < deadline and not done():
+            time.sleep(0.005)
+        return done()
+
+    a = rant.Node("FA", on_event=lambda e: None, domain=DOMAIN + 19, multicast_interface=IFACE)
+    b = rant.Node("FB", on_event=lambda e: None, domain=DOMAIN + 19, multicast_interface=IFACE)
+    try:
+        whole, ids, xs = [], [], []
+        pub = a.publisher("f/gauge", Gauge, reliable=True)
+        s_whole = b.subscriber("f/gauge", Gauge, whole.append, reliable=True)
+        b.subscriber("f/gauge.id", rant.u8, ids.append, reliable=True)
+        b.subscriber("f/gauge.origin", Velocity, lambda v: xs.append(v.dx), reliable=True)
+        check("topic matched", until(4.0, lambda: pub.match_count > 0 and pub.ready))
+        pub.send(Gauge(origin=Velocity(dx=1.5, dy=2.0), id=9, level=3.0))
+        check("every handle gets the sample", until(3.0, lambda: len(whole) == 1 and len(ids) == 1))
+        check("a field handle reads its field", until(3.0, lambda: ids == [9] and xs == [1.5]))
+        check("closing one handle leaves the others", s_whole.close())
+        pub.send(Gauge(origin=Velocity(dx=5.0), id=4))
+        check("the open handles still receive", until(3.0, lambda: ids[-1:] == [4] and xs[-1:] == [5.0]))
+        check("the closed handle no longer fires", len(whole) == 1)
+        try:
+            a.publisher("f/gauge.id", rant.u8)
+            check("a field handle never publishes", False)
+        except rant.Error:
+            check("a field handle never publishes", True)
+
+        vd = a.variable_definition("f/var", Gauge, initial=Gauge(origin=Velocity(dx=1.0, dy=1.0), id=3, level=2.0))
+        r_whole = b.remote_variable("f/var", Gauge)
+        r_id = b.remote_variable("f/var.id", rant.u8)
+        r_at = b.remote_variable("f/var.origin", Velocity)
+        r_raw = b.remote_variable("f/var.level")
+        check("a field remote waits for the value", r_id.wait(4.0))
+        check("a field remote reads its field", r_id.get() == 3)
+        v = r_at.get()
+        check("a struct field reads", v is not None and v.dx == 1.0 and v.dy == 1.0)
+        check("an untyped field remote decodes its field", r_raw.get() == 2.0)
+        changes = []
+        r_id.on_change(changes.append)
+        check("on_change replays at registration", changes == [3])
+        check("a field write is accepted", r_id.set(7) == rant.SendStatus.OK)
+        check("it sets only that field at the owner", until(3.0, lambda: (lambda g: g is not None
+              and g.id == 7 and g.origin.dx == 1.0 and g.level == 2.0)(vd.get())))
+        check("another field write", r_at.set(Velocity(dx=6.0, dy=8.0)) == rant.SendStatus.OK)
+        check("both writes hold", until(3.0, lambda: (lambda g: g is not None
+              and g.id == 7 and g.origin.dx == 6.0 and g.origin.dy == 8.0)(vd.get())))
+        check("the whole remote sees both", until(3.0, lambda: (lambda g: g is not None
+              and g.id == 7 and g.origin.dy == 8.0)(r_whole.get())))
+        check("on_change fired only for its own field", changes == [3, 7])
+        try:
+            a.variable_definition("f/other.id", rant.u8)
+            check("a definition takes no path", False)
+        except rant.Error:
+            check("a definition takes no path", True)
+        q = b.create_queue()
+        try:
+            b.remote_variable("f/var.id", rant.u8, queue=q)
+            check("a later remote on another queue is refused", False)
+        except rant.Error:
+            check("a later remote on another queue is refused", True)
+    finally:
+        a.close()
+        b.close()
+    print("fields: " + ("PASS\n" if ok else "FAIL\n"))
+    return ok
+
+
 def handles():
-    """Same name handles on one node share the topic slot, close releases one hold and the
-    last close retires the name. Plus the reflection walks and the log write."""
+    """Same name handles on one node close one at a time and the last close retires the
+    name. Plus the reflection walks and the log write."""
     print("handles leg: two nodes, domain 48, loopback")
     ok = True
 
@@ -1596,12 +1682,11 @@ def dispatch_leg():
     check("the queue holds it until its own dispatch",
           wait(lambda: q.stats[0] == 1) and not own)
     check("the queue's dispatch runs it", q.dispatch() == 1 and own == [7])
-    try:
-        srv.publisher("down", Level)
-        shared = True
-    except rant.Error:
-        shared = False
-    check("a same name handle on another queue is refused", not shared)
+    plain = []
+    srv.subscriber("down", Level, lambda v: plain.append(v.value))
+    pub2.send(Level(value=8))
+    check("a same name handle on another queue runs at its own dispatch",
+          wait(lambda: q.dispatch() >= 0 and plain == [8] and own == [7, 8]))
     try:
         cli.subscriber("x", Level, lambda v: None, queue=q)
         foreign = True
@@ -2085,6 +2170,7 @@ LEGS = [
     ("pose", pose_leg),
     ("lifecycle", lifecycle),
     ("handles", handles),
+    ("fields", fields),
     ("value_roots_live", value_roots_live),
     ("struct_arrays_live", struct_arrays_live),
     ("video_types", video_types),

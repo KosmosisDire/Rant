@@ -277,15 +277,17 @@ typedef struct {
 } RantVariableOpts;
 
 /* Creates the definition (this node holds the value) or a remote (reads see the cached
- * latest, writes go over the set channel). schema NULL = untyped. NULL on failure. */
+ * latest, writes go over the set channel). schema NULL = untyped. NULL on failure. A
+ * remote's name may end in a field path, and every remote of one name shares the value. */
 RANT_API RantVariable *rant_node_create_variable_definition(RantNode *n, const char *name,
                                        const RantSchema *schema, const RantVariableOpts *opts);
 RANT_API RantVariable *rant_node_create_remote_variable(RantNode *n, const char *name,
                                        const RantSchema *schema, const RantVariableOpts *opts);
 
 /* Reads the current value into *out, a view valid until the next call on this variable or
- * the next poll. 1 if a value exists. */
-RANT_API int    rant_variable_get(RantVariable *var, RantBytes *out);
+ * the next poll, and the schema that reads it into *schema: a field handle's reads the
+ * field, NULL = raw bytes. Either may be NULL. 1 if a value exists. */
+RANT_API int    rant_variable_get(RantVariable *var, RantBytes *out, const RantSchema **schema);
 /* Sets the value: a definition applies and publishes, a remote sends over the set channel.
  * RANT_ERR_NO_TOPIC = no owner matched, RANT_ERR_ROLE = a read only owner. docs/patterns.md. */
 RANT_API int    rant_variable_set(RantVariable *var, RantBytes value);
@@ -305,7 +307,7 @@ typedef struct {
     RantVariable       *variable;
     RantString          name;      /* a stable view */
     RantBytes           value;     /* the value just applied, valid for the callback */
-    const RantSchema *schema;      /* NULL = untyped */
+    const RantSchema *schema;      /* reads value, a field handle's the field. NULL = untyped */
     uint8_t           forced;      /* the value is a forced override */
     uint32_t          write_seq;   /* the owner's write counter */
     uint32_t          source;      /* the peer the write arrived from, 0 = a local call */

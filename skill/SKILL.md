@@ -80,6 +80,11 @@ To list the domains that have nodes on the network, open a domains watch (`rant_
 `rant::Domains`, `rant.Domains`, `Domains` in C# and Rust, `openDomains` in TypeScript). It is
 no node: it hears the census every node sends and shows nothing on the mesh.
 
+A subscriber or remote variable may name one field after a `.`, such as
+`Gp12/RobotState.servo_power` as `bool`, typed as that field. The whole value still
+travels, and a field remote variable's `set` writes only its field. Many handles of one
+name on a node are fine and cost little.
+
 TypeScript has the same names in the npm package `rant-middleware` each Rant release
 attaches, with every pattern and reflection. In Node.js a node joins the mesh directly. A
 page has no UDP sockets, so it goes through a bridge, and so does a node on another network:

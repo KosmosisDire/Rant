@@ -81,8 +81,11 @@ a remote unforce a typed variable.
   first 4 bytes. It also gives any observer requester attribution, which is why there is
   no `@rant/meta` tasks section.
 - value: `[u8 flags][u32 write_seq]`, flag 0x01 = forced.
-- `v@set`: `[u8 op]`, op 0 set, 1 force, 2 unforce. A plain set with an empty payload is
-  ignored.
+- `v@set`: `[u8 op][u64 layout][u16 len][units]`, op 0 set, 1 force, 2 unforce. `layout`
+  is the hash of the owner's schema the payload is built in, 0 when the owner is untyped.
+  `len` bytes of units follow, 8 each, that name what the write sets: `[u32 off][u32 len]`
+  a range of the fixed section, `[u32 ord][u32 0]` the whole frame `ord` of the message
+  record. No units sets the whole value. A plain set with an empty payload is ignored.
 - `@obs`: `[u32 caller_lo][u32 call_id][u8 event][u8 status][u64 schema_hash]`, then
   `[u8 len][caller name][u8 len][text]` and the payload. See Call observers below.
 
@@ -242,9 +245,12 @@ draining thread with the lock released. A delivered message parks whole and is s
 at dispatch. A synthesized outcome (timeout, no provider, peer lost, severed, a local
 cancel) parks as `RANT__REC_OUTCOME` with the call id, status and text, and the pending
 entry moves to `RantFunction.parked`, out of the reaper's reach, until its record runs. A
-variable parks `RANT__REC_VAR`, the write's seq, forced flag, changed and replay flags and
-the value, on the value channel, so `on_write` fires per write with that write's value and
-the replay at registration fires only `on_change`. Pattern rings evict at the cap and never
+variable parks one `RANT__REC_VAR` per write on the value channel for all its handles:
+`[u32 seq][u8 forced][u8 0][u16 n]`, then `n` entries `[u16 id][u8 flags][u8 0]` naming
+each handle the write is due to with its changed and replay flags, then the value. Dispatch
+finds each handle by id under the lock and reads the value through that handle's view, so
+`on_write` fires per write with that write's value and the replay at registration fires
+only `on_change`. Pattern rings evict at the cap and never
 park the transport, since the state was applied already. Retire, refresh and close are
 refused while a channel's ring is busy (`i_rant_topic_busy`), and they answer the parked
 entries CANCELLED inline before the rings go.
@@ -306,6 +312,45 @@ first write orders above the predecessor's last at every accessor. The accessor'
 order guard is disarmed on PEER_INTEREST when the source match count hits 0, or a same
 node successor definition's values were dropped forever.
 
+### Handles and field writes
+
+One entity per variable name per node (`i_RantVar`) holds the channels, the store, the
+shadow and the source. Each `RantVariable` is a handle on it with its own id, name, path,
+schema, view and callbacks. The first handle lives in the entity's block.
+
+- **Sharing.** Remotes of one name share the entity. A definition is its entity's only
+  handle: a second definition, or a definition and a remote on one node, is refused by the
+  transport define with `RANT_E_NAME_COLLISION` as before.
+- **Field remotes.** A remote name with a path after its first `.` reads and writes one
+  field, as spec/schema.md, Field views, describes. A definition with a path is refused with
+  `RANT_E_BAD_NAME`. Functions and tasks take no path.
+- **Typing.** The first whole handle's schema types the value channel. A first field handle
+  leaves it untyped, and the value is then checked against the writer's schema on arrival.
+- **Reads.** The store holds the owner's whole value. Each handle reads it through its own
+  view of the owner's schema, made once per writer schema with the node's memo (spec/node.md)
+  and reported once with `RANT_E_SCHEMA_MISMATCH` on that handle when refused.
+  `rant_variable_get` returns the store and the handle's view. `on_change` compares only the
+  units the handle reads, the whole bytes when it reads the owner's whole type.
+- **Writes.** A remote builds every write in the owner's layout O, the writer schema of the
+  cached value, or before any value the schema of the oldest owner the set channel reaches.
+  It validates the value against its own type (declared, else the field's own type, else O),
+  starts from O's default message, copies its units in, and names them in the header. A
+  whole handle of type O sends no units. `RANT_ERR_SCHEMA` refuses a value that fails its
+  type, a field or subset O lacks, and a field or typed handle against an untyped owner.
+  The payload is a plain O message, so it stays byte identical to a plain topic's.
+- **Merge.** The set channel is untyped at the node on both sides. The owner drops a write
+  whose layout hash is not its own, validates the payload against its schema and copies
+  the named units into its current value, or the shadow while forced. Units are explicit
+  marks, never a diff against a cache, so two writers of different fields never revert each
+  other.
+- **Queues.** Later handles must pass the entity's queue or none and are otherwise refused
+  with `RANT_E_STATE`. So is `reflect_from_mesh` on a later handle or a field handle.
+  `rant_variable_refresh` refuses a shared entity.
+- **Retire.** Retiring a handle that shares the entity only unlinks it. The last retire
+  takes the entity off the mesh.
+
+The `var_fields` and `var_queue` cases of `e2e.schema` pin these.
+
 ## Duplicate authority
 
 Two authorities never form a lane (pub and pub, sub and sub), so the layer checks the
@@ -361,14 +406,14 @@ route deliveries into the handle: the half is parked INACTIVE and the handle sta
 allocated until close.
 
 The per peer index maps bind a name to one local topic, preferring the oldest active one,
-so a second same name handle created while the first lives would only be SHADOWED: it
+so a second same name entity created while the first lives would only be SHADOWED: it
 would receive nothing and its writes would collide with the twin's shared reader cursor.
 The transport therefore refuses the define (spec/interest.md) and the create returns NULL
 with `RANT_E_NAME_COLLISION` recorded, `.peer` 0. Retire parks the predecessor, peers re
 pend its verdicts and re verify the name against the successor. The channel slots are
 released through the topic retire and reuse machinery, so a re created entity takes its
-old slots back. The same rule means a tool must go fully raw or fully through handles,
-never both. The `retire` and `loud` cases of `e2e.patterns` pin it.
+old slots back. Variable remotes of one name are one entity and share it instead. The same
+rule means a tool must go fully raw or fully through handles, never both. The `retire` and `loud` cases of `e2e.patterns` pin it.
 
 ## Progress reliability
 

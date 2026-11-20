@@ -48,7 +48,7 @@ the service thread with `rant.Error`, and MANUAL is the way in.
 response, log line, status set and event on the node's queue until your thread calls `node.dispatch()`,
 the one liner for a frame paced app. `node.create_queue()` makes another `rant.Queue`,
 and a handle created with `queue=` set to it parks its callbacks there alone until
-`queue.dispatch()`. Same name topic handles must agree on the queue. From inside a handler,
+`queue.dispatch()`. Remote variables of one name share the first one's queue. From inside a handler,
 sends and read only queries are allowed, and poll, handle creation, drain and `settle`
 are refused with `SendStatus.STATE`, None or False.
 
@@ -158,10 +158,11 @@ frames = node.subscriber("Camera/Image", rant.types.Image)
 img = frames.latest()          # newest frame since the last call, or None
 ```
 
-Same name handles on one node share the topic slot: the node advertises the roles the live
-handles hold, `close()` on one leaves its siblings working, and the last close retires the
-slot so the name can carry another schema. A different schema on a live name raises
-`rant.Error`. Every handle has `close()`, which returns False when refused from a callback,
+A node may hold many handles of one name, each with its own type: `close()` on one leaves
+the others working, and the last close retires the topic so the name can carry another
+schema. A publisher whose schema differs from the one a live name advertises raises
+`rant.Error`. A name may end in a field path to receive one field, such as
+`node.subscriber("Gp12/RobotState.servo_power", bool, on_power)`. Every handle has `close()`, which returns False when refused from a callback,
 and works as a context manager. `ready` on a publisher is true when a send would not wait,
 `match_count` counts matched subscribers, and `drain(timeout)` pumps until every reader
 has acked. A subscriber has no match count, since the C exposes no publisher count on the
@@ -221,7 +222,9 @@ owner without it and BAD_ROLE on a remote whose owner advertises none. `wait()` 
 until a value exists and `forced` says whether a force is in effect. `on_change(handler)`
 replays the current value at registration and fires on every state change, `on_write` fires
 on every applied write, both inline on the thread that applied the write, with the value or
-the value and a `VariableUpdate`. A later call rebinds and None clears.
+the value and a `VariableUpdate`. A later call rebinds and None clears. A remote name may
+end in a field path, and that remote then reads and sets only its field:
+`node.remote_variable("Gp12/RobotState.servo_power", bool)`.
 
 `node.call_observer(name, handler)` watches a function's or task's calls, with the rules in
 docs/patterns.md. The handler takes a `CallEvent` (`kind`, `name`, `provider_name`, `caller_name`,

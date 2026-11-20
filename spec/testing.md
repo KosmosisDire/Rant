@@ -65,12 +65,12 @@ program in this order.
 | `unit.transport` | basics, fresh_join, ack_coalesce, ack_holes, bulk, want_set, want_filter, rate, lapped, rtt, ahead, qos_match, best_effort_flow, tap_framing |
 | `unit.discovery` | records, migrate, owed, judge, unmatched, offer, full, filter, forgotten, churn, first_contact, too_big, bulk, wire, change_age, discovery_core, node_core |
 | `unit.shm` | module, loss |
-| `unit.schema` | dsl, wire, nested, writes |
+| `unit.schema` | dsl, views, doc, structs, wire, nested, writes, misuse |
 | `unit.detail` | detail_codec, detail_paging, interest_codec |
 | `unit.tunnel` | hash, handshake, frame, json, batch |
 | `e2e.stream` | stream, scale, named, collision |
 | `e2e.node` | open_fail, bye_marks, bulk_pools, bulk_queued, bulk_shm, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups, poll_signal |
-| `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema, nested |
+| `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema, nested, fields, shared, var_fields, var_queue |
 | `e2e.detail` | detail_live, interest_external, interest_bulk, filter_fetch |
 | `e2e.shm` | shm_node |
 | `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
@@ -314,6 +314,28 @@ What each phase pins, grouped by layer.
 - Nested end to end: a message of polygons and strings crosses loopback, the receiver
   validates it, and a subset reader declaring its fields in another order reads every level
   through the rebased schema.
+- Field views: a view of a writer's field reads it untyped or through a reader's subset,
+  for a bool, a struct, a string, a variable array and fields under fixed arrays. A missing
+  index, an index past the end or into a variable array, an unknown field and a reader
+  that does not fit are refused with the field and the rule named.
+- Fields end to end: five handles on one entity in one node match the writer once and each
+  reads its own field under its own index and name, inline or pulled. A field the writer
+  lacks is reported once per writer schema on its handle. A field handle that writes, an
+  empty path, a reliable handle on a best effort wire and a path on a definition are
+  refused. Closing the first handle leaves the others receiving, and the last close takes
+  the entity off the mesh.
+- Shared delivery: two reliable pull handles on one topic each take every message once in
+  order, the full ring holds the other back by its own size, and closing it while the lane
+  waits lets the other take the rest. A typed writer joining
+  untyped readers types the wire, a writer of another type is refused, and a typed reader
+  elsewhere reads it.
+- Variable fields: six remotes of one name share an entity and each reads its own field
+  through its own view, with a field the owner lacks reported once. `on_change` fires only
+  on the handle whose field changed. A field write, a string field write and a subset write
+  merge at the owner, and two back to back writes of different fields both land. A value of
+  the wrong type, a write to a field the owner lacks, a definition with a path, a definition
+  beside remotes of its name and a later handle on another queue are refused. Retiring a shared handle leaves the others, the last retire leaves the mesh.
+- Queued variable fields: two queued field remotes each dispatch a write with their own view.
 - Standard types: golden bytes and a golden hash every wrapper pins, and recognition that
   verifies the shape as well as the name. Change the golden pair only with a deliberate
   wire bump.
@@ -545,9 +567,10 @@ What each phase pins, grouped by layer.
   peaks flat at every payload size.
 - threadbench: keep_last 64 so the drain guard rather than ack flow control engages, and
   backpressure only ever engages flat out.
-- queuebench: inline callbacks against a 4 MB callback queue ring. The ring must cover the
-  writer's in flight burst or the reader parks and the overrun heals through repair,
-  which is a sizing bug, not steady state cost.
+- queuebench: inline callbacks against a 4 MB callback queue ring, with one and three same
+  name handles, and the process CPU time per message. The ring must cover the writer's in
+  flight burst or the reader parks and the overrun heals through repair, which is a sizing
+  bug, not steady state cost.
 
 ## Binding tests
 

@@ -18,6 +18,29 @@ rematch with no round trip.
 The schema is optional. With one, a peer whose schema cannot read yours is refused with
 `RANT_E_SCHEMA_MISMATCH`. docs/stdtypes.md covers the schema DSL and the standard types.
 
+## Many handles
+
+A node may create the same topic more than once, for example a publisher and a subscriber in
+two parts of a program. Each handle has its own index, schema and callbacks, and the mesh
+sees one topic. The first handle sets the QoS and the type the topic advertises.
+
+A name may end in a field path after a `.` to receive one field of each sample. The whole
+sample still travels.
+
+```c
+RantTopic *at = rant_node_create_topic(n, "Rover/Odometry.pose.pose.position", RANT_SUB_ONLY,
+                                       rant_node_schema(n, "Double3"), NULL);
+RantTopic *tw = rant_node_create_topic(n, "Rover/Odometry.twist", RANT_SUB_ONLY, NULL, NULL);
+```
+
+- `RantMsg.data` and `RantMsg.schema` read the field as if it were the whole message.
+- With no schema the handle takes the field's own type from each publisher.
+- A path names an index for every array it crosses, and only fixed arrays of fixed size
+  elements take one.
+- A field handle only subscribes.
+- A publisher whose sample has no such field, or whose field your schema cannot read, is
+  reported once as `RANT_E_SCHEMA_MISMATCH` on that handle.
+
 ## QoS
 
 | field | meaning |
@@ -90,10 +113,7 @@ The slot is parked and the next create reuses it, so retire and create churn nev
 the topic table or the announce. Re creating with the same name, kind and schema relinks
 silently. Re creating with a different schema, kind or name makes peers re verify before
 any data crosses. This is the retype flow: retire, then create with the new schema.
-Creating a second topic with the same name while the first lives is refused, whatever
-its schema: the create returns `NULL` and `rant_last_error` says `RANT_E_NAME_COLLISION`.
-A twin created `RANT_INACTIVE` is allowed, so a node can hold two QoS variants of one name
-and switch which is live by role.
+To change a live topic's QoS, retire it and create it again.
 
 ## Loss
 

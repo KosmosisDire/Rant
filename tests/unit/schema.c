@@ -1536,8 +1536,86 @@ static void schema_struct_checks(void){
     rant_allocator_reset(&ma);
 }
 
+/* Field views: a reader's type, or the field's own, over one field of a writer's message.
+   Indices reach only into fixed arrays of fixed elements, and a refusal says why. */
+static RantSchema *view_of(RantAllocator *ma, const char *reader, const RantSchema *pub,
+                           const char *path, char *why, size_t cap){
+    RantSchema *r = reader ? test_compile(ma, reader, NULL) : NULL;
+    if (reader && !r) return NULL;
+    return i_rant_schema_view(r, pub, path, rant_allocator_alloc, ma, why, cap);
+}
+static void schema_view_checks(void){
+    RantAllocator ma = rant_allocator_heap(0);
+    i_RantSchemaErr err = { NULL, NULL };
+    RantSchema *w = test_compile(&ma,
+        "Spot { x: f32, y: f32 }\n"
+        "Axis { pos: f32, vel: f32 }\n"
+        "Cell { v: u16[4] }\n"
+        "Seg { pts: f32[] }\n"
+        "Arm { stamp: u64, servo: bool, spot: Spot, name: string, axes: Axis[3],\n"
+        "      path: f32[], cells: Cell[2], segs: Seg[], tags: string[2], code: u8 }", &err);
+    uint8_t m[256]; RantBytes b; RantSchema *v; RantValue val; char why[160];
+    float pts[3] = { 1.5f, 2.5f, 3.5f };
+    if (!w){ CHECK(0, "views: the writer compiles (%s)", err.why ? err.why : "?"); return; }
+    {   int ok = rant_schema_message_default(w, m, sizeof m);
+        ok &= rant_set_uint(m, sizeof m, w, "servo", 1);
+        ok &= rant_set_f32(m, sizeof m, w, "spot.y", 4.0f);
+        ok &= rant_set_string(m, sizeof m, w, "name", rant_cstr("gp12"));
+        ok &= rant_set_f32(m, sizeof m, w, "axes[1].vel", -2.0f);
+        ok &= rant_set_array_count(m, sizeof m, w, "path", 3);
+        ok &= rant_set_array(m, sizeof m, w, "path", rant_bytes(pts, sizeof pts));
+        ok &= rant_set_uint(m, sizeof m, w, "cells[1].v[2]", 77);
+        ok &= rant_set_uint(m, sizeof m, w, "code", 9);
+        b = rant_bytes(m, rant_schema_msg_len(w, m, sizeof m));
+        CHECK(ok && b.len && rant_schema_validate(w, b), "views: the writer's message builds");
+    }
+    v = view_of(&ma, NULL, w, "servo", why, sizeof why);
+    CHECK(v && rant_schema_field_count(v) == 1 && rant_get_value(b, v, 0, &val)
+             && val.kind == RANT_BOOL && val.v.u == 1 && rant_schema_validate(v, b),
+             "views: an untyped field reads the writer's bool and validates its message");
+    {   RantSchema *bare = test_compile(&ma, "bool", NULL);
+        CHECK(v && bare && rant_schema_hash(v) == rant_schema_hash(bare),
+                 "views: an untyped field's schema is its type's");
+    }
+    v = view_of(&ma, "bool", w, "servo", why, sizeof why);
+    CHECK(v && rant_get_value(b, v, 0, &val) && val.v.u == 1, "views: a bool reader over servo");
+    v = view_of(&ma, "u8", w, "servo", why, sizeof why);
+    CHECK(!v && strstr(why, "field 'servo'") && strstr(why, "reader u8"),
+             "views: a type mismatch is refused with the field named (%s)", why);
+    v = view_of(&ma, "Spot { y: f32 }", w, "spot", why, sizeof why);
+    CHECK(v && rant_get_f32(b, v, "y") == 4.0f, "views: a subset struct reader over a struct field");
+    v = view_of(&ma, NULL, w, "name", why, sizeof why);
+    CHECK(v && rant_get_value(b, v, 0, &val) && val.bytes.len == 4
+             && memcmp(val.bytes.data, "gp12", 4) == 0, "views: a framed string field");
+    v = view_of(&ma, NULL, w, "path", why, sizeof why);
+    CHECK(v && rant_get_value(b, v, 0, &val) && val.count == 3 && val.bytes.len == sizeof pts
+             && memcmp(val.bytes.data, pts, sizeof pts) == 0, "views: a variable array field");
+    v = view_of(&ma, NULL, w, "axes[1].vel", why, sizeof why);
+    CHECK(v && rant_get_value(b, v, 0, &val) && val.v.f == -2.0, "views: an indexed field");
+    v = view_of(&ma, "Axis { vel: f32 }", w, "axes[1]", why, sizeof why);
+    CHECK(v && rant_get_f32(b, v, "vel") == -2.0f, "views: an indexed struct element");
+    v = view_of(&ma, NULL, w, "cells[1].v[2]", why, sizeof why);
+    CHECK(v && rant_get_value(b, v, 0, &val) && val.v.u == 77, "views: nested fixed arrays");
+    v = view_of(&ma, NULL, w, "code", why, sizeof why);
+    CHECK(v && rant_get_value(b, v, 0, &val) && val.v.u == 9, "views: a field after the frames' owners");
+    v = view_of(&ma, NULL, w, "axes.vel", why, sizeof why);
+    CHECK(!v && strstr(why, "an index for each array"), "views: a crossed array needs its index (%s)", why);
+    v = view_of(&ma, NULL, w, "axes[3].vel", why, sizeof why);
+    CHECK(!v && strstr(why, "past the array's end"), "views: an index past the end (%s)", why);
+    v = view_of(&ma, NULL, w, "segs[0].pts", why, sizeof why);
+    CHECK(!v && strstr(why, "fixed arrays of fixed elements"), "views: no index into a variable array (%s)", why);
+    v = view_of(&ma, NULL, w, "tags[1]", why, sizeof why);
+    CHECK(!v && strstr(why, "fixed arrays of fixed elements"), "views: no index into variable elements (%s)", why);
+    v = view_of(&ma, NULL, w, "nope", why, sizeof why);
+    CHECK(!v && strstr(why, "no such field"), "views: an unknown field (%s)", why);
+    v = view_of(&ma, NULL, w, "servo", why, 0);
+    CHECK(v != NULL, "views: a zero capacity reason buffer is never written");
+    rant_allocator_reset(&ma);
+}
+
 static const TestCase cases[] = {
     { "dsl", schema_dsl_checks },
+    { "views", schema_view_checks },
     { "doc", schema_doc_checks },
     { "structs", schema_struct_checks },
     { "wire", schema_v8_checks },

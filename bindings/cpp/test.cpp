@@ -1566,12 +1566,14 @@ static bool queue_leg() {
     chk("queue: its own dispatch runs it",
         wait_for(4000, [&] { q.dispatch(); return extra.size() == 1 && extra[0] == 9; }));
     chk("queue: every callback ran on this thread", !stray.load());
+    {   /* a same name handle on the node queue runs at the node's dispatch */
+        std::atomic<int> plain{ 0 };
+        auto other = b.subscriber<Speed>("q/extra", [&](const Speed&) { plain++; }, rel);
+        xpub.send(Speed{ 10 });
+        chk("queue: a same name handle on another queue runs at its own dispatch",
+            wait_for(4000, [&] { b.dispatch(); q.dispatch(); return plain.load() == 1 && extra.size() == 2; }));
+    }
     bool refused = false;
-#if defined(__cpp_exceptions)
-    try { auto other = b.publisher<Speed>("q/extra", rel); }
-    catch (const rant::Error&) { refused = true; }
-    chk("queue: a same name handle on another queue is refused", refused);
-#endif
 /* pull: no handler, the app takes when it wants and nothing parks on a queue */
     auto ppub = a.publisher<Speed>("q/pull", rel);
     auto pulled = b.subscriber<Speed>("q/pull", rel);
@@ -1591,7 +1593,7 @@ static bool queue_leg() {
     return g_failures == fails_at_entry;
 }
 
-/* handle lifetime: holds per side on a shared name, moves, the last close retiring the name,
+/* handle lifetime: same name handles closing apart, moves, the last close retiring the name,
  * handles and deferred replies that outlive their node, closes inside their own callbacks */
 static bool lifetime_leg() {
     int fails_at_entry = g_failures;
@@ -2421,6 +2423,89 @@ static bool call_observer_leg() {
     return true;
 }
 
+/* field handles: a topic field read by a typed subscriber, field remotes of one variable
+ * that read and write their own part, and the refusals */
+static bool fields_leg() {
+    int fails_at_entry = g_failures;
+    rant::NodeOptions opts;
+    opts.domain = test_domain(18);
+    opts.multicast_interface = "127.0.0.1";
+    opts.max_topics = 32;
+    rant::Node a("FA", opts), b("FB", opts);
+    chk("fields: nodes constructed", a.valid() && b.valid());
+    if (!a.valid() || !b.valid()) return false;
+    rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
+
+    /* each same name handle has its own type and handler, and the whole sample travels */
+    std::atomic<int> whole{ 0 }, ids{ 0 }, corners{ 0 };
+    std::atomic<uint8_t> last_id{ 0 };
+    std::atomic<float> last_x{ 0.f };
+    auto pub = a.publisher<Shape>("f/shape", rel);
+    auto s_whole = b.subscriber<Shape>("f/shape", [&](const Shape&) { whole++; }, rel);
+    auto s_id = b.subscriber<uint8_t>("f/shape.id", [&](const uint8_t& v) { last_id = v; ids++; }, rel);
+    auto s_at = b.subscriber<Corner>("f/shape.origin", [&](const Corner& c) { last_x = c.x; corners++; }, rel);
+    chk("fields: topic handles created", pub.valid() && s_whole.valid() && s_id.valid() && s_at.valid());
+    chk("fields: topic matched", wait_for(4000, [&] { return pub.match_count() > 0 && pub.ready(); }));
+    pub.send(Shape{ Corner{ 1.5f, 2.f }, rant::types::Float2{ 3.f, 4.f }, 9 });
+    chk("fields: every handle gets the sample once",
+        wait_for(3000, [&] { return whole.load() == 1 && ids.load() == 1 && corners.load() == 1; }));
+    chk("fields: a field handle reads its field", last_id.load() == 9 && last_x.load() == 1.5f);
+    chk("fields: closing one handle leaves the others", s_whole.close() == rant::SendStatus::Ok);
+    pub.send(Shape{ Corner{ 5.f, 0.f }, rant::types::Float2{}, 4 });
+    chk("fields: the open handles still receive",
+        wait_for(3000, [&] { return ids.load() == 2 && last_id.load() == 4 && last_x.load() == 5.f; }));
+    chk("fields: the closed handle no longer fires", whole.load() == 1);
+#if defined(__cpp_exceptions)
+    bool refused = false;
+    try { auto w = a.publisher<uint8_t>("f/shape.id", rel); }
+    catch (const rant::Error&) { refused = true; }
+    chk("fields: a field handle never publishes", refused);
+#endif
+
+    /* field remotes share the value, each reads and writes its own part */
+    rant::VariableOptions<Shape> vo;
+    vo.initial = Shape{ Corner{ 1.f, 1.f }, rant::types::Float2{ 2.f, 2.f }, 3 };
+    auto def = a.variable_definition<Shape>("f/var", vo);
+    auto r_whole = b.remote_variable<Shape>("f/var");
+    auto r_id = b.remote_variable<uint8_t>("f/var.id");
+    auto r_at = b.remote_variable<Corner>("f/var.origin");
+    chk("fields: variable handles created", def.valid() && r_whole.valid() && r_id.valid() && r_at.valid());
+    chk("fields: a field remote waits for the value", r_id.wait(4s));
+    { auto v = r_id.get(); chk("fields: a field remote reads its field", v && *v == 3); }
+    { auto v = r_at.get(); chk("fields: a struct field reads", v && v->x == 1.f && v->y == 1.f); }
+    std::atomic<int> id_changes{ 0 };
+    r_id.on_change([&](const uint8_t&) { id_changes++; });
+    chk("fields: on_change replays at registration", id_changes.load() == 1);
+    chk("fields: a field write is accepted", r_id.set(7) == rant::SendStatus::Ok);
+    chk("fields: it sets only that field at the owner", wait_for(3000, [&] {
+        auto v = def.get(); return v && v->id == 7 && v->origin.x == 1.f && v->at.x == 2.f; }));
+    chk("fields: another field write", r_at.set(Corner{ 6.f, 8.f }) == rant::SendStatus::Ok);
+    chk("fields: both writes hold", wait_for(3000, [&] {
+        auto v = def.get(); return v && v->id == 7 && v->origin.x == 6.f && v->origin.y == 8.f; }));
+    chk("fields: the whole remote sees both", wait_for(3000, [&] {
+        auto v = r_whole.get(); return v && v->id == 7 && v->origin.y == 8.f; }));
+    chk("fields: on_change fired only for its own field", id_changes.load() == 2);
+    {   rant::Schema id_view = b.schema("u8");
+        auto raw = b.remote_variable<rant::Bytes>("f/var.id", {}, id_view);
+        auto v = raw.get();
+        chk("fields: an untyped field remote reads by its view", v && v->has_schema()
+            && v->get_uint("") == 7);
+    }
+#if defined(__cpp_exceptions)
+    refused = false;
+    try { auto d = a.variable_definition<uint8_t>("f/other.id"); }
+    catch (const rant::Error&) { refused = true; }
+    chk("fields: a definition takes no path", refused);
+    rant::Queue q = b.create_queue();
+    rant::VariableOptions<uint8_t> qo; qo.queue = &q;
+    refused = false;
+    try { auto r = b.remote_variable<uint8_t>("f/var.id", qo); }
+    catch (const rant::Error&) { refused = true; }
+    chk("fields: a later remote on another queue is refused", refused);
+#endif
+    return g_failures == fails_at_entry;
+}
+
 struct Leg { const char* name; bool (*run)(); };
 static const Leg LEGS[] = {
     { "bulk",       bulk_leg },
@@ -2437,6 +2522,7 @@ static const Leg LEGS[] = {
     { "status",     status_leg },
     { "lifetime",   lifetime_leg },
     { "rebind",     rebind_leg },
+    { "fields",     fields_leg },
     { "close_race", close_race_leg },
     { "handle_gate", handle_gate_leg },
     { "failure",    failure_leg },

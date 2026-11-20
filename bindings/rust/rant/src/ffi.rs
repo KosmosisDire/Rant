@@ -15,7 +15,7 @@ pub const RANT_CENSUS_PORT_OFFSET: u32 = 3;
 pub const RANT_ANNOUNCE_INTERVAL_US: u32 = 3000000;
 pub const RANT_MAX_PEERS: u32 = 16;
 pub const RANT_ALLOCATOR_PAGE: u32 = 65536;
-pub const RANT_WIRE_VERSION: u32 = 10;
+pub const RANT_WIRE_VERSION: u32 = 11;
 pub const RANT_DISCOVERY_META_MAX: u32 = 64;
 pub const RANT_DISCOVERY_WIRE_MAX: u32 = 128;
 pub const RANT_DISCOVERY_FIXED_LEN: u32 = 37;
@@ -2122,6 +2122,7 @@ unsafe extern "C" {
     pub fn rant_variable_get(
         var: *mut RantVariable,
         out: *mut RantBytes,
+        schema: *mut *const RantSchema,
     ) -> ::std::os::raw::c_int;
     pub fn rant_variable_set(
         var: *mut RantVariable,

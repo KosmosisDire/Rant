@@ -930,7 +930,7 @@ namespace Rant
         internal static extern IntPtr rant_node_create_remote_variable(IntPtr node, byte[] name,
             IntPtr schema, ref RantVariableOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
-        internal static extern int rant_variable_get(IntPtr var, out RantBytes value);
+        internal static extern int rant_variable_get(IntPtr var, out RantBytes value, out IntPtr schema);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_variable_set(IntPtr var, RantBytes value);
         [DllImport(LIB, CallingConvention = CC)]
@@ -2162,8 +2162,8 @@ namespace Rant
 
     // ---- topic ----------------------------------------------------------------
 
-    // The native topic slot behind Publisher<T> and Subscriber<T>. Same name handles on one
-    // node share it, held per role in the node's registry, and the last one out retires it.
+    // The native topic behind Publisher<T> and Subscriber<T>. Same name handles are separate
+    // native handles of one entity, which the C shares.
     internal sealed class TopicCore : INodeHandle
     {
         internal readonly RantNode _node;
@@ -2205,7 +2205,7 @@ namespace Rant
             }
         }
 
-        // Drop this handle's hold on the slot. The native topic is retired with the last one.
+        // Retire this handle. The C retires the entity with its last handle.
         internal void Release() => _node.ReleaseTopic(this);
         internal bool Refresh() { using (Use(out IntPtr t)) return t != IntPtr.Zero && Native.rant_topic_refresh(t) == 1; }
         internal ushort Index { get { using (Use(out IntPtr t)) return Native.rant_topic_index(t); } }
@@ -2260,14 +2260,10 @@ namespace Rant
         // its own lock: the delivery path reaches it while the node lock is held, and
         // _createLock is held across a create, which takes the node lock the other way round
         private readonly object _msgSchemaLock = new object();
-        // same name topic sharing: one native slot per name and a hold count per role, so the
-        // role follows the live handles and the last release retires the slot
-        private sealed class TopicRec { public IntPtr Handle; public IntPtr Queue; public bool Pull; public ulong SchemaHash; public int Pubs, Subs; }
-        private readonly Dictionary<string, TopicRec> _topicsByName = new Dictionary<string, TopicRec>();
         private readonly object _createLock = new object();
-        // per topic subscriber handlers, copy on write arrays so the poll thread read never
+        // the subscriber handler per topic index, copy on write so the poll thread read never
         // takes more than a volatile fetch
-        private volatile Dictionary<ushort, Action<RantMessage>[]> _subHandlers = new Dictionary<ushort, Action<RantMessage>[]>();
+        private volatile Dictionary<ushort, Action<RantMessage>> _subHandlers = new Dictionary<ushort, Action<RantMessage>>();
         private readonly object _subLock = new object();
         // pattern handler boxes + in-flight async calls this node owns (reaped at Close)
         private readonly List<long> _patternBoxes = new List<long>();
@@ -2439,8 +2435,7 @@ namespace Rant
             return block;
         }
 
-        // The native create behind Publisher<T> and Subscriber<T>. A same name handle on this
-        // node shares the slot, widening its role, and a different schema is refused.
+        // The native create behind Publisher<T> and Subscriber<T>.
         internal IntPtr AcquireTopic(string name, Role role, Schema schema, Qos qos, bool pull = false)
         {
             if (string.IsNullOrEmpty(name)) throw new ArgumentException("topic name required", nameof(name));
@@ -2450,32 +2445,12 @@ namespace Rant
             lock (_createLock)
             {
                 if (!p.Ok) throw new RantException(SendStatus.State, "topic '" + name + "' create failed: the node is closed");
-                TopicRec rec;
-                ulong sh = schema != null ? schema.Hash : 0;
-                IntPtr wantQueue = pull ? IntPtr.Zero : QueueHandle(qos != null ? qos.Queue : null);
-                if (_topicsByName.TryGetValue(name, out rec))
-                {
-                    if (sh != 0 && rec.SchemaHash != 0 && sh != rec.SchemaHash)
-                        throw new RantException(SendStatus.Schema,
-                            "topic '" + name + "' already exists on this node with a different schema"
-                            + " (dispose every handle on it to retype the name)");
-                    if (wantQueue != rec.Queue || pull != rec.Pull)
-                        throw new RantException(SendStatus.State,
-                            "topic '" + name + "' already exists on this node with a different queue"
-                            + " or delivery (same name handles share one slot)");
-                    Role before = RoleOf(rec);
-                    Hold(rec, role, 1);
-                    Role after = RoleOf(rec);
-                    if (after != before) Native.rant_topic_set_role(rec.Handle, (int)after);
-                    return rec.Handle;
-                }
-
                 qos = qos ?? new Qos();
                 var co = new RantTopicOpts
                 {
                     qos = qos.ToNative(),
                     reflect_from_mesh = (byte)(qos.ReflectFromMesh ? 1 : 0),
-                    queue = wantQueue,
+                    queue = pull ? IntPtr.Zero : QueueHandle(qos.Queue),
                     pull = (byte)(pull ? 1 : 0),
                 };
                 IntPtr h = Native.rant_node_create_topic(_handle, Codec.CStr(name), (int)role,
@@ -2484,16 +2459,12 @@ namespace Rant
                     throw new RantException("topic '" + name + "' create failed", LastError);
                 ushort idx = Native.rant_topic_index(h);
                 if (schema != null) _topicTypes[idx] = schema.ClrType;
-                rec = new TopicRec { Handle = h, Queue = wantQueue, Pull = pull, SchemaHash = sh };
-                Hold(rec, role, 1);
-                _topicsByName[name] = rec;
                 return h;
             }
         }
 
-        // Release one hold. The role narrows to what is still held, and the last release
-        // retires the native slot and forgets every wrapper registration for the index, since
-        // a reused slot may carry a different topic.
+        // Retire one handle and forget its registrations, since the C may give its index to
+        // the next create.
         internal void ReleaseTopic(TopicCore t)
         {
             using (Pass p = Gate.Enter())
@@ -2501,99 +2472,46 @@ namespace Rant
             {
                 if (!p.Ok) t._handle = IntPtr.Zero;   // the node closed and freed the topic
                 if (t._handle == IntPtr.Zero) return;
-                string name = null;
-                TopicRec rec = null;
-                foreach (var kv in _topicsByName)
-                    if (kv.Value.Handle == t._handle) { name = kv.Key; rec = kv.Value; break; }
-                if (rec == null) { t._handle = IntPtr.Zero; return; }
-                Role before = RoleOf(rec);
-                Hold(rec, t.Role, -1);
-                Role after = RoleOf(rec);
-                int r = 0;
-                if (after == Role.Inactive)
-                {
-                    ushort idx = Native.rant_topic_index(t._handle);
-                    r = Native.rant_topic_retire(t._handle);
-                    if (r == 0)
-                    {
-                        _topicsByName.Remove(name);
-                        _topicTypes.Remove(idx);
-                        lock (_subLock)
-                        {
-                            var next = new Dictionary<ushort, Action<RantMessage>[]>(_subHandlers);
-                            next.Remove(idx);
-                            _subHandlers = next;
-                        }
-                    }
-                }
-                else if (after != before)
-                {
-                    r = Native.rant_topic_set_role(rec.Handle, (int)after);
-                }
+                ushort idx = Native.rant_topic_index(t._handle);
+                int r = Native.rant_topic_retire(t._handle);
                 if (r != 0)
-                {
-                    Hold(rec, t.Role, 1);   // still held: the C refused from a callback
                     throw new RantException((SendStatus)r, "topic release refused: " + (SendStatus)r
                         + " (a Dispose from a service thread callback is refused)");
-                }
+                _topicTypes.Remove(idx);
+                RemoveSubHandler(idx);
                 t._handle = IntPtr.Zero;
             }
         }
 
-        private static void Hold(TopicRec rec, Role role, int delta)
-        {
-            if (role == Role.PubOnly || role == Role.PubSub) rec.Pubs += delta;
-            if (role == Role.SubOnly || role == Role.PubSub) rec.Subs += delta;
-        }
-
-        private static Role RoleOf(TopicRec rec)
-            => rec.Pubs > 0 && rec.Subs > 0 ? Role.PubSub : rec.Pubs > 0 ? Role.PubOnly
-             : rec.Subs > 0 ? Role.SubOnly : Role.Inactive;
-
-        // Subscriber handlers per topic index, copy on write.
-        internal void AddSubHandler(ushort index, Action<RantMessage> fn)
+        // The subscriber handler per topic index, copy on write.
+        internal void SetSubHandler(ushort index, Action<RantMessage> fn)
         {
             lock (_subLock)
             {
-                var next = new Dictionary<ushort, Action<RantMessage>[]>(_subHandlers);
-                Action<RantMessage>[] cur;
-                if (!next.TryGetValue(index, out cur)) cur = Array.Empty<Action<RantMessage>>();
-                var nv = new Action<RantMessage>[cur.Length + 1];
-                Array.Copy(cur, nv, cur.Length);
-                nv[cur.Length] = fn;
-                next[index] = nv;
+                var next = new Dictionary<ushort, Action<RantMessage>>(_subHandlers);
+                next[index] = fn;
                 _subHandlers = next;   // published whole, so a reader never sees a torn map
             }
         }
 
-        internal void RemoveSubHandler(ushort index, Action<RantMessage> fn)
+        internal void RemoveSubHandler(ushort index)
         {
             lock (_subLock)
             {
-                Action<RantMessage>[] cur;
-                if (!_subHandlers.TryGetValue(index, out cur)) return;
-                int at = Array.IndexOf(cur, fn);
-                if (at < 0) return;
-                var next = new Dictionary<ushort, Action<RantMessage>[]>(_subHandlers);
-                if (cur.Length == 1) next.Remove(index);
-                else
-                {
-                    var nv = new Action<RantMessage>[cur.Length - 1];
-                    Array.Copy(cur, 0, nv, 0, at);
-                    Array.Copy(cur, at + 1, nv, at, cur.Length - at - 1);
-                    next[index] = nv;
-                }
+                if (!_subHandlers.ContainsKey(index)) return;
+                var next = new Dictionary<ushort, Action<RantMessage>>(_subHandlers);
+                next.Remove(index);
                 _subHandlers = next;
             }
         }
 
         // No lock: the map is replaced whole on every write, so this volatile read gets one
         // consistent version. Runs once per delivered message.
-        private Action<RantMessage>[] SubHandlersOf(ushort index)
+        private Action<RantMessage> SubHandlerOf(ushort index)
         {
-            Action<RantMessage>[] hs;
-            _subHandlers.TryGetValue(index, out hs);
-            return hs;
+            Action<RantMessage> h;
+            _subHandlers.TryGetValue(index, out h);
+            return h;
         }
 
         // The wrapper of a schema a message arrived with, made once per schema.
@@ -2920,11 +2838,11 @@ namespace Rant
                     if (qrc != 0) throw new RantException((SendStatus)qrc, what + " queue: " + (SendStatus)qrc);
                 }
                 ushort index = Native.rant_topic_index(ch);
-                AddSubHandler(index, deliver);
+                SetSubHandler(index, deliver);
                 int rc = Native.rant_topic_set_role(ch, (int)Role.PubSub);
                 if (rc != 0)
                 {
-                    RemoveSubHandler(index, deliver);
+                    RemoveSubHandler(index);
                     throw new RantException((SendStatus)rc, what + " subscribe: " + (SendStatus)rc);
                 }
             }
@@ -3147,13 +3065,13 @@ namespace Rant
                 RantNode node; Type clr = null;
                 s_nodes.TryGetValue((long)m.user, out node);
                 if (node == null) return;
-                var hs = node.SubHandlersOf(m.topic_index);
-                if (hs == null) return;
+                var h = node.SubHandlerOf(m.topic_index);
+                if (h == null) return;
                 node._topicTypes.TryGetValue(m.topic_index, out clr);
                 // the payload is copied and the schema lives until close, so a later decode is safe
                 var msg = RantMessage.FromNative(ref m, clr, node.OwnedSchema(m.schema));
                 using (node.Gate.Running())
-                    foreach (var h in hs) h(msg);
+                    h(msg);
             }
             catch (Exception e) { Console.Error.WriteLine("rant on_message: " + e); }
         }
@@ -4481,11 +4399,12 @@ namespace Rant
             node.RegisterHandle(this);
         }
 
-        /// <summary>Read the current value copied out, the store or the cached latest. False
-        /// when no value exists yet.</summary>
-        public bool TryGet(out byte[] value)
+        // The whole value copied out and the schema that reads this handle's part of it, kept
+        // by the node until close. False when no value exists yet.
+        internal bool TryGet(out byte[] value, out IntPtr schema)
         {
             value = null;
+            schema = IntPtr.Zero;
             using (St.Use(RantNode, out IntPtr v))
             {
                 if (v == IntPtr.Zero) return false;
@@ -4494,7 +4413,7 @@ namespace Rant
                 try
                 {
                     RantBytes b;
-                    if (Native.rant_variable_get(v, out b) != 1) return false;
+                    if (Native.rant_variable_get(v, out b, out schema) != 1) return false;
                     value = Codec.Bytes(b);
                     return true;
                 }
@@ -5038,9 +4957,10 @@ namespace Rant
         {
             value = default(T);
             byte[] b;
-            if (!_core.TryGet(out b)) return false;
+            IntPtr wire;
+            if (!_core.TryGet(out b, out wire)) return false;
             object v;
-            if (!Patterns.TryDecode(_schema, IntPtr.Zero, b, typeof(T), out v)) return false;
+            if (!Patterns.TryDecode(_schema, wire, b, typeof(T), out v)) return false;
             value = (T)v;
             return true;
         }
@@ -5186,8 +5106,8 @@ namespace Rant
         /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
         /// provider moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => _topic.Refresh();
-        /// <summary>Stop publishing. The node stops advertising the role no handle holds, and
-        /// the last handle on the name retires the topic. Refused from a callback.</summary>
+        /// <summary>Stop publishing. The last handle on the name retires the topic. Refused
+        /// from a callback.</summary>
         public void Dispose() => _topic.Release();
     }
 
@@ -5210,7 +5130,7 @@ namespace Rant
             if (_pull) return;
             _handler = handler;
             _deliver = Deliver;
-            _topic._node.AddSubHandler(_topic.Index, _deliver);
+            _topic._node.SetSubHandler(_topic.Index, _deliver);
         }
 
         private void Deliver(RantMessage m)
@@ -5276,16 +5196,11 @@ namespace Rant
         /// <summary>A ReflectFromMesh topic: re read the mesh and re type in place when the
         /// provider moved. True when it was re typed. See <see href="https://github.com/KosmosisDire/Rant/blob/main/docs/reflection.md">docs/reflection.md</see>.</summary>
         public bool Refresh() => _topic.Refresh();
-        /// <summary>Stop receiving: the handlers are dropped, the node stops advertising the
-        /// role no handle holds, and the last handle on the name retires the topic. Refused
+        /// <summary>Stop receiving. The last handle on the name retires the topic. Refused
         /// from a callback.</summary>
         public void Dispose()
         {
-            lock (_lock)
-            {
-                if (_handler != null && _topic._handle != IntPtr.Zero) _topic._node.RemoveSubHandler(_topic.Index, _deliver);
-                _handler = null;
-            }
+            lock (_lock) _handler = null;
             _topic.Release();
         }
     }
