@@ -3214,9 +3214,11 @@ static int i_rant_node_do_send_ex(RantNode *n, uint16_t topic_index, RantBytes h
             && i_rant_transport_publisher_shm_eligible(n->transport, topic_index)){
             uint16_t keep_last = (q && q->keep_last) ? q->keep_last : 1u;
             /* a hint pins the topic to one class, else each message uses its own size
-               class's segment. Per topic either way */
+               class's segment. A hint counts the payload, so its class also holds the stamp
+               and header. Per topic either way */
             uint32_t hint = q ? (q->shm_max_bytes ? q->shm_max_bytes : q->max_message_bytes) : 0u;
-            uint32_t k = i_rant_shm_class_for(hint ? hint : (uint32_t)len);
+            uint64_t need = hint ? (uint64_t)hint + (len - data.len) : (uint64_t)len;
+            uint32_t k = i_rant_shm_class_for(need > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)need);
             /* fits its class: publish via SHM. The chunk index is the history slot this
                send occupies, so chunk i binds slot i */
             if (k < RANT_SHM_N_CLASSES && (uint32_t)len <= i_rant_shm_class_bytes(k)){

@@ -48,7 +48,9 @@ spec/allocation.md for sizes.
 There is one segment per topic and size class, and its chunk count is the topic's
 `keep_last`, so history slot i binds chunk i and no free list is needed. Class k holds
 chunks of `RANT_SHM_CLASS_BASE << (k * RANT_SHM_CLASS_SHIFT)` bytes. The defaults are 64K,
-256K, 1M, 4M, 16M, 64M, 256M. A publish takes the smallest class that fits. There is
+256K, 1M, 4M, 16M, 64M, 256M. A publish takes the smallest class that fits. A topic's
+`shm_max_bytes`, else its `max_message_bytes`, pins it to one class instead: the hint counts
+the payload, and the class also holds the stamp and header the chunk carries. There is
 no size based fallback to UDP. A message larger than the wire cap is refused on both
 paths. The wire cap is 65535 times the fragment size.
 

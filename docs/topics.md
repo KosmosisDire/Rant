@@ -48,11 +48,11 @@ RantTopic *tw = rant_node_create_topic(n, "Rover/Odometry.twist", RANT_SUB_ONLY,
 | `reliability` | `RANT_BEST_EFFORT` or `RANT_RELIABLE` |
 | `keep_last` | messages kept for late join and repair. 0 = 1, or 10 on a reliable topic |
 | `catch_up` | messages a new subscriber gets at once. 0 = future only, 1 = latest value |
-| `max_message_bytes` | a size hint that pins the shared memory class. Buffers grow to fit anyway |
+| `max_message_bytes` | a payload size hint that pins the shared memory class. Buffers grow to fit anyway |
 | `heartbeat_us` | reliable idle publisher ping. 0 = 250 ms |
 | `repair_delay_us` | how long a subscriber waits before asking again for a resend. 0 = measured round trip |
 | `backpressure_wait_us` | how long a send pauses for a slow subscriber before evicting unacked history. 0 = none |
-| `shm_max_bytes` | pin the topic to one shared memory size class |
+| `shm_max_bytes` | pin the topic to the shared memory size class that holds a payload this big |
 | `queue_bytes` | the topic's ring cap on its callback queue, 0 = 1 MB. Unused without a queue |
 | `max_rate_hz` | subscriber side, best effort only. Cap delivery from each publisher to this rate |
 | `no_timestamp` | publisher side. Send without the `written_us` stamp |

@@ -72,7 +72,7 @@ program in this order.
 | `e2e.node` | open_fail, bye_marks, bulk_pools, bulk_queued, bulk_shm, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups, poll_signal |
 | `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema, nested, fields, shared, var_fields, var_queue |
 | `e2e.detail` | detail_live, interest_external, interest_bulk, filter_fetch |
-| `e2e.shm` | shm_node |
+| `e2e.shm` | shm_node, shm_gone, shm_hint |
 | `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
 | `e2e.patterns` | patterns, variable_wait, dup_authority, retire, reflect_reuse, loud, sync_capture, sync_threads, one_announce, handle_gate, refresh_live, dropped_peer |
 | `e2e.tasks` | task, task_matrix |

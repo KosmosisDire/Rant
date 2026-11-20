@@ -161,8 +161,8 @@ Rules from the footprint work:
 
 ## Sends larger than the wire cap
 
-There is no per topic message cap. `qos.max_message_bytes` is a hint that pins the SHM
-size class. The only hard limit is the wire's 65535 fragment cap (`RANT_MESSAGE_MAX`). A
+There is no per topic message cap. `qos.max_message_bytes` is a payload size hint that pins
+the SHM size class. The only hard limit is the wire's 65535 fragment cap (`RANT_MESSAGE_MAX`). A
 receive that cannot allocate its reassembly buffer skips the sample and fires
 `RANT_E_MSG_TOO_BIG`.
 

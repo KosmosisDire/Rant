@@ -41,11 +41,11 @@ typedef struct {
     RantReliability reliability;
     uint16_t keep_last;          /* messages retained. 0 = 1, or 10 on a reliable topic */
     uint16_t catch_up;           /* messages a new subscriber gets at once. 0 = future only */
-    uint32_t max_message_bytes;  /* a size hint that pins the SHM class, never a cap */
+    uint32_t max_message_bytes;  /* a payload size hint that pins the SHM class, never a cap */
     uint32_t heartbeat_us;       /* reliable idle publisher ping. 0 = 250 ms */
     uint32_t repair_delay_us;    /* the reliable re ask bound, 0 = adaptive from the round trip */
     uint32_t backpressure_wait_us;/* reliable send pause for a slow subscriber. 0 = none */
-    uint32_t shm_max_bytes;      /* pin the topic to one SHM class. 0 = per message */
+    uint32_t shm_max_bytes;      /* pin the SHM class that holds this payload. 0 = per message */
     uint32_t queue_bytes;        /* the ring cap on a callback queue, 0 = lazy up to RANT_QUEUE_CAP */
     uint16_t max_rate_hz;        /* subscriber side, best effort: a delivery cap per publisher */
     uint8_t  no_timestamp;       /* publisher side: no source stamp, receivers see written_us 0 */
