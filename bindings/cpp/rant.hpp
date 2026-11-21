@@ -148,7 +148,7 @@ enum class CallEventKind {
 enum class EntityKind { Topic = 0, Function, Variable, Task };
 
 /* The severity of a log line or a status condition, rising. */
-enum class Level { Debug = 1, Info, Warn, Error };
+enum class DiagnosticLevel { Debug = 1, Info, Warn, Error };
 /* Who wrote a log line or a condition: the app, or Rant itself. */
 enum class Origin { App = 0, Rant = 1 };
 
@@ -181,8 +181,8 @@ static_assert((int)EntityKind::Topic == detail::RANT_ENTITY_TOPIC, "entity enum 
 static_assert((int)EntityKind::Variable == detail::RANT_ENTITY_VARIABLE, "entity enum drift");
 static_assert((int)EntityKind::Task == detail::RANT_ENTITY_TASK, "entity enum drift");
 #endif
-static_assert((int)Level::Debug == detail::RANT_LEVEL_DEBUG, "level enum drift");
-static_assert((int)Level::Error == detail::RANT_LEVEL_ERROR, "level enum drift");
+static_assert((int)DiagnosticLevel::Debug == detail::RANT_LEVEL_DEBUG, "level enum drift");
+static_assert((int)DiagnosticLevel::Error == detail::RANT_LEVEL_ERROR, "level enum drift");
 static_assert((int)Origin::Rant == detail::RANT_ORIGIN_RANT, "origin enum drift");
 
 /* forward decls. Every handle is a template over the message type, and the type argument
@@ -471,7 +471,7 @@ struct NodeOptions {
     /* built in observability, all on by default (Node::log, Node::set_status, Reflection::meta) */
     bool                     disable_logs         = false; /* strip the @rant/log topic (saves its
                                                               history memory) */
-    std::optional<Level>     log_level;                    /* the lowest level published, empty
+    std::optional<DiagnosticLevel>     log_level;                    /* the lowest level published, empty
                                                               takes RANT_LOG_LEVEL, else Info */
     bool                     disable_status       = false; /* strip the @rant/status topics */
     bool                     disable_meta         = false; /* do not host the @rant/meta endpoint */
@@ -1067,7 +1067,7 @@ struct Peer {
 /* One line from another node's log, for a Node::on_log handler. The views are valid for the
  * callback only. wall_us is the sender's UTC clock when it logged, recv_us our monotonic one. */
 struct LogLine {
-    Level            level = Level::Info;
+    DiagnosticLevel            level = DiagnosticLevel::Info;
     Origin           origin = Origin::App;
     std::string_view node;         /* the publishing node's name */
     uint32_t         node_id = 0;  /* the publishing peer id */
@@ -1079,7 +1079,7 @@ struct LogLine {
 /* One active condition in a node's status. The views are valid for the callback only. */
 struct Condition {
     std::string_view key;          /* its identity within the node */
-    Level            level = Level::Info;
+    DiagnosticLevel            level = DiagnosticLevel::Info;
     Origin           origin = Origin::App;
     bool             clearable = false;   /* Node::clear_peer_status may clear it */
     uint64_t         since_us = 0; /* the owner's UTC clock when it was raised */
@@ -2842,7 +2842,7 @@ public:
 
     /* Publish an already formatted line on the built in log, truncated at RANT_LOG_MAX. A
      * level below the node's log_level sends nothing. SendStatus::NoSys when logs are disabled. */
-    SendStatus log(Level level, std::string_view text) {
+    SendStatus log(DiagnosticLevel level, std::string_view text) {
         priv::Pass p = pass();
         if (!p) return SendStatus::State;
         return static_cast<SendStatus>(detail::rant_node_log_text(
@@ -2853,7 +2853,7 @@ public:
     /* printf style overloads with the C log API's bounded formatting: truncated at
      * RANT_LOG_MAX, and a formatting failure publishes an empty line. */
     template <class... Args>
-    SendStatus log(Level level, const char* fmt, Args&&... args) {
+    SendStatus log(DiagnosticLevel level, const char* fmt, Args&&... args) {
         if (!valid()) return SendStatus::State;
         if (!fmt) return SendStatus::NoTopic;
         char text[RANT_LOG_MAX];
@@ -2896,7 +2896,7 @@ public:
             }
             if (!f) return;
             LogLine ln;
-            ln.level   = static_cast<Level>(m.get_uint("level"));
+            ln.level   = static_cast<DiagnosticLevel>(m.get_uint("level"));
             ln.origin  = static_cast<Origin>(m.get_uint("origin"));
             ln.node    = m.publisher_name();
             ln.node_id = m.publisher_id();
@@ -2916,7 +2916,7 @@ public:
      * stays from the raise, and the same values again send nothing. Readers see it after the
      * next loop pass. TooBig for a key over 48 bytes or past 32 conditions, NoSys when status
      * is disabled. clearable lets another node clear it with clear_peer_status. */
-    SendStatus set_status(std::string_view key, Level level, std::string_view text, bool clearable = false) {
+    SendStatus set_status(std::string_view key, DiagnosticLevel level, std::string_view text, bool clearable = false) {
         priv::Pass p = pass();
         if (!p) return SendStatus::State;
         std::string k(key), t(text);
@@ -2973,7 +2973,7 @@ public:
                 };
                 Condition c;
                 c.key       = m.get_string(at("key"));
-                c.level     = static_cast<Level>(m.get_uint(at("level")));
+                c.level     = static_cast<DiagnosticLevel>(m.get_uint(at("level")));
                 c.origin    = static_cast<Origin>(m.get_uint(at("origin")));
                 c.clearable = m.get_bool(at("clearable"));
                 c.since_us  = m.get_uint(at("since_us"));

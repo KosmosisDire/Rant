@@ -236,7 +236,7 @@ namespace Rant
     }
 
     /// <summary>The severity of a log line or a status condition, rising.</summary>
-    public enum Level
+    public enum DiagnosticLevel
     {
         /// <summary>Detail for whoever debugs, sent only when the node's LogLevel allows it.</summary>
         Debug = 1,
@@ -368,7 +368,7 @@ namespace Rant
         public byte disable_logs;              // strip the built-in @rant/log topic
         public byte disable_meta;              // do not host the @rant/meta endpoint
         public byte disable_error_logs;   // no error mirroring onto @rant/log
-        public byte log_level;                 // the lowest Level published, 0 = RANT_LOG_LEVEL
+        public byte log_level;                 // the lowest DiagnosticLevel published, 0 = RANT_LOG_LEVEL
         public byte disable_status;            // strip the built-in @rant/status topics
         public RantNodeNet net;
         public RantNodeDiscovery discovery;
@@ -1113,7 +1113,7 @@ namespace Rant
         /// <summary>No @rant/log topic: Log returns NoSys.</summary>
         public bool DisableLogs;
         /// <summary>The lowest level Log sends, null takes RANT_LOG_LEVEL, else Info.</summary>
-        public Level? LogLevel;
+        public DiagnosticLevel? LogLevel;
         /// <summary>No @rant/status topics: SetStatus returns NoSys.</summary>
         public bool DisableStatus;
         /// <summary>No built in @rant/meta function.</summary>
@@ -1711,7 +1711,7 @@ namespace Rant
     public sealed class RantLogLine
     {
         /// <summary>The line's severity.</summary>
-        public Level Level;
+        public DiagnosticLevel Level;
         /// <summary>The app wrote it, or Rant itself.</summary>
         public Origin Origin;
         /// <summary>The publishing node's name.</summary>
@@ -1735,7 +1735,7 @@ namespace Rant
         /// <summary>Its identity within the node.</summary>
         public string Key;
         /// <summary>How serious it is.</summary>
-        public Level Level;
+        public DiagnosticLevel Level;
         /// <summary>The app raised it, or Rant itself.</summary>
         public Origin Origin;
         /// <summary>Another node may clear it with RantNode.ClearPeerStatus.</summary>
@@ -2674,7 +2674,7 @@ namespace Rant
         /// <summary>Publish a log line at a level (already formatted text, truncated at
         /// RANT_LOG_MAX). A level below the node's LogLevel sends nothing. SendStatus.NoSys
         /// when logs are disabled. Thread safe.</summary>
-        public SendStatus Log(Level level, string text)
+        public SendStatus Log(DiagnosticLevel level, string text)
         {
             byte[] b = Encoding.UTF8.GetBytes(text ?? "");
             using (Pass p = Gate.Enter())
@@ -2715,7 +2715,7 @@ namespace Rant
             var f = m.Value as Dictionary<string, object>;
             h(new RantLogLine
             {
-                Level = (Level)FieldI(f, "level"), Origin = (Origin)FieldI(f, "origin"),
+                Level = (DiagnosticLevel)FieldI(f, "level"), Origin = (Origin)FieldI(f, "origin"),
                 Node = m.PublisherName, NodeId = m.PublisherId, RecvUs = m.RecvUs,
                 WallUs = m.CaptureUs != 0 ? m.CaptureUs : m.WrittenUs,
                 Text = FieldS(f, "text"),
@@ -2727,7 +2727,7 @@ namespace Rant
         /// Readers see it after the next loop pass. TooBig for a key over 48 bytes or past 32
         /// conditions, NoSys when status is disabled. A clearable condition may be cleared by
         /// another node with ClearPeerStatus, and this node then sees EventKind.StatusCleared.</summary>
-        public SendStatus SetStatus(string key, Level level, string text, bool clearable = false)
+        public SendStatus SetStatus(string key, DiagnosticLevel level, string text, bool clearable = false)
         {
             var so = new RantStatusOpts { clearable = (byte)(clearable ? 1 : 0) };
             using (Pass p = Gate.Enter())
@@ -2790,7 +2790,7 @@ namespace Rant
                 foreach (var c in list)
                     u.Conditions.Add(new RantCondition
                     {
-                        Key = FieldS(c, "key"), Level = (Level)FieldI(c, "level"), Origin = (Origin)FieldI(c, "origin"),
+                        Key = FieldS(c, "key"), Level = (DiagnosticLevel)FieldI(c, "level"), Origin = (Origin)FieldI(c, "origin"),
                         Clearable = c.TryGetValue("clearable", out var cl) && cl is bool b && b,
                         SinceUs = (ulong)FieldI(c, "since_us"), Text = FieldS(c, "text"),
                     });

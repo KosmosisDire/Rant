@@ -1345,7 +1345,7 @@ static class Program
 
         int logId = 0; string logText = null;
         cli.OnLog += l => { logId = Thread.CurrentThread.ManagedThreadId; logText = l.Text; };
-        srv.Log(Rant.Level.Info, "dispatched line");
+        srv.Log(Rant.DiagnosticLevel.Info, "dispatched line");
         deadline = DateTime.UtcNow.AddSeconds(8);
         while (DateTime.UtcNow < deadline && logText != "dispatched line") { Drain(); Thread.Sleep(5); }
         Check("log line arrived", logText == "dispatched line");
@@ -1380,23 +1380,23 @@ static class Program
         using var a = new RantNode("lsrc", Local(8));
         using var b = new RantNode("lsink", Local(8));
         var lines = new System.Collections.Concurrent.ConcurrentQueue<RantLogLine>();
-        a.Log(Rant.Level.Warn, "before");
-        a.Log(Rant.Level.Debug, "hidden");
+        a.Log(Rant.DiagnosticLevel.Warn, "before");
+        a.Log(Rant.DiagnosticLevel.Debug, "hidden");
         b.OnLog += l => lines.Enqueue(l);
-        bool Has(string t, Rant.Level lv)
+        bool Has(string t, Rant.DiagnosticLevel lv)
         {
             foreach (var l in lines)
                 if (l.Text == t && l.Level == lv && l.Origin == Origin.App && l.Node == "lsrc" && l.WallUs != 0) return true;
             return false;
         }
         var deadline = DateTime.UtcNow.AddSeconds(8);
-        while (DateTime.UtcNow < deadline && !Has("before", Rant.Level.Warn)) Thread.Sleep(5);
-        Check("a line logged before the subscribe replays", Has("before", Rant.Level.Warn));
-        a.Log(Rant.Level.Error, "live");
+        while (DateTime.UtcNow < deadline && !Has("before", Rant.DiagnosticLevel.Warn)) Thread.Sleep(5);
+        Check("a line logged before the subscribe replays", Has("before", Rant.DiagnosticLevel.Warn));
+        a.Log(Rant.DiagnosticLevel.Error, "live");
         deadline = DateTime.UtcNow.AddSeconds(8);
-        while (DateTime.UtcNow < deadline && !Has("live", Rant.Level.Error)) Thread.Sleep(5);
-        Check("a live line arrives with its level, origin and node", Has("live", Rant.Level.Error));
-        Check("a line below the level never arrives", !Has("hidden", Rant.Level.Debug));
+        while (DateTime.UtcNow < deadline && !Has("live", Rant.DiagnosticLevel.Error)) Thread.Sleep(5);
+        Check("a live line arrives with its level, origin and node", Has("live", Rant.DiagnosticLevel.Error));
+        Check("a line below the level never arrives", !Has("hidden", Rant.DiagnosticLevel.Debug));
 
         var o = Local(8); o.DisableLogs = true;
         using var c = new RantNode("lnone", o);
@@ -1404,7 +1404,7 @@ static class Program
         try { c.OnLog += l => { }; } catch (RantException) { threw = true; }
         Check("OnLog on a node without logs throws", threw);
 
-        var bad = Local(8); bad.LogLevel = (Rant.Level)9;
+        var bad = Local(8); bad.LogLevel = (Rant.DiagnosticLevel)9;
         threw = false;
         try { using var d = new RantNode("lbad", bad); } catch (RantException) { threw = true; }
         Check("a bad LogLevel refuses the open", threw);
@@ -1434,9 +1434,9 @@ static class Program
         string clearedKey = null;
         a.OnEvent += e => { if (e.Kind == EventKind.StatusCleared) lock (mu) clearedKey = e.Detail; };
         Check("raised before anyone listens",
-              a.SetStatus("estop", Rant.Level.Error, "pressed") == SendStatus.Ok
-              && a.SetStatus("hot", Rant.Level.Warn, "motor hot", clearable: true) == SendStatus.Ok);
-        Check("a long key is refused", a.SetStatus(new string('k', 49), Rant.Level.Info, "x") == SendStatus.TooBig);
+              a.SetStatus("estop", Rant.DiagnosticLevel.Error, "pressed") == SendStatus.Ok
+              && a.SetStatus("hot", Rant.DiagnosticLevel.Warn, "motor hot", clearable: true) == SendStatus.Ok);
+        Check("a long key is refused", a.SetStatus(new string('k', 49), Rant.DiagnosticLevel.Info, "x") == SendStatus.TooBig);
         b.OnStatus += u => { if (u.Node == "ssrc") lock (mu) { last = u; updates++; } };
         int Count() { lock (mu) return last == null ? -1 : last.Conditions.Count; }
         Check("the late binder gets the whole set", Until(8000, () => Count() == 2));
@@ -1444,7 +1444,7 @@ static class Program
         lock (mu)
         {
             var c = last.Conditions;
-            Check("the set decodes", c.Count == 2 && c[0].Key == "estop" && c[0].Level == Rant.Level.Error
+            Check("the set decodes", c.Count == 2 && c[0].Key == "estop" && c[0].Level == Rant.DiagnosticLevel.Error
                   && !c[0].Clearable && c[1].Key == "hot" && c[1].Text == "motor hot" && c[1].Clearable
                   && c[1].SinceUs != 0 && c[1].Origin == Origin.App);
             if (c.Count == 2) hot = c[1];
@@ -1455,7 +1455,7 @@ static class Program
         Check("B sees the smaller set", Until(8000, () => Count() == 1));
         Check("an own clear", a.ClearStatus("estop") == SendStatus.Ok);
         Check("B sees it empty", Until(8000, () => Count() == 0));
-        a.SetStatus("estop", Rant.Level.Error, "pressed again");
+        a.SetStatus("estop", Rant.DiagnosticLevel.Error, "pressed again");
         Check("raised again", Until(8000, () => Count() == 1));
         int before; lock (mu) before = updates;
         a.Dispose();
@@ -1467,7 +1467,7 @@ static class Program
         bool threw = false;
         try { c2.OnStatus += u => { }; } catch (RantException) { threw = true; }
         Check("OnStatus on a node without status throws", threw);
-        Check("SetStatus on a node without status is NoSys", c2.SetStatus("k", Rant.Level.Info, "x") == SendStatus.NoSys);
+        Check("SetStatus on a node without status is NoSys", c2.SetStatus("k", Rant.DiagnosticLevel.Info, "x") == SendStatus.NoSys);
 
         Console.WriteLine(ok ? "status: PASS\n" : "status: FAIL\n");
         return ok;

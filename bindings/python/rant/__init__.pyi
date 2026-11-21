@@ -68,7 +68,7 @@ class CallStatus(IntEnum):
     RUNNING = 6
     NO_PROVIDER = 7
 
-class Level(IntEnum):
+class DiagnosticLevel(IntEnum):
     DEBUG = 1
     INFO = 2
     WARN = 3
@@ -270,7 +270,7 @@ class Queue:
     def stats(self) -> tuple[int, int]: ...
 
 class LogLine:
-    level: Level
+    level: DiagnosticLevel
     origin: Origin
     node: str
     node_id: int
@@ -280,7 +280,7 @@ class LogLine:
 
 class Condition:
     key: str
-    level: Level
+    level: DiagnosticLevel
     origin: Origin
     clearable: bool
     since_us: int
@@ -420,7 +420,7 @@ class Node:
                  multicast_interface: str | None = None, max_topics: int = 0,
                  match_wait: float | None = 0.0, disable_shm: bool = False,
                  fetch_details: bool = False, disable_logs: bool = False,
-                 log_level: Level | None = None, disable_status: bool = False,
+                 log_level: DiagnosticLevel | None = None, disable_status: bool = False,
                  disable_meta: bool = False, disable_error_logs: bool = False,
                  data_port: int = 0,
                  discovery_port: int = 0, multicast_ttl: int = 0,
@@ -535,10 +535,10 @@ class Node:
     def dispatch(self, max_callbacks: int = 0, timeout: float | None = 0.0) -> int: ...
     def create_queue(self) -> Queue: ...
     def settle(self, timeout: float | None = None) -> bool: ...
-    def log(self, level: Level, text: str | bytes) -> SendStatus: ...
+    def log(self, level: DiagnosticLevel, text: str | bytes) -> SendStatus: ...
     def on_event(self, handler: Callable[[Event], object] | None) -> Callable[[Event], object] | None: ...
     def on_log(self, handler: Callable[[LogLine], object] | None) -> Callable[[LogLine], object] | None: ...
-    def set_status(self, key: str, level: Level, text: str, clearable: bool = False) -> SendStatus: ...
+    def set_status(self, key: str, level: DiagnosticLevel, text: str, clearable: bool = False) -> SendStatus: ...
     def clear_status(self, key: str) -> SendStatus: ...
     def clear_peer_status(self, node_id: int, key: str, since_us: int) -> SendStatus: ...
     def on_status(self, handler: Callable[[StatusUpdate], object] | None) -> Callable[[StatusUpdate], object] | None: ...

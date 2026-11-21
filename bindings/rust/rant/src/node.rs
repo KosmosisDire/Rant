@@ -13,7 +13,7 @@ use crate::callback::{Callback, Refused, Registry, in_callback_of};
 use crate::error::{Error, ErrorKind, SendError, event_text};
 use crate::ffi;
 use crate::gate::{Gate, Pass};
-use crate::logs::{Level, LogFn};
+use crate::logs::{DiagnosticLevel, LogFn};
 use crate::status::StatusFn;
 use crate::message::{Codec, Payload};
 use crate::options::{Qos, options, to_ms, to_us};
@@ -87,7 +87,7 @@ options! {
         seed_peers: Vec<String> = Vec::new(),
         bridge: Option<String> = None,
         match_wait: Option<Duration> = None,
-        log_level: Option<Level> = None,
+        log_level: Option<DiagnosticLevel> = None,
     }
 }
 
@@ -118,7 +118,7 @@ impl NodeOptions {
     }
 
     /// The lowest level [`Node::log`] sends. Left out takes RANT_LOG_LEVEL, else Info.
-    pub fn log_level(mut self, level: Level) -> Self {
+    pub fn log_level(mut self, level: DiagnosticLevel) -> Self {
         self.log_level = Some(level);
         self
     }

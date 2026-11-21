@@ -1441,7 +1441,7 @@ static bool status_leg() {
     rant::Node b("SB", opts);
     chk("status: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
-    struct Seen { std::string key, text; rant::Level level; rant::Origin origin; bool clearable; uint64_t since; };
+    struct Seen { std::string key, text; rant::DiagnosticLevel level; rant::Origin origin; bool clearable; uint64_t since; };
     std::mutex mu;
     std::vector<Seen> seen;
     uint32_t from = 0;
@@ -1453,10 +1453,10 @@ static bool status_leg() {
         cleared++; cleared_key = e.detail();
     });
     chk("status: raised before anyone listens",
-        a.set_status("estop", rant::Level::Error, "pressed") == rant::SendStatus::Ok
-        && a.set_status("hot", rant::Level::Warn, "motor hot", true) == rant::SendStatus::Ok);
+        a.set_status("estop", rant::DiagnosticLevel::Error, "pressed") == rant::SendStatus::Ok
+        && a.set_status("hot", rant::DiagnosticLevel::Warn, "motor hot", true) == rant::SendStatus::Ok);
     chk("status: a long key is refused",
-        a.set_status(std::string(49, 'k'), rant::Level::Info, "x") == rant::SendStatus::TooBig);
+        a.set_status(std::string(49, 'k'), rant::DiagnosticLevel::Info, "x") == rant::SendStatus::TooBig);
     chk("status: on_status binds", b.on_status([&](const rant::StatusUpdate& u) {
         if (u.node != "SA") return;
         std::lock_guard<std::mutex> g(mu);
@@ -1470,7 +1470,7 @@ static bool status_leg() {
     {
         std::lock_guard<std::mutex> g(mu);
         chk("status: the set decodes", seen.size() == 2 && seen[0].key == "estop"
-            && seen[0].level == rant::Level::Error && !seen[0].clearable && seen[1].key == "hot"
+            && seen[0].level == rant::DiagnosticLevel::Error && !seen[0].clearable && seen[1].key == "hot"
             && seen[1].text == "motor hot" && seen[1].clearable && seen[1].since
             && seen[1].origin == rant::Origin::App);
         if (seen.size() == 2) hot = seen[1];
@@ -1481,7 +1481,7 @@ static bool status_leg() {
     chk("status: B sees the smaller set", wait_for(4000, [&] { return count() == 1; }));
     chk("status: an own clear", a.clear_status("estop") == rant::SendStatus::Ok);
     chk("status: B sees it empty", wait_for(4000, [&] { return count() == 0; }));
-    a.set_status("estop", rant::Level::Error, "pressed again");
+    a.set_status("estop", rant::DiagnosticLevel::Error, "pressed again");
     chk("status: raised again", wait_for(4000, [&] { return count() == 1; }));
     int before;
     { std::lock_guard<std::mutex> g(mu); before = updates; }
@@ -1516,10 +1516,10 @@ static bool queue_leg() {
     b.on_event([&](const rant::Event&) { mark(); events++; });
 
     std::vector<std::string> lines;
-    a.log(rant::Level::Warn, "before");
+    a.log(rant::DiagnosticLevel::Warn, "before");
     chk("queue: on_log binds", b.on_log([&](const rant::LogLine& l) {
         mark();
-        if (l.level == rant::Level::Warn && l.origin == rant::Origin::App && l.wall_us) lines.emplace_back(l.text);
+        if (l.level == rant::DiagnosticLevel::Warn && l.origin == rant::Origin::App && l.wall_us) lines.emplace_back(l.text);
     }));
 
     rant::Qos rel; rel.reliability = rant::Reliability::Reliable;
@@ -1547,7 +1547,7 @@ static bool queue_leg() {
         [&](const rant::ResponseView<AddRsp>& rv) { mark(); if (rv.ok()) sum = rv.value()->sum; })
         == rant::SendStatus::Ok);
     chk("queue: the response arrives at dispatch", drained([&] { return sum == 5; }));
-    a.log(rant::Level::Warn, "live");
+    a.log(rant::DiagnosticLevel::Warn, "live");
     chk("queue: a live line arrives at dispatch",
         drained([&] { return lines.size() >= 2 && lines.back() == "live"; }));
     chk("queue: events arrive at dispatch", drained([&] { return events.load() > 0; }));
@@ -2016,8 +2016,8 @@ static bool factory_leg() {
     chk("factory: on_status refuses when status is disabled",
         refuses([&] { (void)nostatus.on_status([](const rant::StatusUpdate&) {}); }));
     chk("factory: set_status answers NoSys when status is disabled",
-        nostatus.set_status("k", rant::Level::Info, "x") == rant::SendStatus::NoSys);
-    quiet.log_level = static_cast<rant::Level>(9);
+        nostatus.set_status("k", rant::DiagnosticLevel::Info, "x") == rant::SendStatus::NoSys);
+    quiet.log_level = static_cast<rant::DiagnosticLevel>(9);
     chk("factory: a bad log_level refuses the open", refuses([&] { rant::Node bad("FL", quiet); }));
 #endif
 

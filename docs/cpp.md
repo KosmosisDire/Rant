@@ -272,10 +272,10 @@ remote.set(2.0f);
 ## Reflection, logs and status
 
 ```cpp
-node.log(rant::Level::Info, "started");
+node.log(rant::DiagnosticLevel::Info, "started");
 node.on_log([](const rant::LogLine& l) { /* l.level, l.origin, l.node, l.text */ });
 
-node.set_status("drive2", rant::Level::Error, "drive 2 tripped", /*clearable=*/true);
+node.set_status("drive2", rant::DiagnosticLevel::Error, "drive 2 tripped", /*clearable=*/true);
 node.clear_status("drive2");
 node.on_status([](const rant::StatusUpdate& u) { /* u.node, u.conditions */ });
 

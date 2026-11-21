@@ -23,7 +23,7 @@ __all__ = [
     "Node", "Publisher", "Subscriber", "Message", "Event", "NodeStats", "TopicCounts",
     "Queue", "QueueStats", "Schema", "dsl", "types",
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "string", "enum",
-    "Threading", "SendStatus", "CallStatus", "Level", "Origin", "MetaSection", "EventKind",
+    "Threading", "SendStatus", "CallStatus", "DiagnosticLevel", "Origin", "MetaSection", "EventKind",
     "ErrorKind", "PeerLiveness", "EntityKind",
     "Error", "SchemaError", "CallError", "CancelledError",
     "FunctionDefinition", "RemoteFunction", "Request", "Response", "Deferred",
@@ -85,7 +85,7 @@ class CallStatus(_pyenum.IntEnum):
     NO_PROVIDER = 7      # the timeout passed with no definition ever matched
 
 
-class Level(_pyenum.IntEnum):
+class DiagnosticLevel(_pyenum.IntEnum):
     """The severity of a log line or a status condition, rising. Mirrors RantLevel."""
     DEBUG = 1
     INFO = 2
@@ -224,7 +224,7 @@ class CancelledError(Exception):
 class LogLine:
     """One decoded @rant/log line for a node.on_log handler. wall_us is epoch us when it was
         logged and recv_us this node's clock at receipt."""
-    level: Level
+    level: DiagnosticLevel
     origin: Origin      # the app wrote it, or Rant itself
     node: str           # the publishing node's name
     node_id: int        # the publishing peer id
@@ -237,7 +237,7 @@ class LogLine:
 class Condition:
     """One active condition in a node's status."""
     key: str            # its identity within the node
-    level: Level
+    level: DiagnosticLevel
     origin: Origin      # the app raised it, or Rant itself
     clearable: bool     # another node may clear it with node.clear_peer_status
     since_us: int       # the owner's epoch us when it was raised
@@ -1477,8 +1477,8 @@ def _from_decoded(spec, d):
 # The public runtime API.
 
 def _level(v):
-    """A wire level as a Level, the number when it names none."""
-    return Level(v) if v in Level._value2member_map_ else int(v or 0)
+    """A wire level as a DiagnosticLevel, the number when it names none."""
+    return DiagnosticLevel(v) if v in DiagnosticLevel._value2member_map_ else int(v or 0)
 
 
 def _origin(v):
@@ -2218,7 +2218,7 @@ class Node:
     # ---- log, status, reflection, diagnostics ----
 
     def log(self, level, text):
-        """Publish a log line at a Level, truncated at RANT_LOG_MAX. A level below the node's
+        """Publish a log line at a DiagnosticLevel, truncated at RANT_LOG_MAX. A level below the node's
                 log_level sends nothing. Returns a SendStatus, NOSYS when logs are disabled."""
         b = text.encode("utf-8") if isinstance(text, str) else bytes(text)
         with self._gate.use(self._h) as h:

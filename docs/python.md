@@ -257,14 +257,14 @@ with rant.Domains() as watch:
 
 ## Log and status
 
-`node.log(level, text)` publishes a line at a `rant.Level`, truncated at RANT_LOG_MAX, and
+`node.log(level, text)` publishes a line at a `rant.DiagnosticLevel`, truncated at RANT_LOG_MAX, and
 a level below the node's `log_level` sends nothing. `node.on_log(handler)` delivers every
 other node's lines as a `LogLine` (`level`, `origin`, `node`, `node_id`, `wall_us`,
 `recv_us`, `text`), at `dispatch()` under DISPATCH. It raises `rant.Error` on a node opened
 with `disable_logs`.
 
 ```python
-node.set_status("drive2", rant.Level.ERROR, "drive 2 tripped", clearable=True)
+node.set_status("drive2", rant.DiagnosticLevel.ERROR, "drive 2 tripped", clearable=True)
 node.clear_status("drive2")
 node.on_status(lambda u: print(u.node, len(u.conditions)))
 ```

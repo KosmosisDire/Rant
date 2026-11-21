@@ -219,10 +219,10 @@ remote.set(&2.0)?;
 ## Reflection, log and status
 
 ```rust
-node.log(Level::Info, "started")?;
+node.log(DiagnosticLevel::Info, "started")?;
 node.on_log(|line| println!("{}: {}", line.node, line.text))?;
 
-node.set_status("drive2", Level::Error, "drive 2 tripped", StatusOptions::new().clearable(true))?;
+node.set_status("drive2", DiagnosticLevel::Error, "drive 2 tripped", StatusOptions::new().clearable(true))?;
 node.clear_status("drive2")?;
 node.on_status(|u| println!("{}: {} active", u.node, u.conditions.len()))?;
 

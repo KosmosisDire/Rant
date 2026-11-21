@@ -11,7 +11,7 @@ use crate::topic::MsgFn;
 
 /// The severity of a log line or a status condition, rising.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Level {
+pub enum DiagnosticLevel {
     /// Detail for whoever debugs, sent only when the node's `log_level` allows it.
     Debug,
     /// Normal progress.
@@ -22,23 +22,23 @@ pub enum Level {
     Error,
 }
 
-impl Level {
+impl DiagnosticLevel {
     pub(crate) fn to_c(self) -> ffi::RantLevel {
         match self {
-            Level::Debug => ffi::RANT_LEVEL_DEBUG,
-            Level::Info => ffi::RANT_LEVEL_INFO,
-            Level::Warn => ffi::RANT_LEVEL_WARN,
-            Level::Error => ffi::RANT_LEVEL_ERROR,
+            DiagnosticLevel::Debug => ffi::RANT_LEVEL_DEBUG,
+            DiagnosticLevel::Info => ffi::RANT_LEVEL_INFO,
+            DiagnosticLevel::Warn => ffi::RANT_LEVEL_WARN,
+            DiagnosticLevel::Error => ffi::RANT_LEVEL_ERROR,
         }
     }
 
     /// A wire level. A number past the known ones reads as the nearest.
-    pub(crate) fn from_wire(v: u64) -> Level {
+    pub(crate) fn from_wire(v: u64) -> DiagnosticLevel {
         match v {
-            0 | 1 => Level::Debug,
-            2 => Level::Info,
-            3 => Level::Warn,
-            _ => Level::Error,
+            0 | 1 => DiagnosticLevel::Debug,
+            2 => DiagnosticLevel::Info,
+            3 => DiagnosticLevel::Warn,
+            _ => DiagnosticLevel::Error,
         }
     }
 }
@@ -63,7 +63,7 @@ impl Origin {
 #[non_exhaustive]
 pub struct LogLine<'a> {
     /// Its severity.
-    pub level: Level,
+    pub level: DiagnosticLevel,
     /// The app wrote it, or Rant itself.
     pub origin: Origin,
     /// The publishing node's name.
@@ -84,7 +84,7 @@ impl Node {
     /// Publishes one line on the built in log, cut at 512 bytes. A level below the node's
     /// `log_level` sends nothing. It works inside callbacks too. NoSys when the node was
     /// opened with `disable_logs`.
-    pub fn log(&self, level: Level, text: &str) -> Result<(), SendError> {
+    pub fn log(&self, level: DiagnosticLevel, text: &str) -> Result<(), SendError> {
         let (_pass, raw) = self.inner.enter()?;
         let len = i32::try_from(text.len()).unwrap_or(i32::MAX);
         // SAFETY: the pass keeps the node open, and the text outlives the call
@@ -145,7 +145,7 @@ pub(crate) fn bind_builtin(
 fn deliver(inner: &NodeInner, m: MessageView<'_>) {
     let Some(handler) = lock(&inner.on_log).clone() else { return };
     let line = LogLine {
-        level: Level::from_wire(m.get_uint("level")),
+        level: DiagnosticLevel::from_wire(m.get_uint("level")),
         origin: Origin::from_wire(m.get_uint("origin")),
         node: m.publisher_name(),
         node_id: m.publisher_id(),

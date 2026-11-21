@@ -46,7 +46,7 @@ mod variable;
 pub use domains::{DomainInfo, Domains, DomainsOptions};
 pub use error::{Error, ErrorKind, SendError};
 pub use function::{Deferred, FunctionDefinition, FunctionOptions, RemoteFunction, Request};
-pub use logs::{Level, LogLine, Origin};
+pub use logs::{DiagnosticLevel, LogLine, Origin};
 pub use map::{MapItem, MapReader, MapValue, MapWriter};
 pub use message::{Bytes, Message, Payload};
 pub use node::{Event, EventKind, Node, NodeOptions, NodeStats, Queue, QueueStats, Threading};

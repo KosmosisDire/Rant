@@ -269,14 +269,14 @@ of it when done.
 `Schema.EnumVariants(field)` the options of an enum field, for a tool that renders a
 schema it has never seen.
 
-`node.Log(level, text)` publishes a line at a `Level`, and a level below
+`node.Log(level, text)` publishes a line at a `DiagnosticLevel`, and a level below
 `NodeOptions.LogLevel` sends nothing. The `node.OnLog` event delivers every other node's
 lines as a `RantLogLine` (`Level`, `Origin`, `Node`, `NodeId`, `WallUs`, `RecvUs`, `Text`),
 at `Dispatch()` under `Threading.Dispatch` like every other handler. It throws on a node
 opened with `DisableLogs`.
 
 ```csharp
-node.SetStatus("drive2", Level.Error, "drive 2 tripped", clearable: true);
+node.SetStatus("drive2", DiagnosticLevel.Error, "drive 2 tripped", clearable: true);
 node.ClearStatus("drive2");
 node.OnStatus += u => Console.WriteLine($"{u.Node}: {u.Conditions.Count} active");
 ```

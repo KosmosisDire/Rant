@@ -15,7 +15,7 @@ export type SendStatus = "ok" | "no_topic" | "too_big" | "role" | "oom" | "state
 export type CallStatus = "ok" | "app_error" | "no_handler" | "timeout" | "peer_lost" | "cancelled" | "running" | "no_provider";
 export type CancelStatus = "ok" | "no_cancel" | "not_pending";
 /* the severity of a log line or a status condition, rising */
-export type Level = "debug" | "info" | "warn" | "error";
+export type DiagnosticLevel = "debug" | "info" | "warn" | "error";
 /* who wrote a log line or a condition */
 export type Origin = "app" | "rant";
 export type EntityKind = "topic" | "function" | "variable" | "task";
@@ -33,9 +33,9 @@ export type CallEventKind = "call" | "running" | "progress" | "cancel" | "end";
 const CALL_EVENT: CallEventKind[] = ["call", "running", "progress", "cancel", "end"];
 const CALL: CallStatus[] = ["ok", "app_error", "no_handler", "timeout", "peer_lost", "cancelled", "running", "no_provider"];
 const CALL_NUMBER: Record<CallStatus, number> = { ok: 0, app_error: 1, no_handler: 2, timeout: 3, peer_lost: 4, cancelled: 5, running: 6, no_provider: 7 };
-const LEVELS: Level[] = ["debug", "info", "warn", "error"];      /* the C numbers them from 1 */
+const LEVELS: DiagnosticLevel[] = ["debug", "info", "warn", "error"];      /* the C numbers them from 1 */
 /* a decoded enum is its option name, a number past the known ones reads as the nearest */
-const levelOf = (v: unknown): Level => typeof v === "string" ? (v.toLowerCase() as Level)
+const levelOf = (v: unknown): DiagnosticLevel => typeof v === "string" ? (v.toLowerCase() as DiagnosticLevel)
     : LEVELS[Math.min(Math.max(Number(v ?? 2), 1), 4) - 1];
 const originOf = (v: unknown): Origin => (typeof v === "string" ? v.toLowerCase() === "rant" : Number(v ?? 0) === 1)
     ? "rant" : "app";
@@ -70,7 +70,7 @@ export interface NodeOptions {
     domain?: number; prefix?: string; maxTopics?: number; fetchDetails?: boolean;
     disableLogs?: boolean; disableStatus?: boolean; disableMeta?: boolean; disableErrorLogs?: boolean;
     /* the lowest level log() sends, unset takes RANT_LOG_LEVEL in Node.js, else "info" */
-    logLevel?: Level;
+    logLevel?: DiagnosticLevel;
     /* "127.0.0.1" keeps the node on this computer */
     multicastInterface?: string;
     dataPort?: number; discoveryPort?: number; multicastTtl?: number;
@@ -200,14 +200,14 @@ export interface Entity {
 }
 
 export interface LogLine {
-    level: Level; origin: Origin; node: string; nodeId: number; text: string;
+    level: DiagnosticLevel; origin: Origin; node: string; nodeId: number; text: string;
     /* the sender's UTC clock when it logged, and this node's monotonic clock at receipt */
     wallUs: number; recvUs: number;
 }
 
 /* One active condition in a node's status. sinceUs is the owner's UTC clock at the raise. */
 export interface Condition {
-    key: string; level: Level; origin: Origin; clearable: boolean; sinceUs: number; text: string;
+    key: string; level: DiagnosticLevel; origin: Origin; clearable: boolean; sinceUs: number; text: string;
 }
 
 /* A node's whole status: every condition active there now, empty when it cleared them all or went away. */
@@ -754,7 +754,7 @@ export class RantNode {
     }
 
     /* Publishes a log line, truncated at 512 bytes. A level below logLevel sends nothing. "nosys" when logs are disabled. */
-    log(level: Level, text: string): SendStatus {
+    log(level: DiagnosticLevel, text: string): SendStatus {
         const h = this.live();
         const b = encodeUtf8(text);
         const r = scoped(this.n, (sc) => this.n.c.rant_node_log_text(h, LEVELS.indexOf(level) + 1, sc.data(b), b.length));
@@ -772,7 +772,7 @@ export class RantNode {
 
     /* Raises the condition key on this node's status, or updates it while active: sinceUs stays from the raise and the
      * same values again send nothing. "too_big" for a key over 48 bytes or past 32 conditions, "nosys" when disabled. */
-    setStatus(key: string, level: Level, text: string, opts: { clearable?: boolean } = {}): SendStatus {
+    setStatus(key: string, level: DiagnosticLevel, text: string, opts: { clearable?: boolean } = {}): SendStatus {
         const h = this.live();
         const r = scoped(this.n, (sc) => {
             const so = sc.alloc(L.RantStatusOpts.sizeof);

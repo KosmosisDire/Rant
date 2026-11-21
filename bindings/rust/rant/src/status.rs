@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use crate::callback::Callback;
 use crate::error::{Error, SendError};
 use crate::ffi;
-use crate::logs::{Level, Origin, bind_builtin};
+use crate::logs::{DiagnosticLevel, Origin, bind_builtin};
 use crate::node::{Node, NodeInner, lock};
 use crate::options::options;
 use crate::schema::MessageView;
@@ -27,7 +27,7 @@ pub struct Condition<'a> {
     /// Its identity within the node.
     pub key: Cow<'a, str>,
     /// How serious it is.
-    pub level: Level,
+    pub level: DiagnosticLevel,
     /// The app raised it, or Rant itself.
     pub origin: Origin,
     /// Another node may clear it with [`Node::clear_peer_status`].
@@ -62,7 +62,7 @@ impl Node {
     /// `since_us` stays from the raise, and the same values again send nothing. Readers see
     /// it after the next loop pass. TooBig for a key over 48 bytes or past 32 conditions,
     /// NoSys when the node was opened with `disable_status`.
-    pub fn set_status(&self, key: &str, level: Level, text: &str, options: StatusOptions) -> Result<(), SendError> {
+    pub fn set_status(&self, key: &str, level: DiagnosticLevel, text: &str, options: StatusOptions) -> Result<(), SendError> {
         let (k, t) = (c_text(key)?, c_text(text)?);
         let opts = ffi::RantStatusOpts { clearable: options.clearable as u8 };
         let (_pass, raw) = self.inner.enter()?;
@@ -109,7 +109,7 @@ fn deliver(inner: &NodeInner, m: MessageView<'_>) {
             let at = |member: &str| format!("conditions[{i}].{member}");
             Condition {
                 key: m.get_string(&at("key")),
-                level: Level::from_wire(m.get_uint(&at("level"))),
+                level: DiagnosticLevel::from_wire(m.get_uint(&at("level"))),
                 origin: Origin::from_wire(m.get_uint(&at("origin"))),
                 clearable: m.get_bool(&at("clearable")),
                 since_us: m.get_uint(&at("since_us")),
