@@ -1,0 +1,4 @@
+# Normalize line endings in the repo, independent of each contributor's local
+# core.autocrlf (that is a per-machine Git setting, not a repo guarantee). Store
+# everything LF; auto-detected binaries are left untouched.
+* text=auto eol=lf

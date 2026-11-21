@@ -1,0 +1,2 @@
+-- A one byte enum before an f64 gains padding in C
+Padded { kind: u8, value: f64 }
