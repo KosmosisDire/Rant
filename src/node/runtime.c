@@ -2494,8 +2494,9 @@ static void i_rant_node_trouble(void *u, RantErrorKind what, uint32_t peer, uint
     switch (what){
     case RANT_E_SCHEMA_MISMATCH: {
         const char *why = i_rant_node_core_schema_why(n->core, peer, topic_index, read);
-        snprintf(text, sizeof text, "%s %s %.*s: %s", tn, read ? "from" : "to", (int)pn.len, pn.data,
-                 why && why[0] ? why : "the schemas do not fit");
+        int len = snprintf(text, sizeof text, "%s %s %.*s: ", tn, read ? "from" : "to", (int)pn.len, pn.data);
+        if (len >= 0 && (size_t)len < sizeof text)
+            snprintf(text + len, sizeof text - (size_t)len, "%s", why && why[0] ? why : "the schemas do not fit");
         i_rant_node_problem(k->schema, id, RANT_LEVEL_ERROR, text);
         break; }
     case RANT_E_QOS_INCOMPATIBLE:
