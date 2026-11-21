@@ -63,7 +63,7 @@ configured, so nothing is fetched and no tools or tests are built.
 ```cmake
 CPMAddPackage(NAME rant
               GIT_REPOSITORY https://github.com/KosmosisDire/Rant.git
-              GIT_TAG v0.0.47)
+              GIT_TAG v0.0.48)
 
 target_link_libraries(app PRIVATE rant::rant_host)
 ```
@@ -84,7 +84,7 @@ cmake --install build --prefix /usr/local
 ```
 
 ```cmake
-find_package(rant 0.0.47 CONFIG REQUIRED)
+find_package(rant 0.0.48 CONFIG REQUIRED)
 target_link_libraries(app PRIVATE rant::rant_host)
 ```
 
