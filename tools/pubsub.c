@@ -1,0 +1,579 @@
+/* A small pub sub command line tool over one node. --help lists the modes and flags.
+ * Same host traffic rides shared memory, which needs -lrt on Linux. */
+
+#define RANT_IMPLEMENTATION
+#include "rant.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+/* The tool creates its topics in index order, so these shims keep a (node, index) call
+ * form: rant_node_topic maps a creation index back to its handle. */
+#define rant_node_send(n, idx, d, l)           rant_topic_send(rant_node_topic((n),(idx)), rant_bytes((d),(l)), NULL)
+#define rant_node_drain(n, idx, ms)            rant_topic_drain(rant_node_topic((n),(idx)), (ms))
+#define rant_node_publisher_match_count(n, idx) rant_topic_match_count(rant_node_topic((n),(idx)))
+#define rant_node_repair_stats(n, idx, o)      rant_topic_repair_stats(rant_node_topic((n),(idx)), (o))
+#define rant_node_subscriber_progress(n, idx, p, b, h, t) \
+        rant_topic_subscriber_progress(rant_node_topic((n),(idx)), (p),(b),(h),(t))
+
+/* A node only does discovery, liveness and repair inside rant_node_poll, so a background
+ * thread keeps polling while main blocks on stdin, and one lock serializes every call. */
+#ifdef _WIN32
+  #include <windows.h>
+  typedef CRITICAL_SECTION lock_t;
+  static void lock_init(lock_t *mutex){ InitializeCriticalSection(mutex); }
+  static void lock_get (lock_t *mutex){ EnterCriticalSection(mutex); }
+  static void lock_put (lock_t *mutex){ LeaveCriticalSection(mutex); }
+  static void sleep_ms (int ms){ Sleep((DWORD)ms); }
+#else
+  #include <pthread.h>
+  #include <time.h>
+  typedef pthread_mutex_t lock_t;
+  static void lock_init(lock_t *mutex){ pthread_mutex_init(mutex, NULL); }
+  static void lock_get (lock_t *mutex){ pthread_mutex_lock(mutex); }
+  static void lock_put (lock_t *mutex){ pthread_mutex_unlock(mutex); }
+  static void sleep_ms (int ms){ struct timespec ts; ts.tv_sec = ms/1000;
+                                 ts.tv_nsec = (long)(ms%1000)*1000000L; nanosleep(&ts, NULL); }
+#endif
+
+#ifdef _WIN32
+  #include <io.h>
+  static int stdin_is_tty(void){ return _isatty(_fileno(stdin)); }
+  static void file_truncate(FILE *file, long n){ _chsize(_fileno(file), n); }
+#else
+  #include <unistd.h>
+  static int stdin_is_tty(void){ return isatty(fileno(stdin)); }
+  static void file_truncate(FILE *file, long n){ if (ftruncate(fileno(file), n)){} }
+#endif
+
+/* milliseconds since process start, for the discovery timing logs */
+static long g_start_ms;
+static long now_ms(void){
+#ifdef _WIN32
+    return (long)GetTickCount();
+#else
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)(ts.tv_sec*1000 + ts.tv_nsec/1000000);
+#endif
+}
+
+static RantNode    *g_node;
+static lock_t      g_lock;
+static volatile int g_pumping = 1;
+static FILE        *g_outfile = NULL; /* sub --file: received messages saved here */
+static int         g_rate_mode = 0;   /* sub --rate: measured rate only, no per message lines */
+static unsigned long      g_rx_msgs  = 0;  /* messages received since the last rate report */
+static unsigned long long g_rx_bytes = 0;  /* bytes received since the last rate report */
+static unsigned long long g_rx_total = 0;  /* cumulative messages delivered to on_message */
+static unsigned long long g_lost     = 0;  /* cumulative messages the transport reported lost */
+static uint32_t           g_last_peer = 0;   /* the last sender, the loop snapshots its progress */
+#define MAX_TOPICS 64
+static const char *g_topics[MAX_TOPICS];   /* topic handle to topic name, for the receive print */
+static int         g_n_topics = 0;
+
+#ifdef _WIN32
+static DWORD WINAPI pump_thread(LPVOID arg){
+#else
+static void *pump_thread(void *arg){
+#endif
+    (void)arg;
+    while (g_pumping){
+        lock_get(&g_lock); rant_node_poll(g_node, 0); lock_put(&g_lock);
+        sleep_ms(5);
+    }
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+static int parse_ipv4(const char *s, uint8_t out[4]){
+    int i;
+    for (i = 0; i < 4; i++){
+        char *end;
+        long byte_val = strtol(s, &end, 10);
+        if (end == s || byte_val < 0 || byte_val > 255) return -1;
+        if (i < 3 && *end != '.') return -1;
+        if (i == 3 && *end != '\0') return -1;
+        out[i] = (uint8_t)byte_val;
+        s = end + 1;
+    }
+    return 0;
+}
+
+/* Called by the node every 200 ms while a send is blocked in backpressure, so the repair
+ * series is visible inside a stall (spec/testing.md). Stderr, apart from the rate lines. */
+static void pump_probe(void *u, const RantPumpSample *s){
+    double secs = s->interval_us/1e6;
+    (void)u;
+    fprintf(stderr, "[pub]   in-pump @%.2fs: resent %.0f/s  nacks %.0f/s  idle %u/%u polls\n",
+            s->wait_elapsed_us/1e6,
+            secs>0 ? s->frags_resent/secs : 0.0,
+            secs>0 ? s->nacks_recv/secs   : 0.0,
+            s->polls_idle, s->polls);
+}
+
+/* "4M", "512k" or "1048576" to bytes, with a binary K, M or G suffix. 0 on garbage. */
+static size_t parse_size(const char *s){
+    char *end; double value = strtod(s, &end), mult = 1.0;
+    if      (*end=='k'||*end=='K') mult = 1024.0;
+    else if (*end=='m'||*end=='M') mult = 1024.0*1024.0;
+    else if (*end=='g'||*end=='G') mult = 1024.0*1024.0*1024.0;
+    return (value > 0) ? (size_t)(value*mult) : 0;
+}
+
+static void on_message(const RantMsg *msg){
+    char topic[RANT_TOPIC_NAME_MAX + 1];     /* NUL terminated copy: topic_name is a RantString */
+    uint32_t from = msg->publisher_id; const void *data = msg->data.data; size_t len = msg->data.len;
+    size_t tn = msg->topic_name.len < sizeof topic - 1 ? msg->topic_name.len : sizeof topic - 1;
+    if (tn) memcpy(topic, msg->topic_name.data, tn);
+    topic[tn] = '\0';
+    if (!tn){ topic[0] = '?'; topic[1] = '\0'; }
+    g_rx_msgs++; g_rx_bytes += len; g_rx_total++;   /* sub --rate accounting, the loop prints it */
+    g_last_peer = from;   /* the loop snapshots its HOL progress */
+    if (g_outfile){                       /* --file: each message overwrites the file */
+        rewind(g_outfile);                /* back to the start, not appending */
+        fwrite(data, 1, len, g_outfile);
+        fflush(g_outfile);                /* flush before truncating a longer prior message */
+        file_truncate(g_outfile, (long)len);
+        if (!g_rate_mode)
+            printf("[%s <- peer %u] wrote %lu bytes\n", topic, from, (unsigned long)len);
+    } else if (!g_rate_mode){             /* --rate: no per message line, the loop shows the rate */
+        printf("[%s <- peer %u] %.*s\n", topic, from, (int)len, (const char*)data);
+    }
+}
+
+static void on_event(const RantEvent *ev)
+{
+    char line[160];
+    printf("  <event> %s\n", rant_event_str(ev, line, sizeof line));
+}
+
+static void usage(void){
+    fprintf(stderr,
+        "usage:\n"
+        "  pubsub sub <topic> [<topic>...] [opts]   (subscribe to one or more topics)\n"
+        "  pubsub pub <topic> [text...] [opts]      (no text = read lines from stdin)\n"
+        "opts: --domain N  --mcast (same-host: discovery on loopback)  --if <ip>  --peer <ip>  --best-effort  --wait MS  --file <name>  --max <size>\n"
+        "      --rate HZ   (pub: repeat the text/--file payload at HZ; sub: bare --rate prints the measured receive rate)\n"
+        "      --frag N    (UDP fragment payload bytes this node sends; advertised to peers. Build with -DRANT_FRAG_SIZE_MAX>=N)\n");
+}
+
+/* Pump the node until at least one subscriber has matched and the count has held for a
+ * short quiet window, so peers found together are all captured. 0 on timeout with none. */
+static int wait_for_sub(RantNode *n, uint16_t topic, int timeout_ms){
+    int t, count = 0, stable = 0, printed_wait = 0;
+    /* just longer than the startup solicit reply jitter of about 20 ms, so a burst of
+       subscribers is captured and a lone one is not made to wait */
+    const int QUIET_WINDOW_MS = 60;
+    for (t = 0; t < timeout_ms; t += 20){
+        int match_count = rant_node_publisher_match_count(n, topic);
+        if (match_count > count){ count = match_count; stable = 0; }   /* a new sub: keep waiting */
+        else if (count > 0 && (stable += 20) >= QUIET_WINDOW_MS) return 1;
+        if (!printed_wait && count == 0 && t >= 400){ printf("[pub] waiting for a subscriber...\n"); printed_wait = 1; }
+        rant_node_poll(n, 20);
+    }
+    return rant_node_publisher_match_count(n, topic) > 0;
+}
+
+/* Read all of file into a malloc'd buffer the caller frees, refusing input over cap bytes
+ * (*too_big = 1) rather than splitting. NULL with *too_big = 0 is out of memory. */
+static char *read_all(FILE *file, size_t cap, size_t *out_len, int *too_big){
+    size_t buf_cap = 65536, len = 0, n_read;
+    char *buf, *new_buf;
+    *too_big = 0;
+    if (buf_cap > cap) buf_cap = cap;
+    buf = (char*)malloc(buf_cap);
+    if (!buf) return NULL;
+    for (;;){
+        if (len == buf_cap){
+            if (buf_cap >= cap){                       /* at the limit, is more left? */
+                if (fgetc(file) != EOF){ *too_big = 1; free(buf); return NULL; }
+                break;                                /* exactly cap, at EOF */
+            }
+            { size_t want = buf_cap*2; if (want > cap) want = cap;
+              new_buf = (char*)realloc(buf, want);
+              if (!new_buf){ free(buf); return NULL; }
+              buf = new_buf; buf_cap = want; }
+        }
+        n_read = fread(buf + len, 1, buf_cap - len, file);
+        if (n_read == 0) break;                            /* EOF */
+        len += n_read;
+    }
+    *out_len = len;
+    return buf;
+}
+
+/* Publish the whole file as one message, refusing input over cap. Settles first so a
+ * fresh subscriber is matched, then drains delivery before returning. */
+static int publish_stream(RantNode *n, uint16_t topic, FILE *file, int wait_ms, size_t cap){
+    size_t len = 0; int too_big, t;
+    char *buf;
+    if (!wait_for_sub(n, topic, wait_ms)){
+        fprintf(stderr, "[pub] no subscriber matched in %dms; nothing sent\n", wait_ms);
+        return -1;
+    }
+    buf = read_all(file, cap, &len, &too_big);
+    if (!buf){
+        if (too_big) fprintf(stderr, "[pub] input exceeds the %lu-byte message limit; raise --max\n",
+                          (unsigned long)cap);
+        else      fprintf(stderr, "out of memory\n");
+        return -1;
+    }
+    if (rant_node_send(n, topic, buf, len) < 0){ fprintf(stderr, "send failed\n"); free(buf); return -1; }
+    printf("[pub] sent %lu bytes\n", (unsigned long)len);
+    /* wait until the receiver has acked every byte: the BYE that follows makes the
+       reader abandon in flight data, so a fixed grace would cut off a slow transfer */
+    if (!rant_node_drain(n, topic, 30000))
+        fprintf(stderr, "[pub] warning: delivery incomplete (reader slow or gone)\n");
+    for (t = 0; t < 200; t += 20) rant_node_poll(n, 20);     /* a brief best effort flush */
+    free(buf);
+    return 0;
+}
+
+/* --rate: repeat the payload at hz until Ctrl-C, publishing even with no subscriber since
+ * keep_last catches late joiners. The pacing rules are in spec/testing.md. Never returns. */
+static void publish_rate(RantNode *n, uint16_t topic, const void *data, size_t len,
+                         double hz, int wait_ms){
+    uint64_t period_us = (uint64_t)(1000000.0/hz + 0.5);
+    uint64_t next, now, last_print;
+    unsigned long sent = 0, last_sent = 0;
+    uint64_t backpressure_us = 0; uint32_t backpressure_waits = 0, last_backpressure_waits = 0;
+    RantRepairStats repair_stats, prev_repair_stats;     /* reliable repair throughput, writer side */
+    memset(&prev_repair_stats, 0, sizeof prev_repair_stats);
+    if (period_us == 0) period_us = 1;                 /* clamp absurd rates to about 1 MHz */
+    /* lag under this is jitter and is made up one send per spin. Lag over it is a
+       backpressure block and resyncs, so a stall never bursts a backlog into the history */
+    const uint64_t RESYNC_LAG_US = 50000;              /* 50 ms */
+    if (!wait_for_sub(n, topic, wait_ms))
+        fprintf(stderr, "[pub] no subscriber yet; publishing anyway (late joiners catch up)\n");
+    printf("[pub] publishing %lu bytes at %g Hz (Ctrl-C to stop)...\n", (unsigned long)len, hz);
+    now = i_rant_plat_now_us(); next = now; last_print = now;
+    for (;;){
+        now = i_rant_plat_now_us();
+        if (now >= next){
+            if (rant_node_send(n, topic, data, len) >= 0) sent++;    /* may block in backpressure */
+            next += period_us;
+            now = i_rant_plat_now_us();                    /* a blocking send moved the clock */
+            if (next + RESYNC_LAG_US < now) next = now; /* a real block: resync, never burst */
+        }
+        /* sleep only with at least 1 ms of slack, else spin with a non blocking poll so high
+           rates are not capped near 1 kHz */
+        rant_node_poll(n, (next > now && next - now >= 1000) ? 1 : 0);
+        now = i_rant_plat_now_us();
+        if (now - last_print >= 1000000u){   /* one real second: the true rate and flow control */
+            double secs = (now - last_print)/1e6;
+            rant_node_backpressure_stats(n, &backpressure_us, &backpressure_waits);
+            printf("[pub] %.1f msg/s (sent %lu)  matched=%d  bp_waits=+%u  bp_total=%.2fs\n",
+                   (sent - last_sent)/secs, sent,
+                   rant_node_publisher_match_count(n, topic),
+                   backpressure_waits - last_backpressure_waits, backpressure_us/1e6);
+            rant_node_repair_stats(n, topic, &repair_stats);     /* meaningful only when reliable */
+            if (repair_stats.nacks_recv != prev_repair_stats.nacks_recv || repair_stats.frags_resent != prev_repair_stats.frags_resent){
+                uint64_t delta_sent = repair_stats.frags_sent - prev_repair_stats.frags_sent;
+                uint64_t delta_resent  = repair_stats.frags_resent - prev_repair_stats.frags_resent;
+                /* normalise by real elapsed time: a blocked second can span many wall seconds */
+                printf("[pub]   repair: nacks %.1f/s  resent %.1f/s  (%.1f%% of TX)\n",
+                       (repair_stats.nacks_recv - prev_repair_stats.nacks_recv)/secs,
+                       delta_resent/secs,
+                       delta_sent ? 100.0*(double)delta_resent/(double)delta_sent : 0.0);
+            }
+            last_sent = sent; last_print = now; last_backpressure_waits = backpressure_waits; prev_repair_stats = repair_stats;
+        }
+    }
+}
+
+int main(int argc, char **argv){
+    const char *mode = NULL, *if_ip = NULL, *peer_ip = NULL, *file_name = NULL;
+    const char *pos[64]; int npos = 0;     /* positional args: mode, then topics or message words */
+    uint16_t domain = 0;
+    int mcast = 0, reliable = 1, wait_ms = 5000, rate_set = 0, frag = 0;
+    double rate_hz = 0;                    /* --rate: pub repeats at N Hz, sub measures the rate */
+    size_t cap = 4u<<20; int max_set = 0; /* --max: fixed message cap (else dynamic) */
+    char msg[65536]; size_t msg_len = 0;  /* one shot publish text, if any */
+    int i;
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+    g_start_ms = now_ms();
+
+    /* --flags are recognized anywhere. The rest are positionals: mode, topic, then message
+     * words joined with spaces. */
+    for (i = 1; i < argc; i++){
+        const char *arg = argv[i];
+        if      (!strcmp(arg, "--domain") && i+1 < argc) domain  = (uint16_t)atoi(argv[++i]);
+        else if (!strcmp(arg, "--if")     && i+1 < argc) if_ip   = argv[++i];
+        else if (!strcmp(arg, "--peer")   && i+1 < argc) peer_ip = argv[++i];
+        else if (!strcmp(arg, "--wait")   && i+1 < argc) wait_ms = atoi(argv[++i]);
+        else if (!strcmp(arg, "--file")   && i+1 < argc) file_name = argv[++i];
+        else if (!strcmp(arg, "--max")    && i+1 < argc){ cap = parse_size(argv[++i]); max_set = 1; }
+        else if (!strcmp(arg, "--frag")   && i+1 < argc) frag = atoi(argv[++i]);
+        else if (!strcmp(arg, "--rate")){              /* HZ is optional: a bare --rate on a sub */
+            rate_set = 1;
+            if (i+1 < argc){   /* take the next token only if numeric, so --rate --file survives */
+                char *end; double value = strtod(argv[i+1], &end);
+                if (end != argv[i+1] && *end == '\0'){ rate_hz = value; i++; }
+            }
+        }
+        else if (!strcmp(arg, "--mcast"))                mcast   = 1;
+        else if (!strcmp(arg, "--best-effort"))          reliable = 0;
+        else if (!strcmp(arg, "--help") || !strcmp(arg, "-h")){ usage(); return 0; }
+        else if (arg[0] == '-' && arg[1] == '-'){ fprintf(stderr, "unknown option %s\n", arg); usage(); return 2; }
+        else if (npos < 64) pos[npos++] = arg;
+    }
+    if (max_set && cap < 64) cap = 64;   /* --max 0 or garbage: keep a sane floor */
+
+    mode = npos > 0 ? pos[0] : NULL;
+    if (!mode){ usage(); return 2; }
+    int is_pub = !strcmp(mode, "pub");
+    int is_sub = !strcmp(mode, "sub");
+    if (!is_pub && !is_sub){ fprintf(stderr, "mode must be 'pub' or 'sub'\n"); usage(); return 2; }
+
+    /* sub takes every positional after the mode as a topic list. pub takes the first as
+       its topic and joins the rest as the message text. */
+    if (is_sub){
+        for (i = 1; i < npos && g_n_topics < MAX_TOPICS; i++) g_topics[g_n_topics++] = pos[i];
+    } else {
+        if (npos > 1) g_topics[g_n_topics++] = pos[1];
+        for (i = 2; i < npos; i++){
+            size_t word_len = strlen(pos[i]);
+            if (msg_len && msg_len < sizeof msg - 1) msg[msg_len++] = ' ';
+            if (word_len > sizeof msg - 1 - msg_len) word_len = sizeof msg - 1 - msg_len;
+            memcpy(msg + msg_len, pos[i], word_len); msg_len += word_len;
+        }
+    }
+    msg[msg_len] = '\0';
+    if (g_n_topics == 0){ usage(); return 2; }
+
+    int dynamic = !max_set;                 /* no --max: grow buffers via malloc */
+    size_t send_limit = dynamic ? RANT_MESSAGE_MAX : cap;
+
+    /* the publisher sends on the first topic, index 0 */
+    const uint16_t topic = 0;
+
+    /* A big message profile shared by every topic: shallow keep_last since messages can be
+       megabytes, fast repair, and a long backpressure window so a file drains before eviction. */
+    RantQos qos = {
+        .reliability         = reliable ? RANT_RELIABLE : RANT_BEST_EFFORT,
+        .keep_last           = 4,
+        .catch_up            = 2,
+        .max_message_bytes   = dynamic ? 0u : (uint32_t)cap,
+        .heartbeat_us        = 200000,
+        .repair_delay_us     = 2000,
+        .backpressure_wait_us= 5000000,
+    };
+    const uint16_t max_peers = 8;   /* a few peers, bounds per peer reassembly */
+
+    /* announce and timeout stay at their defaults: the startup solicit makes discovery
+       near instant. data_port 0 is an OS assigned ephemeral port. */
+    RantNodeOpts opts; memset(&opts, 0, sizeof opts);
+    opts.domain       = domain;
+    opts.max_topics = (uint16_t)g_n_topics;
+    opts.discovery.max_peers = max_peers;
+    /* A big message has no flow control inside it, so the receive socket must hold it whole
+       or fragments drop and repair crawls. Linux also needs net.core.rmem_max raised. */
+    { size_t sb = dynamic ? RANT_MESSAGE_MAX : cap;
+      if (sb < (8u<<20))  sb = 8u<<20;
+      if (sb > (64u<<20)) sb = 64u<<20;
+      opts.net.recv_buffer_bytes = (uint32_t)sb;
+      opts.net.send_buffer_bytes = (uint32_t)(sb > (16u<<20) ? (16u<<20) : sb); }
+    if (frag) opts.net.fragment_size = (uint16_t)frag;   /* needs -DRANT_FRAG_SIZE_MAX>=frag */
+    if (if_ip)      opts.net.multicast_interface = if_ip;          /* multihomed: pin it */
+    else if (mcast) opts.net.multicast_interface = "127.0.0.1";    /* same host: stay local */
+
+    RantAddr seed;
+    if (peer_ip){
+        memset(&seed, 0, sizeof seed);
+        if (parse_ipv4(peer_ip, seed.ip) < 0){ fprintf(stderr, "bad --peer ip %s\n", peer_ip); return 2; }
+        seed.ip_len = 4;           /* port 0 = use the discovery port */
+        opts.net.seed_peers = &seed; opts.net.n_seed_peers = 1;
+    }
+
+    /* Dynamic mode grows message buffers from the heap. Fixed mode (--max) is a static
+       allocator over one block sized for history plus reassembly, live for the whole process. */
+    RantAllocator alloc;
+    if (dynamic){
+        alloc = rant_allocator_heap(0);
+    } else {
+        size_t mem_size = (8u<<20)
+                        + (size_t)g_n_topics * ((size_t)qos.keep_last + max_peers) * cap;
+        void *block = malloc(mem_size);
+        if (!block){ fprintf(stderr, "out of memory (arena %lu bytes)\n", (unsigned long)mem_size); return 1; }
+        alloc = rant_allocator_static(block, mem_size);
+    }
+    RantNode *n = rant_node_open(&alloc, NULL, on_message, on_event, &opts);
+    if (!n){ fprintf(stderr, "rant_node_open failed\n"); return 1; }
+
+    /* Topics are created in index order, so topic index i is g_topics[i] and the shims
+       resolve an index straight to its handle. */
+    for (i = 0; i < g_n_topics; i++){
+        RantTopicOpts co; memset(&co, 0, sizeof co);
+        co.qos = qos;
+        if (!rant_node_create_topic(n, g_topics[i], is_pub ? RANT_PUB_ONLY : RANT_SUB_ONLY, NULL, &co)){
+            fprintf(stderr, "create topic '%s' failed\n", g_topics[i]);
+            rant_node_close(n, 0); return 1;
+        }
+    }
+
+    if (is_sub){
+        if (file_name){
+            g_outfile = fopen(file_name, "wb");   /* truncate, on_sample appends and flushes */
+            if (!g_outfile){ fprintf(stderr, "cannot open %s for writing\n", file_name);
+                             rant_node_close(n, 1); return 1; }
+        }
+        g_rate_mode = rate_set;   /* --rate on a sub: report the throughput, not each message */
+        printf("[sub] %d topic(s):", g_n_topics);
+        for (i = 0; i < g_n_topics; i++) printf(" %s", g_topics[i]);
+        printf(" | domain %u, %s%s%s. Listening (Ctrl-C to quit)...\n",
+               domain, reliable ? "reliable" : "best-effort",
+               file_name ? ", saving to " : "", file_name ? file_name : "");
+        /* a short tick either way, so the timer sweep flushes acks before nack_delay and a
+           reliable publisher's backpressure window keeps draining */
+        if (g_rate_mode){
+            /* print the measured receive rate once a second over the real elapsed interval, and
+               stay quiet until the first message so an idle wait is not a stream of zeros */
+            uint64_t last = i_rant_plat_now_us(), repair_last = last; int seen = 0;
+            RantRepairStats repair_stats, prev_repair_stats; memset(&prev_repair_stats, 0, sizeof prev_repair_stats);
+            for (;;){
+                uint64_t now, rate_elapsed, repair_elapsed;
+                rant_node_poll(n, 2);
+                now = i_rant_plat_now_us();
+                if (g_rx_msgs) seen = 1;
+                /* a 250 ms reader repair series, finer than the rate line so a stall plateau
+                   shows (spec/testing.md reads it). Gated on activity so idle stays quiet. */
+                repair_elapsed = now - repair_last;
+                if (repair_elapsed >= 250000u){
+                    double repair_secs = repair_elapsed/1e6;
+                    rant_node_repair_stats(n, topic, &repair_stats);
+                    if (repair_stats.nacks_sent != prev_repair_stats.nacks_sent || repair_stats.frags_recv != prev_repair_stats.frags_recv
+                        || repair_stats.frags_old != prev_repair_stats.frags_old || repair_stats.frags_ahead != prev_repair_stats.frags_ahead){
+                        uint64_t base; uint32_t have, total;
+                        int mid_reassembly = rant_node_subscriber_progress(n, topic, g_last_peer, &base, &have, &total);
+                        /* recv counts accepted fragments, old and ahead the rejected ones */
+                        printf("[sub]   repair: nacks %.0f/s  recv %.0f/s  dup %.0f/s  old %.0f/s  ahead %.0f/s  arms(d/hb) %.0f/%.0f",
+                               (repair_stats.nacks_sent - prev_repair_stats.nacks_sent)/repair_secs,
+                               (repair_stats.frags_recv - prev_repair_stats.frags_recv)/repair_secs,
+                               (repair_stats.frags_dup  - prev_repair_stats.frags_dup)/repair_secs,
+                               (repair_stats.frags_old  - prev_repair_stats.frags_old)/repair_secs,
+                               (repair_stats.frags_ahead- prev_repair_stats.frags_ahead)/repair_secs,
+                               (repair_stats.arms_data  - prev_repair_stats.arms_data)/repair_secs,
+                               (repair_stats.arms_hb    - prev_repair_stats.arms_hb)/repair_secs);
+                        if (mid_reassembly) printf("  | HOL base=%llu have=%u/%u", (unsigned long long)base, have, total);
+                        printf("  skipped=%llu\n", (unsigned long long)repair_stats.msgs_skipped);
+                    }
+                    prev_repair_stats = repair_stats; repair_last = now;
+                }
+                rate_elapsed = now - last;
+                if (rate_elapsed >= 1000000u){                       /* 1s: measured receive rate */
+                    double secs = rate_elapsed/1e6;
+                    if (seen) printf("[sub] %.0f msg/s, %.1f KB/s (total %llu, lost %llu)\n",
+                                     g_rx_msgs/secs, (g_rx_bytes/1024.0)/secs, g_rx_total, g_lost);
+                    g_rx_msgs = 0; g_rx_bytes = 0; last = now;
+                }
+            }
+            /* not reached */
+        }
+        for (;;) rant_node_poll(n, 2);
+        /* not reached */
+    }
+
+    /* publisher */
+    printf("[pub] topic %s, domain %u, %s.\n",
+           g_topics[0], domain, reliable ? "reliable" : "best-effort");
+    /* fires only while a send is blocked in backpressure, so healthy operation is silent */
+    rant_node_set_pump_probe(n, pump_probe, 200000u, NULL);
+
+    /* pub --rate must carry a positive HZ. A sub ignores the value. */
+    if (rate_set && rate_hz <= 0){
+        fprintf(stderr, "pub --rate needs a positive HZ, e.g. --rate 100\n");
+        rant_node_close(n, 1); return 2;
+    }
+    /* --rate needs a fixed payload to repeat: CLI text or --file, not stdin */
+    if (rate_hz > 0 && !msg_len && !file_name){
+        fprintf(stderr, "--rate needs data to repeat: give a message or --file\n");
+        rant_node_close(n, 1); return 2;
+    }
+
+    /* --file <name>: publish the file whole, framed like piped stdin, whatever the terminal.
+     * It takes precedence over CLI text and stdin. */
+    if (file_name){
+        FILE *file = fopen(file_name, "rb");
+        if (!file){ fprintf(stderr, "cannot open %s\n", file_name);
+                 rant_node_close(n, 1); return 1; }
+        if (rate_hz > 0){                    /* load once, then repeat at the rate */
+            size_t len; int too_big;
+            char *buf = read_all(file, send_limit, &len, &too_big);
+            fclose(file);
+            if (!buf){
+                if (too_big) fprintf(stderr, "[pub] %s exceeds the %lu-byte message limit; raise --max\n",
+                                  file_name, (unsigned long)send_limit);
+                else      fprintf(stderr, "out of memory\n");
+                rant_node_close(n, 1); return 1;
+            }
+            publish_rate(n, topic, buf, len, rate_hz, wait_ms);   /* never returns */
+        }
+        int rc = publish_stream(n, topic, file, wait_ms, send_limit);
+        fclose(file);
+        rant_node_close(n, 1);
+        return rc < 0 ? 1 : 0;
+    }
+
+    if (msg_len){
+        int t;
+        if (rate_hz > 0)
+            publish_rate(n, topic, msg, msg_len, rate_hz, wait_ms);   /* never returns */
+        /* one shot: wait for a matched subscriber, publish the CLI text, drain delivery,
+         * then exit */
+        if (!wait_for_sub(n, topic, wait_ms)){
+            fprintf(stderr, "[pub] no subscriber matched in %dms; nothing sent\n", wait_ms);
+            rant_node_close(n, 1); return 1;
+        }
+        if (rant_node_send(n, topic, msg, msg_len) < 0)
+            fprintf(stderr, "send failed\n");
+        else
+            printf("[pub] sent %lu bytes\n", (unsigned long)msg_len);
+        rant_node_drain(n, topic, 30000);        /* wait for delivery, not a fixed grace */
+        for (t = 0; t < 200; t += 20) rant_node_poll(n, 20);     /* brief flush */
+        rant_node_close(n, 1);     /* BYE: peers drop us now, not after timeout */
+        return 0;
+    }
+
+    /* stdin is a pipe or a redirect: send the whole stream as messages with newlines
+     * intact, splitting only at the 64 KB sample cap, never per line */
+    if (!stdin_is_tty()){
+        int rc = publish_stream(n, topic, stdin, wait_ms, send_limit);
+        rant_node_close(n, 1);
+        return rc < 0 ? 1 : 0;
+    }
+
+    /* a terminal: one message per typed line until EOF. The background thread keeps the
+     * node polled while we block on input, so discovery and repair never stall. */
+    {   static char line[65536];   /* static: keeps this 64 KB off the stack */
+        g_node = n; lock_init(&g_lock);
+#ifdef _WIN32
+        HANDLE th = CreateThread(NULL, 0, pump_thread, NULL, 0, NULL);
+#else
+        pthread_t th; pthread_create(&th, NULL, pump_thread, NULL);
+#endif
+        printf("[pub] type a message per line, Ctrl-D / Ctrl-Z+Enter to end:\n");
+        while (fgets(line, sizeof line, stdin)){
+            size_t line_len = strlen(line);
+            while (line_len && (line[line_len-1] == '\n' || line[line_len-1] == '\r')) line[--line_len] = '\0';
+            if (!line_len) continue;
+            lock_get(&g_lock);
+            if (rant_node_send(n, topic, line, line_len) < 0) fprintf(stderr, "send failed\n");
+            lock_put(&g_lock);
+        }
+        g_pumping = 0;              /* stop the pump first: only we touch the node now */
+#ifdef _WIN32
+        WaitForSingleObject(th, INFINITE); CloseHandle(th);
+#else
+        pthread_join(th, NULL);
+#endif
+        rant_node_drain(n, topic, 30000);     /* deliver the last typed messages before BYE */
+    }
+
+    rant_node_close(n, 1);     /* BYE: peers drop us now instead of after timeout */
+    return 0;
+}

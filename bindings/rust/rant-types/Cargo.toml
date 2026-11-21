@@ -1,0 +1,18 @@
+[package]
+name = "rant-types"
+description = "The standard types of Rant, such as Pose, Image and PointCloud, with no middleware"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "rant_types"
+
+[dependencies]
+nalgebra = { version = "0.34", optional = true, default-features = false, features = ["std"] }
+
+[features]
+# Casts to and from nalgebra's types.
+nalgebra = ["dep:nalgebra"]
