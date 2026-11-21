@@ -1,0 +1,12 @@
+# The canonical schema wire every binding pins: change a line only with a deliberate wire
+# format bump. A line is the schema text, its hash as 16 hex digits, and optionally its wire
+# as hex. C checks every line, each binding checks its own mirrors against them.
+bool                 ee90234f61d2520b
+f32[]                314844e3386a1fc4
+Float3               04aa9469cd08b1dd 0806466c6f6174330c03017808017908017a08
+Image                9492b746eb9f64c8
+VideoFrame           8361df477b9db68d
+ExternalVideoStream  c5b9f05a0bb6ff60
+PointCloud           5040c22f51b4bba9
+Grid                 48af91159ad29f18
+Odometry             2bfadb1f24c9c74f

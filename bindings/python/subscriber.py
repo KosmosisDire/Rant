@@ -1,0 +1,61 @@
+"""A 'tick' subscriber reporting the received rate, the pair of bindings/python/publisher.py or
+bindings/csharp/publisher. Args: [seconds] [interface]."""
+import os
+import sys
+import time
+from dataclasses import dataclass, field
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rant    # noqa: E402
+
+
+@dataclass
+class Tick:
+    seq: rant.u64 = 0
+    when: rant.types.Timestamp = 0                                    # Unix-epoch microseconds, UTC
+    value: rant.f64 = 0.0
+    at: rant.types.Transform = field(default_factory=rant.types.Transform)       # meters and a quaternion
+
+
+count = 0
+last = Tick()
+
+
+def on_tick(tick):
+    global count, last
+    count += 1
+    last = tick                          # the decoded Tick: standard types and all
+
+
+def main():
+    seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0
+    iface = sys.argv[2] if len(sys.argv) > 2 else None
+    node = rant.Node("py-subscriber", multicast_interface=iface, threading=rant.Threading.MANUAL)
+    node.subscriber("tick", Tick, on_tick)
+    print("subscribing to 'tick' (manual poll), reporting received Hz (Ctrl+C to stop)")
+
+    start = time.perf_counter()
+    last_report, last_count = start, 0
+    try:
+        while True:
+            node.poll(0.001)                      # block up to 1 ms, wakes on receive and delivers
+            now = time.perf_counter()
+            if now - last_report >= 1.0:
+                rate = (count - last_count) / (now - last_report)
+                # `when` is the publisher's wall clock in the same units everywhere, so the
+                # difference against ours is one-way latency plus clock skew.
+                age_ms = (rant.types.now() - last.when) / 1000.0 if last.when else 0.0
+                p = last.at.pose.position
+                print("received=%d  rate=%.0f Hz  age=%.1f ms  at=(%.2f, %.2f, %.2f)"
+                      % (count, rate, age_ms, p.x, p.y, p.z))
+                last_report, last_count = now, count
+            if seconds and now - start >= seconds:
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
