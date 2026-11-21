@@ -54,7 +54,7 @@ pub use observer::{CallEvent, CallEventKind, CallObserver, CallObserverOptions};
 pub use options::Qos;
 pub use pattern::{CallError, CallOptions, CallStatus, IntoReply, PendingCall, Progress, Response, TaskCall};
 pub use rant_macros::{Enum, Message};
-pub use reflect::{Entity, EntityKind, MetaNode, MetaProcess, MetaSection, MetaSnapshot, Peer, Reflection};
+pub use reflect::{Entity, EntityKind, MetaNode, MetaProcess, MetaSection, MetaSnapshot, OtherWireNode, Peer, Reflection};
 pub use schema::{EnumVariant, Field, SchemaTypeKind, FieldView, MessageBuilder, MessageView, Schema};
 pub use status::{Condition, StatusOptions, StatusUpdate};
 pub use rant_types::String;

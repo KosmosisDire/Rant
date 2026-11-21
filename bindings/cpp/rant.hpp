@@ -1064,6 +1064,16 @@ struct Peer {
     uint32_t                rtt_samples = 0;
 };
 
+/* A node of this domain heard on another wire version, a copied snapshot. Only a node with
+ * fetch_details hears them. uuid and name are empty when its header did not read. */
+struct OtherWireNode {
+    std::array<uint8_t, 16> uuid{};
+    std::string             name;
+    std::string             address;         /* "1.2.3.4:port" */
+    uint8_t                 wire = 0;        /* its wire version */
+    uint64_t                last_heard_us = 0;
+};
+
 /* One line from another node's log, for a Node::on_log handler. The views are valid for the
  * callback only. wall_us is the sender's UTC clock when it logged, recv_us our monotonic one. */
 struct LogLine {
@@ -3245,6 +3255,25 @@ public:
             peer.rtt_min_us    = p.rtt_min_us;
             peer.rtt_samples   = p.rtt_samples;
             out.push_back(std::move(peer));
+        }
+        return out;
+    }
+    /* The nodes heard on another wire version within the peer timeout. */
+    std::vector<OtherWireNode> other_wire_nodes() const {
+        std::vector<OtherWireNode> out;
+        priv::Pass hold(impl_.get());
+        if (!hold) return out;
+        Node::LockGuard guard(impl_->node);
+        detail::RantIter it; std::memset(&it, 0, sizeof it);
+        detail::RantOtherWireNode o;
+        while (detail::rant_node_other_wire_next(impl_->node, &it, &o)) {
+            OtherWireNode node;
+            std::memcpy(node.uuid.data(), o.uuid, 16);
+            if (o.name.data)    node.name.assign(o.name.data, o.name.len);
+            if (o.address.data) node.address.assign(o.address.data, o.address.len);
+            node.wire          = o.wire;
+            node.last_heard_us = o.last_heard_us;
+            out.push_back(std::move(node));
         }
         return out;
     }

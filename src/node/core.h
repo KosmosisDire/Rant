@@ -38,6 +38,16 @@ typedef struct {
     uint32_t         rtt_samples;
 } RantPeerInfo;
 
+/* A node heard on another wire version, which this node cannot match. Only an observer
+ * (fetch_details) keeps them. Its uuid and name read only from a wire 8 or later header. */
+typedef struct {
+    uint8_t    uuid[16];       /* all zero when its header did not read */
+    RantString name;           /* empty when its header did not read */
+    RantString address;        /* "ip:port" */
+    uint8_t    wire;           /* its RANT_WIRE_VERSION */
+    uint64_t   last_heard_us;
+} RantOtherWireNode;
+
 typedef enum {
     RANT_ENTITY_TOPIC = 0,
     RANT_ENTITY_FUNCTION,
@@ -190,6 +200,7 @@ void     i_rant_node_core_self_channel(i_RantNodeCore *c, uint16_t index, RantSt
                               const RantSchema *schema);
 void     i_rant_node_core_self_end(i_RantNodeCore *c);
 int      i_rant_node_core_peers_next(i_RantNodeCore *c, RantIter *it, RantPeerInfo *out);
+int      i_rant_node_core_other_wire_next(i_RantNodeCore *c, RantIter *it, RantOtherWireNode *out);
 int      i_rant_node_core_entities_next(i_RantNodeCore *c, uint32_t peer, RantIter *it,
                               RantEntityInfo *out);
 int      i_rant_node_core_mesh_next(i_RantNodeCore *c, RantIter *it, RantEntityInfo *out);

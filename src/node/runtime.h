@@ -226,6 +226,10 @@ RANT_API RantTopic *rant_node_topic(RantNode *n, uint16_t index);
 /* One discovered peer per call, dropped peers included. Gate on liveness. */
 RANT_API int rant_node_peers_next(RantNode *n, RantIter *it, RantPeerInfo *out);
 
+/* One node of this domain heard on another wire version within the peer timeout, per call.
+ * Empty unless fetch_details is set. */
+RANT_API int rant_node_other_wire_next(RantNode *n, RantIter *it, RantOtherWireNode *out);
+
 /* The entities one node advertises. RANT_SELF walks this node, a dropped peer serves its
  * last known view. */
 RANT_API int rant_node_entities_next(RantNode *n, uint32_t peer, RantIter *it, RantEntityInfo *out);

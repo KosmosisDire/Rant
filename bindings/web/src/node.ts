@@ -186,6 +186,12 @@ export interface Peer {
     catchingUp: boolean; fragmentSize: number; rttUs: number; rttJitterUs: number; rttMinUs: number; rttSamples: number;
 }
 
+/* A node of this domain heard on another wire version. uuid is all zero and name empty when
+ * its header did not read. Only a node with fetchDetails hears them. */
+export interface OtherWireNode {
+    uuid: string; name: string; address: string; wire: number; lastHeardUs: number;
+}
+
 export interface Entity {
     kind: EntityKind; name: string; hash: number;
     provides: boolean; consumes: boolean; reliable: boolean; writable: boolean; forceable: boolean;
@@ -1644,6 +1650,16 @@ export class Reflection {
             lastHeardUs: n.us(p + P.last_heard_us), epoch: n.u32(p + P.epoch), catchingUp: n.u8(p + P.catching_up) !== 0,
             fragmentSize: n.u16(p + P.fragment_size), rttUs: n.u32(p + P.rtt_us), rttJitterUs: n.u32(p + P.rtt_jitter_us),
             rttMinUs: n.u32(p + P.rtt_min_us), rttSamples: n.u32(p + P.rtt_samples),
+        }));
+    }
+
+    /* The nodes heard on another wire version within the peer timeout. */
+    otherWireNodes(): OtherWireNode[] {
+        const n = this.node.n, h = this.node.h, O = L.RantOtherWireNode;
+        return this.walk(O.sizeof, (it, out) => n.c.rant_node_other_wire_next(h, it, out), (p) => ({
+            uuid: [...n.copy(p + O.uuid, 16)].map((b) => b.toString(16).padStart(2, "0")).join(""),
+            name: n.strAt(p + O.name), address: n.strAt(p + O.address), wire: n.u8(p + O.wire),
+            lastHeardUs: n.us(p + O.last_heard_us),
         }));
     }
 

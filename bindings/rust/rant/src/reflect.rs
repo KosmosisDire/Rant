@@ -82,6 +82,23 @@ pub struct Peer {
     pub rtt_samples: u32,
 }
 
+/// A node of this domain heard on another wire version, copied out. Only a node opened with
+/// `fetch_details` hears them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OtherWireNode {
+    /// The process instance, all zero when its header did not read.
+    pub uuid: [u8; 16],
+    /// The node's name, empty when its header did not read.
+    pub name: String,
+    /// Where it was heard, "ip:port".
+    pub address: String,
+    /// Its wire version.
+    pub wire: u8,
+    /// When it was last heard, on this node's monotonic clock in microseconds.
+    pub last_heard_us: u64,
+}
+
 /// One mesh entity, copied out with its schemas. `name` reads "0x" and a hash until the
 /// peer's details arrive, which a node opened with `fetch_details` asks for.
 #[derive(Clone, Debug)]
@@ -313,6 +330,26 @@ impl Reflection {
                 rtt_jitter_us: p.rtt_jitter_us,
                 rtt_min_us: p.rtt_min_us,
                 rtt_samples: p.rtt_samples,
+            });
+        }
+        out
+    }
+
+    /// The nodes heard on another wire version within the peer timeout.
+    pub fn other_wire_nodes(&self) -> Vec<OtherWireNode> {
+        let Ok((_pass, raw)) = self.inner.enter() else { return Vec::new() };
+        let _lock = Locked::new(raw);
+        let mut it = ffi::RantIter::default();
+        let mut o = ffi::RantOtherWireNode::default();
+        let mut out = Vec::new();
+        // SAFETY: the pass and the lock keep every view valid until it is copied
+        while unsafe { ffi::rant_node_other_wire_next(raw, &mut it, &mut o) } != 0 {
+            out.push(OtherWireNode {
+                uuid: o.uuid,
+                name: utf8_prefix(rstring_bytes(o.name)).to_owned(),
+                address: utf8_prefix(rstring_bytes(o.address)).to_owned(),
+                wire: o.wire,
+                last_heard_us: o.last_heard_us,
             });
         }
         out

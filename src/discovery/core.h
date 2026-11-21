@@ -238,6 +238,23 @@ int            i_rant_discovery_trouble_more(const i_RantDiscoveryState *st, Ran
 /* 1 when the trouble the last datagram noted was news: a source not tracked before, or the
  * first heard past the table's size. The node reports repeats of a trouble only once. */
 int            i_rant_discovery_trouble_new(const i_RantDiscoveryState *st);
+/* A node heard on another wire version, kept by an observer with an alloc hook.
+ * spec/discovery.md, Wire format. */
+#ifndef RANT_DISCOVERY_OTHER_WIRE_MAX
+#define RANT_DISCOVERY_OTHER_WIRE_MAX 256   /* nodes kept, past it a newcomer waits */
+#endif
+typedef struct {
+    uint8_t  uuid[16];          /* all zero when its header did not read */
+    char     name[RANT_NODE_NAME_MAX + 1];
+    uint8_t  name_len;
+    uint8_t  wire;
+    RantAddr addr;              /* its data port when its header read, else the source port */
+    uint64_t heard_us;
+} i_RantDiscoveryOtherWire;
+/* The entries held, live or not, the range for other_wire_at. */
+uint16_t       i_rant_discovery_other_wire_count(const i_RantDiscoveryState *st);
+/* Entry i when it was heard within the peer timeout, else NULL. A view until the next poll. */
+const i_RantDiscoveryOtherWire *i_rant_discovery_other_wire_at(const i_RantDiscoveryState *st, uint16_t i);
 /* 1 while a live peer was forgotten for room within three announce intervals: one found no
  * record, or a match took its record. The node's directory partial condition. */
 int            i_rant_discovery_partial(const i_RantDiscoveryState *st);

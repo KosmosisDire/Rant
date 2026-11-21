@@ -72,7 +72,13 @@ v5 the number versions everything that crosses the wire, discovery or not, and a
 bumps the number. The first eight bytes (magic, version, flags, domain) keep their place in
 every version, so a datagram of this domain on another version is recognized from them
 alone: it is dropped and its source reported once with `RANT_E_WIRE_VERSION`, the last 8
-sources remembered. A datagram with another magic or domain is dropped silently, as is a
+sources remembered. An observer with an alloc hook also keeps each such node, by uuid
+when its header reads, else by source address, for `rant_node_other_wire_next`. The header
+reads as this one's only from wire 8 on, when its bounds hold, its name has no control
+byte and its uuid is not zero. Then the entry takes the uuid, name and data port, and a BYE
+ends it. Anything else keeps the source alone. The table doubles on the hook up to
+`RANT_DISCOVERY_OTHER_WIRE_MAX`, an entry silent past the peer timeout is stale and a
+newcomer takes the first stale one. A datagram with another magic or domain is dropped silently, as is a
 malformed blob. The per peer
 overlay capacity defaults to `RANT_DISCOVERY_META_MAX` (64) bytes and the name to
 `RANT_NODE_NAME_MAX` (32).

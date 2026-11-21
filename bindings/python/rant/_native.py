@@ -410,6 +410,16 @@ class RantPeerInfo(Structure):
     ]
 
 
+class RantOtherWireNode(Structure):
+    _fields_ = [
+        ("uuid", c_uint8 * 16),
+        ("name", RantStringView),
+        ("address", RantStringView),
+        ("wire", c_uint8),
+        ("last_heard_us", c_uint64),
+    ]
+
+
 class RantEntityInfo(Structure):
     _fields_ = [
         ("kind", c_int),
@@ -505,6 +515,7 @@ def bind(lib):
     F("rant_node_unlock", [c_void_p], None)
     # reflection
     F("rant_node_peers_next", [c_void_p, POINTER(RantIter), POINTER(RantPeerInfo)], c_int)
+    F("rant_node_other_wire_next", [c_void_p, POINTER(RantIter), POINTER(RantOtherWireNode)], c_int)
     F("rant_domains_open", [POINTER(RantAllocator), POINTER(RantDomainsOpts)], c_void_p)
     F("rant_domains_next", [c_void_p, POINTER(RantIter), POINTER(RantDomainInfo)], c_int)
     F("rant_domains_close", [c_void_p], None)

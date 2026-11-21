@@ -304,6 +304,7 @@ struct i_RantNodeCore {
     uint32_t                mesh_epoch;
     void                   *scratch; uint32_t scratch_cap;   /* fold and mesh build workspace */
     i_RantAddrText         *addrs;   uint16_t addrs_cap;     /* peers_next's addresses, per record */
+    i_RantAddrText         *other_addrs; uint16_t other_addrs_cap;   /* other_wire_next's, per entry */
 #ifndef RANT_NO_DIAG
     i_RantNodeSchemaWhy      *schema_whys;   uint32_t n_schema_whys,   cap_schema_whys;
 #endif
@@ -1206,6 +1207,31 @@ int i_rant_node_core_peers_next(i_RantNodeCore *c, RantIter *it, RantPeerInfo *o
         out->epoch = ex ? ex->interest_epoch : 0;
         out->catching_up = (uint8_t)(v.adv_meta_version > v.meta_version);
         out->fragment_size = v.meta.data ? i_rant_meta_frag(v.meta) : 0;
+        return 1;
+    }
+    return 0;
+}
+
+int i_rant_node_core_other_wire_next(i_RantNodeCore *c, RantIter *it, RantOtherWireNode *out){
+    uint16_t n;
+    if (!c || !c->discovery || !it || !out) return 0;
+    n = i_rant_discovery_other_wire_count(c->discovery);
+    if (n > c->other_addrs_cap){
+        i_RantAddrText *na = (i_RantAddrText*)c->alloc(c->alloc_user, c->other_addrs, (size_t)n * sizeof *na);
+        if (na){ c->other_addrs = na; c->other_addrs_cap = n; }
+    }
+    for (; it->a < n; it->a++){
+        uint16_t i = (uint16_t)it->a;
+        const i_RantDiscoveryOtherWire *o = i_rant_discovery_other_wire_at(c->discovery, i);
+        if (!o) continue;
+        it->a++;
+        memset(out, 0, sizeof *out);
+        memcpy(out->uuid, o->uuid, 16);
+        out->name = rant_string(o->name, o->name_len);
+        if (i < c->other_addrs_cap)
+            out->address = rant_string(c->other_addrs[i].text, i_rant_format_addr(&c->other_addrs[i], &o->addr));
+        out->wire = o->wire;
+        out->last_heard_us = o->heard_us;
         return 1;
     }
     return 0;

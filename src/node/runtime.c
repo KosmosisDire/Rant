@@ -3654,6 +3654,15 @@ int rant_node_peers_next(RantNode *n, RantIter *it, RantPeerInfo *out){
     return r;
 }
 
+int rant_node_other_wire_next(RantNode *n, RantIter *it, RantOtherWireNode *out){
+    int r, acquired;
+    if (!n) return 0;
+    acquired = i_rant_node_lock(n);
+    r = i_rant_node_core_other_wire_next(n->core, it, out);
+    i_rant_node_unlock(n, acquired);
+    return r;
+}
+
 int rant_node_entities_next(RantNode *n, uint32_t peer, RantIter *it, RantEntityInfo *out){
     int r, acquired;
     if (!n) return 0;

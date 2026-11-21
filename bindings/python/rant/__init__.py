@@ -30,7 +30,7 @@ __all__ = [
     "TaskDefinition", "RemoteTask", "TaskContext", "Progress",
     "Variable", "VariableDefinition", "RemoteVariable", "VariableUpdate",
     "CallObserver", "CallEvent", "CallEventKind",
-    "LogLine", "Condition", "StatusUpdate", "Reflection", "Peer", "Entity", "MetaSnapshot", "version",
+    "LogLine", "Condition", "StatusUpdate", "Reflection", "Peer", "OtherWireNode", "Entity", "MetaSnapshot", "version",
     "Domains", "DomainInfo",
 ]
 
@@ -1711,6 +1711,23 @@ class Peer:
 
 
 @_dataclasses.dataclass
+class OtherWireNode:
+    """A node of this domain heard on another wire version, from
+        node.reflection.other_wire_nodes(). Only a node with fetch_details hears them. uuid is
+        all zero and name empty when its header did not read."""
+    uuid: bytes
+    name: str
+    address: str
+    wire: int
+    last_heard_us: int
+
+    @classmethod
+    def _from_c(cls, o):
+        return cls(uuid=bytes(o.uuid), name=_dstr(o.name), address=_dstr(o.address),
+                   wire=o.wire, last_heard_us=o.last_heard_us)
+
+
+@_dataclasses.dataclass
 class Entity:
     """One entity of the mesh: a topic, a function, a variable or a task, never a channel
         (docs/reflection.md). The schemas are owned copies, None when untyped or not fetched.
@@ -2461,6 +2478,14 @@ class Reflection:
             p = _c.RantPeerInfo()
             return Peer._from_c(p) if node._lib.rant_node_peers_next(node._h, _c.byref(it),
                                                                      _c.byref(p)) else None
+        return self._walk(step)
+
+    def other_wire_nodes(self):
+        """The nodes heard on another wire version within the peer timeout, as OtherWireNode."""
+        def step(node, it):
+            o = _c.RantOtherWireNode()
+            return OtherWireNode._from_c(o) if node._lib.rant_node_other_wire_next(
+                node._h, _c.byref(it), _c.byref(o)) else None
         return self._walk(step)
 
     def entities(self, peer=0):

@@ -66,6 +66,8 @@ struct i_RantDiscoveryState {
     uint64_t      forgot_us;      /* when a live peer was last forgotten for room, 0 = never */
     i_RantDiscoveryLoose loose[RANT_DISCOVERY_LOOSE];
     uint8_t       n_loose;
+    i_RantDiscoveryOtherWire *other;   /* hook memory, observers only */
+    uint16_t      n_other, cap_other;
     /* uuids that said BYE lately, a ring. A datagram from one was sent before it */
     uint8_t       left[RANT_DISCOVERY_LEFT][16];
     uint64_t      left_us[RANT_DISCOVERY_LEFT];   /* when each said it, 0 = empty */
@@ -356,6 +358,8 @@ void i_rant_discovery_destroy(i_RantDiscoveryState *st){
         st->cfg.bulk(st->cfg.alloc_user, st->meta_pool, 0);
         st->meta_pool = NULL;
     }
+    if (st->other){ st->cfg.alloc(st->cfg.alloc_user, st->other, 0); st->other = NULL; }
+    st->n_other = st->cap_other = 0;
     i_rant_records_destroy(&st->records);
 }
 
@@ -601,6 +605,75 @@ static void i_rant_discovery_wire_mismatch(i_RantDiscoveryState *st, const RantA
     if (src && (src->ip_len==4 || src->ip_len==16)){ memcpy(a.ip, src->ip, src->ip_len); a.ip_len = src->ip_len; a.port = src->port; }
     if (i_rant_discovery_trouble_note(st, RANT_E_WIRE_VERSION, &a, version, 0))
         i_rant_discovery_fire_error(st, RANT_E_WIRE_VERSION, 0, &a, 0);
+}
+
+static int i_rant_discovery_silent_past(uint64_t now, uint64_t heard_us, uint64_t limit_us);
+
+/* Reads the uuid, port and name of another wire's header as v8 to this one lay them out,
+   only when every bound holds and the name has no control byte. 1 when it read. */
+static int i_rant_discovery_other_header(const uint8_t *p, size_t len, i_RantDiscoveryOtherWire *o){
+    uint8_t nl, i, any = 0;
+    if (p[4] < 8u || len < (size_t)RANT_DISCOVERY_FIXED_LEN) return 0;
+    nl = p[36];
+    if (nl > RANT_NODE_NAME_MAX || len < (size_t)RANT_DISCOVERY_FIXED_LEN + nl) return 0;
+    for (i = 0; i < nl; i++){
+        uint8_t ch = p[RANT_DISCOVERY_FIXED_LEN + i];
+        if (ch < 0x20u || ch == 0x7Fu) return 0;
+    }
+    for (i = 0; i < 16; i++) any |= p[8 + i];
+    if (!any) return 0;
+    memcpy(o->uuid, p + 8, 16);
+    memcpy(o->name, p + RANT_DISCOVERY_FIXED_LEN, nl);
+    o->name[nl] = '\0'; o->name_len = nl;
+    if (i_rant_le_r16(p + 34)) o->addr.port = i_rant_le_r16(p + 34);
+    return 1;
+}
+
+static int i_rant_discovery_other_live(const i_RantDiscoveryState *st, const i_RantDiscoveryOtherWire *o){
+    return o->heard_us && !i_rant_discovery_silent_past(st->now_us, o->heard_us, st->cfg.peer_timeout_us);
+}
+
+/* An observer keeps each node heard on another wire, by uuid when its header read, else by
+   source. A BYE that read ends its entry. */
+static void i_rant_discovery_other_note(i_RantDiscoveryState *st, const RantAddr *src, RantBytes datagram){
+    i_RantDiscoveryOtherWire o, *e = NULL;
+    static const uint8_t zero[16] = {0};
+    int read; uint16_t i;
+    if (!st->cfg.observer || !st->cfg.alloc || !src || datagram.len < 8) return;
+    memset(&o, 0, sizeof o);
+    if (src->ip_len == 4 || src->ip_len == 16){ memcpy(o.addr.ip, src->ip, src->ip_len); o.addr.ip_len = src->ip_len; }
+    o.addr.port = src->port;
+    o.wire = datagram.data[4];
+    read = i_rant_discovery_other_header(datagram.data, datagram.len, &o);
+    o.heard_us = read && (datagram.data[5] & RANT_DISCOVERY_FLAG_BYE) ? 0 : st->now_us;
+    for (i = 0; i < st->n_other && !e; i++){
+        i_RantDiscoveryOtherWire *c = &st->other[i];
+        if (read ? memcmp(c->uuid, o.uuid, 16) == 0
+                 : memcmp(c->uuid, zero, 16) == 0 && i_rant_discovery_addr_is(&c->addr, o.addr.ip, o.addr.ip_len, o.addr.port))
+            e = c;
+    }
+    for (i = 0; i < st->n_other && !e; i++)
+        if (!i_rant_discovery_other_live(st, &st->other[i])) e = &st->other[i];
+    if (!e && o.heard_us){
+        if (st->n_other == st->cap_other && st->cap_other < RANT_DISCOVERY_OTHER_WIRE_MAX){
+            uint16_t cap = st->cap_other ? (uint16_t)(st->cap_other * 2u) : 8u;
+            i_RantDiscoveryOtherWire *grown;
+            if (cap > RANT_DISCOVERY_OTHER_WIRE_MAX) cap = RANT_DISCOVERY_OTHER_WIRE_MAX;
+            grown = (i_RantDiscoveryOtherWire*)st->cfg.alloc(st->cfg.alloc_user, st->other, (size_t)cap * sizeof *grown);
+            if (grown){ st->other = grown; st->cap_other = cap; }
+        }
+        if (st->n_other < st->cap_other) e = &st->other[st->n_other++];
+    }
+    if (e) *e = o;
+}
+
+uint16_t i_rant_discovery_other_wire_count(const i_RantDiscoveryState *st){
+    return st ? st->n_other : 0;
+}
+
+const i_RantDiscoveryOtherWire *i_rant_discovery_other_wire_at(const i_RantDiscoveryState *st, uint16_t i){
+    if (!st || i >= st->n_other || !i_rant_discovery_other_live(st, &st->other[i])) return NULL;
+    return &st->other[i];
 }
 
 /* REFETCH ends: a blob came, or the record went silent or too big. The slot promised to a
@@ -977,7 +1050,11 @@ void i_rant_discovery_on_datagram(i_RantDiscoveryState *st, const RantAddr *src,
     st->now_us = now;
     dr = i_rant_discovery_decode(datagram, &w);
     if (dr == I_RANT_DISC_FOREIGN || w.domain != st->cfg.domain_id) return;
-    if (dr == I_RANT_DISC_WIRE){ i_rant_discovery_wire_mismatch(st, src, w.wire); return; }
+    if (dr == I_RANT_DISC_WIRE){
+        i_rant_discovery_wire_mismatch(st, src, w.wire);
+        i_rant_discovery_other_note(st, src, datagram);
+        return;
+    }
     if (dr == I_RANT_DISC_MALFORMED || memcmp(w.uuid, st->cfg.uuid, 16) == 0) return;   /* or self */
     /* a blob we cannot hold leaves the header, which still counts */
     have_blob = dr == I_RANT_DISC_OK && (w.flags & RANT_DISCOVERY_FLAG_BLOB);

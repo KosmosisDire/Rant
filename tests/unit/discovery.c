@@ -1740,7 +1740,67 @@ static void bulk_checks(void){
     rant_allocator_reset(&pl.main); rant_allocator_reset(&pl.bulk);
 }
 
+/* An observer keeps each node on another wire: its uuid, name and data port from a header
+   that reads as v8 on, else its source alone. */
+static void other_wire_checks(void){
+    static uint8_t mem[16384];
+    RantAllocator ma = rant_allocator_heap(0);
+    uint8_t buf[RANT_DISCOVERY_WIRE_MAX], out[RANT_DISCOVERY_WIRE_MAX];
+    uint8_t sa[4]={10,0,0,1}, sb[4]={10,0,0,2}, sc[4]={10,0,0,3}, sd[4]={10,0,0,4};
+    i_RantDiscoveryCoreConfig c; i_RantDiscoveryState *st;
+    const i_RantDiscoveryOtherWire *o;
+    uint8_t uuid[16]; size_t n; uint16_t i, live;
+    memset(&c,0,sizeof c); memset(c.uuid,0xEE,16);
+    c.domain_id=99; c.announce_interval_us=1000000; c.peer_timeout_us=4000000; c.max_peers=4;
+    c.alloc=rant_allocator_alloc; c.alloc_user=&ma;
+
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    CHECK(st != NULL, "other wire: init");
+    if (!st) return;
+    i_rant_discovery_update(st, 1000, out, sizeof out);
+    n = dc_wire(buf,1,0,99,5001,"old_arm",1); buf[4] = 10;
+    dc_feed(st,sa,6730,buf,n,2000);
+    CHECK(i_rant_discovery_other_wire_count(st) == 0, "other wire: a node that is no observer keeps none");
+    i_rant_discovery_destroy(st);
+
+    c.observer = 1;
+    st = i_rant_discovery_init(mem, sizeof mem, &c);
+    if (!st) return;
+    i_rant_discovery_update(st, 1000, out, sizeof out);
+    dc_feed(st,sa,6730,buf,n,2000);
+    dc_feed(st,sa,5001,buf,n,2100);          /* its unicast copy, from the data port */
+    o = i_rant_discovery_other_wire_at(st, 0);
+    memset(uuid, 1, 16);
+    CHECK(i_rant_discovery_other_wire_count(st) == 1 && o && o->wire == 10 && o->addr.port == 5001
+          && o->name_len == 7 && memcmp(o->name, "old_arm", 7) == 0 && memcmp(o->uuid, uuid, 16) == 0
+          && o->heard_us == 2100,
+          "other wire: a v8 on header gives the uuid, name and data port, one entry per uuid");
+
+    buf[4] = 7; dc_feed(st,sb,6730,buf,n,2200);          /* before v8 the header is not read */
+    n = dc_wire(buf,2,0,99,5002,"bad\x01name",1); buf[4] = 10; dc_feed(st,sc,6730,buf,n,2300);
+    dc_feed(st,sd,6730,buf,20,2400);                     /* cut short */
+    for (i = 1, live = 0; i < i_rant_discovery_other_wire_count(st); i++){
+        o = i_rant_discovery_other_wire_at(st, i);
+        if (o && o->name_len == 0 && o->uuid[0] == 0 && o->addr.port == 6730) live++;
+    }
+    CHECK(i_rant_discovery_other_wire_count(st) == 4 && live == 3,
+          "other wire: an older wire, a control byte in the name or a cut header keeps the source only (%u)",
+          (unsigned)live);
+
+    n = dc_wire(buf,1,RANT_DISCOVERY_FLAG_BYE,99,5001,"old_arm",1); buf[4] = 10;
+    dc_feed(st,sa,6730,buf,n,2500);
+    CHECK(i_rant_discovery_other_wire_at(st, 0) == NULL, "other wire: a BYE ends its entry");
+    i_rant_discovery_update(st, 2400 + c.peer_timeout_us + 1u, out, sizeof out);
+    for (i = 0, live = 0; i < i_rant_discovery_other_wire_count(st); i++)
+        if (i_rant_discovery_other_wire_at(st, i)) live++;
+    CHECK(live == 0, "other wire: an entry silent past the peer timeout is gone (%u)", (unsigned)live);
+    i_rant_discovery_destroy(st);
+    CHECK(ma.in_use == 0, "other wire: destroy frees the table (%u)", (unsigned)ma.in_use);
+    rant_allocator_reset(&ma);
+}
+
 static const TestCase cases[] = {
+    { "other_wire",     other_wire_checks },
     { "records",        records_checks },
     { "migrate",        migrate_checks },
     { "owed",           owed_checks },

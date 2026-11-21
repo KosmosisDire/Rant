@@ -30,6 +30,7 @@ pub const RANT_DISCOVERY_FLAG_FULL: u32 = 64;
 pub const RANT_DISCOVERY_MAX_SUBNETS: u32 = 16;
 pub const RANT_DISCOVERY_FILTER_BYTES: u32 = 32;
 pub const RANT_DISCOVERY_TROUBLE_MAX: u32 = 16;
+pub const RANT_DISCOVERY_OTHER_WIRE_MAX: u32 = 256;
 pub const RANT_POLLIN: u32 = 1;
 pub const RANT_POLLOUT: u32 = 4;
 pub const RANT_POLLERR: u32 = 8;
@@ -1046,6 +1047,24 @@ impl Default for RantPeerInfo {
         }
     }
 }
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RantOtherWireNode {
+    pub uuid: [u8; 16usize],
+    pub name: RantString,
+    pub address: RantString,
+    pub wire: u8,
+    pub last_heard_us: u64,
+}
+impl Default for RantOtherWireNode {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
 pub const RANT_ENTITY_TOPIC: RantEntityKind = 0;
 pub const RANT_ENTITY_FUNCTION: RantEntityKind = 1;
 pub const RANT_ENTITY_VARIABLE: RantEntityKind = 2;
@@ -1899,6 +1918,11 @@ unsafe extern "C" {
         n: *mut RantNode,
         it: *mut RantIter,
         out: *mut RantPeerInfo,
+    ) -> ::std::os::raw::c_int;
+    pub fn rant_node_other_wire_next(
+        n: *mut RantNode,
+        it: *mut RantIter,
+        out: *mut RantOtherWireNode,
     ) -> ::std::os::raw::c_int;
     pub fn rant_node_entities_next(
         n: *mut RantNode,

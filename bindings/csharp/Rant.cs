@@ -510,6 +510,16 @@ namespace Rant
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct RantOtherWireNodeNative
+    {
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)] public byte[] uuid;
+        public RantStringView name;
+        public RantStringView address;
+        public byte wire;
+        public ulong last_heard_us;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct RantEntityInfoNative
     {
         public int kind;
@@ -845,6 +855,8 @@ namespace Rant
         internal static extern void rant_node_unlock(IntPtr node);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern int rant_node_peers_next(IntPtr node, ref RantIter it, out RantPeerInfoNative info);
+        [DllImport(LIB, CallingConvention = CC)]
+        internal static extern int rant_node_other_wire_next(IntPtr node, ref RantIter it, out RantOtherWireNodeNative info);
         [DllImport(LIB, CallingConvention = CC)]
         internal static extern IntPtr rant_domains_open(ref RantAllocator alloc, ref RantDomainsOpts opts);
         [DllImport(LIB, CallingConvention = CC)]
@@ -2090,6 +2102,28 @@ namespace Rant
         };
     }
 
+    /// <summary>A node of this domain heard on another wire version, copied out of the node.
+    /// Only a node with FetchDetails hears them.</summary>
+    public sealed class RantOtherWireNode
+    {
+        /// <summary>The process instance's 16 bytes, all zero when its header did not read.</summary>
+        public byte[] Uuid;
+        /// <summary>Its node name, empty when its header did not read.</summary>
+        public string Name;
+        /// <summary>Where it was heard, as "ip:port".</summary>
+        public string Address;
+        /// <summary>Its wire version.</summary>
+        public byte Wire;
+        /// <summary>When it was last heard, on this node's monotonic clock in microseconds.</summary>
+        public ulong LastHeardUs;
+
+        internal static RantOtherWireNode Read(ref RantOtherWireNodeNative o) => new RantOtherWireNode
+        {
+            Uuid = o.uuid, Name = Codec.Str(o.name), Address = Codec.Str(o.address),
+            Wire = o.wire, LastHeardUs = o.last_heard_us,
+        };
+    }
+
     /// <summary>One entity of the mesh: a topic, a function, a variable or a task, never a
     /// channel. The schemas are owned copies, null when untyped or not fetched yet.</summary>
     public sealed class RantEntity
@@ -3154,6 +3188,25 @@ namespace Rant
                     var it = new RantIter();
                     RantPeerInfoNative p;
                     while (Native.rant_node_peers_next(_node.Handle, ref it, out p) != 0) list.Add(RantPeer.Read(ref p));
+                }
+                finally { Native.rant_node_unlock(_node.Handle); }
+            }
+            return list;
+        }
+
+        /// <summary>The nodes heard on another wire version within the peer timeout.</summary>
+        public List<RantOtherWireNode> OtherWireNodes()
+        {
+            var list = new List<RantOtherWireNode>();
+            using (Pass pass = _node.Gate.Enter())
+            {
+                if (!pass.Ok) return list;
+                Native.rant_node_lock(_node.Handle);
+                try
+                {
+                    var it = new RantIter();
+                    RantOtherWireNodeNative o;
+                    while (Native.rant_node_other_wire_next(_node.Handle, ref it, out o) != 0) list.Add(RantOtherWireNode.Read(ref o));
                 }
                 finally { Native.rant_node_unlock(_node.Handle); }
             }

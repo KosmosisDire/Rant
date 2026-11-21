@@ -27,6 +27,25 @@ while (rant_node_mesh_next(n, &it3, &e)) ...                      /* the whole m
   one `RantEntityInfo` per kind and name across every active matched peer and this node,
   so a tool that walks the whole mesh sets `opts.fetch_details`.
 
+## Nodes on another wire version
+
+```c
+RantIter it = {0};
+RantOtherWireNode o;
+while (rant_node_other_wire_next(n, &it, &o)) ...
+```
+
+- Lists the nodes of this domain heard within the peer timeout that speak another
+  `RANT_WIRE_VERSION`, which this node can never match: `uuid`, `name`, `address`, `wire`
+  and `last_heard_us`.
+- `uuid` is all zero and `name` empty when the sender's wire is older than 8.
+- Only a node with `opts.fetch_details` keeps them, at most `RANT_DISCOVERY_OTHER_WIRE_MAX`
+  (256).
+- C++ `reflection().other_wire_nodes()`, C# `OtherWireNodes()`, Python
+  `reflection.other_wire_nodes()`, Rust `other_wire_nodes()`, TypeScript `otherWireNodes()`.
+
+## Entities
+
 An entity is never a channel. A function's request and response pair is one function, a
 task's three channels are one task, and a variable's set channel folds in as `writable`.
 The `@rant/` builtins (the log and status topics and the meta function) are listed like any entity.

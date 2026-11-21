@@ -9,7 +9,7 @@ export {
     type CallEvent, type CallEventKind, type CallObserverOptions,
     type RantResult, type CallStatus, type CancelStatus, type DiagnosticLevel, type Origin, type LogLine, type Condition,
     type StatusUpdate, type EntityKind, type EventKind,
-    type ErrorKind, type RantEvent, type TopicCounts, type QueueStats, type NodeStats, type Peer, type Entity, type MetaSnapshot,
+    type ErrorKind, type RantEvent, type TopicCounts, type QueueStats, type NodeStats, type Peer, type OtherWireNode, type Entity, type MetaSnapshot,
 } from "./node.js";
 
 export {

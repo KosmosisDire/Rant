@@ -31,6 +31,8 @@ export const RantNodeOpts = { sizeof: 84, domain: 0, max_topics: 2, user_data: 4
 
 export const RantPeerInfo = { sizeof: 72, id: 0, uuid: 4, name: 20, address: 28, liveness: 36, last_heard_us: 40, epoch: 48, catching_up: 52, fragment_size: 54, rtt_us: 56, rtt_jitter_us: 60, rtt_min_us: 64, rtt_samples: 68 } as const;
 
+export const RantOtherWireNode = { sizeof: 48, uuid: 0, name: 16, address: 24, wire: 32, last_heard_us: 40 } as const;
+
 export const RantProgress = { sizeof: 48, call_id: 0, provider: 4, data: 8, schema: 16, written_us: 24, recv_us: 32, user: 40 } as const;
 
 export const RantQos = { sizeof: 36, reliability: 0, keep_last: 4, catch_up: 6, max_message_bytes: 8, heartbeat_us: 12, repair_delay_us: 16, backpressure_wait_us: 20, shm_max_bytes: 24, queue_bytes: 28, max_rate_hz: 32, no_timestamp: 34 } as const;
