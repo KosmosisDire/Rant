@@ -131,7 +131,8 @@ A raw reader accepts anything. A typed reader refuses an untyped or unverifiable
 An identical hash skips the parse. A peer schema is interned once per hash, and the claimed hash must equal the parsed wire's hash, or a lying peer could poison the intern for every honest one. Both directions advertise and run the same gate, so a
 refused pair forms no proxy on either side. The node validates the message length against
 the sender's schema before delivery and fires `RANT_E_SCHEMA_MISMATCH` with a per field
-`detail` from `rant_schema_subset_why`. There is deliberately no boot time
+`detail` from `rant_schema_subset_why`. Only a writer and a reader form a pair, so two readers or two
+writers of one name never refuse each other, even on a node that fetches every detail. There is deliberately no boot time
 validator API.
 
 ## Field views

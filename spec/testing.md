@@ -70,7 +70,7 @@ program in this order.
 | `unit.tunnel` | hash, handshake, frame, json, batch |
 | `e2e.stream` | stream, scale, named, collision |
 | `e2e.node` | open_fail, bye_marks, bulk_pools, bulk_queued, bulk_shm, event_user, dynamic_grow, launch_name, launch_domain, launch_log_level, prefix, domain_groups, poll_signal |
-| `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema, nested, fields, shared, var_fields, var_queue |
+| `e2e.schema` | advert, bind, big_enum, root, stdtypes, pattern_schema, nested, fields, shared, var_fields, var_queue, readers |
 | `e2e.detail` | detail_live, interest_external, interest_bulk, filter_fetch |
 | `e2e.shm` | shm_node, shm_gone, shm_hint |
 | `e2e.queues` | queue, pull, pull_view, callback_queue, callback_pattern, queued_retire |
@@ -336,6 +336,8 @@ What each phase pins, grouped by layer.
   the wrong type, a write to a field the owner lacks, a definition with a path, a definition
   beside remotes of its name and a later handle on another queue are refused. Retiring a shared handle leaves the others, the last retire leaves the mesh.
 - Queued variable fields: two queued field remotes each dispatch a write with their own view.
+- Readers never pair: a detail fetching node's untyped reader and field reader beside typed
+  readers of the same names refuse nothing, and its untyped writer beside a typed reader is refused.
 - Standard types: golden bytes and a golden hash every wrapper pins, and recognition that
   verifies the shape as well as the name. Change the golden pair only with a deliberate
   wire bump.

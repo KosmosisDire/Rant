@@ -1439,6 +1439,48 @@ done:
     rant_allocator_reset(&ma);
 }
 
+/* Readers never pair: an observer's untyped and field readers beside typed readers of the
+   same names refuse nothing, while its untyped writer beside a typed reader is refused */
+static unsigned long rd_raw, rd_field, rd_write;
+static void rd_on_event(const RantEvent *ev){
+    if (ev->kind != RANT_ERROR || ev->error != RANT_E_SCHEMA_MISMATCH || !ev->topic_name) return;
+    if (strncmp(ev->topic_name, "rd/raw", 6) == 0) rd_raw++;
+    else if (strncmp(ev->topic_name, "rd/field", 8) == 0) rd_field++;
+    else if (strncmp(ev->topic_name, "rd/write", 8) == 0) rd_write++;
+}
+static void schema_readers_checks(void){
+    RantAllocator aa = rant_allocator_heap(0), ba = rant_allocator_heap(0);
+    RantNodeOpts o; RantAddr seed; RantNode *A, *B; const RantSchema *T, *X;
+    RantTopic *araw, *afield, *awrite, *braw, *bfield, *bwrite;
+    memset(&seed,0,sizeof seed); seed.ip[0]=127; seed.ip[3]=1; seed.ip_len=4;
+    memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+56; o.discovery.max_peers=4;
+    o.net.multicast_interface="127.0.0.1"; o.net.seed_peers=&seed; o.net.n_seed_peers=1;
+    o.fetch_details = 1;
+    A = rant_node_open(&aa, "rd-observer", NULL, rd_on_event, &o);
+    o.fetch_details = 0;
+    B = rant_node_open(&ba, "rd-typed", NULL, NULL, &o);
+    CHECK(A && B, "readers: nodes open");
+    if (!(A && B)){ if(A)rant_node_close(A,0); if(B)rant_node_close(B,0); return; }
+    rd_raw = rd_field = rd_write = 0;
+    T = rant_node_schema(B, "RdState { x: f64, y: f64 }");
+    X = rant_node_schema(A, "f64");
+    araw   = rant_node_create_topic(A, "rd/raw", RANT_SUB_ONLY, NULL, NULL);
+    afield = rant_node_create_topic(A, "rd/field.x", RANT_SUB_ONLY, X, NULL);
+    awrite = rant_node_create_topic(A, "rd/write", RANT_PUB_ONLY, NULL, NULL);
+    braw   = rant_node_create_topic(B, "rd/raw", RANT_SUB_ONLY, T, NULL);
+    bfield = rant_node_create_topic(B, "rd/field", RANT_SUB_ONLY, T, NULL);
+    bwrite = rant_node_create_topic(B, "rd/write", RANT_SUB_ONLY, T, NULL);
+    CHECK(araw && afield && awrite && braw && bfield && bwrite, "readers: topics created");
+    if (araw && afield && awrite && braw && bfield && bwrite){
+        PUMP_UNTIL(A, B, 6400, rd_write != 0);
+        CHECK(rd_write >= 1, "readers: the untyped writer is refused by the typed reader (%lu)", rd_write);
+        test_pump(A, B, 300);   /* the details have arrived, give the reader pairs a moment more */
+        CHECK(rd_raw == 0, "readers: an untyped reader beside a typed reader refuses nothing (%lu)", rd_raw);
+        CHECK(rd_field == 0, "readers: a field reader beside a typed reader refuses nothing (%lu)", rd_field);
+    }
+    rant_node_close(A, 0); rant_node_close(B, 0);
+}
+
 static const TestCase cases[] = {
     { "advert", schema_advert_checks },
     { "bind", schema_bind_checks },
@@ -1451,6 +1493,7 @@ static const TestCase cases[] = {
     { "shared", schema_shared_checks },
     { "var_fields", schema_var_fields_checks },
     { "var_queue", schema_var_queue_checks },
+    { "readers", schema_readers_checks },
 };
 
 TEST_MAIN(cases)

@@ -1142,22 +1142,27 @@ void i_rant_transport_apply_peer_interest(i_RantTransportState *st, uint32_t pee
         their_pub = i_rant_role_pubs(role);
         their_sub = i_rant_role_subs(role);
         rel       = (flags & RANT__INT_RELIABLE) != 0;
+        /* a refusal needs our side of the pair too: two readers or two writers never match */
         if (their_pub){   /* their offered qos against our subscription */
             int ours_sub = i_rant_role_subs(topic->role);
             if (ours_sub && topic->qos.reliability==RANT_RELIABLE && !rel){
                 astate[a] |= RANT__AST_REF_QOS;
                 i_rant_transport_fire_event(st, RANT_E_QOS_INCOMPATIBLE, cidx, peer_id, 0, 0);
             } else if (!(astate[a] & RANT__AST_READ_OK)){
-                astate[a] |= RANT__AST_REF_READ;
-                i_rant_transport_fire_event(st, RANT_E_SCHEMA_MISMATCH, cidx, peer_id, 1, 0);
+                if (ours_sub){
+                    astate[a] |= RANT__AST_REF_READ;
+                    i_rant_transport_fire_event(st, RANT_E_SCHEMA_MISMATCH, cidx, peer_id, 1, 0);
+                }
             } else {
                 i_rant_bit_set(peer_pub_bitmap,(uint32_t)cidx);
             }
         }
         if (their_sub){                                /* their requested qos, for our writer */
             if (!(astate[a] & RANT__AST_WRITE_OK)){
-                astate[a] |= RANT__AST_REF_WRITE;
-                i_rant_transport_fire_event(st, RANT_E_SCHEMA_MISMATCH, cidx, peer_id, 0, 0);
+                if (i_rant_role_pubs(topic->role)){
+                    astate[a] |= RANT__AST_REF_WRITE;
+                    i_rant_transport_fire_event(st, RANT_E_SCHEMA_MISMATCH, cidx, peer_id, 0, 0);
+                }
             } else {
                 i_rant_bit_set(peer_sub_bitmap,(uint32_t)cidx);
                 if (rel) i_rant_bit_set(peer_sub_reliable,(uint32_t)cidx);
