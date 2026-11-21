@@ -282,7 +282,7 @@ spec/transport.md.
 
 The owner publishes the value channel (`catch_up` 1, so a late remote gets the latest).
 Writers push on `v@set` with no response. A read only definition creates no set channel,
-and remote sets get `RANT_ERR_ROLE`. Both channels keep the reliable history depth (10).
+and remote sets get `RANT_ERR_BAD_ROLE`. Both channels keep the reliable history depth (10).
 That depth is the repair window, distinct from `catch_up`, the replay window. They were
 once the same line, which gave every reliable variable a one slot history: the next write
 overwrote the sample a lagging accessor was about to NACK. A burst written from inside a

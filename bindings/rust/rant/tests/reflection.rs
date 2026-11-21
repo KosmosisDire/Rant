@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::{block_on, domain, node, options, wait_for};
 use rant::{
-    Bytes, CallOptions, EntityKind, ErrorKind, EventKind, FunctionOptions, DiagnosticLevel, MetaSections, Node, NodeOptions, Origin, Qos, Request,
+    Bytes, CallOptions, EntityKind, ErrorKind, EventKind, FunctionOptions, DiagnosticLevel, MetaSection, Node, NodeOptions, Origin, Qos, Request,
     SendError, StatusOptions, TaskOptions, TaskRequest, Threading, VariableOptions,
 };
 
@@ -74,19 +74,19 @@ fn meta_snapshots_a_peer() {
     assert!(wait_for(4000, None, || r.peers().iter().any(|p| p.name == "meta_a" && p.active)));
     let peer = r.peers().into_iter().find(|p| p.name == "meta_a").unwrap();
 
-    let snap = r.meta(peer.id, MetaSections::ALL, Duration::from_secs(3)).unwrap();
+    let snap = r.meta(peer.id, MetaSection::ALL, Duration::from_secs(3)).unwrap();
     assert_eq!(snap.provider, peer.id);
     assert_eq!(snap.node.name, "meta_a");
     assert!(snap.node.uptime_us > 0 && snap.node.mem_in_use > 0, "{:?}", snap.node);
     assert!(snap.node.matched_peers >= 1 && snap.node.matched_peers <= snap.node.max_peers, "{:?}", snap.node);
     assert!(snap.info.contains_key("node") && snap.info.contains_key("topics"));
 
-    let only_node = block_on(r.meta_async(peer.id, MetaSections::NODE).unwrap()).unwrap();
+    let only_node = block_on(r.meta_async(peer.id, MetaSection::NODE).unwrap()).unwrap();
     assert_eq!(only_node.node.name, "meta_a");
     assert!(!only_node.info.contains_key("peers"), "a section not asked for is left out");
 
     let quiet = Node::new("meta_off", options(41, Threading::ServiceThread).disable_meta(true)).unwrap();
-    let e = quiet.reflection().meta(peer.id, MetaSections::ALL, Duration::from_millis(100)).err().unwrap();
+    let e = quiet.reflection().meta(peer.id, MetaSection::ALL, Duration::from_millis(100)).err().unwrap();
     assert_eq!(e.kind(), ErrorKind::State, "{e}");
     drop(a);
 }
@@ -114,7 +114,7 @@ fn logs_cross_nodes_but_not_back() {
     assert!(!lines.lock().unwrap().iter().any(|l| l.2 == "below the level"), "a line below the level is never sent");
 
     let mute = Node::new("log_off", options(42, Threading::ServiceThread).disable_logs(true)).unwrap();
-    assert_eq!(mute.log(DiagnosticLevel::Info, "x"), Err(SendError::NoSys));
+    assert_eq!(mute.log(DiagnosticLevel::Info, "x"), Err(SendError::Disabled));
     assert!(mute.on_log(|_| {}).is_err());
     let loud = Node::new("log_debug", options(42, Threading::ServiceThread).log_level(DiagnosticLevel::Debug)).unwrap();
     assert_eq!(loud.log(DiagnosticLevel::Debug, "x"), Ok(()));
@@ -173,7 +173,7 @@ fn status_reaches_late_binders_and_clears() {
     }), "a node that went away reads as empty");
 
     let off = Node::new("status_off", options(44, Threading::ServiceThread).disable_status(true)).unwrap();
-    assert_eq!(off.set_status("k", DiagnosticLevel::Info, "x", StatusOptions::new()), Err(SendError::NoSys));
+    assert_eq!(off.set_status("k", DiagnosticLevel::Info, "x", StatusOptions::new()), Err(SendError::Disabled));
     assert!(off.on_status(|_| {}).is_err());
 }
 

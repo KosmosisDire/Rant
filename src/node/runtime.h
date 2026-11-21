@@ -31,11 +31,11 @@ typedef struct {
                                             for observer UIs. Costs memory per peer topic */
     int32_t               match_wait_ms; /* the send path match wait bound. 0 = RANT_MATCH_WAIT_MS,
                                             negative = disabled and such a send fires UNMATCHED_SEND */
-    uint8_t               disable_logs;  /* 1 = no @rant/log topic, rant_node_log gives NOSYS */
+    uint8_t               disable_logs;  /* 1 = no @rant/log topic, rant_node_log gives DISABLED */
     uint8_t               disable_meta;  /* 1 = no built in @rant/meta function */
     uint8_t               disable_error_logs; /* 1 = do not mirror errors onto @rant/log */
-    uint8_t               log_level;     /* the lowest RantLevel published, 0 = RANT_LOG_LEVEL, else INFO */
-    uint8_t               disable_status; /* 1 = no @rant/status topics, rant_node_set_status gives NOSYS */
+    uint8_t               log_level;     /* the lowest RantDiagnosticLevel published, 0 = RANT_LOG_LEVEL, else INFO */
+    uint8_t               disable_status; /* 1 = no @rant/status topics, rant_node_set_status gives DISABLED */
     RantNodeNet           net;
     RantNodeDiscovery     discovery;
     uint32_t              event_queue_bytes; /* the event ring cap once rant_node_set_event_queue is
@@ -119,7 +119,7 @@ RANT_API int            rant_node_close(RantNode *n, int send_bye);
 
 /* Threading: every call is thread safe under one node lock never held across a wait.
  * Drive the node with rant_node_poll or with rant_node_start. See docs/node.md. */
-/* Runs the background service thread. RANT_ERR_NOSYS when threads are compiled out. */
+/* Runs the background service thread. RANT_ERR_DISABLED when threads are compiled out. */
 RANT_API int            rant_node_start(RantNode *n);
 /* Stops and joins the service thread. Idempotent, implied by close. */
 RANT_API int            rant_node_stop(RantNode *n);
@@ -185,12 +185,12 @@ RANT_API int        rant_queue_dispatch(RantQueue *q, int max_callbacks, int tim
 RANT_API void       rant_queue_stats(RantQueue *q, uint32_t *waiting, uint32_t *dropped);
 /* Parks on_event on q from now on, NULL = inline again and the parked events are dropped.
  * rant_last_error stays current either way. RANT_ERR_STATE from a callback, for another
- * node's queue or while the events are being dispatched, RANT_ERR_OOM for the ring. */
+ * node's queue or while the events are being dispatched, RANT_ERR_OUT_OF_MEMORY for the ring. */
 RANT_API int        rant_node_set_event_queue(RantNode *n, RantQueue *q);
 /* Parks the log lines this node receives on q from now on, NULL = inline again and the
- * parked lines are dropped. RANT_ERR_STATE as above, RANT_ERR_NOSYS when logs are disabled. */
+ * parked lines are dropped. RANT_ERR_STATE as above, RANT_ERR_DISABLED when logs are disabled. */
 RANT_API int        rant_node_set_log_queue(RantNode *n, RantQueue *q);
-/* The same for the status sets this node receives. RANT_ERR_NOSYS when status is disabled. */
+/* The same for the status sets this node receives. RANT_ERR_DISABLED when status is disabled. */
 RANT_API int        rant_node_set_status_queue(RantNode *n, RantQueue *q);
 
 /* Pull topics (RantTopicOpts.pull). take pops the oldest waiting message, take_latest the
@@ -290,16 +290,16 @@ RANT_API void       rant_topic_counts(RantTopic *topic, uint64_t *tx_msgs, uint6
                                     uint64_t *rx_msgs, uint64_t *rx_bytes);
 
 /* The built in @rant/log and @rant/status topics. docs/node.md explains them. */
-typedef enum { RANT_LEVEL_DEBUG = 1, RANT_LEVEL_INFO, RANT_LEVEL_WARN, RANT_LEVEL_ERROR } RantLevel;
+typedef enum { RANT_DIAGNOSTIC_LEVEL_DEBUG = 1, RANT_DIAGNOSTIC_LEVEL_INFO, RANT_DIAGNOSTIC_LEVEL_WARN, RANT_DIAGNOSTIC_LEVEL_ERROR } RantDiagnosticLevel;
 typedef enum { RANT_ORIGIN_APP = 0, RANT_ORIGIN_RANT = 1 } RantOrigin;   /* who wrote a line or condition */
 #ifndef RANT_LOG_MAX
 #define RANT_LOG_MAX 512     /* formatted log text bytes, longer is truncated */
 #endif
 /* printf style publish of one line. A level below the node's log_level sends nothing and
- * returns RANT_OK. RANT_ERR_NOSYS when the log is disabled. */
-RANT_API int            rant_node_log(RantNode *n, RantLevel level, const char *fmt, ...);
+ * returns RANT_OK. RANT_ERR_DISABLED when the log is disabled. */
+RANT_API int            rant_node_log(RantNode *n, RantDiagnosticLevel level, const char *fmt, ...);
 /* Publishes an already formatted line, len negative = NUL terminated. The FFI entry. */
-RANT_API int            rant_node_log_text(RantNode *n, RantLevel level, const char *text, int len);
+RANT_API int            rant_node_log_text(RantNode *n, RantDiagnosticLevel level, const char *text, int len);
 /* The node's own @rant/log handle, NULL when disabled. */
 RANT_API RantTopic       *rant_node_log_topic(RantNode *n);
 
@@ -322,7 +322,7 @@ typedef struct {
 /* Raises the condition key, or updates it when it is active. since_us stays from the raise,
  * and setting what it already holds sends nothing. The set publishes on the next poll pass.
  * RANT_ERR_TOO_BIG for a key over its cap or past RANT_STATUS_MAX conditions. */
-RANT_API int            rant_node_set_status(RantNode *n, const char *key, RantLevel level,
+RANT_API int            rant_node_set_status(RantNode *n, const char *key, RantDiagnosticLevel level,
                                              const char *text, const RantStatusOpts *opts);
 /* Clears the condition key. RANT_OK whether or not it was active. */
 RANT_API int            rant_node_clear_status(RantNode *n, const char *key);
@@ -447,7 +447,7 @@ const RantSchema *i_rant_topic_writer_schema(RantTopic *topic, uint32_t peer);
 /* A peer's node name, "unknown-peer" when it has none. */
 RantString i_rant_node_sys_peer_name(RantNode *n, uint32_t peer);
 /* A line of Rant's own on @rant/log, coalesced by text and sent by the next poll. Lock held. */
-void     i_rant_node_sys_note(RantNode *n, RantLevel level, const char *text);
+void     i_rant_node_sys_note(RantNode *n, RantDiagnosticLevel level, const char *text);
 /* Rant's own conditions, one kind per problem source (spec/node.md). A source reports its
  * whole current set of one kind between begin and end, and end clears what went unreported
  * and folds a kind past RANT_STATUS_KIND_MAX into one. id names one problem, 0 when the kind
@@ -469,7 +469,7 @@ typedef struct {
     char      first[96];     /* the first problem's text, which a folded condition quotes */
 } i_RantProblems;
 void     i_rant_node_problems_begin(RantNode *n, i_RantProblems *ps, i_RantProblemKind kind);
-void     i_rant_node_problem       (i_RantProblems *ps, uint32_t id, RantLevel level, const char *text);
+void     i_rant_node_problem       (i_RantProblems *ps, uint32_t id, RantDiagnosticLevel level, const char *text);
 void     i_rant_node_problems_end  (i_RantProblems *ps);
 /* An id for a problem from the bytes that name it, never 0. */
 uint32_t i_rant_node_problem_id(const void *bytes, size_t len);

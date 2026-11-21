@@ -224,7 +224,7 @@ pub enum SendError {
     /// Refused at this moment, such as a blocking call from an inline callback.
     State,
     /// Switched off on this node, such as logs.
-    NoSys,
+    Disabled,
     /// The value does not fit the schema.
     Schema,
 }
@@ -236,9 +236,9 @@ impl SendError {
             rc if rc >= 0 => Ok(rc),
             ffi::RANT_ERR_NO_TOPIC => Err(SendError::NoTopic),
             ffi::RANT_ERR_TOO_BIG => Err(SendError::TooBig),
-            ffi::RANT_ERR_ROLE => Err(SendError::BadRole),
-            ffi::RANT_ERR_OOM => Err(SendError::OutOfMemory),
-            ffi::RANT_ERR_NOSYS => Err(SendError::NoSys),
+            ffi::RANT_ERR_BAD_ROLE => Err(SendError::BadRole),
+            ffi::RANT_ERR_OUT_OF_MEMORY => Err(SendError::OutOfMemory),
+            ffi::RANT_ERR_DISABLED => Err(SendError::Disabled),
             ffi::RANT_ERR_SCHEMA => Err(SendError::Schema),
             _ => Err(SendError::State),
         }
@@ -253,7 +253,7 @@ impl fmt::Display for SendError {
             SendError::BadRole => "the handle or its peer has no such side",
             SendError::OutOfMemory => "out of memory",
             SendError::State => "refused at this moment, such as a blocking call from an inline callback",
-            SendError::NoSys => "switched off on this node",
+            SendError::Disabled => "switched off on this node",
             SendError::Schema => "the value does not fit the schema",
         })
     }

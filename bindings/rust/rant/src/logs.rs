@@ -23,12 +23,12 @@ pub enum DiagnosticLevel {
 }
 
 impl DiagnosticLevel {
-    pub(crate) fn to_c(self) -> ffi::RantLevel {
+    pub(crate) fn to_c(self) -> ffi::RantDiagnosticLevel {
         match self {
-            DiagnosticLevel::Debug => ffi::RANT_LEVEL_DEBUG,
-            DiagnosticLevel::Info => ffi::RANT_LEVEL_INFO,
-            DiagnosticLevel::Warn => ffi::RANT_LEVEL_WARN,
-            DiagnosticLevel::Error => ffi::RANT_LEVEL_ERROR,
+            DiagnosticLevel::Debug => ffi::RANT_DIAGNOSTIC_LEVEL_DEBUG,
+            DiagnosticLevel::Info => ffi::RANT_DIAGNOSTIC_LEVEL_INFO,
+            DiagnosticLevel::Warn => ffi::RANT_DIAGNOSTIC_LEVEL_WARN,
+            DiagnosticLevel::Error => ffi::RANT_DIAGNOSTIC_LEVEL_ERROR,
         }
     }
 
@@ -82,7 +82,7 @@ pub(crate) type LogFn = dyn for<'a> FnMut(LogLine<'a>) + Send;
 
 impl Node {
     /// Publishes one line on the built in log, cut at 512 bytes. A level below the node's
-    /// `log_level` sends nothing. It works inside callbacks too. NoSys when the node was
+    /// `log_level` sends nothing. It works inside callbacks too. Disabled when the node was
     /// opened with `disable_logs`.
     pub fn log(&self, level: DiagnosticLevel, text: &str) -> Result<(), SendError> {
         let (_pass, raw) = self.inner.enter()?;

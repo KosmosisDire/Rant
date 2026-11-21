@@ -131,27 +131,27 @@ pub struct Entity {
     pub generation: u64,
 }
 
-/// The sections of a meta snapshot to ask for: `MetaSections::NODE | MetaSections::PEERS`.
+/// The sections of a meta snapshot to ask for: `MetaSection::NODE | MetaSection::PEERS`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MetaSections(u32);
+pub struct MetaSection(u32);
 
-impl MetaSections {
+impl MetaSection {
     /// Uptime, memory, backpressure, peer and topic counts, the last error.
-    pub const NODE: MetaSections = MetaSections(ffi::RANT_META_NODE);
+    pub const NODE: MetaSection = MetaSection(ffi::RANT_META_NODE);
     /// Process cpu and memory, where the platform measures them.
-    pub const PROC: MetaSections = MetaSections(ffi::RANT_META_PROC);
+    pub const PROC: MetaSection = MetaSection(ffi::RANT_META_PROC);
     /// Each topic's name, role, match counts and traffic.
-    pub const TOPICS: MetaSections = MetaSections(ffi::RANT_META_TOPICS);
+    pub const TOPICS: MetaSection = MetaSection(ffi::RANT_META_TOPICS);
     /// Each peer's id, name, address and match counts.
-    pub const PEERS: MetaSections = MetaSections(ffi::RANT_META_PEERS);
+    pub const PEERS: MetaSection = MetaSection(ffi::RANT_META_PEERS);
     /// Every section.
-    pub const ALL: MetaSections = MetaSections(ffi::RANT_META_NODE | ffi::RANT_META_PROC | ffi::RANT_META_TOPICS | ffi::RANT_META_PEERS);
+    pub const ALL: MetaSection = MetaSection(ffi::RANT_META_NODE | ffi::RANT_META_PROC | ffi::RANT_META_TOPICS | ffi::RANT_META_PEERS);
 }
 
-impl std::ops::BitOr for MetaSections {
-    type Output = MetaSections;
-    fn bitor(self, rhs: MetaSections) -> MetaSections {
-        MetaSections(self.0 | rhs.0)
+impl std::ops::BitOr for MetaSection {
+    type Output = MetaSection;
+    fn bitor(self, rhs: MetaSection) -> MetaSection {
+        MetaSection(self.0 | rhs.0)
     }
 }
 
@@ -349,7 +349,7 @@ impl Reflection {
 
     /// A peer's runtime snapshot through its @rant/meta function, waiting up to `timeout`.
     /// Refused inside an inline callback, where [`Reflection::meta_async`] is the tool.
-    pub fn meta(&self, peer: u32, sections: MetaSections, timeout: Duration) -> Result<MetaSnapshot, Error> {
+    pub fn meta(&self, peer: u32, sections: MetaSection, timeout: Duration) -> Result<MetaSnapshot, Error> {
         let shared = self.meta_function()?;
         let options = CallOptions::new().provider(peer).timeout(timeout);
         let r = blocking_call::<Bytes, Bytes>(&shared, &sections.0.to_le_bytes(), &options, None)?;
@@ -357,7 +357,7 @@ impl Reflection {
     }
 
     /// The same, returning at once with a Future of the snapshot, which any executor can await.
-    pub fn meta_async(&self, peer: u32, sections: MetaSections) -> Result<impl Future<Output = Result<MetaSnapshot, Error>> + Send + 'static, Error> {
+    pub fn meta_async(&self, peer: u32, sections: MetaSection) -> Result<impl Future<Output = Result<MetaSnapshot, Error>> + Send + 'static, Error> {
         let shared = self.meta_function()?;
         let (state, _) = async_call::<Bytes, Bytes>(&shared, &sections.0.to_le_bytes(), &CallOptions::new().provider(peer), None)?;
         let pending = PendingCall { state };

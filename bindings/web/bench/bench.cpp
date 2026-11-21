@@ -143,7 +143,7 @@ struct Echo {
         watch(node, a);
         pong = node.publisher<rant::Bytes>("bench/pong", qos(a));
         ping = node.subscriber<rant::Bytes>("bench/ping", [this](const rant::MessageView& m) {
-            if (pong.send(m.data()) != rant::SendStatus::Ok) { backlog.push_back(m.data().to_vector()); deferred++; }
+            if (pong.send(m.data()) != rant::RantResult::Ok) { backlog.push_back(m.data().to_vector()); deferred++; }
             echoed++;
         }, qos(a));
     }
@@ -152,7 +152,7 @@ struct Echo {
     int step()
     {
         for (auto it = backlog.begin(); it != backlog.end();) {
-            if (pong.send(rant::Bytes(*it)) != rant::SendStatus::Ok) break;
+            if (pong.send(rant::Bytes(*it)) != rant::RantResult::Ok) break;
             it = backlog.erase(it);
         }
         uint64_t t = now_us();
@@ -211,7 +211,7 @@ struct Ping {
         std::memcpy(payload.data(), &seq, 8);
         std::memcpy(payload.data() + 8, &t, 8);
         send_us[seq] = t;
-        if (ping.send(rant::Bytes(payload)) != rant::SendStatus::Ok) return false;
+        if (ping.send(rant::Bytes(payload)) != rant::RantResult::Ok) return false;
         sent++;
         last_send_us = t;
         return true;

@@ -124,7 +124,7 @@ wrappers can be event driven).
 
 The cancellable attrs bit is ON by default. A definition that will not honor cancellation
 opts out with `RantTaskOpts.no_cancel`. Remotes then refuse `rant_function_cancel` locally
-with `RANT_ERR_ROLE` (nothing sent) and tools grey out their cancel button. `.exclusive`
+with `RANT_ERR_BAD_ROLE` (nothing sent) and tools grey out their cancel button. `.exclusive`
 declares serialization. It is advisory: the handler enforces it by answering
 `rant_request_fail(req, "busy", ...)`. There is no REJECTED status.
 

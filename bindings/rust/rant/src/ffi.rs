@@ -118,10 +118,10 @@ impl Default for RantQos {
 pub const RANT_OK: RantResult = 0;
 pub const RANT_ERR_NO_TOPIC: RantResult = -1;
 pub const RANT_ERR_TOO_BIG: RantResult = -2;
-pub const RANT_ERR_ROLE: RantResult = -3;
-pub const RANT_ERR_OOM: RantResult = -4;
+pub const RANT_ERR_BAD_ROLE: RantResult = -3;
+pub const RANT_ERR_OUT_OF_MEMORY: RantResult = -4;
 pub const RANT_ERR_STATE: RantResult = -5;
-pub const RANT_ERR_NOSYS: RantResult = -6;
+pub const RANT_ERR_DISABLED: RantResult = -6;
 pub const RANT_ERR_SCHEMA: RantResult = -7;
 pub type RantResult = ::std::os::raw::c_int;
 #[repr(C)]
@@ -1194,11 +1194,11 @@ pub struct RantPumpSample {
 pub type RantPumpProbeFn = ::std::option::Option<
     unsafe extern "C" fn(user: *mut ::std::os::raw::c_void, s: *const RantPumpSample),
 >;
-pub const RANT_LEVEL_DEBUG: RantLevel = 1;
-pub const RANT_LEVEL_INFO: RantLevel = 2;
-pub const RANT_LEVEL_WARN: RantLevel = 3;
-pub const RANT_LEVEL_ERROR: RantLevel = 4;
-pub type RantLevel = ::std::os::raw::c_uint;
+pub const RANT_DIAGNOSTIC_LEVEL_DEBUG: RantDiagnosticLevel = 1;
+pub const RANT_DIAGNOSTIC_LEVEL_INFO: RantDiagnosticLevel = 2;
+pub const RANT_DIAGNOSTIC_LEVEL_WARN: RantDiagnosticLevel = 3;
+pub const RANT_DIAGNOSTIC_LEVEL_ERROR: RantDiagnosticLevel = 4;
+pub type RantDiagnosticLevel = ::std::os::raw::c_uint;
 pub const RANT_ORIGIN_APP: RantOrigin = 0;
 pub const RANT_ORIGIN_RANT: RantOrigin = 1;
 pub type RantOrigin = ::std::os::raw::c_uint;
@@ -1964,13 +1964,13 @@ unsafe extern "C" {
     );
     pub fn rant_node_log(
         n: *mut RantNode,
-        level: RantLevel,
+        level: RantDiagnosticLevel,
         fmt: *const ::std::os::raw::c_char,
         ...
     ) -> ::std::os::raw::c_int;
     pub fn rant_node_log_text(
         n: *mut RantNode,
-        level: RantLevel,
+        level: RantDiagnosticLevel,
         text: *const ::std::os::raw::c_char,
         len: ::std::os::raw::c_int,
     ) -> ::std::os::raw::c_int;
@@ -1978,7 +1978,7 @@ unsafe extern "C" {
     pub fn rant_node_set_status(
         n: *mut RantNode,
         key: *const ::std::os::raw::c_char,
-        level: RantLevel,
+        level: RantDiagnosticLevel,
         text: *const ::std::os::raw::c_char,
         opts: *const RantStatusOpts,
     ) -> ::std::os::raw::c_int;

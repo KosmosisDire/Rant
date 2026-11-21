@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{node, options, wait_for};
-use rant::{Bytes, ErrorKind, FieldType, MapItem, MapReader, MapWriter, MessageBuilder, Node, Qos, Threading};
+use rant::{Bytes, ErrorKind, SchemaTypeKind, MapItem, MapReader, MapWriter, MessageBuilder, Node, Qos, Threading};
 
 const TICK: &str = "Tick { seq: u64, when: Timestamp, value: f64, at: Transform }";
 
@@ -113,10 +113,10 @@ fn schemas_reflect_the_c_field_table() {
     let fields = s.fields();
     let at = s.field_index("corners").unwrap() as usize;
     let (corners, elem) = (&fields[at], &fields[at + 1]);
-    assert_eq!((corners.kind, corners.count), (FieldType::Array, 4));
-    assert_eq!((elem.name.as_str(), elem.kind, elem.type_name.as_deref(), elem.size), ("", FieldType::Struct, Some("Float2"), 8), "the element is the row after its array");
+    assert_eq!((corners.kind, corners.count), (SchemaTypeKind::Array, 4));
+    assert_eq!((elem.name.as_str(), elem.kind, elem.type_name.as_deref(), elem.size), ("", SchemaTypeKind::Struct, Some("Float2"), 8), "the element is the row after its array");
     assert!(s.field_index("corners[2].x").is_some());
-    assert_eq!(fields[s.field_index("tags").unwrap() as usize].kind, FieldType::VString);
+    assert_eq!(fields[s.field_index("tags").unwrap() as usize].kind, SchemaTypeKind::VString);
     assert_eq!(a.schema(&s.to_dsl()).unwrap(), s, "the printed DSL compiles back to the same handle");
     assert_eq!(a.schema_from_wire(&s.wire()).unwrap().hash(), s.hash());
 

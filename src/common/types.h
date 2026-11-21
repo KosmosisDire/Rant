@@ -56,10 +56,10 @@ typedef enum {
     RANT_OK               =  0,
     RANT_ERR_NO_TOPIC = -1,    /* topic index out of range */
     RANT_ERR_TOO_BIG      = -2,  /* exceeds RANT_MESSAGE_MAX */
-    RANT_ERR_ROLE         = -3,  /* the topic is SUB_ONLY or INACTIVE */
-    RANT_ERR_OOM          = -4,  /* the allocator returned NULL */
+    RANT_ERR_BAD_ROLE         = -3,  /* the topic is SUB_ONLY or INACTIVE */
+    RANT_ERR_OUT_OF_MEMORY          = -4,  /* the allocator returned NULL */
     RANT_ERR_STATE        = -5,  /* wrong state, or a call not allowed from inside a callback */
-    RANT_ERR_NOSYS        = -6,  /* not compiled in */
+    RANT_ERR_DISABLED        = -6,  /* not compiled in */
     RANT_ERR_SCHEMA       = -7   /* the payload is not a message of the topic's schema */
 } RantResult;
 

@@ -51,7 +51,7 @@ OnWrite and awaited call results.
 - `ServiceThread`, the default: the service thread runs the loop from construction and
   every callback fires on it, one at a time. From inside one, `Send` and read only
   queries work, while `Poll`, handle creation and `Dispose` are refused with
-  `SendStatus.State` or an exception. `Close()` there runs once the callback returns.
+  `RantResult.State` or an exception. `Close()` there runs once the callback returns.
 - `Manual`: your thread calls `Poll()` and callbacks fire there, under the same rules.
 - `Dispatch`: the service thread runs the loop, every callback waits, and `Dispatch()`
   runs the waiting ones on the calling thread with the whole API available. Call it once
@@ -67,9 +67,9 @@ State applies at receipt either way: a variable holds its newest value before it
 
 Everything the wrapper throws is a `RantException`. A failed create, of the node or of a
 handle, carries the C reason as a `RantEvent` in `Error` and in the message. A refused
-action, such as a `Dispose` from a service thread callback, carries its `SendStatus`.
+action, such as a `Dispose` from a service thread callback, carries its `RantResult` in `Result`.
 `SchemaException` and `CallException` derive from it. The data path never throws: `Send`
-and `Set` return a `SendStatus`. A build without threads refuses the service thread, and
+and `Set` return a `RantResult`. A build without threads refuses the service thread, and
 `Threading.Manual` or `Threading.Dispatch` is the way in.
 
 ## Schemas
@@ -208,7 +208,7 @@ context streams `Progress` and exposes a real `CancellationToken`. A completion 
 
 A call is loud. `Call(req)` blocks and returns the response, `await CallAsync(req)` does the
 same without blocking, and both throw `CallException` when the call did not end Ok. The
-exception names the call and carries `Status`, `SendStatus`, `Provider` and the provider's
+exception names the call and carries `Status`, `SendResult`, `Provider` and the provider's
 text, for a handler that threw its exception message. `TryCall` and `TryCallAsync` are the
 quiet forms for an expected failure: they return a `RantResponse<TRsp>` and never throw.
 Its `Value` reads whatever payload came back, a partial result or failure data too, and

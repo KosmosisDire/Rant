@@ -337,7 +337,7 @@ static void patterns_checks(void){
       /* the owner's value arrives only once the accessor verified it, read only included */
       PUMP_UNTIL(P, C, 4000, rant_variable_get(ro_a, &gv, NULL));
       i_rant_le_w32(b,8); sr = rant_variable_set(ro_a, rant_bytes(b,4));
-      CHECK(sr==RANT_ERR_ROLE, "var: read-only set refused (%d)", sr); }
+      CHECK(sr==RANT_ERR_BAD_ROLE, "var: read-only set refused (%d)", sr); }
     { RantVariable *orphan = rant_node_create_remote_variable(C, "nobody-owns-this", NULL, NULL);
       uint8_t b[4]; int sr; i_rant_le_w32(b,1);
       CHECK(orphan != NULL, "var: orphan accessor opens");
@@ -829,9 +829,9 @@ static void loud_checks(void){
         CHECK(rant_variable_get(acc,&gv, NULL) && rant_variable_get(kacc,&gv, NULL), "loud: accessors got the values");
         i_rant_le_w32(b, 99);
         rc = rant_variable_force(acc, rant_bytes(b,4));
-        CHECK(rc==RANT_ERR_ROLE, "loud: force against an owner without allow_force refused ROLE (%d)", rc);
+        CHECK(rc==RANT_ERR_BAD_ROLE, "loud: force against an owner without allow_force refused ROLE (%d)", rc);
         rc = rant_variable_unforce(acc);
-        CHECK(rc==RANT_ERR_ROLE, "loud: unforce likewise (%d)", rc);
+        CHECK(rc==RANT_ERR_BAD_ROLE, "loud: unforce likewise (%d)", rc);
         test_pump(A, B, 400);
         CHECK(v1 && !rant_variable_forced(v1), "loud: nothing reached the owner");
         rc = rant_variable_force(kacc, rant_bytes(b,4));

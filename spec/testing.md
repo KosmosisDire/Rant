@@ -524,7 +524,7 @@ What each phase pins, grouped by layer.
   nothing, a late joiner gets the whole set, an update keeps `since_us`, a clear that is
   not clearable, names an old raise or a missing key changes nothing and leaves a Debug
   note, an accepted clear fires `RANT_STATUS_CLEARED` with the asker, a full set refuses
-  one more, and a node that reads no status has no clear to send (`RANT_ERR_ROLE`).
+  one more, and a node that reads no status has no clear to send (`RANT_ERR_BAD_ROLE`).
 - Launch log level: `RANT_LOG_LEVEL` in any case fills a level the code left at 0, never
   one it set, and a word that is no level, or a bad `opts.log_level`, refuses the open.
 - Mesh: two nodes that share nothing match nothing, builtins included, until one asks meta.

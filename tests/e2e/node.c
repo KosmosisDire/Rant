@@ -251,18 +251,18 @@ static void launchloglevel_checks(void){
     RantNodeOpts o; RantNode *n; RantEvent err; size_t i;
     memset(&o,0,sizeof o); o.domain=TEST_DOMAIN+45; o.net.multicast_interface="127.0.0.1";
     n = rant_node_open(&a, "ll", NULL, NULL, &o);
-    CHECK(n && n->log_level == RANT_LEVEL_INFO, "launchloglevel: Info by default (%d)", n ? n->log_level : -1);
+    CHECK(n && n->log_level == RANT_DIAGNOSTIC_LEVEL_INFO, "launchloglevel: Info by default (%d)", n ? n->log_level : -1);
     if (n) rant_node_close(n, 0);
     rant_allocator_reset(&a);
     test_setenv("RANT_LOG_LEVEL", "DeBuG");
     n = rant_node_open(&a, "ll", NULL, NULL, &o);
-    CHECK(n && n->log_level == RANT_LEVEL_DEBUG, "launchloglevel: RANT_LOG_LEVEL fills the default (%d)",
+    CHECK(n && n->log_level == RANT_DIAGNOSTIC_LEVEL_DEBUG, "launchloglevel: RANT_LOG_LEVEL fills the default (%d)",
              n ? n->log_level : -1);
     if (n) rant_node_close(n, 0);
     rant_allocator_reset(&a);
-    o.log_level = RANT_LEVEL_ERROR;
+    o.log_level = RANT_DIAGNOSTIC_LEVEL_ERROR;
     n = rant_node_open(&a, "ll", NULL, NULL, &o);
-    CHECK(n && n->log_level == RANT_LEVEL_ERROR, "launchloglevel: a level set in code stands (%d)",
+    CHECK(n && n->log_level == RANT_DIAGNOSTIC_LEVEL_ERROR, "launchloglevel: a level set in code stands (%d)",
              n ? n->log_level : -1);
     if (n) rant_node_close(n, 0);
     rant_allocator_reset(&a);

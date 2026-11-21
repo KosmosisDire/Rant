@@ -355,7 +355,7 @@ def video_types():
         pixels = bytes((i * 7) & 0xFF for i in range(384))
         img = rant.types.Image(width=32, height=4, stride=96,
                          format=rant.types.ImageFormat.Rgb8, data=pixels)
-        check("image send", pub.send(img) == rant.SendStatus.OK)
+        check("image send", pub.send(img) == rant.RantResult.OK)
         deadline = time.time() + 5.0
         while time.time() < deadline and "img" not in got:
             a.poll(0.001)
@@ -754,7 +754,7 @@ def lifecycle():
     try:
         check("service thread by default", watcher.threading == rant.Threading.SERVICE_THREAD)
         check("poll refused under the service thread",
-              watcher.poll(0) == rant.SendStatus.STATE)
+              watcher.poll(0) == rant.RantResult.STATE)
 
         got = threading.Event()
         watcher.subscriber("twist", Velocity, lambda t: got.set(), reliable=True)
@@ -846,10 +846,10 @@ def fields():
         changes = []
         r_id.on_change(changes.append)
         check("on_change replays at registration", changes == [3])
-        check("a field write is accepted", r_id.set(7) == rant.SendStatus.OK)
+        check("a field write is accepted", r_id.set(7) == rant.RantResult.OK)
         check("it sets only that field at the owner", until(3.0, lambda: (lambda g: g is not None
               and g.id == 7 and g.origin.dx == 1.0 and g.level == 2.0)(vd.get())))
-        check("another field write", r_at.set(Velocity(dx=6.0, dy=8.0)) == rant.SendStatus.OK)
+        check("another field write", r_at.set(Velocity(dx=6.0, dy=8.0)) == rant.RantResult.OK)
         check("both writes hold", until(3.0, lambda: (lambda g: g is not None
               and g.id == 7 and g.origin.dx == 6.0 and g.origin.dy == 8.0)(vd.get())))
         check("the whole remote sees both", until(3.0, lambda: (lambda g: g is not None
@@ -907,14 +907,14 @@ def handles():
         check("the sibling subscriber closes", s.close())
         check("close is idempotent", s.close())
         check("a closed handle reports no schema", s.schema is None)
-        check("the publisher still sends", p.send(Velocity(dx=3.0)) == rant.SendStatus.OK)
+        check("the publisher still sends", p.send(Velocity(dx=3.0)) == rant.RantResult.OK)
         deadline = time.time() + 5.0
         while time.time() < deadline and not got:
             time.sleep(0.005)
         check("and the peer still receives", bool(got) and abs(got[0].dx - 3.0) < 1e-6)
         check("counts show the send", p.counts.tx_msgs >= 1)
         check("the last handle closes", p.close())
-        check("a closed handle answers NO_TOPIC", p.send(Velocity()) == rant.SendStatus.NO_TOPIC)
+        check("a closed handle answers NO_TOPIC", p.send(Velocity()) == rant.RantResult.NO_TOPIC)
         p2 = a.publisher("shared", Reading)
         check("the name carries another schema after the last close", p2.name == "shared")
 
@@ -941,7 +941,7 @@ def handles():
         check("epoch is a counter", isinstance(a.reflection.epoch, int))
         check("the function definition closes", fn.close())
 
-        check("log writes", a.log(rant.DiagnosticLevel.INFO, "hello") == rant.SendStatus.OK)
+        check("log writes", a.log(rant.DiagnosticLevel.INFO, "hello") == rant.RantResult.OK)
         handler = lambda line: None
         check("on_log binds and returns the handler", a.on_log(handler) is handler)
         st = a.stats
@@ -1165,8 +1165,8 @@ def close_race():
         while calls[0] < 300:
             time.sleep(0)
         n.close()
-        refused_after = (refused_after and pub.send(Level()) == rant.SendStatus.NO_TOPIC
-                         and var.set(Level()) == rant.SendStatus.NO_TOPIC)
+        refused_after = (refused_after and pub.send(Level()) == rant.RantResult.NO_TOPIC
+                         and var.set(Level()) == rant.RantResult.NO_TOPIC)
         stop.set()
         for t in threads:
             t.join()
@@ -1190,7 +1190,7 @@ def close_race():
               until(3, lambda: polled(lambda: accepted == [True])))
         me.close()   # waits for the close the callback started
         check("the node closed once the callback returned",
-              probe.send(Level()) == rant.SendStatus.NO_TOPIC)
+              probe.send(Level()) == rant.RantResult.NO_TOPIC)
     finally:
         me.close()
         src.close()
@@ -1239,7 +1239,7 @@ def handle_gate():
         check("a close waits for the blocking call on another thread", done_first)
         check("which completed", got[0].status == rant.CallStatus.OK)
         check("then the remote answers NO_TOPIC",
-              rem.call(AddReq(a=1, b=2), timeout=0.1).send_status == rant.SendStatus.NO_TOPIC)
+              rem.call(AddReq(a=1, b=2), timeout=0.1).send_result == rant.RantResult.NO_TOPIC)
 
         def _job(q, task):
             task.progress(JobPrg(done=1))
@@ -1255,7 +1255,7 @@ def handle_gate():
               inside and not any(inside))
         check("and the call still completes", r2.status == rant.CallStatus.OK)
         check("a close after it retires the remote", jr.close()
-              and jr.call(JobReq(count=1), timeout=0.1).send_status == rant.SendStatus.NO_TOPIC)
+              and jr.call(JobReq(count=1), timeout=0.1).send_result == rant.RantResult.NO_TOPIC)
 
         parked = []
         park = a.function_definition("g/park", lambda q, req: parked.append(req.defer()),
@@ -1341,7 +1341,7 @@ def patterns():
     v = lvl.get()
     check("initial value", v is not None and v.value == 5)
     check("owner matched", lvl.match_count > 0)
-    check("remote set accepted", lvl.set(Level(value=9)) == rant.SendStatus.OK)
+    check("remote set accepted", lvl.set(Level(value=9)) == rant.RantResult.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
         time.sleep(0.005)
@@ -1349,13 +1349,13 @@ def patterns():
     check("definition applied it", (v := lvl_def.get()) is not None and v.value == 9)
 
     # force overrides with a shadow source, unforce restores the latest set
-    check("force", lvl_def.force(Level(value=99)) == rant.SendStatus.OK)
+    check("force", lvl_def.force(Level(value=99)) == rant.RantResult.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 99):
         time.sleep(0.005)
     check("forced value visible remotely", (v := lvl.get()) is not None and v.value == 99)
     check("remote sees forced", lvl.forced)
-    check("unforce", lvl_def.unforce() == rant.SendStatus.OK)
+    check("unforce", lvl_def.unforce() == rant.RantResult.OK)
     deadline = time.time() + 5.0
     while time.time() < deadline and not ((v := lvl.get()) and v.value == 9):
         time.sleep(0.005)
@@ -1371,9 +1371,9 @@ def patterns():
     check("on_change replays current at registration", len(chg) == 1 and chg[0][0] == 9)
     lvl_def.on_write(lambda v: wr.append(v.value))
     check("on_write does not replay", len(wr) == 0)
-    check("identical re-set accepted", lvl_def.set(Level(value=9)) == rant.SendStatus.OK)
+    check("identical re-set accepted", lvl_def.set(Level(value=9)) == rant.RantResult.OK)
     check("identical re-set is a write, not a change", len(chg) == 1 and len(wr) == 1)
-    check("new set accepted", lvl_def.set(Level(value=12)) == rant.SendStatus.OK)
+    check("new set accepted", lvl_def.set(Level(value=12)) == rant.RantResult.OK)
     check("change fires inline with the new value",
           len(chg) == 2 and chg[1][0] == 12 and chg[1][2] == 0 and len(wr) == 2)
     deadline = time.time() + 5.0
@@ -1515,7 +1515,7 @@ def tasks():
             gdone.set()
         gid = grind_r.call_async(JobReq(count=1), grsp, on_progress=gprog)
         check("grind running", grunning.wait(5.0))
-        check("cancel accepted", grind_r.cancel(gid) == rant.SendStatus.OK)
+        check("cancel accepted", grind_r.cancel(gid) == rant.RantResult.OK)
         check("terminal CANCELLED with the handler's message",
               gdone.wait(5.0) and grsps[0].status == rant.CallStatus.CANCELLED
               and grsps[0].message == "stopped")
@@ -1532,7 +1532,7 @@ def tasks():
                                  on_progress=lambda v: nrunning.set())
         check("rigid running", nrunning.wait(5.0))
         check("cancel refused (no_cancel)",
-              rigid_r.cancel(nid) == rant.SendStatus.BAD_ROLE)
+              rigid_r.cancel(nid) == rant.RantResult.BAD_ROLE)
         check("rigid completes anyway",
               ndone.wait(5.0) and nrsps[0].ok and nrsps[0].value.total == 7)
 
@@ -1914,9 +1914,9 @@ def log_status():
         check("a line below the level never arrives", not any(x.text == "hidden" for x in lines))
 
         check("raised before anyone listens",
-              a.set_status("estop", rant.DiagnosticLevel.ERROR, "pressed") == rant.SendStatus.OK
-              and a.set_status("hot", rant.DiagnosticLevel.WARN, "motor hot", clearable=True) == rant.SendStatus.OK)
-        check("a long key is refused", a.set_status("k" * 49, rant.DiagnosticLevel.INFO, "x") == rant.SendStatus.TOO_BIG)
+              a.set_status("estop", rant.DiagnosticLevel.ERROR, "pressed") == rant.RantResult.OK
+              and a.set_status("hot", rant.DiagnosticLevel.WARN, "motor hot", clearable=True) == rant.RantResult.OK)
+        check("a long key is refused", a.set_status("k" * 49, rant.DiagnosticLevel.INFO, "x") == rant.RantResult.TOO_BIG)
         seen = []
         b.on_status(lambda u: seen.append(u) if u.node == "lsa" else None)
 
@@ -1929,10 +1929,10 @@ def log_status():
               and c[1].since_us > 0 and c[1].origin == rant.Origin.APP)
         if len(c) == 2:
             check("a peer clear is sent",
-                  b.clear_peer_status(seen[-1].node_id, "hot", c[1].since_us) == rant.SendStatus.OK)
+                  b.clear_peer_status(seen[-1].node_id, "hot", c[1].since_us) == rant.RantResult.OK)
         check("A's app hears which was cleared", until(8, lambda: cleared == ["hot"]))
         check("B sees the smaller set", until(8, lambda: count() == 1))
-        check("an own clear", a.clear_status("estop") == rant.SendStatus.OK)
+        check("an own clear", a.clear_status("estop") == rant.RantResult.OK)
         check("B sees it empty", until(8, lambda: count() == 0))
         a.set_status("estop", rant.DiagnosticLevel.ERROR, "pressed again")
         check("raised again", until(8, lambda: count() == 1))
@@ -1954,8 +1954,8 @@ def log_status():
         except rant.Error:
             raised = True
         check("on_status on a node without status raises", raised)
-        check("set_status on a node without status is NOSYS",
-              quiet.set_status("k", rant.DiagnosticLevel.INFO, "x") == rant.SendStatus.NOSYS)
+        check("set_status on a node without status is DISABLED",
+              quiet.set_status("k", rant.DiagnosticLevel.INFO, "x") == rant.RantResult.DISABLED)
         quiet.close()
     finally:
         rant.Node._bind_builtin = bind
@@ -2077,7 +2077,7 @@ def pose_leg():
 
     # A handle outliving its node answers NO_TOPIC instead of touching freed memory.
     if ok:
-        ok = (pubch.send(sent) == rant.SendStatus.NO_TOPIC and pubch.match_count == 0
+        ok = (pubch.send(sent) == rant.RantResult.NO_TOPIC and pubch.match_count == 0
               and subch.queue_stats.messages == 0 and pubch.name == "pose" and pub.name == "pub")
         print("PASS: handle after close" if ok else "FAIL: handle after close")
 
@@ -2137,7 +2137,7 @@ def call_observer_leg():
         call_id = job.call_async(JobReq(count=1), on_response=done.append)
         check("task started", call_id != 0)
         check("running and progress seen", until(lambda: len(steps) >= 3))
-        check("cancel sent", job.cancel(call_id) == rant.SendStatus.OK)
+        check("cancel sent", job.cancel(call_id) == rant.RantResult.OK)
         check("cancel seen", until(lambda: len(steps) >= 4))
         release.set()
         check("end seen", until(lambda: len(steps) >= 5))

@@ -134,7 +134,7 @@ static void task_checks(void){
                "task: caller sees wire CANCELLED \"stopped\" (st=%d msg=\"%s\")",
                tk_reply_status, tk_reply_msg); }
 
-    /* .no_cancel: the caller's cancel refuses locally (RANT_ERR_ROLE), nothing reaches the
+    /* .no_cancel: the caller's cancel refuses locally (RANT_ERR_BAD_ROLE), nothing reaches the
        definition, and the task still completes normally */
     { uint32_t id = 0; int rc, cr;
       tk_reply_done=0; tk_token=0; tk_cancel_fired=0;
@@ -144,7 +144,7 @@ static void task_checks(void){
       PUMP_UNTIL(P, C, 8000, tk_token);
       CHECK(rc==RANT_OK && tk_token!=0, "task: no_cancel call running (rc=%d)", rc);
       cr = rant_function_cancel(cnc, id);
-      CHECK(cr==RANT_ERR_ROLE, "task: cancel refused locally with RANT_ERR_ROLE (%d)", cr);
+      CHECK(cr==RANT_ERR_BAD_ROLE, "task: cancel refused locally with RANT_ERR_BAD_ROLE (%d)", cr);
       test_pump(P,C,60);
       { int sr = rant_function_cancelled(pnc, tk_token);
         CHECK(!tk_cancel_fired && sr==0,

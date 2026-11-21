@@ -61,7 +61,7 @@ impl Node {
     /// Raises the condition `key` on this node's status, or updates it while it is active:
     /// `since_us` stays from the raise, and the same values again send nothing. Readers see
     /// it after the next loop pass. TooBig for a key over 48 bytes or past 32 conditions,
-    /// NoSys when the node was opened with `disable_status`.
+    /// Disabled when the node was opened with `disable_status`.
     pub fn set_status(&self, key: &str, level: DiagnosticLevel, text: &str, options: StatusOptions) -> Result<(), SendError> {
         let (k, t) = (c_text(key)?, c_text(text)?);
         let opts = ffi::RantStatusOpts { clearable: options.clearable as u8 };

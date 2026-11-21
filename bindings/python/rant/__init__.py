@@ -23,7 +23,7 @@ __all__ = [
     "Node", "Publisher", "Subscriber", "Message", "Event", "NodeStats", "TopicCounts",
     "Queue", "QueueStats", "Schema", "dsl", "types",
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "string", "enum",
-    "Threading", "SendStatus", "CallStatus", "DiagnosticLevel", "Origin", "MetaSection", "EventKind",
+    "Threading", "RantResult", "CallStatus", "DiagnosticLevel", "Origin", "MetaSection", "EventKind",
     "ErrorKind", "PeerLiveness", "EntityKind",
     "Error", "SchemaError", "CallError", "CancelledError",
     "FunctionDefinition", "RemoteFunction", "Request", "Response", "Deferred",
@@ -51,14 +51,14 @@ class Threading(_pyenum.IntEnum):
     DISPATCH = 2
 
 
-class SendStatus(_pyenum.IntEnum):
+class RantResult(_pyenum.IntEnum):
     OK = 0
     NO_TOPIC = -1
     TOO_BIG = -2
     BAD_ROLE = -3
     OUT_OF_MEMORY = -4
     STATE = -5       # wrong state: poll while started, or a call a callback may not make
-    NOSYS = -6       # not compiled in (the service thread under RANT_NO_THREADS)
+    DISABLED = -6       # not compiled in (the service thread under RANT_NO_THREADS)
     SCHEMA = -7      # the payload is not a message of the topic's schema
 
 
@@ -86,7 +86,7 @@ class CallStatus(_pyenum.IntEnum):
 
 
 class DiagnosticLevel(_pyenum.IntEnum):
-    """The severity of a log line or a status condition, rising. Mirrors RantLevel."""
+    """The severity of a log line or a status condition, rising. Mirrors RantDiagnosticLevel."""
     DEBUG = 1
     INFO = 2
     WARN = 3
@@ -167,7 +167,7 @@ class EntityKind(_pyenum.IntEnum):
     TASK = 3
 
 
-# raw kind bytes (== Schema.FieldType, kept short for the codec below)
+# raw kind bytes (== Schema.SchemaTypeKind, kept short for the codec below)
 _BOOL, _ARR, _STRUCT, _STR = 10, 11, 12, 13
 _VSTR, _VARR, _MAP = 14, 15, 16    # the variable kinds (ride the message tail)
 _ENUM = 17                          # named integer (wire = its backing scalar)
@@ -201,11 +201,11 @@ class SchemaError(Error):
 
 class CallError(Error):
     """Raised by Response.value when the call did not complete CallStatus.OK.
-    Carries .status (the CallStatus) and .send_status (a synchronous refusal)."""
-    def __init__(self, status, send_status, msg):
+    Carries .status (the CallStatus) and .send_result (a synchronous refusal)."""
+    def __init__(self, status, send_result, msg):
         super().__init__(msg)
         self.status = status
-        self.send_status = send_status
+        self.send_result = send_result
 
 
 class CancelledError(Exception):
@@ -815,7 +815,7 @@ class Schema:
         annotated fields are the wire fields, or a bare type whose message is that one value
         (docs/python.md). Valid for the node's life, and SchemaError after its close."""
 
-    class FieldType(_pyenum.IntEnum):
+    class SchemaTypeKind(_pyenum.IntEnum):
         U8 = 0
         U16 = 1
         U32 = 2
@@ -839,8 +839,8 @@ class Schema:
     @_dataclasses.dataclass
     class Field:
         name: str            # "" for a bare root or an array's element, the row after the array
-        kind: "Schema.FieldType"
-        backing: "Schema.FieldType"   # an ENUM's backing kind
+        kind: "Schema.SchemaTypeKind"
+        backing: "Schema.SchemaTypeKind"   # an ENUM's backing kind
         count: int
         depth: int
         offset: int
@@ -926,8 +926,8 @@ class Schema:
         with self._use() as sp:
             for i in range(lib.rant_schema_field_count(sp)):
                 if lib.rant_schema_field_at(sp, i, _c.byref(info)):
-                    out.append(Schema.Field(_dstr(info.name), Schema.FieldType(info.kind),
-                                            Schema.FieldType(info.backing), info.count, info.depth,
+                    out.append(Schema.Field(_dstr(info.name), Schema.SchemaTypeKind(info.kind),
+                                            Schema.SchemaTypeKind(info.backing), info.count, info.depth,
                                             info.offset, info.size, info.str_cap,
                                             _dstr(info.type_name), info.arr_parent, info.arr_depth,
                                             info.min_len))
@@ -1486,8 +1486,8 @@ def _origin(v):
     return Origin(v) if v in Origin._value2member_map_ else int(v or 0)
 
 
-def _send_status(r):
-    return SendStatus(r) if r in SendStatus._value2member_map_ else r
+def _result(r):
+    return RantResult(r) if r in RantResult._value2member_map_ else r
 
 
 def _ms(timeout):
@@ -1843,12 +1843,12 @@ class _Topic:
     def send(self, value, capture_us):
         with self._use() as h:
             if not h:
-                return SendStatus.NO_TOPIC
+                return RantResult.NO_TOPIC
             b, buf = _c_view(_payload_bytes(self._schema, value))
             o = _c.RantSendOpts(capture_us=int(capture_us or 0))
             r = self._node._lib.rant_topic_send(h, b, _c.byref(o))
         del buf
-        return _send_status(r)
+        return _result(r)
 
     @property
     def counts(self):
@@ -1911,7 +1911,7 @@ class Queue:
                 waiting up to timeout seconds for the first, None = forever. Returns the
                 count run, or STATE from a callback or while another thread dispatches it."""
         dispatch = self._node._lib.rant_queue_dispatch
-        return self._node._gate.wait_sliced(_ms(timeout), int(SendStatus.STATE), self._q,
+        return self._node._gate.wait_sliced(_ms(timeout), int(RantResult.STATE), self._q,
                                             lambda q, ms: dispatch(q, max_callbacks, ms))
 
     @property
@@ -2032,7 +2032,7 @@ class Node:
             rc = lib.rant_node_set_event_queue(h, self._queue._q)
             if rc != 0:
                 self.close(False)
-                raise Error("Node(...) event queue failed: %s" % _send_status(rc))
+                raise Error("Node(...) event queue failed: %s" % _result(rc))
         if self._threading != Threading.MANUAL:
             rc = lib.rant_node_start(h)
             if rc != 0 and self._threading == Threading.DISPATCH:
@@ -2041,7 +2041,7 @@ class Node:
                 self.close(False)
                 raise Error("Node(...) service thread start failed: %s (open with "
                             "threading=rant.Threading.MANUAL and poll() the node)"
-                            % _send_status(rc))
+                            % _result(rc))
 
     @property
     def name(self):
@@ -2219,10 +2219,10 @@ class Node:
 
     def log(self, level, text):
         """Publish a log line at a DiagnosticLevel, truncated at RANT_LOG_MAX. A level below the node's
-                log_level sends nothing. Returns a SendStatus, NOSYS when logs are disabled."""
+                log_level sends nothing. Returns a RantResult, DISABLED when logs are disabled."""
         b = text.encode("utf-8") if isinstance(text, str) else bytes(text)
         with self._gate.use(self._h) as h:
-            return _send_status(self._lib.rant_node_log_text(h, int(level), b, len(b)))
+            return _result(self._lib.rant_node_log_text(h, int(level), b, len(b)))
 
     def on_log(self, handler):
         """Deliver every other node's log lines to handler as a LogLine, on the polling
@@ -2249,26 +2249,26 @@ class Node:
     def set_status(self, key, level, text, clearable=False):
         """Raise the condition key on this node's status, or update it while it is active:
                 since_us stays from the raise, and the same values again send nothing. Readers
-                see it after the next loop pass. Returns a SendStatus, TOO_BIG for a key over 48
-                bytes or past 32 conditions, NOSYS when status is disabled. A clearable one may
+                see it after the next loop pass. Returns a RantResult, TOO_BIG for a key over 48
+                bytes or past 32 conditions, DISABLED when status is disabled. A clearable one may
                 be cleared by another node with clear_peer_status, and this node then gets an
                 EventKind.STATUS_CLEARED event."""
         opts = _c.RantStatusOpts(clearable=1 if clearable else 0)
         with self._gate.use(self._h) as h:
-            return _send_status(self._lib.rant_node_set_status(
+            return _result(self._lib.rant_node_set_status(
                 h, key.encode("utf-8"), int(level), (text or "").encode("utf-8"), _c.byref(opts)))
 
     def clear_status(self, key):
         """Clear the condition key, OK whether or not it was active."""
         with self._gate.use(self._h) as h:
-            return _send_status(self._lib.rant_node_clear_status(h, key.encode("utf-8")))
+            return _result(self._lib.rant_node_clear_status(h, key.encode("utf-8")))
 
     def clear_peer_status(self, node_id, key, since_us):
         """Ask another node to clear its clearable condition key, the occurrence raised at
                 since_us. Nothing answers: its next StatusUpdate shows it gone, or still there
                 when it refused. BAD_ROLE while this node does not read status with on_status."""
         with self._gate.use(self._h) as h:
-            return _send_status(self._lib.rant_node_clear_peer_status(h, node_id, key.encode("utf-8"), since_us))
+            return _result(self._lib.rant_node_clear_peer_status(h, node_id, key.encode("utf-8"), since_us))
 
     def on_status(self, handler):
         """Deliver every other node's status to handler as a StatusUpdate, where the node's
@@ -2319,14 +2319,14 @@ class Node:
             if self._queue is not None:
                 rc = set_queue(nh, self._queue._q)
                 if rc != 0:
-                    raise Error("%s: queue refused: %s" % (what, _send_status(rc)), self.last_error)
+                    raise Error("%s: queue refused: %s" % (what, _result(rc)), self.last_error)
             index = self._lib.rant_topic_index(h)
             self._set_sub_handler(index, deliver)
             rc = self._lib.rant_topic_set_role(h, _ROLE_PUBSUB)
             if rc != 0:
                 with self._pat_lock:
                     self._sub_handlers.pop(index, None)
-                raise Error("%s: subscribe refused: %s" % (what, _send_status(rc)), self.last_error)
+                raise Error("%s: subscribe refused: %s" % (what, _result(rc)), self.last_error)
 
     @property
     def reflection(self):
@@ -2520,11 +2520,11 @@ class Reflection:
 
     def meta_async(self, peer, on_snapshot, sections=MetaSection.ALL):
         """Async: a @rant/meta call directed at peer. on_snapshot fires once from the polling
-                thread. Returns the launch SendStatus."""
+                thread. Returns the launch RantResult."""
         fn = self._meta_function()
         if fn is None:
             on_snapshot(MetaSnapshot(status=CallStatus.NO_HANDLER))
-            return SendStatus.NO_TOPIC
+            return RantResult.NO_TOPIC
         req = b"" if int(sections) == 0 else _struct.pack("<I", int(sections))
         return fn.call_async(req, lambda r: on_snapshot(MetaSnapshot._from_response(r)),
                              provider=peer)
@@ -2694,13 +2694,13 @@ class Deferred:
 
 class Response:
     """An owning call outcome, the payload copied out. status and data never raise, reading
-        value when not ok raises CallError. send_status carries a synchronous refusal."""
-    __slots__ = ("status", "send_status", "provider", "written_us", "data", "message",
+        value when not ok raises CallError. send_result carries a synchronous refusal."""
+    __slots__ = ("status", "send_result", "provider", "written_us", "data", "message",
                  "_value", "_decoded")
 
     def __init__(self):
         self.status = CallStatus.TIMEOUT
-        self.send_status = SendStatus.OK
+        self.send_result = RantResult.OK
         self.provider = 0
         self.written_us = 0   # the provider's wall clock when it wrote the reply (0 = synthesized)
         self.data = b""
@@ -2744,11 +2744,11 @@ class Response:
         if not self.ok and not self.data:
             name = self.status.name if isinstance(self.status, CallStatus) else self.status
             tail = "" if not self.message else " (%s)" % self.message
-            tail += "" if self.send_status == SendStatus.OK else " (send %s)" % self.send_status
-            raise CallError(self.status, self.send_status,
+            tail += "" if self.send_result == RantResult.OK else " (send %s)" % self.send_result
+            raise CallError(self.status, self.send_result,
                             "call did not complete OK: %s%s" % (name, tail))
         if not self._decoded:
-            raise CallError(self.status, self.send_status, "response payload failed to decode")
+            raise CallError(self.status, self.send_result, "response payload failed to decode")
         return self._value
 
     def __repr__(self):
@@ -2867,15 +2867,15 @@ class TaskContext:
     __class_getitem__ = classmethod(_generic)
 
     def progress(self, value=None):
-        """Broadcast a progress update, encoded via the progress schema. Returns a SendStatus,
+        """Broadcast a progress update, encoded via the progress schema. Returns a RantResult,
                 STATE once the call completed."""
         with self._st.use(self._gate) as fn:
             if not fn:
-                return SendStatus.STATE
+                return RantResult.STATE
             b, buf = _c_view(_payload_bytes(self._prg_schema, value))
             r = _c.load().rant_function_progress(fn, self._token, b)
         del buf
-        return _send_status(r)
+        return _result(r)
 
     @property
     def cancelled(self):
@@ -3153,7 +3153,7 @@ class RemoteFunction(_Function):
         # held through the copy of the outcome, which points into the node
         with self._use() as fn:
             if not fn:
-                r.send_status = SendStatus.NO_TOPIC
+                r.send_result = RantResult.NO_TOPIC
                 return r
             b, buf = _c_view(_payload_bytes(self._req_schema, req))
             rc = self._node._lib.rant_function_call(fn, b, _c.byref(out), _ms(timeout),
@@ -3162,13 +3162,13 @@ class RemoteFunction(_Function):
             if rc == 1:
                 return Response._from_c(out, self._rsp_schema)
             if rc < 0:
-                r.send_status = _send_status(rc)   # never launched: message stays ""
+                r.send_result = _result(rc)   # never launched: message stays ""
             else:
                 r.message = _dstr(out.message)     # timed out: the C fills "timeout"
         return r
 
     def call_async(self, req, on_response, provider=0):
-        """Async call: returns the launch SendStatus once the request is committed, and
+        """Async call: returns the launch RantResult once the request is committed, and
                 on_response fires exactly once with an owning Response from the polling thread."""
         if not callable(on_response):
             raise TypeError("on_response must be callable")
@@ -3183,12 +3183,12 @@ class RemoteFunction(_Function):
                                                           _c.c_void_p(box_id),
                                                           _c.cast(_c.byref(co), _c.c_void_p) if co else None)
         del buf
-        st = _send_status(rc)
+        st = _result(rc)
         if rc != 0:
             _pbox_pop(box_id)
             self._node._drop_async(box_id)
             r = Response()
-            r.send_status = st
+            r.send_result = st
             try:
                 on_response(r)
             except Exception:
@@ -3293,7 +3293,7 @@ class RemoteTask(_Function):
         # held through the copy of the outcome, which points into the node
         with self._use() as fn:
             if not fn:
-                r.send_status = SendStatus.NO_TOPIC
+                r.send_result = RantResult.NO_TOPIC
                 return r
             b, buf = _c_view(_payload_bytes(self._req_schema, req))
             rc = self._node._lib.rant_function_call(fn, b, _c.byref(out), _ms(timeout),
@@ -3302,7 +3302,7 @@ class RemoteTask(_Function):
             if rc == 1:
                 return Response._from_c(out, self._rsp_schema)
             if rc < 0:
-                r.send_status = _send_status(rc)   # never launched: message stays ""
+                r.send_result = _result(rc)   # never launched: message stays ""
             else:
                 r.message = _dstr(out.message)     # timed out: the C fills "timeout"
         return r
@@ -3333,7 +3333,7 @@ class RemoteTask(_Function):
             _pbox_pop(box_id)
             self._node._drop_async(box_id)
             r = Response()
-            r.send_status = _send_status(rc)
+            r.send_result = _result(rc)
             try:
                 on_response(r)
             except Exception:
@@ -3345,7 +3345,7 @@ class RemoteTask(_Function):
         """Request cancellation of the call. Cooperative and never acked, the terminal status
                 answers. BAD_ROLE when the provider declared no_cancel, STATE when not pending."""
         with self._use() as fn:
-            return _send_status(self._node._lib.rant_function_cancel(fn, int(call_id)))
+            return _result(self._node._lib.rant_function_cancel(fn, int(call_id)))
 
 
 class CallEvent:
@@ -3427,7 +3427,7 @@ class CallObserver:
 class Variable:
     """The surface shared by VariableDefinition and RemoteVariable: read the latest value,
         write, force and observe. Reads are local and status free, every write returns its
-        SendStatus."""
+        RantResult."""
     __slots__ = ("_node", "_st", "_schema", "_name")
 
     def _create(self, node, name, schema, co, remote):
@@ -3487,11 +3487,11 @@ class Variable:
                 matched, BAD_ROLE = the owner advertises no set channel."""
         with self._use() as v:
             if not v:
-                return SendStatus.NO_TOPIC
+                return RantResult.NO_TOPIC
             b, buf = _c_view(_payload_bytes(self._schema, value))
             r = self._node._lib.rant_variable_set(v, b)
         del buf
-        return _send_status(r)
+        return _result(r)
 
     def force(self, value):
         """Force the value: sets are absorbed into the shadow source until unforce restores the
@@ -3499,15 +3499,15 @@ class Variable:
                 without it, BAD_ROLE on a remote whose owner advertises none."""
         with self._use() as v:
             if not v:
-                return SendStatus.NO_TOPIC
+                return RantResult.NO_TOPIC
             b, buf = _c_view(_payload_bytes(self._schema, value))
             r = self._node._lib.rant_variable_force(v, b)
         del buf
-        return _send_status(r)
+        return _result(r)
 
     def unforce(self):
         with self._use() as v:
-            return _send_status(self._node._lib.rant_variable_unforce(v))
+            return _result(self._node._lib.rant_variable_unforce(v))
 
     @property
     def forced(self):
@@ -3524,7 +3524,7 @@ class Variable:
 
         def step(st, ms):
             with st.use(gate) as v:   # a pass per slice, so close waits at most one
-                return wait(v, ms) if v else int(SendStatus.NO_TOPIC)
+                return wait(v, ms) if v else int(RantResult.NO_TOPIC)
         return gate.wait_sliced(_ms(timeout), 0, self._st, step) == 1
 
     @property
@@ -3644,7 +3644,7 @@ class Publisher:
     def send(self, value, capture_us=0):
         """Publish one message to every matched subscriber: a typed value, a mapping, or
                 bytes or str on a raw topic. capture_us is when the data was true rather than
-                when it was sent, in types.now() units, 0 = unstated. Returns a SendStatus."""
+                when it was sent, in types.now() units, 0 = unstated. Returns a RantResult."""
         return self._topic.send(value, capture_us)
 
     @property

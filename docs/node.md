@@ -165,15 +165,15 @@ costs nothing on the data path, and `RANT_NO_DIAG` strips the text.
 A log line says something happened. A status condition says something holds until it
 clears, such as an e-stop pressed or a drive fault. Both carry a level and an origin:
 
-- `RantLevel` rises: `RANT_LEVEL_DEBUG`, `RANT_LEVEL_INFO`, `RANT_LEVEL_WARN`,
-  `RANT_LEVEL_ERROR`.
+- `RantDiagnosticLevel` rises: `RANT_DIAGNOSTIC_LEVEL_DEBUG`, `RANT_DIAGNOSTIC_LEVEL_INFO`, `RANT_DIAGNOSTIC_LEVEL_WARN`,
+  `RANT_DIAGNOSTIC_LEVEL_ERROR`.
 - `RantOrigin` is `RANT_ORIGIN_APP` for what the app wrote and `RANT_ORIGIN_RANT` for
   Rant's own.
 
 ### Log
 
 Every node hosts one shared reliable topic, `@rant/log`, carrying
-`RantLog { level: RantLevel, origin: RantOrigin, text: string }`.
+`RantLog { level: RantDiagnosticLevel, origin: RantOrigin, text: string }`.
 
 - `rant_node_log(n, level, fmt, ...)` publishes a line, also from inside callbacks.
   `rant_node_log_text` takes formatted text. Text past `RANT_LOG_MAX` (512) bytes is cut.
@@ -190,7 +190,7 @@ Every node hosts one shared reliable topic, `@rant/log`, carrying
 - `opts.disable_logs` strips the topic.
 
 ```c
-rant_node_log(n, RANT_LEVEL_WARN, "battery at %d%%", pct);
+rant_node_log(n, RANT_DIAGNOSTIC_LEVEL_WARN, "battery at %d%%", pct);
 ```
 
 ### Status
@@ -210,7 +210,7 @@ A node's status is the set of conditions active on it now, published whole on
   reaches `on_message` as `RantStatus { conditions: RantCondition[] }`, inline or on the
   queue given to `rant_node_set_status_queue`, and replaces that node's previous one. A
   node's conditions end with its `RANT_PEER_DOWN`.
-- `RantCondition { key: string<48>, level: RantLevel, origin: RantOrigin,
+- `RantCondition { key: string<48>, level: RantDiagnosticLevel, origin: RantOrigin,
   clearable: bool, since_us: u64, text: string<160> }`. `since_us` is the owner's UTC clock
   at the raise and stays through updates.
 - `opts.disable_status` strips the topics.
@@ -220,13 +220,13 @@ operator resetting a latched fault from an HMI.
 
 - `rant_node_clear_peer_status(n, peer, key, since_us)` asks `peer` to clear it. `since_us`
   is the one its last set reported, so a clear never lands on a later raise of the key.
-  It is `RANT_ERR_ROLE` while this node does not read status.
+  It is `RANT_ERR_BAD_ROLE` while this node does not read status.
 - Nothing answers. The owner clears it, fires `RANT_STATUS_CLEARED` with `.peer` the asker
   and `.detail` the key, and publishes the smaller set. A clear of a condition that is
   missing, not clearable or raised again is dropped with a Debug line from Rant.
 
 ```c
-rant_node_set_status(n, "drive2", RANT_LEVEL_ERROR, "drive 2 tripped on overcurrent",
+rant_node_set_status(n, "drive2", RANT_DIAGNOSTIC_LEVEL_ERROR, "drive 2 tripped on overcurrent",
                      &(RantStatusOpts){ .clearable = 1 });
 /* in on_event */
 if (ev->kind == RANT_STATUS_CLEARED && !strcmp(ev->detail, "drive2")) reset_drive(2);

@@ -57,7 +57,7 @@ node.subscriber("Line1/Conveyor", Conveyor, (c) => console.log(c.speed));
 
 ## Topics
 
-- `node.publisher(name, schema, options)`: `send(value, captureUs?)` returns a SendStatus,
+- `node.publisher(name, schema, options)`: `send(value, captureUs?)` returns a RantResult,
   `matchCount`, `ready`, `drain(timeoutMs)`, `counts`.
 - `node.subscriber(name, schema, handler?, options)`: the handler gets `(value, msg)`. A
   `Message` has `value`, `data`, `publisherId`, `publisherName`, `topicName`, `recvUs`,
@@ -71,7 +71,7 @@ node.subscriber("Line1/Conveyor", Conveyor, (c) => console.log(c.speed));
   type.
 - A name may end in a field path to receive one field. The whole sample still travels:
   `node.subscriber("Gp12/RobotState.servo_power", bool, (on) => ...)`.
-- SendStatus: `"ok"`, `"no_topic"`, `"too_big"`, `"role"`, `"oom"`, `"state"`, `"nosys"`,
+- RantResult: `"ok"`, `"no_topic"`, `"too_big"`, `"bad_role"`, `"out_of_memory"`, `"state"`, `"disabled"`,
   `"schema"`.
 
 ## Functions and tasks
@@ -108,7 +108,7 @@ const r = await add.call({ a: 2, b: 3 });     // r.status "ok", r.value { sum: 5
   options)`. Options: `initial`, `readOnly`, `allowForce`, `catchUp`, `keepLast`,
   `backpressureWaitMs`, `reflectFromMesh`.
 - `get()` is undefined before a value. `set(v)`, `force(v)` and `unforce()` return a
-  SendStatus. `forced`, `wait(timeoutMs)`, `matchCount`.
+  RantResult. `forced`, `wait(timeoutMs)`, `matchCount`.
 - `onChange(handler)` fires with the current value, then on each change. `onWrite(handler)`
   fires on every applied write. Both get `(value, update)`, and null stops them.
 - A remote name may end in a field path, and that remote then reads and sets only its

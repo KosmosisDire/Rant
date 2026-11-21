@@ -11,7 +11,7 @@ import { encodeUtf8, Native, scoped, type Scope } from "./wasm.js";
 
 /* ---- public types ------------------------------------------------------------------------- */
 
-export type SendStatus = "ok" | "no_topic" | "too_big" | "role" | "oom" | "state" | "nosys" | "schema";
+export type RantResult = "ok" | "no_topic" | "too_big" | "bad_role" | "out_of_memory" | "state" | "disabled" | "schema";
 export type CallStatus = "ok" | "app_error" | "no_handler" | "timeout" | "peer_lost" | "cancelled" | "running" | "no_provider";
 export type CancelStatus = "ok" | "no_cancel" | "not_pending";
 /* the severity of a log line or a status condition, rising */
@@ -27,7 +27,7 @@ export type ErrorKind =
     | "recv" | "poll" | "waker" | "bad_address" | "bad_name" | "state" | "bad_schema" | "bad_domain"
     | "bad_prefix" | "bad_log_level" | "wire_version" | "bridge";
 
-const SEND: Record<number, SendStatus> = { 0: "ok", [-1]: "no_topic", [-2]: "too_big", [-3]: "role", [-4]: "oom", [-5]: "state", [-6]: "nosys", [-7]: "schema" };
+const SEND: Record<number, RantResult> = { 0: "ok", [-1]: "no_topic", [-2]: "too_big", [-3]: "bad_role", [-4]: "out_of_memory", [-5]: "state", [-6]: "disabled", [-7]: "schema" };
 /* A step of a call, as a call observer sees it. */
 export type CallEventKind = "call" | "running" | "progress" | "cancel" | "end";
 const CALL_EVENT: CallEventKind[] = ["call", "running", "progress", "cancel", "end"];
@@ -47,7 +47,7 @@ const ERROR: ErrorKind[] = [
     "unmatched_send", "duplicate_authority", "oom", "platform", "socket", "bind", "mcast_join", "send", "recv",
     "poll", "waker", "bad_address", "bad_name", "state", "bad_schema", "bad_domain", "bad_prefix", "bad_log_level",
     "wire_version", "bridge"];
-const sendStatus = (r: number): SendStatus => SEND[r] ?? "state";
+const sendStatus = (r: number): RantResult => SEND[r] ?? "state";
 
 /* The section mask of a meta snapshot, 0 for all of them. */
 export const MetaSection = { node: 1, proc: 2, topics: 4, peers: 8 } as const;
@@ -145,7 +145,7 @@ export interface Request {
 
 /* What a task handler works through. Throw CancelledError, or the signal's reason, to answer cancelled. */
 export interface TaskContext<Prg> extends Request {
-    progress(value: Prg): SendStatus;
+    progress(value: Prg): RantResult;
     readonly cancelled: boolean;
     readonly signal: AbortSignal;
 }
@@ -154,7 +154,7 @@ export interface TaskContext<Prg> extends Request {
 export interface Response<T> {
     ok: boolean; status: CallStatus;
     /* why the call was never sent, "ok" when it was */
-    sendStatus: SendStatus;
+    sendStatus: RantResult;
     value: T | undefined; hasValue: boolean; data: Uint8Array;
     /* the outcome text to show, the status's own when the provider gave none */
     message: string;
@@ -753,8 +753,8 @@ export class RantNode {
         return this.until(() => !!this.h && this.n.c.rant_node_settle(this.h, 0) === 1, timeoutMs);
     }
 
-    /* Publishes a log line, truncated at 512 bytes. A level below logLevel sends nothing. "nosys" when logs are disabled. */
-    log(level: DiagnosticLevel, text: string): SendStatus {
+    /* Publishes a log line, truncated at 512 bytes. A level below logLevel sends nothing. "disabled" when logs are disabled. */
+    log(level: DiagnosticLevel, text: string): RantResult {
         const h = this.live();
         const b = encodeUtf8(text);
         const r = scoped(this.n, (sc) => this.n.c.rant_node_log_text(h, LEVELS.indexOf(level) + 1, sc.data(b), b.length));
@@ -771,8 +771,8 @@ export class RantNode {
     }
 
     /* Raises the condition key on this node's status, or updates it while active: sinceUs stays from the raise and the
-     * same values again send nothing. "too_big" for a key over 48 bytes or past 32 conditions, "nosys" when disabled. */
-    setStatus(key: string, level: DiagnosticLevel, text: string, opts: { clearable?: boolean } = {}): SendStatus {
+     * same values again send nothing. "too_big" for a key over 48 bytes or past 32 conditions, "disabled" when disabled. */
+    setStatus(key: string, level: DiagnosticLevel, text: string, opts: { clearable?: boolean } = {}): RantResult {
         const h = this.live();
         const r = scoped(this.n, (sc) => {
             const so = sc.alloc(L.RantStatusOpts.sizeof);
@@ -784,7 +784,7 @@ export class RantNode {
     }
 
     /* Clears the condition key, "ok" whether or not it was active. */
-    clearStatus(key: string): SendStatus {
+    clearStatus(key: string): RantResult {
         const h = this.live();
         const r = scoped(this.n, (sc) => this.n.c.rant_node_clear_status(h, sc.cstr(key)));
         this.n.wake();
@@ -792,9 +792,9 @@ export class RantNode {
     }
 
     /* Asks another node to clear its clearable condition key, the occurrence raised at sinceUs. Nothing answers:
-     * its next status shows it gone, or still there when it refused. "role" while this node does not read
+     * its next status shows it gone, or still there when it refused. "bad_role" while this node does not read
      * status with onStatus. */
-    clearPeerStatus(nodeId: number, key: string, sinceUs: number): SendStatus {
+    clearPeerStatus(nodeId: number, key: string, sinceUs: number): RantResult {
         const h = this.live();
         const r = scoped(this.n, (sc) => this.n.c.rant_node_clear_peer_status(h, nodeId, sc.cstr(key), BigInt(sinceUs)));
         this.n.wake();
@@ -1005,7 +1005,7 @@ export class Publisher<T> extends TopicHandle {
     }
 
     /* Publishes to every matched subscriber. captureUs is when the data was true, if not now. */
-    send(value: T, captureUs = 0): SendStatus {
+    send(value: T, captureUs = 0): RantResult {
         const t = this.t(), n = this.node.n;
         if (!t) return "no_topic";
         let r: number;
@@ -1239,7 +1239,7 @@ function responseFrom<T>(node: RantNode, p: number, names: Names | null): Respon
              data: bytes, message: n.strAt(p + R.message), provider: n.u32(p + R.provider), writtenUs: n.us(p + R.written_us) };
 }
 
-function failed<T>(status: CallStatus, message: string, sendStatus: SendStatus = "ok"): Response<T> {
+function failed<T>(status: CallStatus, message: string, sendStatus: RantResult = "ok"): Response<T> {
     return { ok: false, status, sendStatus, value: undefined, hasValue: false, data: new Uint8Array(0), message, provider: 0, writtenUs: 0 };
 }
 
@@ -1346,7 +1346,7 @@ export class TaskDefinition<Req, Prg, Rsp> extends FunctionHandle {
         const ctx: TaskContext<Prg> = {
             ...call.info, signal: ctrl.signal,
             get cancelled() { return ctrl.signal.aborted || (!!self.h && n.c.rant_function_cancelled(self.h, token) === 1); },
-            progress: (v: Prg): SendStatus => {
+            progress: (v: Prg): RantResult => {
                 const h = this.h;
                 if (finished || !h) return "state";
                 let r: number;
@@ -1488,10 +1488,10 @@ export class Variable<T> extends Handle {
     }
 
     /* An owner applies and publishes, a remote sends the write to the owner. */
-    set(value: T): SendStatus { return this.write(value, false); }
+    set(value: T): RantResult { return this.write(value, false); }
     /* Overrides the value until unforce. */
-    force(value: T): SendStatus { return this.write(value, true); }
-    unforce(): SendStatus {
+    force(value: T): RantResult { return this.write(value, true); }
+    unforce(): RantResult {
         if (!this.h) return "no_topic";
         const r = this.node.n.c.rant_variable_unforce(this.h);
         this.node.n.wake();
@@ -1499,7 +1499,7 @@ export class Variable<T> extends Handle {
     }
     get forced(): boolean { return !!this.h && this.node.n.c.rant_variable_forced(this.h) === 1; }
 
-    private write(value: T, force: boolean): SendStatus {
+    private write(value: T, force: boolean): RantResult {
         const h = this.h, node = this.node, n = node.n;
         if (!h) return "no_topic";
         let r: number;

@@ -193,8 +193,8 @@ namespace Rant
         internal override bool PubReady() => _pub.Ready;
         internal override (uint, uint, uint, uint) SubQueueStats() => _sub.QueueStats();
 
-        public SendStatus Publish(byte[] data)
-            => PubOpen() ? _pub.Send(data) : SendStatus.NoTopic;
+        public RantResult Publish(byte[] data)
+            => PubOpen() ? _pub.Send(data) : RantResult.NoTopic;
 
         public RantSubscription Subscribe(Action<RantMessage> handler)
         {
@@ -233,8 +233,8 @@ namespace Rant
         internal override bool PubReady() => _pub.Ready;
         internal override (uint, uint, uint, uint) SubQueueStats() => _sub.QueueStats();
 
-        public SendStatus Publish(T message)
-            => PubOpen() ? _pub.Send(message) : SendStatus.NoTopic;
+        public RantResult Publish(T message)
+            => PubOpen() ? _pub.Send(message) : RantResult.NoTopic;
 
         public RantSubscription Subscribe(Action<T> handler)
         {

@@ -177,7 +177,7 @@ MinGW g++, clang++, clang-cl and MSVC, and clean under `-fno-exceptions -fno-rtt
   (spec/schema.md), so a pointer never names two schemas.
 - Encoding is strict. `priv::encode` returns `std::optional<Bytes>` into a thread local
   scratch buffer, empty when the value does not fit, such as an over long `String<N>`.
-  A send or set then answers `SendStatus::Schema` and a reply answers AppError, never a
+  A send or set then answers `RantResult::Schema` and a reply answers AppError, never a
   cut or empty message.
 - A type's plan is built once from its members: fixed leaves copied at their wire offsets,
   and each variable value (`std::string`, `std::vector<E>`, an array of variable

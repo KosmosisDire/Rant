@@ -136,7 +136,7 @@ RANT_API int    rant_function_match_count(RantFunction *fn);
  * the node, it assumes no other thread is inside a call on the handle. */
 RANT_API int    rant_function_retire(RantFunction *fn);
 /* A reflect_from_mesh handle: re types every channel in place when the generation moved.
- * 1 re typed, 0 current, negative on error, RANT_ERR_ROLE without the flag, RANT_ERR_STATE
+ * 1 re typed, 0 current, negative on error, RANT_ERR_BAD_ROLE without the flag, RANT_ERR_STATE
  * from a callback or while a channel's dispatch runs. */
 RANT_API int    rant_function_refresh(RantFunction *fn);
 /* The schemas a function or task handle uses now, NULL when untyped. A function has no
@@ -167,7 +167,7 @@ typedef struct {
                                        and the RxO rule composes them */
     uint16_t progress_keep_last;    /* the progress ring depth, 0 = the pattern default */
     uint8_t  no_cancel;             /* definition: will not honor cancellation, so remotes refuse
-                                       rant_function_cancel with RANT_ERR_ROLE */
+                                       rant_function_cancel with RANT_ERR_BAD_ROLE */
     uint8_t  exclusive;             /* definition: declared serialization, the handler enforces */
     uint8_t  multi;                 /* redundant providers intended, one executor per request */
     uint32_t timeout_us;            /* remote: the until first response bound, 0 = the default */
@@ -199,7 +199,7 @@ RANT_API int rant_function_cancelled(RantFunction *fn, uint64_t token);
 typedef void (*RantCancelFn)(uint64_t token, void *user);
 RANT_API int rant_function_on_cancel(RantFunction *def, RantCancelFn on_cancel, void *user);
 /* Requests cancellation of call_id, cooperative and never acked: the terminal status is the
- * answer. RANT_ERR_ROLE when the provider declared no_cancel, RANT_ERR_STATE when not pending. */
+ * answer. RANT_ERR_BAD_ROLE when the provider declared no_cancel, RANT_ERR_STATE when not pending. */
 RANT_API int rant_function_cancel(RantFunction *fn, uint32_t call_id);
 
 /* Call observers: any node can watch the calls of a function or task. Its definition reports
@@ -289,11 +289,11 @@ RANT_API RantVariable *rant_node_create_remote_variable(RantNode *n, const char 
  * field, NULL = raw bytes. Either may be NULL. 1 if a value exists. */
 RANT_API int    rant_variable_get(RantVariable *var, RantBytes *out, const RantSchema **schema);
 /* Sets the value: a definition applies and publishes, a remote sends over the set channel.
- * RANT_ERR_NO_TOPIC = no owner matched, RANT_ERR_ROLE = a read only owner. docs/patterns.md. */
+ * RANT_ERR_NO_TOPIC = no owner matched, RANT_ERR_BAD_ROLE = a read only owner. docs/patterns.md. */
 RANT_API int    rant_variable_set(RantVariable *var, RantBytes value);
 /* Force overrides the value until unforce restores the latest absorbed set. A definition
  * needs .allow_force (RANT_ERR_STATE without), and a remote's force against an owner that
- * advertises none is refused with RANT_ERR_ROLE, nothing sent. */
+ * advertises none is refused with RANT_ERR_BAD_ROLE, nothing sent. */
 RANT_API int    rant_variable_force(RantVariable *var, RantBytes value);
 RANT_API int    rant_variable_unforce(RantVariable *var);
 RANT_API int    rant_variable_forced(RantVariable *var);

@@ -94,7 +94,7 @@ static int i_rant_writer_store(i_RantTransportState *st, i_RantTopic *topic,
         size_t need = len ? len : 1u;
         if ((size_t)slot->cap < need){                    /* grow the slot to fit */
             uint8_t *new_buf = (uint8_t*)st->cfg.bulk(st->cfg.user, slot->buf, need);
-            if (!new_buf) return RANT_ERR_OOM;
+            if (!new_buf) return RANT_ERR_OUT_OF_MEMORY;
             slot->buf = new_buf; slot->cap = (uint32_t)need;
         }
     }
@@ -128,7 +128,7 @@ static int i_rant_writer_send(i_RantTransportState *st, uint16_t topic_index,
     if (i_rant_writer_too_big(st, topic,
             i_rant_topic_stamp_bytes(topic, capture_us) + hdr.len + data.len))
         return RANT_ERR_TOO_BIG;
-    if (topic->role == RANT_SUB_ONLY || topic->role == RANT_INACTIVE) return RANT_ERR_ROLE;
+    if (topic->role == RANT_SUB_ONLY || topic->role == RANT_INACTIVE) return RANT_ERR_BAD_ROLE;
     /* nobody subscribes and nothing durable to keep: skip the grow, the copy and the commit */
     if (topic->matched_writers == 0 && !i_rant_topic_retains_history(topic)) return RANT_OK;
     r = i_rant_writer_store(st, topic, hdr, data, capture_us, &len);
@@ -170,7 +170,7 @@ int i_rant_transport_send_shm(i_RantTransportState *st, uint16_t topic_index, Ra
     topic = i_rant_topic_at(st, topic_index, NULL);
     if (!topic) return RANT_ERR_NO_TOPIC;
     if (len > 65535u*(uint32_t)st->frag) return RANT_ERR_TOO_BIG;        /* the fragment count cap */
-    if (topic->role == RANT_SUB_ONLY || topic->role == RANT_INACTIVE) return RANT_ERR_ROLE;
+    if (topic->role == RANT_SUB_ONLY || topic->role == RANT_INACTIVE) return RANT_ERR_BAD_ROLE;
     slot = &topic->history[topic->history_head];
     slot->shm = 1;
     slot->shm_buf = chunk.data;

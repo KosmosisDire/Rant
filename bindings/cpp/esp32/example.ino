@@ -56,6 +56,6 @@ void loop()
   char line[64];
   int  n = snprintf(line, sizeof line, "hello #%lu from esp32",
                     (unsigned long)++g_seq);
-  if (g_chat.send(rant::Bytes(line, (size_t)n)) != rant::SendStatus::Ok)
+  if (g_chat.send(rant::Bytes(line, (size_t)n)) != rant::RantResult::Ok)
       Serial.println("  (send failed)");
 }

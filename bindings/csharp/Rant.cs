@@ -37,7 +37,7 @@ namespace Rant
     internal enum Role { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 }
 
     /// <summary>What a send or set did. Every value but Ok means nothing was sent.</summary>
-    public enum SendStatus
+    public enum RantResult
     {
         /// <summary>Sent, or queued to send.</summary>
         Ok = 0,
@@ -53,7 +53,7 @@ namespace Rant
         /// handler may not make.</summary>
         State = -5,
         /// <summary>Not compiled in, such as a service thread in a build without threads.</summary>
-        NoSys = -6,
+        Disabled = -6,
         /// <summary>The payload is not a message of the topic's schema.</summary>
         Schema = -7
     }
@@ -155,7 +155,7 @@ namespace Rant
     }
 
     /// <summary>A schema field's kind, valued as its wire kind byte.</summary>
-    public enum FieldType : byte
+    public enum SchemaTypeKind : byte
     {
         /// <summary>An unsigned 8 bit integer.</summary>
         U8 = 0,
@@ -1074,7 +1074,7 @@ namespace Rant
         /// inline callback, while another thread dispatches this queue, or once the node
         /// closed.</summary>
         public int Dispatch(int maxCallbacks = 0, int timeoutMs = 0)
-            => Node.Gate.WaitSliced(timeoutMs, (int)SendStatus.State, (q: Handle, max: maxCallbacks),
+            => Node.Gate.WaitSliced(timeoutMs, (int)RantResult.State, (q: Handle, max: maxCallbacks),
                                     (s, ms) => Native.rant_queue_dispatch(s.q, s.max, ms));
 
         /// <summary>Records parked, and records dropped since open.</summary>
@@ -1110,11 +1110,11 @@ namespace Rant
         /// <summary>The send path match wait bound. 0 = 1 s, negative = off, and such a send
         /// fires UnmatchedSend instead of waiting.</summary>
         public int MatchWaitMs;
-        /// <summary>No @rant/log topic: Log returns NoSys.</summary>
+        /// <summary>No @rant/log topic: Log returns Disabled.</summary>
         public bool DisableLogs;
         /// <summary>The lowest level Log sends, null takes RANT_LOG_LEVEL, else Info.</summary>
         public DiagnosticLevel? LogLevel;
-        /// <summary>No @rant/status topics: SetStatus returns NoSys.</summary>
+        /// <summary>No @rant/status topics: SetStatus returns Disabled.</summary>
         public bool DisableStatus;
         /// <summary>No built in @rant/meta function.</summary>
         public bool DisableMeta;
@@ -1335,15 +1335,15 @@ namespace Rant
 
     /// <summary>The library refused something, and the base of every exception it throws. A
     /// failed create carries the C reason in Error. A refused action, such as a Dispose from
-    /// a callback or the Variable&lt;T&gt;.Value setter, carries its SendStatus.</summary>
+    /// a callback or the Variable&lt;T&gt;.Value setter, carries its RantResult.</summary>
     public class RantException : Exception
     {
         /// <summary>The refused status. Ok when the failure was a create: read Error.</summary>
-        public SendStatus SendStatus;
+        public RantResult Result;
         /// <summary>The C reason behind a failed create, else null.</summary>
         public RantEvent Error;
         /// <summary>A refused action and what was refused.</summary>
-        public RantException(SendStatus status, string m) : base(m) { SendStatus = status; }
+        public RantException(RantResult status, string m) : base(m) { Result = status; }
         /// <summary>A failed create and the C reason, which the message then carries.</summary>
         public RantException(string m, RantEvent error) : base(error != null ? m + ": " + error : m)
         { Error = error; }
@@ -1353,7 +1353,7 @@ namespace Rant
     public class SchemaException : RantException
     {
         /// <summary>A schema refusal with its reason.</summary>
-        public SchemaException(string m) : base(SendStatus.Schema, m) { }
+        public SchemaException(string m) : base(RantResult.Schema, m) { }
     }
 
     /// <summary>A call did not complete Ok: thrown by Call, CallAsync and
@@ -1364,9 +1364,9 @@ namespace Rant
         public CallStatus Status;
         /// <summary>The peer that answered, 0 when the outcome was synthesized here.</summary>
         public uint Provider;
-        /// <summary>A call outcome, the send status when the request never left, and the
+        /// <summary>A call outcome, the send result when the request never left, and the
         /// answering peer.</summary>
-        public CallException(CallStatus status, string m, SendStatus send = SendStatus.Ok, uint provider = 0)
+        public CallException(CallStatus status, string m, RantResult send = RantResult.Ok, uint provider = 0)
             : base(send, m) { Status = status; Provider = provider; }
     }
 
@@ -1461,7 +1461,7 @@ namespace Rant
                 fields[i] = new SchemaField
                 {
                     Index = i, Name = Codec.Str(info.name), TypeName = Codec.Str(info.type_name),
-                    Kind = (FieldType)info.kind, Backing = (FieldType)info.backing,
+                    Kind = (SchemaTypeKind)info.kind, Backing = (SchemaTypeKind)info.backing,
                     Count = info.count, Depth = info.depth, StrCap = info.str_cap,
                     ArrayParent = info.arr_parent == 0xFFFF ? -1 : info.arr_parent,
                     ArrayDepth = info.arr_depth,
@@ -1515,9 +1515,9 @@ namespace Rant
         /// <summary>The field type's name, "" when anonymous.</summary>
         public string TypeName;
         /// <summary>The field's kind.</summary>
-        public FieldType Kind;
+        public SchemaTypeKind Kind;
         /// <summary>An enum's backing integer kind.</summary>
-        public FieldType Backing;
+        public SchemaTypeKind Backing;
         /// <summary>A fixed array's element count, or an enum's option count.</summary>
         public int Count;
         /// <summary>0 at the top level, n for a row n types down.</summary>
@@ -1840,7 +1840,7 @@ namespace Rant
             var top = r.SchemaPtr != IntPtr.Zero ? Codec.DecodeDict(r.SchemaPtr, r.Data) : null;
             if (top == null || !(top.TryGetValue("info", out var io) && io is Dictionary<string, object> info))
                 throw new CallException(r.Status, "call '@rant/meta' answered a body with no info map",
-                                        SendStatus.Schema, r.Provider);
+                                        RantResult.Schema, r.Provider);
             s.Info = info;
             if (info.TryGetValue("node", out var no) && no is Dictionary<string, object> node)
             {
@@ -2012,18 +2012,18 @@ namespace Rant
         // Retires the handle once the calls on it are out, zeroing it in place. Inside one of the
         // node's callbacks it never waits, as that callback's caller may hold a pass: it answers
         // State while one is out, as the C refuses a retire there anyway.
-        internal SendStatus Close(RantNode node, Func<IntPtr, int> retire)
+        internal RantResult Close(RantNode node, Func<IntPtr, int> retire)
         {
-            if (Volatile.Read(ref Raw) == IntPtr.Zero) return SendStatus.Ok;
+            if (Volatile.Read(ref Raw) == IntPtr.Zero) return RantResult.Ok;
             using (Pass p = node.Gate.Enter())
             {
-                if (!p.Ok) { Invalidate(); return SendStatus.Ok; }   // freed with the node
+                if (!p.Ok) { Invalidate(); return RantResult.Ok; }   // freed with the node
                 if (!node.Gate.IsRunning) _gate.Close();
-                else if (!_gate.TryClose()) return SendStatus.State;
+                else if (!_gate.TryClose()) return RantResult.State;
                 IntPtr raw = Interlocked.Exchange(ref Raw, IntPtr.Zero);   // one close retires
-                if (raw == IntPtr.Zero) return SendStatus.Ok;
-                var rc = (SendStatus)retire(raw);
-                if (rc != SendStatus.Ok) { Volatile.Write(ref Raw, raw); _gate.Reopen(); }
+                if (raw == IntPtr.Zero) return RantResult.Ok;
+                var rc = (RantResult)retire(raw);
+                if (rc != RantResult.Ok) { Volatile.Write(ref Raw, raw); _gate.Reopen(); }
                 return rc;
             }
         }
@@ -2192,15 +2192,15 @@ namespace Rant
             return p;
         }
 
-        internal SendStatus Send(byte[] data, long captureUs)
+        internal RantResult Send(byte[] data, long captureUs)
         {
             using (Use(out IntPtr t))
             {
-                if (t == IntPtr.Zero) return SendStatus.NoTopic;
+                if (t == IntPtr.Zero) return RantResult.NoTopic;
                 using (var p = new PinnedBytes(data))
                 {
                     var o = new RantSendOpts { capture_us = (ulong)captureUs };
-                    return (SendStatus)Native.rant_topic_send(t, p.B, ref o);
+                    return (RantResult)Native.rant_topic_send(t, p.B, ref o);
                 }
             }
         }
@@ -2369,7 +2369,7 @@ namespace Rant
                 if (qrc != 0)
                 {
                     Close(false);
-                    throw new RantException((SendStatus)qrc, "event queue: " + (SendStatus)qrc);
+                    throw new RantException((RantResult)qrc, "event queue: " + (RantResult)qrc);
                 }
             }
             if (o.Threading != Threading.Manual)
@@ -2380,7 +2380,7 @@ namespace Rant
                 else if (rc != 0)
                 {
                     Close(false);
-                    throw new RantException((SendStatus)rc, "service thread start failed: " + (SendStatus)rc
+                    throw new RantException((RantResult)rc, "service thread start failed: " + (RantResult)rc
                         + " (open with Threading.Manual and Poll() the node)");
                 }
             }
@@ -2444,7 +2444,7 @@ namespace Rant
             using (Pass p = Gate.Enter())
             lock (_createLock)
             {
-                if (!p.Ok) throw new RantException(SendStatus.State, "topic '" + name + "' create failed: the node is closed");
+                if (!p.Ok) throw new RantException(RantResult.State, "topic '" + name + "' create failed: the node is closed");
                 qos = qos ?? new Qos();
                 var co = new RantTopicOpts
                 {
@@ -2475,7 +2475,7 @@ namespace Rant
                 ushort idx = Native.rant_topic_index(t._handle);
                 int r = Native.rant_topic_retire(t._handle);
                 if (r != 0)
-                    throw new RantException((SendStatus)r, "topic release refused: " + (SendStatus)r
+                    throw new RantException((RantResult)r, "topic release refused: " + (RantResult)r
                         + " (a Dispose from a service thread callback is refused)");
                 _topicTypes.Remove(idx);
                 RemoveSubHandler(idx);
@@ -2544,7 +2544,7 @@ namespace Rant
         public int Poll(int timeoutMs = 0)
         {
             using (Pass p = Gate.Enter())
-                return p.Ok ? Native.rant_node_poll(_handle, timeoutMs) : (int)SendStatus.State;
+                return p.Ok ? Native.rant_node_poll(_handle, timeoutMs) : (int)RantResult.State;
         }
 
         /// <summary>Block until discovery and matching settle, so everything sent now reaches
@@ -2672,13 +2672,13 @@ namespace Rant
         // ---- built-in log and status ---------------------------------------------------
 
         /// <summary>Publish a log line at a level (already formatted text, truncated at
-        /// RANT_LOG_MAX). A level below the node's LogLevel sends nothing. SendStatus.NoSys
+        /// RANT_LOG_MAX). A level below the node's LogLevel sends nothing. RantResult.Disabled
         /// when logs are disabled. Thread safe.</summary>
-        public SendStatus Log(DiagnosticLevel level, string text)
+        public RantResult Log(DiagnosticLevel level, string text)
         {
             byte[] b = Encoding.UTF8.GetBytes(text ?? "");
             using (Pass p = Gate.Enter())
-                return p.Ok ? (SendStatus)Native.rant_node_log_text(_handle, (int)level, b, b.Length) : SendStatus.State;
+                return p.Ok ? (RantResult)Native.rant_node_log_text(_handle, (int)level, b, b.Length) : RantResult.State;
         }
 
         private Action<RantLogLine> _onLog;
@@ -2725,33 +2725,33 @@ namespace Rant
         /// <summary>Raise the condition key on this node's status, or update it while it is
         /// active: SinceUs stays from the raise, and the same values again send nothing.
         /// Readers see it after the next loop pass. TooBig for a key over 48 bytes or past 32
-        /// conditions, NoSys when status is disabled. A clearable condition may be cleared by
+        /// conditions, Disabled when status is disabled. A clearable condition may be cleared by
         /// another node with ClearPeerStatus, and this node then sees EventKind.StatusCleared.</summary>
-        public SendStatus SetStatus(string key, DiagnosticLevel level, string text, bool clearable = false)
+        public RantResult SetStatus(string key, DiagnosticLevel level, string text, bool clearable = false)
         {
             var so = new RantStatusOpts { clearable = (byte)(clearable ? 1 : 0) };
             using (Pass p = Gate.Enter())
-                return p.Ok ? (SendStatus)Native.rant_node_set_status(_handle, Codec.CStr(key ?? ""), (int)level,
+                return p.Ok ? (RantResult)Native.rant_node_set_status(_handle, Codec.CStr(key ?? ""), (int)level,
                                                                        Codec.CStr(text ?? ""), ref so)
-                            : SendStatus.State;
+                            : RantResult.State;
         }
 
         /// <summary>Clear the condition key, Ok whether or not it was active.</summary>
-        public SendStatus ClearStatus(string key)
+        public RantResult ClearStatus(string key)
         {
             using (Pass p = Gate.Enter())
-                return p.Ok ? (SendStatus)Native.rant_node_clear_status(_handle, Codec.CStr(key ?? "")) : SendStatus.State;
+                return p.Ok ? (RantResult)Native.rant_node_clear_status(_handle, Codec.CStr(key ?? "")) : RantResult.State;
         }
 
         /// <summary>Ask another node to clear its clearable condition key, the occurrence
         /// raised at sinceUs. Nothing answers: its next RantStatusUpdate shows it gone, or
         /// still there when it refused. BadRole while this node does not read status with
         /// OnStatus.</summary>
-        public SendStatus ClearPeerStatus(uint nodeId, string key, ulong sinceUs)
+        public RantResult ClearPeerStatus(uint nodeId, string key, ulong sinceUs)
         {
             using (Pass p = Gate.Enter())
-                return p.Ok ? (SendStatus)Native.rant_node_clear_peer_status(_handle, nodeId, Codec.CStr(key ?? ""), sinceUs)
-                            : SendStatus.State;
+                return p.Ok ? (RantResult)Native.rant_node_clear_peer_status(_handle, nodeId, Codec.CStr(key ?? ""), sinceUs)
+                            : RantResult.State;
         }
 
         private Action<RantStatusUpdate> _onStatus;
@@ -2828,14 +2828,14 @@ namespace Rant
         {
             using (Pass p = Gate.Enter())
             {
-                if (!p.Ok) throw new RantException(SendStatus.State, what + ": the node is closed");
+                if (!p.Ok) throw new RantException(RantResult.State, what + ": the node is closed");
                 IntPtr ch = topic(_handle);
                 if (ch == IntPtr.Zero)
-                    throw new RantException(SendStatus.NoSys, what + ": the builtin is disabled on this node");
+                    throw new RantException(RantResult.Disabled, what + ": the builtin is disabled on this node");
                 if (_queue != null)
                 {
                     int qrc = setQueue(_handle, _queue.Handle);
-                    if (qrc != 0) throw new RantException((SendStatus)qrc, what + " queue: " + (SendStatus)qrc);
+                    if (qrc != 0) throw new RantException((RantResult)qrc, what + " queue: " + (RantResult)qrc);
                 }
                 ushort index = Native.rant_topic_index(ch);
                 SetSubHandler(index, deliver);
@@ -2843,7 +2843,7 @@ namespace Rant
                 if (rc != 0)
                 {
                     RemoveSubHandler(index);
-                    throw new RantException((SendStatus)rc, what + " subscribe: " + (SendStatus)rc);
+                    throw new RantException((RantResult)rc, what + " subscribe: " + (RantResult)rc);
                 }
             }
         }
@@ -3757,19 +3757,19 @@ namespace Rant
         public void Dispose()
         {
             var rc = St.Close(RantNode, Native.rant_function_retire);
-            if (rc != SendStatus.Ok)
+            if (rc != RantResult.Ok)
                 throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
         }
 
         public bool Refresh() { using (St.Use(RantNode, out IntPtr f)) return f != IntPtr.Zero && Native.rant_function_refresh(f) == 1; }
     }
 
-    // An owning call outcome, the payload copied out. SendStatus carries a synchronous
+    // An owning call outcome, the payload copied out. SendResult carries a synchronous
     // refusal, and Status stays Timeout then.
     internal sealed class ResponseCore
     {
         public CallStatus Status { get; internal set; } = CallStatus.Timeout;
-        public SendStatus SendStatus { get; internal set; } = SendStatus.Ok;
+        public RantResult SendResult { get; internal set; } = RantResult.Ok;
         public uint Provider { get; internal set; }
         /// <summary>The provider's wall clock when it sent the response, 0 = synthesized.</summary>
         public ulong WrittenUs { get; internal set; }
@@ -3786,10 +3786,10 @@ namespace Rant
         {
             string m = "call '" + name + "' failed: " + Status;
             if (Message.Length != 0) m += " (" + Message + ")";
-            if (SendStatus == SendStatus.State)
+            if (SendResult == RantResult.State)
                 m += " (refused in this state: a blocking Call from a service thread callback, use CallAsync)";
-            else if (SendStatus != SendStatus.Ok) m += " (send " + SendStatus + ")";
-            return new CallException(Status, m, SendStatus, Provider);
+            else if (SendResult != RantResult.Ok) m += " (send " + SendResult + ")";
+            return new CallException(Status, m, SendResult, Provider);
         }
     }
 
@@ -3849,7 +3849,7 @@ namespace Rant
             var r = new ResponseCore();
             using (St.Use(RantNode, out IntPtr fn))
             {
-                if (fn == IntPtr.Zero) { r.SendStatus = SendStatus.NoTopic; return r; }
+                if (fn == IntPtr.Zero) { r.SendResult = RantResult.NoTopic; return r; }
                 RantResponseNative o;
                 int rc;
                 GCHandle og = OptsHandle(provider, out IntPtr optp);
@@ -3869,7 +3869,7 @@ namespace Rant
                 }
                 else if (rc < 0)
                 {
-                    r.SendStatus = (SendStatus)rc;  // Status stays Timeout: never answered
+                    r.SendResult = (RantResult)rc;  // Status stays Timeout: never answered
                 }
                 if (rc >= 0)                        // answered or timed out: the outcome text is filled
                     r.Message = Codec.Str(o.message);
@@ -3893,7 +3893,7 @@ namespace Rant
             {
                 using (St.Use(RantNode, out IntPtr fn))
                 using (var p = new PinnedBytes(request))
-                    rc = fn == IntPtr.Zero ? (int)SendStatus.NoTopic
+                    rc = fn == IntPtr.Zero ? (int)RantResult.NoTopic
                        : Native.rant_function_call_async(fn, p.B, Patterns.OnResponse, (IntPtr)id, optp);
             }
             finally { if (og.IsAllocated) og.Free(); }
@@ -3901,7 +3901,7 @@ namespace Rant
             {
                 Patterns.TakeAsync(id);
                 RantNode.UnregisterAsync(id);
-                tcs.TrySetResult(new ResponseCore { SendStatus = (SendStatus)rc });
+                tcs.TrySetResult(new ResponseCore { SendResult = (RantResult)rc });
             }
             return tcs.Task;
         }
@@ -3912,7 +3912,7 @@ namespace Rant
         public void Dispose()
         {
             var rc = St.Close(RantNode, Native.rant_function_retire);
-            if (rc != SendStatus.Ok)
+            if (rc != RantResult.Ok)
                 throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
         }
 
@@ -3947,11 +3947,11 @@ namespace Rant
 
         /// <summary>Broadcast one progress update on the task's progress channel. A reliable
         /// subscriber backpressures end to end.</summary>
-        public SendStatus Progress(byte[] value)
+        public RantResult Progress(byte[] value)
         {
             using (_st.Use(_node, out IntPtr fn))
             using (var p = new PinnedBytes(value))
-                return fn != IntPtr.Zero ? (SendStatus)Native.rant_function_progress(fn, _token, p.B) : SendStatus.State;
+                return fn != IntPtr.Zero ? (RantResult)Native.rant_function_progress(fn, _token, p.B) : RantResult.State;
         }
 
         /// <summary>Convenience view of CancellationToken (with the native flag as a
@@ -4055,7 +4055,7 @@ namespace Rant
         public void Dispose()
         {
             var rc = St.Close(RantNode, Native.rant_function_retire);
-            if (rc != SendStatus.Ok)
+            if (rc != RantResult.Ok)
                 throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
         }
 
@@ -4138,7 +4138,7 @@ namespace Rant
                 opts[0].id_out = idHandle.AddrOfPinnedObject();   // filled at commit
                 using (St.Use(RantNode, out IntPtr fn))
                 using (var p = new PinnedBytes(request))
-                    rc = fn == IntPtr.Zero ? (int)SendStatus.NoTopic
+                    rc = fn == IntPtr.Zero ? (int)RantResult.NoTopic
                        : Native.rant_function_call_async(fn, p.B, Patterns.OnResponse, (IntPtr)id,
                                                          optsHandle.AddrOfPinnedObject());
             }
@@ -4152,7 +4152,7 @@ namespace Rant
             {
                 Patterns.TakeAsync(id);
                 RantNode.UnregisterAsync(id);
-                tcs.TrySetResult(new ResponseCore { SendStatus = (SendStatus)rc });
+                tcs.TrySetResult(new ResponseCore { SendResult = (RantResult)rc });
                 return tcs.Task;
             }
             if (cancellationToken.CanBeCanceled)
@@ -4201,7 +4201,7 @@ namespace Rant
             {
                 opts[0].id_out = idHandle.AddrOfPinnedObject();
                 using (var p = new PinnedBytes(request))
-                    rc = fn == IntPtr.Zero ? (int)SendStatus.NoTopic
+                    rc = fn == IntPtr.Zero ? (int)RantResult.NoTopic
                        : Native.rant_function_call(fn, p.B, out o, timeoutMs, optsHandle.AddrOfPinnedObject());
                 if (rc == 1)
                 {
@@ -4213,7 +4213,7 @@ namespace Rant
                 }
                 else if (rc < 0)
                 {
-                    r.SendStatus = (SendStatus)rc;  // Status stays Timeout: never answered
+                    r.SendResult = (RantResult)rc;  // Status stays Timeout: never answered
                 }
                 if (rc >= 0) r.Message = Codec.Str(o.message);
             }
@@ -4230,10 +4230,10 @@ namespace Rant
 
         // Cooperative and never acked, the terminal status answers. BadRole when the provider
         // declared noCancel, State if done.
-        public SendStatus Cancel(uint callId)
+        public RantResult Cancel(uint callId)
         {
             using (St.Use(RantNode, out IntPtr fn))
-                return fn == IntPtr.Zero ? SendStatus.NoTopic : (SendStatus)Native.rant_function_cancel(fn, callId);
+                return fn == IntPtr.Zero ? RantResult.NoTopic : (RantResult)Native.rant_function_cancel(fn, callId);
         }
 
         public int MatchCount { get { using (St.Use(RantNode, out IntPtr f)) return Native.rant_function_match_count(f); } }
@@ -4242,7 +4242,7 @@ namespace Rant
         public void Dispose()
         {
             var rc = St.Close(RantNode, Native.rant_function_retire);
-            if (rc != SendStatus.Ok)
+            if (rc != RantResult.Ok)
                 throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
         }
 
@@ -4359,7 +4359,7 @@ namespace Rant
         public void Dispose()
         {
             var rc = _st.Close(_node, Native.rant_call_observer_retire);
-            if (rc != SendStatus.Ok)
+            if (rc != RantResult.Ok)
                 throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
         }
     }
@@ -4423,26 +4423,26 @@ namespace Rant
 
         /// <summary>Set the value: apply and publish, or send over the set channel. BadRole =
         /// the owner advertises no set channel.</summary>
-        public SendStatus Set(byte[] value)
+        public RantResult Set(byte[] value)
         {
             using (St.Use(RantNode, out IntPtr v))
             using (var p = new PinnedBytes(value))
-                return v == IntPtr.Zero ? SendStatus.NoTopic : (SendStatus)Native.rant_variable_set(v, p.B);
+                return v == IntPtr.Zero ? RantResult.NoTopic : (RantResult)Native.rant_variable_set(v, p.B);
         }
 
         /// <summary>Force the value: writes are absorbed into the shadow source until Unforce
         /// restores the latest absorbed set. Needs allowForce on the definition: State on the
         /// owner without it, BadRole on a remote whose owner advertises none.</summary>
-        public SendStatus Force(byte[] value)
+        public RantResult Force(byte[] value)
         {
             using (St.Use(RantNode, out IntPtr v))
             using (var p = new PinnedBytes(value))
-                return v == IntPtr.Zero ? SendStatus.NoTopic : (SendStatus)Native.rant_variable_force(v, p.B);
+                return v == IntPtr.Zero ? RantResult.NoTopic : (RantResult)Native.rant_variable_force(v, p.B);
         }
-        public SendStatus Unforce()
+        public RantResult Unforce()
         {
             using (St.Use(RantNode, out IntPtr v))
-                return v == IntPtr.Zero ? SendStatus.NoTopic : (SendStatus)Native.rant_variable_unforce(v);
+                return v == IntPtr.Zero ? RantResult.NoTopic : (RantResult)Native.rant_variable_unforce(v);
         }
         public bool Forced { get { using (St.Use(RantNode, out IntPtr v)) return Native.rant_variable_forced(v) == 1; } }
 
@@ -4454,7 +4454,7 @@ namespace Rant
             => RantNode.Gate.WaitSliced(timeoutMs, 0, this, (c, ms) =>
             {
                 using (c.St.Use(c.RantNode, out IntPtr v))   // a pass per slice, so Dispose waits at most one
-                    return v == IntPtr.Zero ? (int)SendStatus.NoTopic : Native.rant_variable_wait(v, ms);
+                    return v == IntPtr.Zero ? (int)RantResult.NoTopic : Native.rant_variable_wait(v, ms);
             }) == 1;
 
         private bool _changeBound, _writeBound;
@@ -4483,7 +4483,7 @@ namespace Rant
         public void Dispose()
         {
             var rc = St.Close(RantNode, Native.rant_variable_retire);
-            if (rc != SendStatus.Ok)
+            if (rc != RantResult.Ok)
                 throw new RantException(rc, "retire refused: " + rc + " (a Dispose from a service thread callback is refused)");
         }
 
@@ -4647,7 +4647,7 @@ namespace Rant
         /// <summary>The provider's wall clock when it sent the response, 0 = synthesized.</summary>
         public ulong WrittenUs => Core.WrittenUs;
         /// <summary>A synchronous refusal of the send. Status stays Timeout then.</summary>
-        public SendStatus SendStatus => Core.SendStatus;
+        public RantResult SendResult => Core.SendResult;
         /// <summary>The outcome text to display on a failure: the definition's message, else
         /// the default status text.</summary>
         public string Message => Core.Message;
@@ -4663,7 +4663,7 @@ namespace Rant
                 object v;
                 if (!Patterns.TryDecode(RspSchema, Core.SchemaPtr, Core.Data, typeof(TRsp), out v))
                     throw new CallException(Status, "call '" + Name + "' answered a payload that failed to decode as "
-                        + typeof(TRsp).Name, SendStatus.Schema, Core.Provider);
+                        + typeof(TRsp).Name, RantResult.Schema, Core.Provider);
                 return (TRsp)v;
             }
         }
@@ -4742,7 +4742,7 @@ namespace Rant
 
         /// <summary>Broadcast one progress update. A reliable subscriber backpressures end to
         /// end. State once the call completed.</summary>
-        public SendStatus Progress(TPrg value) => _core.Progress(Patterns.Encode(_prg, value));
+        public RantResult Progress(TPrg value) => _core.Progress(Patterns.Encode(_prg, value));
         /// <summary>Cancelled the moment a cancel arrives. Honor it by throwing
         /// OperationCanceledException, or run to completion anyway.</summary>
         public CancellationToken CancellationToken => _core.CancellationToken;
@@ -4945,8 +4945,8 @@ namespace Rant
             }
             set
             {
-                SendStatus st = Set(value);
-                if (st != SendStatus.Ok)
+                RantResult st = Set(value);
+                if (st != RantResult.Ok)
                     throw new RantException(st, "variable '" + _core.Name + "' set refused: " + st);
             }
         }
@@ -4967,13 +4967,13 @@ namespace Rant
 
         /// <summary>Write the value: apply and publish on the owner, or send it to the owner
         /// from a remote. BadRole = the owner advertises no set channel.</summary>
-        public SendStatus Set(T value) => _core.Set(Patterns.Encode(_schema, value));
+        public RantResult Set(T value) => _core.Set(Patterns.Encode(_schema, value));
         /// <summary>Force the value: writes are absorbed until Unforce restores the latest.
         /// Needs AllowForce on the definition: State on the owner without it, BadRole on a
         /// remote whose owner advertises none.</summary>
-        public SendStatus Force(T value) => _core.Force(Patterns.Encode(_schema, value));
+        public RantResult Force(T value) => _core.Force(Patterns.Encode(_schema, value));
         /// <summary>End a force: the latest written value applies again.</summary>
-        public SendStatus Unforce() => _core.Unforce();
+        public RantResult Unforce() => _core.Unforce();
         /// <summary>True while the value is forced.</summary>
         public bool Forced => _core.Forced;
         /// <summary>The variable's name.</summary>
@@ -5084,7 +5084,7 @@ namespace Rant
 
         /// <summary>Publish one message to every matched subscriber. captureUs is when the
         /// data was true rather than when it was sent, in Timestamp.Now() units, 0 = unstated.</summary>
-        public SendStatus Send(T value, long captureUs = 0)
+        public RantResult Send(T value, long captureUs = 0)
             => _topic.Send(Patterns.Encode(_topic.Schema, value), captureUs);
 
         /// <summary>Subscribers currently matched.</summary>
@@ -5178,7 +5178,7 @@ namespace Rant
                 if (msg == null && Gate.Expired(start, timeoutMs)) return false;
             }
             if (!Patterns.TryValue(msg, out value))
-                throw new RantException(SendStatus.Schema,
+                throw new RantException(RantResult.Schema,
                     "a message on '" + msg.TopicName + "' did not decode as " + typeof(T).Name);
             return true;
         }

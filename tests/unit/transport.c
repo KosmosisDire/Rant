@@ -492,7 +492,7 @@ static void basics_checks(void){
             size_t wire_cap = 65535u * (size_t)i_rant_transport_frag(ts);     /* checked before copy */
             memset(buf, 0, sizeof buf);
             CHECK(i_rant_transport_send(ts, 5, rant_bytes(buf, 16),      0) == RANT_ERR_NO_TOPIC, "result: out-of-range topic -> NO_CHANNEL");
-            CHECK(i_rant_transport_send(ts, 1, rant_bytes(buf, 16),      0) == RANT_ERR_ROLE,         "result: sub-only topic -> ROLE");
+            CHECK(i_rant_transport_send(ts, 1, rant_bytes(buf, 16),      0) == RANT_ERR_BAD_ROLE,         "result: sub-only topic -> ROLE");
             CHECK(i_rant_transport_send(ts, 0, rant_bytes(buf, wire_cap + 1u), 0) == RANT_ERR_TOO_BIG, "result: past the wire cap -> TOO_BIG");
             CHECK(i_rant_transport_send(ts, 0, rant_bytes(buf, 16),      0) == RANT_OK,               "result: valid publish -> OK");
         }

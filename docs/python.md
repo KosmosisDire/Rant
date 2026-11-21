@@ -50,7 +50,7 @@ the one liner for a frame paced app. `node.create_queue()` makes another `rant.Q
 and a handle created with `queue=` set to it parks its callbacks there alone until
 `queue.dispatch()`. Remote variables of one name share the first one's queue. From inside a handler,
 sends and read only queries are allowed, and poll, handle creation, drain and `settle`
-are refused with `SendStatus.STATE`, None or False.
+are refused with `RantResult.STATE`, None or False.
 
 `settle()` blocks until discovery and matching converge. `close()` first waits until the
 calls other threads are making on the node return, and inside one of the node's own
@@ -124,7 +124,7 @@ DSL text does it: `node.schema("u8[4]")`.
 in the node's registry: every definition stays in scope for the node's later compiles, and
 the node owns the result for its life. `encode` and
 `decode` walk the compiled flat field table, so they work for any schema including a
-peer's. `fields` lists `Schema.Field` records whose kinds are `Schema.FieldType`, and
+peer's. `fields` lists `Schema.Field` records whose kinds are `Schema.SchemaTypeKind`, and
 `enum_variants(field)` the options of an enum field, for a tool that renders a schema it
 has never seen. `can_read(pub)` is the subset test, `hash` the wire identity. A missing
 value keeps the zeroed default. The map body is built and parsed in Python and validated

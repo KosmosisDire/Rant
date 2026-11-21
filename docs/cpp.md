@@ -87,7 +87,7 @@ To run one handle's callbacks on a thread of your own, pass it a queue from
 
 - A failed node or handle creation throws `rant::Error`. Without exceptions, the object
   is not `valid()` and `node.last_error()` says why.
-- Sends and sets never throw. They return a `SendStatus`.
+- Sends and sets never throw. They return a `RantResult`.
 - A callback that throws never breaks the node. The error goes to stderr and
   `on_event`. A function or task handler that throws answers the caller `AppError`.
 

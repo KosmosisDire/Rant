@@ -156,9 +156,9 @@ static void churn_checks(void){
         char big[200]; int k;
         memset(big, 'x', sizeof big - 1); big[sizeof big - 1] = 0;
         for (k=0;k<8;k++){
-            rant_node_log(P, RANT_LEVEL_ERROR, "%s", big);
-            rant_node_log(C, RANT_LEVEL_ERROR, "%s", big);
-            rant_node_log(U, RANT_LEVEL_ERROR, "%s", big);
+            rant_node_log(P, RANT_DIAGNOSTIC_LEVEL_ERROR, "%s", big);
+            rant_node_log(C, RANT_DIAGNOSTIC_LEVEL_ERROR, "%s", big);
+            rant_node_log(U, RANT_DIAGNOSTIC_LEVEL_ERROR, "%s", big);
         }
     }
     rant_node_mem_stats(P, &p_mem0, &peak, &calls);
@@ -324,9 +324,9 @@ static void ml_on_msg(const RantMsg *m){
     memcpy(tb, txt.data, tl); tb[tl] = '\0';
     ml_n++;
     if (ml_dispatching) ml_in_dispatch++;
-    if (strcmp(tb, "boom 0") == 0 && level == RANT_LEVEL_WARN && origin == RANT_ORIGIN_APP
+    if (strcmp(tb, "boom 0") == 0 && level == RANT_DIAGNOSTIC_LEVEL_WARN && origin == RANT_ORIGIN_APP
         && m->written_us && !m->capture_us) ml_boom0 = 1;
-    if (strstr(tb, "unmatched-send") && level == RANT_LEVEL_ERROR && origin == RANT_ORIGIN_RANT
+    if (strstr(tb, "unmatched-send") && level == RANT_DIAGNOSTIC_LEVEL_ERROR && origin == RANT_ORIGIN_RANT
         && m->capture_us && m->capture_us <= m->written_us) ml_mirror = 1;
     if (strcmp(tb, "hidden") == 0) ml_debug = 1;
     if (strcmp(tb, "live") == 0) ml_live = 1;
@@ -355,17 +355,17 @@ static void metalog_checks(void){
     CHECK(rant_node_log_topic(A) && rant_node_status_topic(A), "metalog: log and status topics exist");
     CHECK(rant_node_meta_function(A) != NULL && rant_node_meta_function(B) != NULL,
              "metalog: meta endpoint hosted");
-    CHECK(rant_node_log(A, (RantLevel)0, "x") == RANT_ERR_NO_TOPIC
-             && rant_node_log(A, (RantLevel)5, "x") == RANT_ERR_NO_TOPIC, "metalog: a bad level refused");
+    CHECK(rant_node_log(A, (RantDiagnosticLevel)0, "x") == RANT_ERR_NO_TOPIC
+             && rant_node_log(A, (RantDiagnosticLevel)5, "x") == RANT_ERR_NO_TOPIC, "metalog: a bad level refused");
 
     /* log BEFORE any subscriber exists: the lines land in KEEP_LAST history and a late
        joiner replays them (catch_up = keep_last). Debug is below the default Info, so it
        is accepted and never sent */
     for (i=0;i<2;i++){
-        int lr = rant_node_log(A, RANT_LEVEL_WARN, "boom %d", i);   /* a side effect, kept out of CHECK */
+        int lr = rant_node_log(A, RANT_DIAGNOSTIC_LEVEL_WARN, "boom %d", i);   /* a side effect, kept out of CHECK */
         CHECK(lr == RANT_OK, "metalog: log %d accepted (%d)", i, lr);
     }
-    { uint64_t txm=0; int lr = rant_node_log(A, RANT_LEVEL_DEBUG, "hidden");
+    { uint64_t txm=0; int lr = rant_node_log(A, RANT_DIAGNOSTIC_LEVEL_DEBUG, "hidden");
       CHECK(lr == RANT_OK, "metalog: a line below the level is accepted (%d)", lr);
       rant_topic_counts(rant_node_log_topic(A), &txm, NULL, NULL, NULL);
       CHECK(txm == 2, "metalog: tx counter counts the sent lines only (%u)", (unsigned)txm); }
@@ -403,7 +403,7 @@ static void metalog_checks(void){
       rc = rant_node_set_log_queue(B, NULL);
       CHECK(rc == RANT_OK, "metalog: log queue cleared (%d)", rc);
       ml_in_dispatch = 0;
-      rc = rant_node_log(A, RANT_LEVEL_INFO, "live");
+      rc = rant_node_log(A, RANT_DIAGNOSTIC_LEVEL_INFO, "live");
       CHECK(rc == RANT_OK, "metalog: live line accepted (%d)", rc);
       PUMP_UNTIL(A, B, 6000, ml_live);
       CHECK(ml_live && ml_in_dispatch == 0, "metalog: live line delivered inline (%d)", ml_live); }
@@ -485,7 +485,7 @@ static void st_on_msg(const RantMsg *m){
     if (m->topic_index != rant_topic_index(rant_node_status_topic(m->node))){
         RantString t = rant_get_string(m->data, m->schema, "text"); char tb[192];
         st_copy(tb, sizeof tb, t);
-        if (strstr(tb, "refused") && rant_get_uint(m->data, m->schema, "level") == RANT_LEVEL_DEBUG
+        if (strstr(tb, "refused") && rant_get_uint(m->data, m->schema, "level") == RANT_DIAGNOSTIC_LEVEL_DEBUG
             && rant_get_uint(m->data, m->schema, "origin") == RANT_ORIGIN_RANT) st_notes++;
         return;
     }
@@ -533,7 +533,7 @@ static void status_checks(void){
     memset(&ao,0,sizeof ao); ao.domain=TEST_DOMAIN+43; ao.discovery.max_peers=4;
     ao.net.multicast_interface="127.0.0.1"; ao.net.seed_peers=&seed; ao.net.n_seed_peers=1;
     bo=ao; co=ao;
-    ao.log_level = RANT_LEVEL_DEBUG;     /* A publishes its debug notes */
+    ao.log_level = RANT_DIAGNOSTIC_LEVEL_DEBUG;     /* A publishes its debug notes */
     co.disable_status = 1;
     A = rant_node_open(&aa, "status-a", NULL, st_on_event, &ao);
     B = rant_node_open(&ba, "status-b", st_on_msg, NULL, &bo);
@@ -542,32 +542,32 @@ static void status_checks(void){
     if (!(A && B && C)) goto done;
 
     CHECK(!rant_node_status_topic(C)
-             && rant_node_set_status(C, "k", RANT_LEVEL_INFO, "x", NULL) == RANT_ERR_NOSYS
-             && rant_node_clear_status(C, "k") == RANT_ERR_NOSYS
-             && rant_node_clear_peer_status(C, 1, "k", 0) == RANT_ERR_NOSYS
-             && rant_node_set_status_queue(C, NULL) == RANT_ERR_NOSYS, "status: disable_status strips it");
+             && rant_node_set_status(C, "k", RANT_DIAGNOSTIC_LEVEL_INFO, "x", NULL) == RANT_ERR_DISABLED
+             && rant_node_clear_status(C, "k") == RANT_ERR_DISABLED
+             && rant_node_clear_peer_status(C, 1, "k", 0) == RANT_ERR_DISABLED
+             && rant_node_set_status_queue(C, NULL) == RANT_ERR_DISABLED, "status: disable_status strips it");
     rant_node_close(C, 0); C = NULL;
     memset(key, 'k', RANT_STATUS_KEY_MAX + 1); key[RANT_STATUS_KEY_MAX + 1] = '\0';
-    CHECK(rant_node_set_status(A, "", RANT_LEVEL_INFO, "x", NULL) == RANT_ERR_NO_TOPIC
-             && rant_node_set_status(A, "k", (RantLevel)0, "x", NULL) == RANT_ERR_NO_TOPIC
-             && rant_node_set_status(A, key, RANT_LEVEL_INFO, "x", NULL) == RANT_ERR_TOO_BIG
+    CHECK(rant_node_set_status(A, "", RANT_DIAGNOSTIC_LEVEL_INFO, "x", NULL) == RANT_ERR_NO_TOPIC
+             && rant_node_set_status(A, "k", (RantDiagnosticLevel)0, "x", NULL) == RANT_ERR_NO_TOPIC
+             && rant_node_set_status(A, key, RANT_DIAGNOSTIC_LEVEL_INFO, "x", NULL) == RANT_ERR_TOO_BIG
              && rant_node_clear_peer_status(A, 1, key, 0) == RANT_ERR_TOO_BIG,
              "status: bad arguments refused");
 
     /* raised before any subscriber: both land in one set, and the same values again send nothing */
     { uint64_t txm = 0;
-      rc = rant_node_set_status(A, "estop", RANT_LEVEL_ERROR, "pressed", NULL);
+      rc = rant_node_set_status(A, "estop", RANT_DIAGNOSTIC_LEVEL_ERROR, "pressed", NULL);
       CHECK(rc == RANT_OK, "status: estop raised (%d)", rc);
-      rc = rant_node_set_status(A, "overtemp", RANT_LEVEL_WARN, "motor hot", &(RantStatusOpts){ .clearable = 1 });
+      rc = rant_node_set_status(A, "overtemp", RANT_DIAGNOSTIC_LEVEL_WARN, "motor hot", &(RantStatusOpts){ .clearable = 1 });
       CHECK(rc == RANT_OK, "status: overtemp raised (%d)", rc);
       rant_node_poll(A, 0);
-      rc = rant_node_set_status(A, "overtemp", RANT_LEVEL_WARN, "motor hot", &(RantStatusOpts){ .clearable = 1 });
+      rc = rant_node_set_status(A, "overtemp", RANT_DIAGNOSTIC_LEVEL_WARN, "motor hot", &(RantStatusOpts){ .clearable = 1 });
       rant_node_poll(A, 0);
       rant_topic_counts(rant_node_status_topic(A), &txm, NULL, NULL, NULL);
       CHECK(rc == RANT_OK && txm == 1, "status: one set for both raises, none for a repeat (%u)", (unsigned)txm); }
 
     /* a node clears only what it read, so its clear sender opens with the status reader */
-    CHECK(rant_node_clear_peer_status(B, 1, "k", 0) == RANT_ERR_ROLE,
+    CHECK(rant_node_clear_peer_status(B, 1, "k", 0) == RANT_ERR_BAD_ROLE,
           "status: a clear before reading status is refused");
 
     /* B late joins the status and A's log */
@@ -576,7 +576,7 @@ static void status_checks(void){
     CHECK(rc == 0, "status: B subscribes (%d)", rc);
     PUMP_UNTIL(A, B, 6000, st_count == 2);
     CHECK(st_count == 2 && !strcmp(st_key[0], "estop") && !strcmp(st_key[1], "overtemp")
-             && st_level[0] == RANT_LEVEL_ERROR && st_level[1] == RANT_LEVEL_WARN
+             && st_level[0] == RANT_DIAGNOSTIC_LEVEL_ERROR && st_level[1] == RANT_DIAGNOSTIC_LEVEL_WARN
              && st_origin[0] == RANT_ORIGIN_APP && !st_clearable[0] && st_clearable[1]
              && st_since[0] && st_since[1] && !strcmp(st_text[1], "motor hot"),
              "status: the late joiner gets the whole set (n=%d)", st_count);
@@ -586,7 +586,7 @@ static void status_checks(void){
 
     /* an update replaces the text and keeps since_us */
     sets = st_sets;
-    rc = rant_node_set_status(A, "estop", RANT_LEVEL_ERROR, "pressed at door 3", NULL);
+    rc = rant_node_set_status(A, "estop", RANT_DIAGNOSTIC_LEVEL_ERROR, "pressed at door 3", NULL);
     PUMP_UNTIL(A, B, 6000, st_sets > sets);
     CHECK(rc == RANT_OK && st_count == 2 && !strcmp(st_text[0], "pressed at door 3") && st_since[0] == since_estop,
              "status: an update keeps since_us (%s)", st_text[0]);
@@ -619,15 +619,15 @@ static void status_checks(void){
     { int k, ok = 1;
       for (k = 0; k < RANT_STATUS_MAX; k++){
           snprintf(key, sizeof key, "k%d", k);
-          if (rant_node_set_status(A, key, RANT_LEVEL_INFO, "x", NULL) != RANT_OK) ok = 0;
+          if (rant_node_set_status(A, key, RANT_DIAGNOSTIC_LEVEL_INFO, "x", NULL) != RANT_OK) ok = 0;
       }
-      rc = rant_node_set_status(A, "one-more", RANT_LEVEL_INFO, "x", NULL);
+      rc = rant_node_set_status(A, "one-more", RANT_DIAGNOSTIC_LEVEL_INFO, "x", NULL);
       PUMP_UNTIL(A, B, 6000, st_count == RANT_STATUS_MAX);
       CHECK(ok && rc == RANT_ERR_TOO_BIG && st_count == RANT_STATUS_MAX,
                "status: a full set refuses one more (%d, n=%d)", rc, st_count); }
 
     rc = rant_topic_set_role(rant_node_status_topic(B), RANT_PUB_ONLY);
-    CHECK(rc == RANT_OK && rant_node_clear_peer_status(B, idA, "k0", 0) == RANT_ERR_ROLE,
+    CHECK(rc == RANT_OK && rant_node_clear_peer_status(B, idA, "k0", 0) == RANT_ERR_BAD_ROLE,
           "status: a node that stops reading status stops clearing (%d)", rc);
 
 done:
@@ -715,7 +715,7 @@ static void rant_conditions_checks(void){
       PUMP3_UNTIL(A, B, C, 6000, rc_kind(A, "schema_mismatch", NULL, 0, NULL) == 2
                                   && rc_kind(B, "schema_mismatch", NULL, 0, NULL) == 1);
       na = rc_kind(A, "schema_mismatch", tx, sizeof tx, &lv);
-      CHECK(na == 2 && lv == RANT_LEVEL_ERROR && strstr(tx, "rc/pose to rc-b") && strstr(tx, "rc/pose to rc-c"),
+      CHECK(na == 2 && lv == RANT_DIAGNOSTIC_LEVEL_ERROR && strstr(tx, "rc/pose to rc-b") && strstr(tx, "rc/pose to rc-c"),
                "rantcond: a writer holds one schema_mismatch per reader, each naming it (n=%d: %s)", na, tx);
       nb = rc_kind(B, "schema_mismatch", tx, sizeof tx, NULL);
       CHECK(nb == 1 && strstr(tx, "rc/pose from rc-a"), "rantcond: the reader names the writer (n=%d: %s)", nb, tx);
@@ -771,7 +771,7 @@ static void rant_conditions_checks(void){
       PUMP_UNTIL(A, B, 6000, rc_kind(A, "duplicate_authority", NULL, 0, NULL) == 1
                               && rc_kind(B, "duplicate_authority", NULL, 0, NULL) == 1);
       na = rc_kind(A, "duplicate_authority", tx, sizeof tx, &lv);
-      CHECK(fa && fb && na == 1 && lv == RANT_LEVEL_WARN && strstr(tx, "rc/f is also provided by rc-b"),
+      CHECK(fa && fb && na == 1 && lv == RANT_DIAGNOSTIC_LEVEL_WARN && strstr(tx, "rc/f is also provided by rc-b"),
                "rantcond: duplicate_authority warns, naming the rival (n=%d: %s)", na, tx);
       (void)rant_function_retire(fb);
       PUMP_UNTIL(A, B, 6000, rc_kind(A, "duplicate_authority", NULL, 0, NULL) == 0);
@@ -787,7 +787,7 @@ static void rant_conditions_checks(void){
       CHECK(va && vb && rant_variable_force(vb, rant_bytes(&two, 1)) == RANT_OK, "rantcond: B forces A's variable");
       PUMP_UNTIL(A, B, 6000, rc_kind(A, "forced", NULL, 0, NULL) == 1);
       na = rc_kind(A, "forced", tx, sizeof tx, &lv);
-      CHECK(na == 1 && lv == RANT_LEVEL_WARN && strstr(tx, "rc/v is forced by rc-b"),
+      CHECK(na == 1 && lv == RANT_DIAGNOSTIC_LEVEL_WARN && strstr(tx, "rc/v is forced by rc-b"),
                "rantcond: forced names the variable and who forced it (n=%d: %s)", na, tx);
       (void)rant_variable_unforce(vb);
       PUMP_UNTIL(A, B, 6000, rc_kind(A, "forced", NULL, 0, NULL) == 0);
@@ -813,7 +813,7 @@ static void rant_conditions_checks(void){
       CHECK(na == 1 && rc_exact(A, "schema_mismatch", tx, sizeof tx)
                && strstr(tx, "20 matches refused for their schemas. First: rc/m") && !rc_exact(A, "more_problems", NULL, 0),
                "rantcond: 20 refusals are one condition (n=%d: %s)", na, tx);
-      CHECK(rant_node_set_status(A, "app", RANT_LEVEL_INFO, "still room", NULL) == RANT_OK,
+      CHECK(rant_node_set_status(A, "app", RANT_DIAGNOSTIC_LEVEL_INFO, "still room", NULL) == RANT_OK,
                "rantcond: the app keeps its room");
       (void)rant_node_clear_status(A, "app");
       for (k = 3; k < 20; k++){ (void)rant_topic_retire(tb[k]); (void)rant_topic_retire(ta[k]); }
@@ -849,7 +849,7 @@ static void rc_cap_checks(void){
         i_rant_node_problems_begin(N, &ps, kinds[k]);
         for (j = 0; j < RANT_STATUS_KIND_MAX; j++){
             snprintf(text, sizeof text, "problem %d.%d", k, j);
-            i_rant_node_problem(&ps, (uint32_t)(k * 10 + j + 1), RANT_LEVEL_ERROR, text);
+            i_rant_node_problem(&ps, (uint32_t)(k * 10 + j + 1), RANT_DIAGNOSTIC_LEVEL_ERROR, text);
         }
         i_rant_node_problems_end(&ps);
     }
@@ -860,7 +860,7 @@ static void rc_cap_checks(void){
     i_rant_node_problems_begin(N, &ps, kinds[0]);
     for (j = 0; j < RANT_STATUS_KIND_MAX + 1; j++){
         snprintf(text, sizeof text, "10.0.0.%d speaks wire version 6", j + 1);
-        i_rant_node_problem(&ps, (uint32_t)(j + 1), RANT_LEVEL_ERROR, text);
+        i_rant_node_problem(&ps, (uint32_t)(j + 1), RANT_DIAGNOSTIC_LEVEL_ERROR, text);
     }
     i_rant_node_problems_end(&ps);
     CHECK(rc_kind(N, "wire_version", NULL, 0, NULL) == 1 && rc_exact(N, "wire_version", tx, sizeof tx)
@@ -982,7 +982,7 @@ static void rc_partial_checks(void){
     }
     PUMP_UNTIL(D, NULL, 6000, rc_kind(D, "directory_partial", NULL, 0, NULL) == 1);
     nd = rc_kind(D, "directory_partial", tx, sizeof tx, &lv);
-    CHECK(nd == 1 && lv == RANT_LEVEL_WARN && strstr(tx, want) && strstr(tx, "raise max_peers")
+    CHECK(nd == 1 && lv == RANT_DIAGNOSTIC_LEVEL_WARN && strstr(tx, want) && strstr(tx, "raise max_peers")
           && rc_kind(D, "peer_refused", NULL, 0, NULL) == 0,
           "rantpartial: among more peers than it remembers it warns and refuses none (n=%d: %s)", nd, tx);
     for (k = 0; k < 6; k++) if (C[k]) rant_node_close(C[k], 1);

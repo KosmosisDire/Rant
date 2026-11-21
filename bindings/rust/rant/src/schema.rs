@@ -58,17 +58,17 @@ pub(crate) fn with_c<R>(s: &str, f: impl FnOnce(*const c_char) -> R) -> R {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[allow(missing_docs)]
-pub enum FieldType {
+pub enum SchemaTypeKind {
     U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool,
     Array, Struct, String, VString, VArray, Map, Enum, Named,
     /// A kind this binding does not know yet.
     Unknown,
 }
 
-impl FieldType {
-    pub(crate) fn from_c(k: u8) -> FieldType {
-        use FieldType::*;
-        const ALL: [FieldType; 19] = [U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String, VString, VArray, Map, Enum, Named];
+impl SchemaTypeKind {
+    pub(crate) fn from_c(k: u8) -> SchemaTypeKind {
+        use SchemaTypeKind::*;
+        const ALL: [SchemaTypeKind; 19] = [U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String, VString, VArray, Map, Enum, Named];
         ALL.get(k as usize).copied().unwrap_or(Unknown)
     }
 }
@@ -83,9 +83,9 @@ pub struct Field {
     /// The field type's name, None when anonymous.
     pub type_name: Option<String>,
     /// The field's kind. A named type reports what it wraps.
-    pub kind: FieldType,
+    pub kind: SchemaTypeKind,
     /// An enum's backing kind.
-    pub backing: FieldType,
+    pub backing: SchemaTypeKind,
     /// A fixed array's element count, or an enum's option count.
     pub count: u16,
     /// 0 at the top level, n for a row n types down.
@@ -248,8 +248,8 @@ pub(crate) fn field_at(s: *const ffi::RantSchema, i: u16) -> Option<Field> {
     Some(Field {
         name: utf8_prefix(rstring_bytes(f.name)).to_owned(),
         type_name: opt(rstring_bytes(f.type_name)),
-        kind: FieldType::from_c(f.kind),
-        backing: FieldType::from_c(f.backing),
+        kind: SchemaTypeKind::from_c(f.kind),
+        backing: SchemaTypeKind::from_c(f.backing),
         count: f.count,
         depth: f.depth,
         str_cap: f.str_cap,
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn every_c_field_kind_has_a_variant() {
         for (name, v) in crate::c_enum_values("RantSchemaTypeKind") {
-            assert_ne!(super::FieldType::from_c(v as u8), super::FieldType::Unknown, "{name}");
+            assert_ne!(super::SchemaTypeKind::from_c(v as u8), super::SchemaTypeKind::Unknown, "{name}");
         }
     }
 }

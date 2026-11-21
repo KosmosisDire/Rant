@@ -159,7 +159,7 @@ strict prefix of it.
 - `rant_node_stop` elects one joiner, broadcasts, kicks, unlocks, joins without the lock,
   then clears the running flag and broadcasts a second time for waiters that re slept.
 - `RANT_NO_THREADS` keeps the single threaded contract and `rant_node_start` returns
-  `RANT_ERR_NOSYS`. Guards are `#ifdef RANT_THREADS`.
+  `RANT_ERR_DISABLED`. Guards are `#ifdef RANT_THREADS`.
 
 ## Callback queues
 
@@ -311,14 +311,14 @@ so an app entity can never land in the hidden namespace. The raw interest walk s
 yields them. `rant_node_log_topic`, `rant_node_status_topic` and `rant_node_meta_function`
 are the way in.
 
-The log and status schemas share `RantLevel = enum<u8> { Debug = 1, Info, Warn, Error }`
+The log and status schemas share `RantDiagnosticLevel = enum<u8> { Debug = 1, Info, Warn, Error }`
 and `RantOrigin = enum<u8> { App, Rant }`. The level starts at 1 so that 0 in
 `opts.log_level` means the default.
 
 `@rant/log` is reliable with `keep_last` = `catch_up` = 4 and no backpressure wait, so a
 slow subscriber only loses old lines. Catch up replay is per writer lane, so a late
 subscriber gets each node's last 4 lines. The record schema is
-`RantLog { level: RantLevel, origin: RantOrigin, text: string }`, and the text is capped at
+`RantLog { level: RantDiagnosticLevel, origin: RantOrigin, text: string }`, and the text is capped at
 `RANT_LOG_MAX` (512) bytes. The line's time is the message's `capture_us` when set (Rant's
 own lines, which flush after they fired), else its `written_us`. The level filter runs in
 the call, before formatting, so a Debug line below the level costs a compare. A node never

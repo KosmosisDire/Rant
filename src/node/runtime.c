@@ -120,7 +120,7 @@ typedef struct {
     uint32_t peer, count;
     uint16_t topic;
     uint8_t  error;              /* RantErrorKind */
-    uint8_t  level;              /* RantLevel */
+    uint8_t  level;              /* RantDiagnosticLevel */
     uint8_t  note;               /* 1 = a note, coalesced by its text rather than its event */
     char     text[192];
 } i_RantLogPend;
@@ -205,7 +205,7 @@ struct RantNode {
     RantTopic      *log_topic;           /* NULL under opts.disable_logs */
     const RantSchema *log_schema;        /* RantLog { level, origin, text } */
     i_RantRegistry  registry;            /* every schema this node compiled or registered */
-    uint8_t         log_level;           /* the lowest RantLevel published */
+    uint8_t         log_level;           /* the lowest RantDiagnosticLevel published */
     uint8_t         log_errors;          /* the default on RANT_ERROR mirror */
     uint8_t         log_flushing;        /* reentrancy guard: a flush must not re enter the ring */
     uint8_t         log_pend_n;
@@ -419,7 +419,7 @@ static int i_rant_node_is_log_topic(RantNode *n, uint16_t topic_index){
 
 /* Records one line of Rant's own for the poll pass to publish: the error event e, or the
  * note text when e is NULL. A repeat coalesces into a count. Lock held. */
-static void i_rant_node_note(RantNode *n, RantLevel level, const RantEvent *e, const char *text){
+static void i_rant_node_note(RantNode *n, RantDiagnosticLevel level, const RantEvent *e, const char *text){
     uint8_t i, err = e ? (uint8_t)e->error : (uint8_t)RANT_E_NONE;
     uint16_t topic = e ? e->topic : 0;
     uint32_t peer = e ? e->peer : 0;
@@ -488,7 +488,7 @@ static void i_rant_node_emit(RantNode *n, RantEvent *e){
        topic itself are excluded, and nothing is recorded during a flush */
     if (e->kind == RANT_ERROR && n->log_errors
         && !(e->topic_name && i_rant_node_is_log_topic(n, e->topic)))
-        i_rant_node_note(n, RANT_LEVEL_ERROR, e, NULL);
+        i_rant_node_note(n, RANT_DIAGNOSTIC_LEVEL_ERROR, e, NULL);
     if (e->kind == RANT_ERROR) n->problems_dirty = 1;     /* a cause of a Rant condition may have changed */
 #ifdef RANT_SHM
     if (e->kind == RANT_PEER_DOWN) i_rant_node_shm_forget_peer(n, e->peer);
@@ -1161,11 +1161,11 @@ static uint8_t i_rant_level_parse(const char *s){
     int i; size_t k;
     for (i = 0; i < 4; i++){
         for (k = 0; names[i][k] && (char)(s[k] | 0x20) == names[i][k]; k++) {}
-        if (!names[i][k] && !s[k]) return (uint8_t)(RANT_LEVEL_DEBUG + i);
+        if (!names[i][k] && !s[k]) return (uint8_t)(RANT_DIAGNOSTIC_LEVEL_DEBUG + i);
     }
     return 0;
 }
-static int i_rant_level_ok(int level){ return level >= RANT_LEVEL_DEBUG && level <= RANT_LEVEL_ERROR; }
+static int i_rant_level_ok(int level){ return level >= RANT_DIAGNOSTIC_LEVEL_DEBUG && level <= RANT_DIAGNOSTIC_LEVEL_ERROR; }
 
 /* The build's features, listed in the magic */
 #ifdef RANT_THREADS
@@ -1323,7 +1323,7 @@ RANT__NOINLINE static RantNode *i_rant_node_open_core(RantAllocator *alloc, cons
         o.log_level = len < sizeof launch_level ? i_rant_level_parse(launch_level) : 0;
         if (!o.log_level) return i_rant_node_open_fail(on_event, o.user_data, RANT_E_BAD_LOG_LEVEL, 0, 0, 0);
     }
-    if (!o.log_level) o.log_level = RANT_LEVEL_INFO;
+    if (!o.log_level) o.log_level = RANT_DIAGNOSTIC_LEVEL_INFO;
     if (!i_rant_level_ok(o.log_level))
         return i_rant_node_open_fail(on_event, o.user_data, RANT_E_BAD_LOG_LEVEL, 0, 0, 0);
     /* the launcher's prefix outside the code's own. spec/node.md, Name prefix */
@@ -1852,7 +1852,7 @@ static int i_rant_node_rebind(RantNode *n, RantTopic *w, const RantSchema *schem
     def.qos = w->qos;
     rb = i_rant_discovery_meta_version(i_rant_discovery_state(n->discovery)) + 1u;
     rc = i_rant_transport_topic_reuse(n->transport, idx, &def, 1, rb);
-    if (rc != 0) return rc == -4 ? RANT_ERR_OOM : RANT_ERR_STATE;
+    if (rc != 0) return rc == -4 ? RANT_ERR_OUT_OF_MEMORY : RANT_ERR_STATE;
     i_rant_node_core_topic_rebound(n->core, idx);
     i_rant_node_core_set_topic_schema(n->core, idx, w->adv);
     i_rant_node_topic_came_up(n, w);
@@ -2120,7 +2120,7 @@ static int i_rant_node_do_send(RantNode *n, uint16_t topic_index, RantBytes data
 #define I_RANT_STR_(x) #x
 #define I_RANT_STR(x)  I_RANT_STR_(x)
 /* the vocabulary both builtins share, compiled in front of each. A repeat is a no op */
-#define I_RANT_LOG_VOCAB "RantLevel = enum<u8> { Debug = 1, Info, Warn, Error } " \
+#define I_RANT_LOG_VOCAB "RantDiagnosticLevel = enum<u8> { Debug = 1, Info, Warn, Error } " \
                          "RantOrigin = enum<u8> { App, Rant } "
 
 /* Creates the log topic at open: reliable, keep_last = catch_up as the replayable history,
@@ -2128,7 +2128,7 @@ static int i_rant_node_do_send(RantNode *n, uint16_t topic_index, RantBytes data
 static void i_rant_node_logs_open(RantNode *n){
     RantTopicOpts topt;
     n->log_schema = i_rant_registry_compile(&n->registry, I_RANT_LOG_VOCAB
-        "RantLog { level: RantLevel, origin: RantOrigin, text: string }", NULL);
+        "RantLog { level: RantDiagnosticLevel, origin: RantOrigin, text: string }", NULL);
     if (!n->log_schema) return;
     memset(&topt, 0, sizeof topt);
     topt.qos.reliability = RANT_RELIABLE;
@@ -2140,14 +2140,14 @@ static void i_rant_node_logs_open(RantNode *n){
 
 /* Builds one RantLog message and publishes it. capture_us is when the line happened, 0 =
  * the send itself. locked = 1 is the flush under the node lock, 0 the public path. */
-static int i_rant_node_log_publish(RantNode *n, RantLevel level, RantOrigin origin, const char *text,
+static int i_rant_node_log_publish(RantNode *n, RantDiagnosticLevel level, RantOrigin origin, const char *text,
                                    size_t text_len, uint64_t capture_us, int locked){
     uint8_t msg[6u + RANT_LOG_MAX];      /* the fixed section (2) and the text frame header (4) */
     RantSendOpts so;
     uint32_t len;
     RantTopic *h = n->log_topic;
-    if (!h || !n->log_schema) return RANT_ERR_NOSYS;
-    if (!rant_schema_message_default(n->log_schema, msg, sizeof msg)) return RANT_ERR_OOM;
+    if (!h || !n->log_schema) return RANT_ERR_DISABLED;
+    if (!rant_schema_message_default(n->log_schema, msg, sizeof msg)) return RANT_ERR_OUT_OF_MEMORY;
     rant_set_uint(msg, sizeof msg, n->log_schema, "level", (uint64_t)level);
     rant_set_uint(msg, sizeof msg, n->log_schema, "origin", (uint64_t)origin);
     if (!rant_set_string(msg, sizeof msg, n->log_schema, "text", rant_string(text, text_len)))
@@ -2158,11 +2158,11 @@ static int i_rant_node_log_publish(RantNode *n, RantLevel level, RantOrigin orig
     return rant_topic_send(h, rant_bytes(msg, len), &so);
 }
 
-int rant_node_log(RantNode *n, RantLevel level, const char *fmt, ...){
+int rant_node_log(RantNode *n, RantDiagnosticLevel level, const char *fmt, ...){
     char text[RANT_LOG_MAX]; int tn;
     va_list ap;
     if (!n || !i_rant_level_ok((int)level) || !fmt) return RANT_ERR_NO_TOPIC;
-    if (!n->log_topic) return RANT_ERR_NOSYS;
+    if (!n->log_topic) return RANT_ERR_DISABLED;
     if ((uint8_t)level < n->log_level) return RANT_OK;
     va_start(ap, fmt);
     tn = vsnprintf(text, sizeof text, fmt, ap);
@@ -2172,10 +2172,10 @@ int rant_node_log(RantNode *n, RantLevel level, const char *fmt, ...){
     return i_rant_node_log_publish(n, level, RANT_ORIGIN_APP, text, (size_t)tn, 0, 0);
 }
 
-int rant_node_log_text(RantNode *n, RantLevel level, const char *text, int len){
+int rant_node_log_text(RantNode *n, RantDiagnosticLevel level, const char *text, int len){
     size_t tl;
     if (!n || !i_rant_level_ok((int)level) || !text) return RANT_ERR_NO_TOPIC;
-    if (!n->log_topic) return RANT_ERR_NOSYS;
+    if (!n->log_topic) return RANT_ERR_DISABLED;
     if ((uint8_t)level < n->log_level) return RANT_OK;
     tl = len < 0 ? strlen(text) : (size_t)len;
     if (tl >= RANT_LOG_MAX) tl = RANT_LOG_MAX - 1;       /* match the variadic path's truncation */
@@ -2196,7 +2196,7 @@ static void i_rant_node_status_open(RantNode *n){
     const RantSchema *clear;
     RantSchemaFieldInfo fi;
     n->status_schema = i_rant_registry_compile(&n->registry, I_RANT_LOG_VOCAB
-        "RantCondition { key: string<" I_RANT_STR(RANT_STATUS_KEY_MAX) ">, level: RantLevel,"
+        "RantCondition { key: string<" I_RANT_STR(RANT_STATUS_KEY_MAX) ">, level: RantDiagnosticLevel,"
         " origin: RantOrigin, clearable: bool, since_us: u64,"
         " text: string<" I_RANT_STR(RANT_STATUS_TEXT_MAX) "> }"
         " RantStatus { conditions: RantCondition[] }", NULL);
@@ -2259,12 +2259,12 @@ static uint32_t i_rant_node_status_count(RantNode *n, RantOrigin origin){
 }
 
 /* Raises or updates one condition and marks the set for the next poll pass. Lock held. */
-static int i_rant_node_status_put(RantNode *n, RantOrigin origin, RantString key, RantLevel level,
+static int i_rant_node_status_put(RantNode *n, RantOrigin origin, RantString key, RantDiagnosticLevel level,
                                   RantString text, int clearable){
     const RantSchema *s = n->status_schema;
     char path[48];
     int i;
-    if (!n->status_topic || !s) return RANT_ERR_NOSYS;
+    if (!n->status_topic || !s) return RANT_ERR_DISABLED;
     if (key.len > RANT_STATUS_KEY_MAX) return RANT_ERR_TOO_BIG;
     if (text.len > RANT_STATUS_TEXT_MAX) text.len = RANT_STATUS_TEXT_MAX;
     clearable = clearable ? 1 : 0;
@@ -2284,12 +2284,12 @@ static int i_rant_node_status_put(RantNode *n, RantOrigin origin, RantString key
             return RANT_ERR_TOO_BIG;      /* each origin has its own cap, so Rant never crowds the app */
         if (need > n->status_cap){
             uint8_t *nb = (uint8_t*)i_rant_node_alloc(n, n->status_msg, need);
-            if (!nb) return RANT_ERR_OOM;
+            if (!nb) return RANT_ERR_OUT_OF_MEMORY;
             if (!n->status_msg) rant_schema_message_default(s, nb, need);
             n->status_msg = nb; n->status_cap = need;
         }
         if (!rant_set_array_count(n->status_msg, n->status_cap, s, "conditions", count + 1u))
-            return RANT_ERR_OOM;
+            return RANT_ERR_OUT_OF_MEMORY;
         i = (int)count;
         rant_set_string(n->status_msg, n->status_cap, s, i_rant_status_path(path, sizeof path, (uint32_t)i, "key"), key);
         rant_set_uint(n->status_msg, n->status_cap, s, i_rant_status_path(path, sizeof path, (uint32_t)i, "origin"), (uint64_t)origin);
@@ -2362,7 +2362,7 @@ void i_rant_node_problems_begin(RantNode *n, i_RantProblems *ps, i_RantProblemKi
 
 /* Puts one of ps's conditions when the status has room, the last slot kept for the count of
  * the unlisted. 1 when it holds the condition. */
-static int i_rant_node_problem_put(i_RantProblems *ps, const char *key, RantLevel level, const char *text){
+static int i_rant_node_problem_put(i_RantProblems *ps, const char *key, RantDiagnosticLevel level, const char *text){
     RantNode *n = ps->n;
     uint32_t listed = i_rant_node_status_count(n, RANT_ORIGIN_RANT)
                     - (i_rant_node_status_find(n, RANT_ORIGIN_RANT, rant_cstr(I_RANT_PROB_MORE)) >= 0 ? 1u : 0u);
@@ -2392,7 +2392,7 @@ static void i_rant_node_problems_sweep(i_RantProblems *ps){
     }
 }
 
-void i_rant_node_problem(i_RantProblems *ps, uint32_t id, RantLevel level, const char *text){
+void i_rant_node_problem(i_RantProblems *ps, uint32_t id, RantDiagnosticLevel level, const char *text){
     RantNode *n = ps->n;
     char key[RANT_STATUS_KEY_MAX + 1];
     uint16_t i;
@@ -2421,7 +2421,7 @@ void i_rant_node_problems_end(i_RantProblems *ps){
             snprintf(text + len, sizeof text - (size_t)len, ". First: %s", ps->first);
         ps->n_ids = 0; ps->over = 0;
         i_rant_node_problems_sweep(ps);     /* its listed ones go first, so the fold has room */
-        if (i_rant_node_problem_put(ps, i_rant_problem_names[ps->kind], (RantLevel)ps->worst, text))
+        if (i_rant_node_problem_put(ps, i_rant_problem_names[ps->kind], (RantDiagnosticLevel)ps->worst, text))
             ps->ids[ps->n_ids++] = 0;
         else ps->over = 1;
     } else {
@@ -2433,7 +2433,7 @@ void i_rant_node_problems_end(i_RantProblems *ps){
         char text[96];
         snprintf(text, sizeof text, "%u more problems than the status holds, each fired a RANT_ERROR event",
                  (unsigned)total);
-        (void)i_rant_node_status_put(n, RANT_ORIGIN_RANT, rant_cstr(I_RANT_PROB_MORE), RANT_LEVEL_ERROR,
+        (void)i_rant_node_status_put(n, RANT_ORIGIN_RANT, rant_cstr(I_RANT_PROB_MORE), RANT_DIAGNOSTIC_LEVEL_ERROR,
                                      rant_cstr(text), 0);
     } else {
         i_rant_node_status_remove(n, i_rant_node_status_find(n, RANT_ORIGIN_RANT, rant_cstr(I_RANT_PROB_MORE)));
@@ -2445,7 +2445,7 @@ RantString i_rant_node_sys_peer_name(RantNode *n, uint32_t peer){
     return nm.data && nm.len ? nm : rant_cstr("unknown-peer");
 }
 
-void i_rant_node_sys_note(RantNode *n, RantLevel level, const char *text){
+void i_rant_node_sys_note(RantNode *n, RantDiagnosticLevel level, const char *text){
     i_rant_node_note(n, level, NULL, text);
 }
 
@@ -2497,21 +2497,21 @@ static void i_rant_node_trouble(void *u, RantErrorKind what, uint32_t peer, uint
         int len = snprintf(text, sizeof text, "%s %s %.*s: ", tn, read ? "from" : "to", (int)pn.len, pn.data);
         if (len >= 0 && (size_t)len < sizeof text)
             snprintf(text + len, sizeof text - (size_t)len, "%s", why && why[0] ? why : "the schemas do not fit");
-        i_rant_node_problem(k->schema, id, RANT_LEVEL_ERROR, text);
+        i_rant_node_problem(k->schema, id, RANT_DIAGNOSTIC_LEVEL_ERROR, text);
         break; }
     case RANT_E_QOS_INCOMPATIBLE:
         snprintf(text, sizeof text, "%s from %.*s: published best effort there, subscribed reliable here",
                  tn, (int)pn.len, pn.data);
-        i_rant_node_problem(k->qos, id, RANT_LEVEL_ERROR, text);
+        i_rant_node_problem(k->qos, id, RANT_DIAGNOSTIC_LEVEL_ERROR, text);
         break;
     case RANT_E_KIND_MISMATCH:
         snprintf(text, sizeof text, "%s at %.*s is another kind of entity", tn, (int)pn.len, pn.data);
-        i_rant_node_problem(k->kind, id, RANT_LEVEL_ERROR, text);
+        i_rant_node_problem(k->kind, id, RANT_DIAGNOSTIC_LEVEL_ERROR, text);
         break;
     case RANT_E_INTEREST_OVERFLOW:
         snprintf(text, sizeof text, "%.*s: %u of its topics could not be mapped, out of memory",
                  (int)pn.len, pn.data, (unsigned)count);
-        i_rant_node_problem(k->big, i_rant_node_problem_id(&peer, sizeof peer), RANT_LEVEL_ERROR, text);
+        i_rant_node_problem(k->big, i_rant_node_problem_id(&peer, sizeof peer), RANT_DIAGNOSTIC_LEVEL_ERROR, text);
         break;
     case RANT_E_META_TRUNCATED_INTEREST:
         k->truncated = 1;
@@ -2537,7 +2537,7 @@ RANT__NOINLINE static void i_rant_node_problems_rebuild(RantNode *n){
         i_rant_problem_addr(&tr[i].addr, addr, sizeof addr);
         snprintf(text, sizeof text, "%s speaks wire version %u, this node %u",
                  addr, (unsigned)tr[i].value, (unsigned)RANT_WIRE_VERSION);
-        i_rant_node_problem(&one, i_rant_problem_addr_id(&tr[i].addr), RANT_LEVEL_ERROR, text);
+        i_rant_node_problem(&one, i_rant_problem_addr_id(&tr[i].addr), RANT_DIAGNOSTIC_LEVEL_ERROR, text);
         aging = 1;
     }
     one.more = (uint8_t)i_rant_discovery_trouble_more(i_rant_discovery_state(n->discovery), RANT_E_WIRE_VERSION);
@@ -2549,7 +2549,7 @@ RANT__NOINLINE static void i_rant_node_problems_rebuild(RantNode *n){
         snprintf(text, sizeof text, "%s meets this node but finds all %u slots taken, %s",
                  addr, (unsigned)tr[i].value,
                  n->alloc_dynamic ? "memory is at its limit" : "raise max_peers");
-        i_rant_node_problem(&one, i_rant_problem_addr_id(&tr[i].addr), RANT_LEVEL_ERROR, text);
+        i_rant_node_problem(&one, i_rant_problem_addr_id(&tr[i].addr), RANT_DIAGNOSTIC_LEVEL_ERROR, text);
         aging = 1;
     }
     if (!n->alloc_dynamic || n->peer_grow_failed)
@@ -2561,7 +2561,7 @@ RANT__NOINLINE static void i_rant_node_problems_rebuild(RantNode *n){
         snprintf(text, sizeof text, "this node remembers %u peers and forgets the rest, %s",
                  (unsigned)i_rant_discovery_record_cap(i_rant_discovery_state(n->discovery)),
                  n->alloc_dynamic ? "memory ran out" : "raise max_peers");
-        i_rant_node_problem(&one, 0, RANT_LEVEL_WARN, text);
+        i_rant_node_problem(&one, 0, RANT_DIAGNOSTIC_LEVEL_WARN, text);
     }
     i_rant_node_problems_end(&one);
     i_rant_node_problems_begin(n, &big, I_RANT_PROB_PEER_TOO_BIG);
@@ -2575,7 +2575,7 @@ RANT__NOINLINE static void i_rant_node_problems_rebuild(RantNode *n){
         } else i_rant_problem_addr(&tr[i].addr, addr, sizeof addr);
         snprintf(text, sizeof text, "%s: its announce needs %u bytes, this node holds %u",
                  addr, (unsigned)tr[i].value, (unsigned)n->meta_cap);
-        i_rant_node_problem(&big, i_rant_problem_addr_id(&tr[i].addr), RANT_LEVEL_ERROR, text);
+        i_rant_node_problem(&big, i_rant_problem_addr_id(&tr[i].addr), RANT_DIAGNOSTIC_LEVEL_ERROR, text);
         aging = 1;
     }
     i_rant_node_problems_begin(n, &schema, I_RANT_PROB_SCHEMA_MISMATCH);
@@ -2594,7 +2594,7 @@ RANT__NOINLINE static void i_rant_node_problems_rebuild(RantNode *n){
         char why[300];
         if (!i_rant_tunnel_link_up(n->tunnel, why, sizeof why)){
             snprintf(text, sizeof text, "the link to the bridge at %.130s", why);   /* the cap's room */
-            i_rant_node_problem(&one, 0, RANT_LEVEL_ERROR, text);
+            i_rant_node_problem(&one, 0, RANT_DIAGNOSTIC_LEVEL_ERROR, text);
             aging = 1;     /* it reconnects on its own and says nothing when it does */
         }
     }
@@ -2602,7 +2602,7 @@ RANT__NOINLINE static void i_rant_node_problems_rebuild(RantNode *n){
     i_rant_node_problems_end(&one);
     i_rant_node_problems_begin(n, &one, I_RANT_PROB_ANNOUNCE_OVERFLOW);
     if (sink.truncated)
-        i_rant_node_problem(&one, 0, RANT_LEVEL_ERROR,
+        i_rant_node_problem(&one, 0, RANT_DIAGNOSTIC_LEVEL_ERROR,
                             "this node's topic list overflowed its announce, so peers see none of its topics");
     i_rant_node_problems_end(&one);
     /* a source that goes quiet raises nothing, so an aging problem asks for the next look */
@@ -2640,7 +2640,7 @@ static void i_rant_node_status_on_clear(void *user, const RantMsg *msg){
     if (why){
         snprintf(note, sizeof note, "status clear of %s from %.*s refused: %s", key,
                  (int)msg->publisher_name.len, msg->publisher_name.data, why);
-        i_rant_node_note(n, RANT_LEVEL_DEBUG, NULL, note);
+        i_rant_node_note(n, RANT_DIAGNOSTIC_LEVEL_DEBUG, NULL, note);
         return;
     }
     i_rant_node_status_remove(n, i);
@@ -2649,7 +2649,7 @@ static void i_rant_node_status_on_clear(void *user, const RantMsg *msg){
         i_rant_node_emit(n, &e); }
 }
 
-int rant_node_set_status(RantNode *n, const char *key, RantLevel level, const char *text,
+int rant_node_set_status(RantNode *n, const char *key, RantDiagnosticLevel level, const char *text,
                          const RantStatusOpts *opts){
     int acquired, r;
     if (!n || !key || !key[0] || !i_rant_level_ok((int)level)) return RANT_ERR_NO_TOPIC;
@@ -2665,7 +2665,7 @@ int rant_node_clear_status(RantNode *n, const char *key){
     int acquired;
     if (!n || !key) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_lock(n);
-    if (!n->status_topic){ i_rant_node_unlock(n, acquired); return RANT_ERR_NOSYS; }
+    if (!n->status_topic){ i_rant_node_unlock(n, acquired); return RANT_ERR_DISABLED; }
     i_rant_node_status_remove(n, i_rant_node_status_find(n, RANT_ORIGIN_APP, rant_cstr(key)));
     if (n->status_dirty) i_rant_node_kick(n);
     i_rant_node_unlock(n, acquired);
@@ -2677,11 +2677,11 @@ int rant_node_clear_peer_status(RantNode *n, uint32_t peer, const char *key, uin
     const RantSchema *s;
     if (!n || !peer || !key || !key[0]) return RANT_ERR_NO_TOPIC;
     if (strlen(key) > RANT_STATUS_KEY_MAX) return RANT_ERR_TOO_BIG;
-    if (!n->clear_topic) return RANT_ERR_NOSYS;
+    if (!n->clear_topic) return RANT_ERR_DISABLED;
     s = n->clear_topic->schema;
     if (!rant_schema_message_default(s, msg, sizeof msg)
         || !rant_set_string(msg, sizeof msg, s, "key", rant_cstr(key))
-        || !rant_set_uint(msg, sizeof msg, s, "since_us", since_us)) return RANT_ERR_OOM;
+        || !rant_set_uint(msg, sizeof msg, s, "since_us", since_us)) return RANT_ERR_OUT_OF_MEMORY;
     return i_rant_topic_send_to(n->clear_topic, peer, rant_bytes(NULL, 0),
                                 rant_bytes(msg, rant_schema_msg_len(s, msg, sizeof msg)));
 }
@@ -2704,7 +2704,7 @@ static void i_rant_node_log_flush(RantNode *n){
                             : snprintf(line, sizeof line, "%s", p->text);
         if (ln < 0) ln = 0;
         if (ln >= (int)sizeof line) ln = (int)sizeof line - 1;
-        i_rant_node_log_publish(n, (RantLevel)p->level, RANT_ORIGIN_RANT, line, (size_t)ln,
+        i_rant_node_log_publish(n, (RantDiagnosticLevel)p->level, RANT_ORIGIN_RANT, line, (size_t)ln,
                                 p->wall_us, 1);
     }
     if (n->log_pend_dropped){
@@ -2712,7 +2712,7 @@ static void i_rant_node_log_flush(RantNode *n){
         int ln = snprintf(line, sizeof line, "log mirror overflow: %u lines dropped",
                           (unsigned)n->log_pend_dropped);
         n->log_pend_dropped = 0;
-        i_rant_node_log_publish(n, RANT_LEVEL_ERROR, RANT_ORIGIN_RANT, line,
+        i_rant_node_log_publish(n, RANT_DIAGNOSTIC_LEVEL_ERROR, RANT_ORIGIN_RANT, line,
                                 (size_t)(ln < 0 ? 0 : ln), 0, 1);
     }
     n->log_flushing = 0;
@@ -3526,7 +3526,7 @@ static int i_rant_topic_set_role_one(RantTopic *topic, RantRole role){
     if (topic->q && topic->q->busy) return RANT_ERR_STATE;   /* its own dispatched callback runs somewhere */
     if (i_rant_role_pubs((uint8_t)role)
         && (topic->path_at || (topic->wire != topic && topic->schema && topic->schema != topic->wire->adv)))
-        return RANT_ERR_ROLE;           /* a field handle reads, a writer takes the wire's type */
+        return RANT_ERR_BAD_ROLE;           /* a field handle reads, a writer takes the wire's type */
     topic->role = (uint8_t)role;
     r = i_rant_node_wire_role(topic->n, topic->wire);
     if (r != 0) topic->role = was;
@@ -3700,7 +3700,7 @@ int i_rant_topic_retype(RantTopic *topic, const RantSchema *schema, uint8_t reli
     if (schema){
         RantBytes w = rant_schema_wire(schema);
         copy = i_rant_registry_parse(&n->registry, w.data, w.len);
-        if (!copy) return RANT_ERR_OOM;
+        if (!copy) return RANT_ERR_OUT_OF_MEMORY;
     }
     topic->schema = copy;
     return i_rant_node_rebind(n, topic, copy, reliability);
@@ -3710,7 +3710,7 @@ int rant_topic_refresh(RantTopic *topic){
     RantNode *n; int acquired, r = 0;
     const RantSchema *ms = NULL; uint8_t rel = 0; uint64_t gen = 0;
     if (!topic) return RANT_ERR_NO_TOPIC;
-    if (!topic->reflect) return RANT_ERR_ROLE;
+    if (!topic->reflect) return RANT_ERR_BAD_ROLE;
     n = topic->n;
     acquired = i_rant_node_lock(n);
     if (!acquired){ i_rant_node_unlock(n, acquired); return RANT_ERR_STATE; }   /* from a callback: lanes are live */
@@ -4313,10 +4313,10 @@ int rant_node_set_event_queue(RantNode *n, RantQueue *q){
     if (!n->event_q){
         i_RantMsgQueue *r = (i_RantMsgQueue*)i_rant_node_alloc(n, NULL, sizeof *r);
         uint32_t limit = RANT__QALIGN(n->event_queue_bytes), initial = limit < 4096u ? limit : 4096u;
-        if (!r){ i_rant_node_unlock(n, acquired); return RANT_ERR_OOM; }
+        if (!r){ i_rant_node_unlock(n, acquired); return RANT_ERR_OUT_OF_MEMORY; }
         memset(r, 0, sizeof *r);
         r->buf = (uint8_t*)i_rant_node_bulk_alloc(n, NULL, initial);
-        if (!r->buf){ i_rant_node_alloc(n, r, 0); i_rant_node_unlock(n, acquired); return RANT_ERR_OOM; }
+        if (!r->buf){ i_rant_node_alloc(n, r, 0); i_rant_node_unlock(n, acquired); return RANT_ERR_OUT_OF_MEMORY; }
         r->cap = initial; r->cap_limit = limit; r->silent = 1;   /* best effort, evicts quietly */
         n->event_q = r;
     }
@@ -4369,9 +4369,9 @@ static int i_rant_node_set_builtin_queue(RantNode *n, RantTopic *h, RantQueue *q
     acquired = i_rant_node_lock(n);
     if (acquired) i_rant_node_callbacks_settle(n);
     if (!acquired || (q && q->n != n) || (h && h->q && h->q->busy)) r = RANT_ERR_STATE;
-    else if (!h) r = RANT_ERR_NOSYS;
+    else if (!h) r = RANT_ERR_DISABLED;
     else if (!q){ i_rant_node_queue_drop(n, h); h->queue = NULL; }    /* the parked records go */
-    else if (!i_rant_node_queue_ensure(n, h, NULL)) r = RANT_ERR_OOM;
+    else if (!i_rant_node_queue_ensure(n, h, NULL)) r = RANT_ERR_OUT_OF_MEMORY;
     else h->queue = q;
     i_rant_node_unlock(n, acquired);
     return r;
@@ -4430,7 +4430,7 @@ static void i_rant_node_service(void *arg){
 int rant_node_start(RantNode *n){
 #ifndef RANT_THREADS
     (void)n;
-    return RANT_ERR_NOSYS;
+    return RANT_ERR_DISABLED;
 #else
     int acquired;
     if (!n) return RANT_ERR_STATE;
@@ -4443,7 +4443,7 @@ int rant_node_start(RantNode *n){
     if (!i_rant_plat_thread_start(&n->svc, i_rant_node_service, n)){
         n->svc_running = 0;
         i_rant_node_unlock(n, acquired);
-        return RANT_ERR_NOSYS;
+        return RANT_ERR_DISABLED;
     }
     i_rant_node_unlock(n, acquired);                      /* the service takes the lock now */
     return RANT_OK;

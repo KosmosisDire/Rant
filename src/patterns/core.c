@@ -903,7 +903,7 @@ static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponse
     if (!fn || !fn->req || !fn->rsp) return RANT_ERR_NO_TOPIC;
     acquired = i_rant_node_sys_lock(fn->n);
     p = (i_RantPending*)i_rant_node_sys_alloc(fn->n, NULL, sizeof *p);
-    if (!p){ i_rant_node_sys_unlock(fn->n, acquired); return RANT_ERR_OOM; }
+    if (!p){ i_rant_node_sys_unlock(fn->n, acquired); return RANT_ERR_OUT_OF_MEMORY; }
     if (fn->is_task && !dest) dest = i_rant_topic_oldest_match(fn->req);     /* always directed */
     id = fn->next_call_id++;
     p->call_id = id;
@@ -926,7 +926,7 @@ static int i_rant_function_call_id(RantFunction *fn, RantBytes req, RantResponse
             fn->pending = p->next;
             i_rant_node_sys_alloc(fn->n, p, 0);
             i_rant_node_sys_unlock(fn->n, acquired);
-            return RANT_ERR_OOM;
+            return RANT_ERR_OUT_OF_MEMORY;
         }
         if (req.len) memcpy(p->queued_req, req.data, req.len);
         p->queued_len = (uint32_t)req.len;
@@ -1035,7 +1035,7 @@ int rant_function_refresh(RantFunction *fn){
     RantNode *n; RantEntityKind ek; uint64_t gen = 0; int acquired, r;
     const RantSchema *rq = NULL, *rs = NULL, *pg = NULL;
     if (!fn) return RANT_ERR_NO_TOPIC;
-    if (!fn->reflect) return RANT_ERR_ROLE;
+    if (!fn->reflect) return RANT_ERR_BAD_ROLE;
     n = fn->n; ek = fn->is_task ? RANT_ENTITY_TASK : RANT_ENTITY_FUNCTION;
     if (!i_rant_node_reflect_pick(n, ek, i_rant_pat_base_name(fn->req), 0, !fn->is_provider, &rq, NULL, &gen)
         || gen == fn->generation) return 0;
@@ -1127,7 +1127,7 @@ int rant_function_call(RantFunction *fn, RantBytes req, RantResponse *out, int t
     if (!acquired){ i_rant_node_sys_unlock(fn->n, acquired); return RANT_ERR_STATE; }   /* from a callback */
     slot = i_rant_func_sync_slot(fn);
     i_rant_node_sys_unlock(fn->n, acquired);
-    if (!slot) return RANT_ERR_OOM;
+    if (!slot) return RANT_ERR_OUT_OF_MEMORY;
     ctx.fn = fn; ctx.done = 0; ctx.status = RANT_CALL_TIMEOUT; ctx.schema = NULL; ctx.len = 0;
     ctx.provider = 0; ctx.written_us = 0; ctx.slot = slot;
     r = i_rant_function_call_id(fn, req, i_rant_func_sync_response, &ctx, opts, &id, &entry);
@@ -1308,7 +1308,7 @@ int rant_function_cancel(RantFunction *fn, uint32_t call_id){
                           && ei.cancellable;
         if (!cancellable){
             i_rant_node_sys_unlock(fn->n, acquired);
-            return RANT_ERR_ROLE;
+            return RANT_ERR_BAD_ROLE;
         }
     }
     i_rant_node_sys_unlock(fn->n, acquired);
@@ -2081,7 +2081,7 @@ int rant_variable_get(RantVariable *var, RantBytes *out, const RantSchema **sche
 /* accessor write routing: no owner at all versus a read only owner */
 static int i_rant_var_accessor_route(i_RantVar *v){
     if (i_rant_topic_source_match_count(v->value) == 0) return RANT_ERR_NO_TOPIC;
-    if (!v->set || i_rant_topic_all_match_count(v->set) == 0) return RANT_ERR_ROLE;
+    if (!v->set || i_rant_topic_all_match_count(v->set) == 0) return RANT_ERR_BAD_ROLE;
     return RANT_OK;
 }
 
@@ -2127,7 +2127,7 @@ static int i_rant_var_build(RantVariable *h, uint8_t op, RantBytes value, uint8_
     hl = RANT__SET_PREFIX + 2u + 8u * (size_t)n;
     need = 2u * sizeof(i_RantUnit) * n + def + def + value.len + (hl > RANT__SET_HDR_STACK ? hl : 0u);
     if (n > 0x1FFFu || !(buf = (uint8_t*)i_rant_node_sys_bulk(v->n, NULL, need ? need : 1u)))
-        return RANT_ERR_OOM;
+        return RANT_ERR_OUT_OF_MEMORY;
     *heap = buf;
     dst = (i_RantUnit*)buf; src = dst + n;
     for (k = 0, kv = 0; k < n; k++){
@@ -2182,7 +2182,7 @@ int rant_variable_set(RantVariable *var, RantBytes value){
         } else {
             int changed = i_rant_var_would_change(v, value, 0);
             if (!i_rant_buf_put(v->n, &v->store, &v->store_len, &v->store_cap, value)){
-                r = RANT_ERR_OOM;
+                r = RANT_ERR_OUT_OF_MEMORY;
             } else {
                 v->has_value = 1; v->write_seq++;
                 my_seq = v->write_seq;
@@ -2231,7 +2231,7 @@ int rant_variable_force(RantVariable *var, RantBytes value){
     }
     r = i_rant_var_accessor_route_wait(v);
     if (r != RANT_OK) return r;
-    if (!i_rant_var_owner_forceable(v)) return RANT_ERR_ROLE;
+    if (!i_rant_var_owner_forceable(v)) return RANT_ERR_BAD_ROLE;
     return i_rant_var_send(var, RANT__SET_OP_FORCE, value);
 }
 
@@ -2249,7 +2249,7 @@ int rant_variable_unforce(RantVariable *var){
     }
     r = i_rant_var_accessor_route_wait(v);
     if (r != RANT_OK) return r;
-    if (!i_rant_var_owner_forceable(v)) return RANT_ERR_ROLE;
+    if (!i_rant_var_owner_forceable(v)) return RANT_ERR_BAD_ROLE;
     {   uint8_t hdr[RANT__SET_PREFIX + 2u];
         memset(hdr, 0, sizeof hdr); hdr[0] = RANT__SET_OP_UNFORCE;
         return i_rant_topic_send_hdr(v->set, rant_bytes(hdr, sizeof hdr), rant_bytes(NULL, 0));
@@ -2315,7 +2315,7 @@ int rant_variable_refresh(RantVariable *var){
     const RantSchema *ms = NULL;
     if (!var) return RANT_ERR_NO_TOPIC;
     v = var->v;
-    if (!v->reflect) return RANT_ERR_ROLE;
+    if (!v->reflect) return RANT_ERR_BAD_ROLE;
     n = v->n;
     if (!i_rant_node_reflect_pick(n, RANT_ENTITY_VARIABLE, i_rant_pat_base_name(v->value), 0,
                                   v->is_owner, &ms, NULL, &gen)
@@ -2569,7 +2569,7 @@ static void i_rant_pat_problem(i_RantPatterns *pm, i_RantProblems *ps, RantTopic
     if (len >= 5 && nm.data[len - 4] == '@') len -= 4;   /* the entity's base name */
     snprintf(text, sizeof text, "%.*s is also %s by %.*s", (int)len, nm.data, role, (int)pn.len, pn.data);
     idb[0] = i_rant_node_problem_id(nm.data, len); idb[1] = peer;
-    i_rant_node_problem(ps, i_rant_node_problem_id(idb, sizeof idb), RANT_LEVEL_WARN, text);
+    i_rant_node_problem(ps, i_rant_node_problem_id(idb, sizeof idb), RANT_DIAGNOSTIC_LEVEL_WARN, text);
 }
 
 /* Rebuilds this layer's Rant conditions: duplicate_authority from the reported rivals, and
@@ -2592,7 +2592,7 @@ static void i_rant_pat_problems(i_RantPatterns *pm){
         by = v->forced_by ? i_rant_node_sys_peer_name(pm->n, v->forced_by) : rant_cstr("this node");
         snprintf(text, sizeof text, "%.*s is forced by %.*s, forcing is for debugging only",
                  (int)nm.len, nm.data, (int)by.len, by.data);
-        i_rant_node_problem(&ps, i_rant_node_problem_id(nm.data, nm.len), RANT_LEVEL_WARN, text);
+        i_rant_node_problem(&ps, i_rant_node_problem_id(nm.data, nm.len), RANT_DIAGNOSTIC_LEVEL_WARN, text);
     }
     i_rant_node_problems_end(&ps);
 }
@@ -2623,7 +2623,7 @@ static uint64_t i_rant_func_reap(RantFunction *fn, uint64_t now, RantCallStatus 
                 snprintf(note, sizeof note, "call of %.*s ended: %s",
                          (int)(nm.len > RANT__PAT_SUFFIX ? nm.len - RANT__PAT_SUFFIX : 0), nm.data,
                          i_rant_call_status_msg(st).data);
-                i_rant_node_sys_note(fn->n, RANT_LEVEL_WARN, note);
+                i_rant_node_sys_note(fn->n, RANT_DIAGNOSTIC_LEVEL_WARN, note);
             }
             *pp = p->next;
             i_rant_func_fail_pending(fn, p, st, i_rant_call_status_msg(st), park);

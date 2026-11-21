@@ -148,7 +148,7 @@ RantNode *n = rant_node_open(&mem, "arm", NULL, NULL, &(RantNodeOpts){ .bulk = &
 | `match_wait_ms` | first send match wait bound, 0 = 1 s, negative = off (docs/topics.md) |
 | `fetch_details` | fetch names and schemas for every topic every peer has, for observer tools |
 | `disable_logs`, `disable_status`, `disable_meta`, `disable_error_logs` | strip the built in log, status and meta (docs/node.md) |
-| `log_level` | the lowest `RantLevel` the log sends. 0 takes `RANT_LOG_LEVEL`, else Info |
+| `log_level` | the lowest `RantDiagnosticLevel` the log sends. 0 takes `RANT_LOG_LEVEL`, else Info |
 | `net` | ports, group, interface, seed peers, bridge (docs/discovery.md) |
 | `discovery` | announce interval, peer timeout, max peers (docs/discovery.md) |
 | `user_data` | surfaced as `RantMsg.user` and `RantEvent.user` |
@@ -165,7 +165,7 @@ Define these before the include.
 | `RANT_SHM` | same host shared memory path. Auto on for Windows, Linux, macOS and BSD |
 | `RANT_NO_SHM` | force shared memory off. Drops the Linux `-lrt` |
 | `RANT_THREADS` | node lock and service thread. Auto on for Windows and POSIX with pthreads |
-| `RANT_NO_THREADS` | force threading off. `rant_node_start` returns `RANT_ERR_NOSYS` |
+| `RANT_NO_THREADS` | force threading off. `rant_node_start` returns `RANT_ERR_DISABLED` |
 | `RANT_ESP_THREAD_STACK` | the stack in bytes of each thread Rant starts on ESP32, 16384 by default |
 | `RANT_PROC_STATS` | process CPU and memory in the meta snapshot. Auto on where the OS can measure |
 | `RANT_NO_PROC_STATS` | force the proc section off |

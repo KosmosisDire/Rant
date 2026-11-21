@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
            .set_uint("tint.b", tint.b).set_uint("tint.a", tint.a)
            .set_uint("textLen", (uint64_t)len)
            .set_array("text", rant::Bytes(line, len));
-        if (chat.send(msg) != rant::SendStatus::Ok)
+        if (chat.send(msg) != rant::RantResult::Ok)
             std::printf("  (send failed)\n");
     }
 

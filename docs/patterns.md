@@ -89,7 +89,7 @@ rant_variable_wait(remote, 1000);            /* until the first value arrives */
 
 The definition owns the value. Remotes write with `rant_variable_set` and a late remote
 gets the latest value at once. `RantVariableOpts`: `initial`, `access`
-(`RANT_VAR_READONLY` creates no set channel, so remote sets get `RANT_ERR_ROLE`),
+(`RANT_VAR_READONLY` creates no set channel, so remote sets get `RANT_ERR_BAD_ROLE`),
 `allow_force`, `catch_up` (default 1), `keep_last` (the repair window for a burst of
 writes, default 10), `backpressure_wait_us` (default 0: a write never waits, a slow reader
 may miss intermediate writes but always ends on the newest value) and `reflect_from_mesh`.
@@ -97,7 +97,7 @@ may miss intermediate writes but always ends on the newest value) and `reflect_f
 `rant_variable_force` overrides the value until `rant_variable_unforce`. Writes while
 forced are absorbed, and unforce restores the latest. `rant_variable_forced` reports it.
 A definition needs `allow_force` (`RANT_ERR_STATE` without), and a remote's force against
-an owner that advertises none is refused with `RANT_ERR_ROLE`, nothing sent.
+an owner that advertises none is refused with `RANT_ERR_BAD_ROLE`, nothing sent.
 
 Events, one slot each, `NULL` clears: `rant_variable_on_change` fires when the observed
 state actually changes (first value, different bytes, a forced flip) and replays the

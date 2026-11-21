@@ -80,7 +80,7 @@ static bool send_one(rant::Publisher<rant::Bytes>& pub, const rant::Schema& sche
      .set_array("samples", rant::Bytes(SAMPLES, sizeof SAMPLES))
      .set_map("extras", mw);
     if (!s.ok() || !mw.ok()) { std::printf("FAIL: encode (ok=%d mw=%d)\n", s.ok(), mw.ok()); return false; }
-    return pub.send(s) == rant::SendStatus::Ok;
+    return pub.send(s) == rant::RantResult::Ok;
 }
 
 /* decoded snapshot filled by the subscriber's handler */
@@ -295,7 +295,7 @@ static bool patterns_leg() {
             if (rv.ok()) async_sum = rv.value()->sum;
             async_done = true;
         });
-    chk("patterns: call_async accepted", st == rant::SendStatus::Ok);
+    chk("patterns: call_async accepted", st == rant::RantResult::Ok);
     chk("patterns: async 1+2=3", wait_for(3000, [&] { return async_done.load(); }, &b)
         && async_sum == 3);
 
@@ -310,14 +310,14 @@ static bool patterns_leg() {
     chk("var: created", vd.valid() && rv.valid());
     chk("var: remote wait() gets a value", rv.wait(4s));
     { auto v = rv.get(); chk("var: initial 7 replicated", v && v->v == 7); }
-    chk("var: remote set accepted", rv.set(Speed{ 25 }) == rant::SendStatus::Ok);
+    chk("var: remote set accepted", rv.set(Speed{ 25 }) == rant::RantResult::Ok);
     chk("var: set converges at definition", wait_for(3000,
         [&] { auto v = vd.get(); return v && v->v == 25; }, &b));
-    chk("var: force accepted", vd.force(Speed{ 99 }) == rant::SendStatus::Ok);
+    chk("var: force accepted", vd.force(Speed{ 99 }) == rant::RantResult::Ok);
     chk("var: forced value replicated", wait_for(3000,
         [&] { auto v = rv.get(); return rv.forced() && v && v->v == 99; }, &b));
-    chk("var: set absorbed while forced", vd.set(Speed{ 50 }) == rant::SendStatus::Ok);
-    chk("var: unforce accepted", vd.unforce() == rant::SendStatus::Ok);
+    chk("var: set absorbed while forced", vd.set(Speed{ 50 }) == rant::RantResult::Ok);
+    chk("var: unforce accepted", vd.unforce() == rant::RantResult::Ok);
     chk("var: unforce restores absorbed set", wait_for(3000,
         [&] { auto v = rv.get(); return !rv.forced() && v && v->v == 50; }, &b));
     chk("var: match_count both sides", rv.match_count() > 0 && vd.match_count() >= 1);
@@ -328,9 +328,9 @@ static bool patterns_leg() {
     chk("var: on_change replays current at registration", vchg.load() == 1 && vlast.load() == 50);
     vd.on_write([&](const Speed& s) { (void)s; vwr++; });
     chk("var: on_write does not replay", vwr.load() == 0);
-    chk("var: identical re-set accepted", vd.set(Speed{ 50 }) == rant::SendStatus::Ok);
+    chk("var: identical re-set accepted", vd.set(Speed{ 50 }) == rant::RantResult::Ok);
     chk("var: identical re-set is a write, not a change", vchg.load() == 1 && vwr.load() == 1);
-    chk("var: new set accepted", vd.set(Speed{ 51 }) == rant::SendStatus::Ok);
+    chk("var: new set accepted", vd.set(Speed{ 51 }) == rant::RantResult::Ok);
     chk("var: change fires inline with the new value",
         vchg.load() == 2 && vlast.load() == 51 && vwr.load() == 2);
     std::atomic<int64_t> rlast{ 0 };
@@ -346,7 +346,7 @@ static bool patterns_leg() {
         [&](const Flat& f) { if (f.a == 7 && f.b == 2.5f) flat_ok = true; }, rel);
     chk("codec: flat pair created", pf.valid() && sf.valid());
     chk("codec: flat matched", wait_for(4000, [&] { return pf.match_count() > 0 && pf.ready(); }, &b));
-    chk("codec: flat send", pf.send(Flat{ 7, 2.5f }) == rant::SendStatus::Ok);
+    chk("codec: flat send", pf.send(Flat{ 7, 2.5f }) == rant::RantResult::Ok);
     chk("codec: memcpy-path round trip", wait_for(3000, [&] { return flat_ok.load(); }, &b));
 
     /* typed pub sub, loop path: a padded struct plus a string, with the two argument handler
@@ -367,7 +367,7 @@ static bool patterns_leg() {
     out.a = 9; out.b = 0x11223344u; out.c = 777; out.d = -3.5;
     chk("codec: string assign", out.tag.assign("robot"));
     chk("codec: string over-cap refused", !out.tag.assign("well over seven"));
-    chk("codec: padded send", pp.send(out) == rant::SendStatus::Ok);
+    chk("codec: padded send", pp.send(out) == rant::RantResult::Ok);
     chk("codec: loop-path round trip", wait_for(3000, [&] { return padded_got.load(); }, &b)
         && padded_seen.a == 9 && padded_seen.b == 0x11223344u
         && padded_seen.c == 777 && padded_seen.d == -3.5
@@ -381,7 +381,7 @@ static bool patterns_leg() {
         [&](const subside::Telemetry& t) { if (t.seq == 31337 && t.flags == 5) tele_ok = true; }, rel);
     chk("codec: telemetry pair created", tp.valid() && ts.valid());
     chk("codec: telemetry matched", wait_for(4000, [&] { return tp.match_count() > 0 && tp.ready(); }, &b));
-    chk("codec: telemetry send", tp.send(pubside::Telemetry{ 31337, 12.6f, 5 }) == rant::SendStatus::Ok);
+    chk("codec: telemetry send", tp.send(pubside::Telemetry{ 31337, 12.6f, 5 }) == rant::RantResult::Ok);
     chk("codec: subset/rebase round trip", wait_for(3000, [&] { return tele_ok.load(); }, &b));
 
     /* reflection: local and peer entities */
@@ -595,7 +595,7 @@ static bool stdtypes_leg() {
         img.format = rant::types::ImageFormat::Mono8;
         img.data.resize((size_t)img.stride * img.height);
         for (size_t i = 0; i < img.data.size(); i++) img.data[i] = (uint8_t)(i * 7);
-        chk("std: image send", ipub.send(img) == rant::SendStatus::Ok);
+        chk("std: image send", ipub.send(img) == rant::RantResult::Ok);
         chk("std: image crosses whole",
             wait_for(4000, [&] { return img_recv.load() > 0; }, &b)
             && img_got.width == 320 && img_got.format == rant::types::ImageFormat::Mono8
@@ -1037,7 +1037,7 @@ static bool value_root_leg() {
     auto sub_b = b.subscriber<bool>("flag", [&](const bool& v) { if (v) flags++; }, rel);
     chk("root: bool pair created", pb.valid() && sub_b.valid());
     chk("root: bool matched", wait_for(4000, [&] { return pb.match_count() > 0 && pb.ready(); }, &b));
-    chk("root: bool send", pb.send(true) == rant::SendStatus::Ok);
+    chk("root: bool send", pb.send(true) == rant::RantResult::Ok);
     chk("root: bool round trip", wait_for(3000, [&] { return flags.load() == 1; }, &b));
 
     /* std::string: the unbounded `string` root, one tail frame */
@@ -1046,7 +1046,7 @@ static bool value_root_leg() {
     auto sub_s = b.subscriber<std::string>("note", [&](const std::string& v) { got = v; }, rel);
     chk("root: string pair created", ps.valid() && sub_s.valid());
     chk("root: string matched", wait_for(4000, [&] { return ps.match_count() > 0 && ps.ready(); }, &b));
-    chk("root: string send", ps.send(std::string("a bare unbounded string")) == rant::SendStatus::Ok);
+    chk("root: string send", ps.send(std::string("a bare unbounded string")) == rant::RantResult::Ok);
     chk("root: string round trip", wait_for(3000, [&] { return got == "a bare unbounded string"; }, &b));
 
     /* std::array: a fixed array root */
@@ -1057,7 +1057,7 @@ static bool value_root_leg() {
         [&](const std::array<float, 3>& v) { a3_seen = v; a3_got = true; }, rel);
     chk("root: array pair created", pa3.valid() && sa3.valid());
     chk("root: array matched", wait_for(4000, [&] { return pa3.match_count() > 0 && pa3.ready(); }, &b));
-    chk("root: array send", pa3.send(std::array<float, 3>{ 1.5f, 2.5f, -3.f }) == rant::SendStatus::Ok);
+    chk("root: array send", pa3.send(std::array<float, 3>{ 1.5f, 2.5f, -3.f }) == rant::RantResult::Ok);
     chk("root: array round trip", wait_for(3000, [&] { return a3_got.load(); }, &b)
         && a3_seen[0] == 1.5f && a3_seen[2] == -3.f);
 
@@ -1069,7 +1069,7 @@ static bool value_root_leg() {
     chk("root: variable pair created", vd.valid() && rv.valid());
     chk("root: variable replicates the initial", wait_for(4000,
         [&] { auto v = rv.get(); return v && *v == 1.25; }, &b));
-    chk("root: variable set accepted", rv.set(2.5) == rant::SendStatus::Ok);
+    chk("root: variable set accepted", rv.set(2.5) == rant::RantResult::Ok);
     chk("root: variable set converges", wait_for(3000,
         [&] { auto v = vd.get(); return v && *v == 2.5; }, &b));
 
@@ -1087,7 +1087,7 @@ static bool value_root_leg() {
         rant::MessageBuilder mb(f64);
         mb.set_f64("", -7.5);
         chk("root: builder set through the empty path", mb.ok());
-        chk("root: dynamic send", dp.send(mb) == rant::SendStatus::Ok);
+        chk("root: dynamic send", dp.send(mb) == rant::RantResult::Ok);
         chk("root: dynamic round trip", wait_for(3000, [&] { return hits.load() == 1; }, &b));
         chk("root: dynamic value read through the empty path", seen == -7.5);
     }
@@ -1190,7 +1190,7 @@ static bool tails_leg() {
         w.seq = 41;
         w.note = "shared tail";
         w.gain = 2.5f;
-        chk("tails: wide send", pub.send(w) == rant::SendStatus::Ok);
+        chk("tails: wide send", pub.send(w) == rant::RantResult::Ok);
         chk("tails: rebased decode reads the right frames",
             wait_for(4000, [&] { return got.load() > 0; }, &b)
             && seen.seq == 41 && seen.samples == w.samples && seen.note == "shared tail");
@@ -1206,7 +1206,7 @@ static bool tails_leg() {
             wait_for(4000, [&] { return pv.match_count() == 1 && pv.ready(); }, &b));
         std::vector<float> wave(256);
         for (size_t i = 0; i < wave.size(); i++) wave[i] = (float)i * 0.5f;
-        chk("tails: vector-root send", pv.send(wave) == rant::SendStatus::Ok);
+        chk("tails: vector-root send", pv.send(wave) == rant::RantResult::Ok);
         chk("tails: vector-root round trip",
             wait_for(4000, [&] { return got.load() > 0; }, &b) && seen == wave);
     }
@@ -1292,8 +1292,8 @@ static bool tasks_leg() {
         if (!pending.valid()) worker_bad++;
         if (pending.cancelled()) worker_bad++;       /* nobody cancelled this call */
         for (int i = 3; i >= 1; i--)
-            if (pending.progress(MoveProgress{ (double)i }) != rant::SendStatus::Ok) worker_bad++;
-        if (pending.complete(MoveRsp{ 5.0 }, "arrived") != rant::SendStatus::Ok) worker_bad++;
+            if (pending.progress(MoveProgress{ (double)i }) != rant::RantResult::Ok) worker_bad++;
+        if (pending.complete(MoveRsp{ 5.0 }, "arrived") != rant::RantResult::Ok) worker_bad++;
         stale_rc = (int)pending.complete(MoveRsp{ 0.0 });   /* the handle emptied: refused */
     });
     std::vector<std::pair<bool, double>> updates;   /* (has_value, value) in arrival order */
@@ -1311,7 +1311,7 @@ static bool tasks_leg() {
         && updates[3].first && updates[3].second == 1.0);
     chk("task: every token verb accepted", worker_bad.load() == 0);
     chk("task: an answered handle refuses a second complete",
-        stale_rc.load() == (int)rant::SendStatus::State);
+        stale_rc.load() == (int)rant::RantResult::State);
 
     /* reflection: the folded task entity carries the attrs and the progress schema */
     auto find = [](const std::vector<rant::Entity>& es, rant::EntityKind k, const char* nm)
@@ -1351,7 +1351,7 @@ static bool tasks_leg() {
         });
     chk("task: call_async returns the id", tc.ok() && tc.id != 0);
     chk("task: definition parked", wait_for(4000, [&] { return g_move_parked.load() >= 2; }, &b));
-    chk("task: cancel accepted", rt_move.cancel(tc.id) == rant::SendStatus::Ok);
+    chk("task: cancel accepted", rt_move.cancel(tc.id) == rant::RantResult::Ok);
     chk("task: definition sees cancelled()", wait_for(4000, [&] {
             std::lock_guard<std::mutex> g(g_move_mu);
             return g_move_pending.cancelled();
@@ -1360,7 +1360,7 @@ static bool tasks_leg() {
     {
         std::lock_guard<std::mutex> g(g_move_mu);
         chk("task: complete_cancelled accepted",
-            g_move_pending.complete_cancelled("stopped") == rant::SendStatus::Ok);
+            g_move_pending.complete_cancelled("stopped") == rant::RantResult::Ok);
     }
     chk("task: caller sees Cancelled", wait_for(4000, [&] { return cancel_done.load(); }, &b)
         && cancel_status.load() == (int)rant::CallStatus::Cancelled && cancel_message == "stopped");
@@ -1373,11 +1373,11 @@ static bool tasks_leg() {
     chk("task: fixed call committed", tf.ok() && tf.id != 0);
     chk("task: fixed parked", wait_for(4000, [&] { return g_fixed_parked.load() >= 1; }, &b));
     chk("task: no_cancel refused locally (BadRole)",
-        rt_fixed.cancel(tf.id) == rant::SendStatus::BadRole);
+        rt_fixed.cancel(tf.id) == rant::RantResult::BadRole);
     {
         std::lock_guard<std::mutex> g(g_fixed_mu);
         chk("task: fixed completes Ok anyway",
-            g_fixed_pending.complete(MoveRsp{ 1.0 }) == rant::SendStatus::Ok);
+            g_fixed_pending.complete(MoveRsp{ 1.0 }) == rant::RantResult::Ok);
     }
     chk("task: fixed caller sees Ok", wait_for(4000, [&] { return fixed_done.load(); }, &b)
         && fixed_status.load() == (int)rant::CallStatus::Ok);
@@ -1393,7 +1393,7 @@ static bool tasks_leg() {
         std::lock_guard<std::mutex> g(g_move_mu);
         g_move_pending = rant::PendingTask<MoveProgress, MoveRsp>();
     }
-    chk("task: retire mid-run", def_move.close() == rant::SendStatus::Ok);
+    chk("task: retire mid-run", def_move.close() == rant::RantResult::Ok);
     chk("task: retire resolves the caller Cancelled",
         wait_for(4000, [&] { return retired_done.load(); }, &b)
         && retired_status.load() == (int)rant::CallStatus::Cancelled);
@@ -1453,10 +1453,10 @@ static bool status_leg() {
         cleared++; cleared_key = e.detail();
     });
     chk("status: raised before anyone listens",
-        a.set_status("estop", rant::DiagnosticLevel::Error, "pressed") == rant::SendStatus::Ok
-        && a.set_status("hot", rant::DiagnosticLevel::Warn, "motor hot", true) == rant::SendStatus::Ok);
+        a.set_status("estop", rant::DiagnosticLevel::Error, "pressed") == rant::RantResult::Ok
+        && a.set_status("hot", rant::DiagnosticLevel::Warn, "motor hot", true) == rant::RantResult::Ok);
     chk("status: a long key is refused",
-        a.set_status(std::string(49, 'k'), rant::DiagnosticLevel::Info, "x") == rant::SendStatus::TooBig);
+        a.set_status(std::string(49, 'k'), rant::DiagnosticLevel::Info, "x") == rant::RantResult::TooBig);
     chk("status: on_status binds", b.on_status([&](const rant::StatusUpdate& u) {
         if (u.node != "SA") return;
         std::lock_guard<std::mutex> g(mu);
@@ -1475,11 +1475,11 @@ static bool status_leg() {
             && seen[1].origin == rant::Origin::App);
         if (seen.size() == 2) hot = seen[1];
     }
-    chk("status: a peer clear is sent", b.clear_peer_status(from, "hot", hot.since) == rant::SendStatus::Ok);
+    chk("status: a peer clear is sent", b.clear_peer_status(from, "hot", hot.since) == rant::RantResult::Ok);
     chk("status: A's app hears which was cleared", wait_for(4000, [&] {
         std::lock_guard<std::mutex> g(mu); return cleared == 1 && cleared_key == "hot"; }));
     chk("status: B sees the smaller set", wait_for(4000, [&] { return count() == 1; }));
-    chk("status: an own clear", a.clear_status("estop") == rant::SendStatus::Ok);
+    chk("status: an own clear", a.clear_status("estop") == rant::RantResult::Ok);
     chk("status: B sees it empty", wait_for(4000, [&] { return count() == 0; }));
     a.set_status("estop", rant::DiagnosticLevel::Error, "pressed again");
     chk("status: raised again", wait_for(4000, [&] { return count() == 1; }));
@@ -1507,8 +1507,8 @@ static bool queue_leg() {
     chk("queue: nodes constructed", a.valid() && b.valid());
     if (!a.valid() || !b.valid()) return false;
     chk("queue: B dispatches", b.threading() == rant::Threading::Dispatch);
-    chk("queue: poll is refused off Manual", b.poll() == (int)rant::SendStatus::State);
-    chk("queue: dispatch is refused off Dispatch", a.dispatch() == (int)rant::SendStatus::State);
+    chk("queue: poll is refused off Manual", b.poll() == (int)rant::RantResult::State);
+    chk("queue: dispatch is refused off Dispatch", a.dispatch() == (int)rant::RantResult::State);
     std::atomic<int> events{ 0 };
     std::thread::id me = std::this_thread::get_id();
     std::atomic<bool> stray{ false };
@@ -1537,7 +1537,7 @@ static bool queue_leg() {
     chk("queue: the replayed line arrives at dispatch",
         drained([&] { return !lines.empty() && lines[0] == "before"; }));
 
-    chk("queue: send", pub.send(Speed{ 5 }) == rant::SendStatus::Ok);
+    chk("queue: send", pub.send(Speed{ 5 }) == rant::RantResult::Ok);
     wait_for(300, [] { return false; });
     chk("queue: the message waits for dispatch", got.empty());
     chk("queue: dispatch runs it", drained([&] { return got.size() == 1 && got[0] == 5; }));
@@ -1545,7 +1545,7 @@ static bool queue_leg() {
     int64_t sum = 0;
     chk("queue: async call accepted", rf.call_async(AddReq{ 2, 3 },
         [&](const rant::ResponseView<AddRsp>& rv) { mark(); if (rv.ok()) sum = rv.value()->sum; })
-        == rant::SendStatus::Ok);
+        == rant::RantResult::Ok);
     chk("queue: the response arrives at dispatch", drained([&] { return sum == 5; }));
     a.log(rant::DiagnosticLevel::Warn, "live");
     chk("queue: a live line arrives at dispatch",
@@ -1615,12 +1615,12 @@ static bool lifetime_leg() {
     auto s1 = b.subscriber<Speed>("l/speed", [&](const Speed& s) { first++; last = s.v; }, rel);
     auto s2 = b.subscriber<Speed>("l/speed", [&](const Speed&) { second++; }, rel);
     chk("life: matched", wait_for(4000, [&] { return p2.match_count() > 0 && p2.ready(); }));
-    chk("life: closing one publisher succeeds", p1.close() == rant::SendStatus::Ok && !p1.valid());
-    chk("life: the other publisher still sends", p2.valid() && p2.send(Speed{ 1 }) == rant::SendStatus::Ok);
+    chk("life: closing one publisher succeeds", p1.close() == rant::RantResult::Ok && !p1.valid());
+    chk("life: the other publisher still sends", p2.valid() && p2.send(Speed{ 1 }) == rant::RantResult::Ok);
     chk("life: both subscribers get it", wait_for(3000, [&] { return first.load() == 1 && second.load() == 1; }));
 
     /* a closed subscriber's handler stops, the other keeps its own */
-    chk("life: closing one subscriber succeeds", s2.close() == rant::SendStatus::Ok);
+    chk("life: closing one subscriber succeeds", s2.close() == rant::RantResult::Ok);
     p2.send(Speed{ 2 });
     chk("life: the open subscriber still receives", wait_for(3000, [&] { return last.load() == 2; }));
     chk("life: the closed one no longer fires", second.load() == 1);
@@ -1628,7 +1628,7 @@ static bool lifetime_leg() {
     /* moves carry the hold, the moved from handle is empty */
     auto p3 = std::move(p2);
     chk("life: a moved handle is empty", !p2.valid() && p3.valid());
-    chk("life: the moved to handle sends", p3.send(Speed{ 3 }) == rant::SendStatus::Ok);
+    chk("life: the moved to handle sends", p3.send(Speed{ 3 }) == rant::RantResult::Ok);
     chk("life: its message arrives", wait_for(3000, [&] { return last.load() == 3; }));
 
     /* the last handle on a name retires it, so the name takes another schema */
@@ -1669,13 +1669,13 @@ static bool lifetime_leg() {
     chk("life: a deferred reply is parked", parked.valid());
     c->close();
     chk("life: a handle outliving its node is not valid", !orphan.valid());
-    chk("life: its send answers NoTopic", orphan.send(Speed{ 1 }) == rant::SendStatus::NoTopic);
+    chk("life: its send answers NoTopic", orphan.send(Speed{ 1 }) == rant::RantResult::NoTopic);
     chk("life: a variable outliving its node reads nothing", !orphan_var.get());
     chk("life: a deferred reply outliving its node is not valid", !parked.valid()
         && !parked.complete(AddRsp{ 3 }));
     c.reset();
     chk("life: its close answers Ok and it stays empty",
-        orphan.close() == rant::SendStatus::Ok && !orphan.valid());
+        orphan.close() == rant::RantResult::Ok && !orphan.valid());
 
     /* a handle destroyed inside its own inline callback cannot retire: an error event says so */
     rant::NodeOptions mopts = opts;
@@ -1781,8 +1781,8 @@ static bool close_race_leg() {
         });
         while (calls.load() < 300) std::this_thread::yield();
         n.close();
-        refused_after = refused_after && pub.send(Speed{ 0 }) == rant::SendStatus::NoTopic
-                        && var.set(Speed{ 0 }) == rant::SendStatus::NoTopic;
+        refused_after = refused_after && pub.send(Speed{ 0 }) == rant::RantResult::NoTopic
+                        && var.set(Speed{ 0 }) == rant::RantResult::NoTopic;
         stop = true;
         sender.join();
         writer.join();
@@ -1822,13 +1822,13 @@ static bool handle_gate_leg() {
     });
     /* the call is surely under way once its handler runs, however slow the machine */
     chk("gate: the call reached its handler", wait_for(4000, [&] { return handling.load(); }));
-    rant::SendStatus closed = rem.close();
+    rant::RantResult closed = rem.close();
     bool done_first = call_done.load();
     caller.join();
     chk("gate: a close waits for the blocking call on another thread", done_first);
     chk("gate: which completed", status == rant::CallStatus::Ok);
-    chk("gate: then the close retired the remote", closed == rant::SendStatus::Ok && !rem.valid());
-    chk("gate: and its calls answer NoTopic", rem.call(AddReq{ 1, 2 }, 100ms).send_status() == rant::SendStatus::NoTopic);
+    chk("gate: then the close retired the remote", closed == rant::RantResult::Ok && !rem.valid());
+    chk("gate: and its calls answer NoTopic", rem.call(AddReq{ 1, 2 }, 100ms).send_result() == rant::RantResult::NoTopic);
 
     auto job = a.task_definition<MoveReq, MoveProgress, MoveRsp>("g/job",
         [](const MoveReq& q, rant::TaskRequest<MoveProgress, MoveRsp>& rq) {
@@ -1838,11 +1838,11 @@ static bool handle_gate_leg() {
         });
     auto jr = b.remote_task<MoveReq, MoveProgress, MoveRsp>("g/job");
     chk("gate: task matched", wait_for(4000, [&] { return jr.match_count() > 0; }));
-    rant::SendStatus inside = rant::SendStatus::Ok;
+    rant::RantResult inside = rant::RantResult::Ok;
     auto r2 = jr.call(MoveReq{ 1.0 }, [&](const rant::ProgressView<MoveProgress>&) { inside = jr.close(); });
-    chk("gate: a close inside the call's own callback answers State at once", inside == rant::SendStatus::State);
+    chk("gate: a close inside the call's own callback answers State at once", inside == rant::RantResult::State);
     chk("gate: and the call still completes", r2.status() == rant::CallStatus::Ok);
-    chk("gate: a close after it retires the remote", jr.close() == rant::SendStatus::Ok);
+    chk("gate: a close after it retires the remote", jr.close() == rant::RantResult::Ok);
 
     rant::Deferred<AddRsp> parked;
     std::mutex parked_mu;
@@ -1855,7 +1855,7 @@ static bool handle_gate_leg() {
     chk("gate: park matched", wait_for(4000, [&] { return pr.match_count() > 0; }));
     (void)pr.call_async(AddReq{ 1, 1 }, [](const rant::ResponseView<AddRsp>&) {});
     chk("gate: the answer parked", wait_for(3000, [&] { std::lock_guard<std::mutex> g(parked_mu); return parked.valid(); }));
-    chk("gate: the definition closes", park.close() == rant::SendStatus::Ok);
+    chk("gate: the definition closes", park.close() == rant::RantResult::Ok);
     {
         std::lock_guard<std::mutex> g(parked_mu);
         chk("gate: a deferred answer after its definition closed is refused", !parked.valid() && !parked.complete(AddRsp{ 2 }));
@@ -1986,7 +1986,7 @@ static bool factory_leg() {
     std::atomic<bool> async_named{ false };
     chk("reflection: meta_async launches", b.reflection().meta_async(a_id,
         [&](const rant::MetaSnapshot& s) { async_named = s.valid && s.node.name == "FA"; })
-        == rant::SendStatus::Ok);
+        == rant::RantResult::Ok);
     chk("reflection: meta_async answers", wait_for(3000, [&] { return async_named.load(); }));
     chk("reflection: epoch moved", b.reflection().epoch() != 0);
 
@@ -2015,8 +2015,8 @@ static bool factory_leg() {
     rant::Node nostatus("FS", quiet);
     chk("factory: on_status refuses when status is disabled",
         refuses([&] { (void)nostatus.on_status([](const rant::StatusUpdate&) {}); }));
-    chk("factory: set_status answers NoSys when status is disabled",
-        nostatus.set_status("k", rant::DiagnosticLevel::Info, "x") == rant::SendStatus::NoSys);
+    chk("factory: set_status answers Disabled when status is disabled",
+        nostatus.set_status("k", rant::DiagnosticLevel::Info, "x") == rant::RantResult::Disabled);
     quiet.log_level = static_cast<rant::DiagnosticLevel>(9);
     chk("factory: a bad log_level refuses the open", refuses([&] { rant::Node bad("FL", quiet); }));
 #endif
@@ -2044,13 +2044,13 @@ static bool factory_leg() {
     auto lpub = a.publisher<Label>("f/label");
     Label lbl{};
     lbl.text.assign("ok");
-    chk("strict: a fitting string sends", lpub.send(lbl) == rant::SendStatus::Ok);
+    chk("strict: a fitting string sends", lpub.send(lbl) == rant::RantResult::Ok);
     lbl.text.len = 9;
-    chk("strict: an overlong string is refused on the memcpy path", lpub.send(lbl) == rant::SendStatus::Schema);
+    chk("strict: an overlong string is refused on the memcpy path", lpub.send(lbl) == rant::RantResult::Schema);
     auto ppub = a.publisher<Padded>("f/padded");
     Padded pd{};
     pd.tag.len = 12;
-    chk("strict: and on the loop path", ppub.send(pd) == rant::SendStatus::Schema);
+    chk("strict: and on the loop path", ppub.send(pd) == rant::RantResult::Schema);
     return g_failures == fails_at_entry;
 }
 
@@ -2140,7 +2140,7 @@ static bool bench_leg() {
         auto pump = [&] { rant::detail::rant_node_poll(na, 0); rant::detail::rant_node_poll(nb, 0); };
         bool matched = ta && tb && wait_for(4000, [&] { pump(); return rant::detail::rant_topic_match_count(ta) > 0 && rant::detail::rant_topic_ready(ta) == 1; });
         line("C (reference)", matched ? us_per_round_trip(M,
-            [&] { return rant::detail::rant_topic_send(ta, rant::detail::rant_bytes(&flat, sizeof flat), nullptr) == (int)rant::SendStatus::Ok; },
+            [&] { return rant::detail::rant_topic_send(ta, rant::detail::rant_bytes(&flat, sizeof flat), nullptr) == (int)rant::RantResult::Ok; },
             pump) : -1.0);
         if (na) rant::detail::rant_node_close(na, 1);
         if (nb) rant::detail::rant_node_close(nb, 1);
@@ -2160,19 +2160,19 @@ static bool bench_leg() {
         auto pub = a.publisher<Flat>("b/flat");
         auto sub = b.subscriber<Flat>("b/flat", [](const Flat&) { g_bench_recv++; });
         line("typed memcpy (Flat)", matched(pub) ? us_per_round_trip(M,
-            [&] { return pub.send(flat) == rant::SendStatus::Ok; }, pump) : -1.0);
+            [&] { return pub.send(flat) == rant::RantResult::Ok; }, pump) : -1.0);
     }
     {
         auto pub = a.publisher<Padded>("b/padded");
         auto sub = b.subscriber<Padded>("b/padded", [](const Padded&) { g_bench_recv++; });
         line("typed loop (Padded, string<7>)", matched(pub) ? us_per_round_trip(M,
-            [&] { return pub.send(padded) == rant::SendStatus::Ok; }, pump) : -1.0);
+            [&] { return pub.send(padded) == rant::RantResult::Ok; }, pump) : -1.0);
     }
     {
         auto pub = a.publisher<narrow::Chunk>("b/chunk");
         auto sub = b.subscriber<narrow::Chunk>("b/chunk", [](const narrow::Chunk&) { g_bench_recv++; });
         line("typed tails (Chunk, f32[] string)", matched(pub) ? us_per_round_trip(M,
-            [&] { return pub.send(chunk) == rant::SendStatus::Ok; }, pump) : -1.0);
+            [&] { return pub.send(chunk) == rant::RantResult::Ok; }, pump) : -1.0);
     }
     {
         auto pub = a.publisher<rant::Bytes>("b/dyn", {}, *ps);
@@ -2183,7 +2183,7 @@ static bool bench_leg() {
         line("dynamic (MessageBuilder, FieldView)", matched(pub) ? us_per_round_trip(M, [&] {
                 rant::MessageBuilder mb(*ps);
                 mb.set_uint("a", 9).set_uint("b", 0x11223344u).set_uint("c", 777).set_f64("d", -3.5).set_string("tag", "robot");
-                return pub.send(mb) == rant::SendStatus::Ok;
+                return pub.send(mb) == rant::RantResult::Ok;
             }, pump) : -1.0);
     }
     std::printf("bench: %s (sink %zu)\n", ok ? "PASS" : "FAIL", sink);
@@ -2240,7 +2240,7 @@ static bool dynamic_leg() {
     if (!ta.valid() || !tb.valid()) { chk("dynamic: threaded node construction", false); return false; }
     ta.on_event(on_evt("TA"));
     tb.on_event(on_evt("TB"));
-    chk("dynamic: poll refused on the service thread", ta.poll() == (int)rant::SendStatus::State);
+    chk("dynamic: poll refused on the service thread", ta.poll() == (int)rant::RantResult::State);
     rant::Schema tschema = ta.schema(SCHEMA);
     auto tpub = ta.publisher<rant::Bytes>("t", { rant::Reliability::Reliable }, tschema);
     auto tsub = tb.subscriber<rant::Bytes>("t", on_msg, { rant::Reliability::Reliable }, tschema);
@@ -2282,7 +2282,7 @@ static bool bulk_leg() {
                                          { rant::Reliability::Reliable });
     auto pub = b.publisher<rant::Bytes>("big", { rant::Reliability::Reliable });
     chk("bulk: the topics match", wait_for(4000, [&] { return pub.match_count() > 0; }));
-    chk("bulk: a 300 kB send commits", pub.send(rant::Bytes(big.data(), big.size())) == rant::SendStatus::Ok);
+    chk("bulk: a 300 kB send commits", pub.send(rant::Bytes(big.data(), big.size())) == rant::RantResult::Ok);
     chk("bulk: it arrives whole", wait_for(5000, [&] { return got.load() == big.size(); }));
     chk("bulk: the main buffer never held it", a.stats().memory_peak <= main_block.size());
     return g_failures == before;
@@ -2401,7 +2401,7 @@ static bool call_observer_leg() {
     }
     chk("call observer: progress seen", wait_for(3000,
         [&] { std::lock_guard<std::mutex> g(mu); return kinds.size() >= 3; }));
-    chk("call observer: cancel sent", rjob.cancel(tc.id) == rant::SendStatus::Ok);
+    chk("call observer: cancel sent", rjob.cancel(tc.id) == rant::RantResult::Ok);
     chk("call observer: cancel seen", wait_for(3000,
         [&] { std::lock_guard<std::mutex> g(mu); return kinds.size() >= 4; }));
     {
@@ -2418,7 +2418,7 @@ static bool call_observer_leg() {
             && kinds[3] == rant::CallEventKind::Cancel && kinds[4] == rant::CallEventKind::End);
         chk("call observer: who cancelled, and the outcome text", cancel_by == "obs-call" && end_text == "stopped");
     }
-    chk("call observer: closes", tobs.close() == rant::SendStatus::Ok && !tobs.valid());
+    chk("call observer: closes", tobs.close() == rant::RantResult::Ok && !tobs.valid());
     chk("call observer: the caller got its answer", wait_for(2000, [&] { return done.load() == 1; }));
     return true;
 }
@@ -2450,7 +2450,7 @@ static bool fields_leg() {
     chk("fields: every handle gets the sample once",
         wait_for(3000, [&] { return whole.load() == 1 && ids.load() == 1 && corners.load() == 1; }));
     chk("fields: a field handle reads its field", last_id.load() == 9 && last_x.load() == 1.5f);
-    chk("fields: closing one handle leaves the others", s_whole.close() == rant::SendStatus::Ok);
+    chk("fields: closing one handle leaves the others", s_whole.close() == rant::RantResult::Ok);
     pub.send(Shape{ Corner{ 5.f, 0.f }, rant::types::Float2{}, 4 });
     chk("fields: the open handles still receive",
         wait_for(3000, [&] { return ids.load() == 2 && last_id.load() == 4 && last_x.load() == 5.f; }));
@@ -2476,10 +2476,10 @@ static bool fields_leg() {
     std::atomic<int> id_changes{ 0 };
     r_id.on_change([&](const uint8_t&) { id_changes++; });
     chk("fields: on_change replays at registration", id_changes.load() == 1);
-    chk("fields: a field write is accepted", r_id.set(7) == rant::SendStatus::Ok);
+    chk("fields: a field write is accepted", r_id.set(7) == rant::RantResult::Ok);
     chk("fields: it sets only that field at the owner", wait_for(3000, [&] {
         auto v = def.get(); return v && v->id == 7 && v->origin.x == 1.f && v->at.x == 2.f; }));
-    chk("fields: another field write", r_at.set(Corner{ 6.f, 8.f }) == rant::SendStatus::Ok);
+    chk("fields: another field write", r_at.set(Corner{ 6.f, 8.f }) == rant::RantResult::Ok);
     chk("fields: both writes hold", wait_for(3000, [&] {
         auto v = def.get(); return v && v->id == 7 && v->origin.x == 6.f && v->origin.y == 8.f; }));
     chk("fields: the whole remote sees both", wait_for(3000, [&] {

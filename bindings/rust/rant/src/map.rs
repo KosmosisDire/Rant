@@ -6,7 +6,7 @@ use std::ptr::null;
 
 use crate::error::{Error, ErrorKind};
 use crate::ffi;
-use crate::schema::{FieldType, c_bytes, rbytes, rstring_bytes, utf8_prefix};
+use crate::schema::{SchemaTypeKind, c_bytes, rbytes, rstring_bytes, utf8_prefix};
 
 /// Builds a map field's body, the self describing value tree. Open a nested map or array,
 /// write its members, then close it. Inside an array the key is ignored.
@@ -186,8 +186,8 @@ impl<'a> MapValue<'a> {
     }
 
     /// Which reader applies: a scalar kind, VString, VArray or Map.
-    pub fn kind(&self) -> FieldType {
-        FieldType::from_c(self.v.kind)
+    pub fn kind(&self) -> SchemaTypeKind {
+        SchemaTypeKind::from_c(self.v.kind)
     }
 
     /// An unsigned integer.
@@ -238,7 +238,7 @@ impl<'a> MapValue<'a> {
 
     /// The value copied into an owned tree.
     pub fn to_item(&self) -> MapItem {
-        use FieldType::*;
+        use SchemaTypeKind::*;
         match self.kind() {
             Bool => MapItem::Bool(self.as_bool()),
             U8 | U16 | U32 | U64 => MapItem::UInt(self.as_uint()),

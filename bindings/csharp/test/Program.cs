@@ -458,19 +458,19 @@ static class Program
         Level lv;
         Check("initial value", lvl.TryGet(out lv) && lv.Value == 5);
         Check("owner matched", lvl.MatchCount > 0);
-        Check("remote set accepted", lvl.Set(new Level { Value = 9 }) == SendStatus.Ok);
+        Check("remote set accepted", lvl.Set(new Level { Value = 9 }) == RantResult.Ok);
         deadline = DateTime.UtcNow.AddSeconds(5);
         while (DateTime.UtcNow < deadline && !(lvl.TryGet(out lv) && lv.Value == 9)) cli.Poll(5);
         Check("set round-trips to the remote", lvl.Value.Value == 9);
         Check("definition applied it", lvlDef.Value.Value == 9);
 
         // force overrides with a shadow source, unforce restores the latest set
-        Check("force", lvlDef.Force(new Level { Value = 99 }) == SendStatus.Ok);
+        Check("force", lvlDef.Force(new Level { Value = 99 }) == RantResult.Ok);
         deadline = DateTime.UtcNow.AddSeconds(5);
         while (DateTime.UtcNow < deadline && !(lvl.TryGet(out lv) && lv.Value == 99)) cli.Poll(5);
         Check("forced value visible remotely", lvl.Value.Value == 99);
         Check("remote sees Forced", lvl.Forced);
-        Check("unforce", lvlDef.Unforce() == SendStatus.Ok);
+        Check("unforce", lvlDef.Unforce() == RantResult.Ok);
         deadline = DateTime.UtcNow.AddSeconds(5);
         while (DateTime.UtcNow < deadline && !(lvl.TryGet(out lv) && lv.Value == 9)) cli.Poll(5);
         Check("unforce restores the latest set", lvl.Value.Value == 9 && !lvl.Forced);
@@ -482,9 +482,9 @@ static class Program
         Check("OnChange replays current at registration", chg.Count == 1 && chg[0] == 9);
         lvlDef.OnWrite += (v, u) => Interlocked.Increment(ref wr);
         Check("OnWrite does not replay", wr == 0);
-        Check("identical re-set accepted", lvlDef.Set(new Level { Value = 9 }) == SendStatus.Ok);
+        Check("identical re-set accepted", lvlDef.Set(new Level { Value = 9 }) == RantResult.Ok);
         Check("identical re-set is a write, not a change", chg.Count == 1 && wr == 1);
-        Check("new set accepted", lvlDef.Set(new Level { Value = 12 }) == SendStatus.Ok);
+        Check("new set accepted", lvlDef.Set(new Level { Value = 12 }) == RantResult.Ok);
         Check("change fires inline with the new value",
               chg.Count == 2 && chg[1] == 12 && chgSource == 0 && wr == 2);
         var rchg = new List<long>();
@@ -903,7 +903,7 @@ static class Program
             }
             Check("image topic matched", pub.MatchCount == 1);
 
-            Check("image send", pub.Send(img) == SendStatus.Ok);
+            Check("image send", pub.Send(img) == RantResult.Ok);
 
             deadline = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < deadline && !gotImage)
@@ -925,7 +925,7 @@ static class Program
                 Kind = Rant.Types.VideoStreamKind.WebrtcWhep,
                 Url = "https://gw.local/whep/cam1",
                 Name = "front door",
-            }) == SendStatus.Ok);
+            }) == RantResult.Ok);
             deadline = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < deadline
                    && !(vd.TryGet(out Rant.Types.ExternalVideoStream v)
@@ -1116,7 +1116,7 @@ static class Program
             Check("float[] dsl", sa.Dsl == "f32[]\n");
             var f = sb.Fields;
             Check("bare root is one anonymous field",
-                  f.Length == 1 && sb.Name == "" && f[0].Name == "" && f[0].Kind == FieldType.Bool);
+                  f.Length == 1 && sb.Name == "" && f[0].Name == "" && f[0].Kind == SchemaTypeKind.Bool);
             var text = node.Schema("bool");
             Check("text `bool` == typeof(bool)", text.Hash == sb.Hash);
         }
@@ -1225,10 +1225,10 @@ static class Program
                   && pubPts.MatchCount == 1);
             Check("bare variable replicated the initial",
                   rv.TryGet(out double gain0) && gain0 == 1.25);
-            Check("bool send", pubFlag.Send(true) == SendStatus.Ok);
-            Check("string send", pubNote.Send("a bare unbounded string") == SendStatus.Ok);
+            Check("bool send", pubFlag.Send(true) == RantResult.Ok);
+            Check("string send", pubNote.Send("a bare unbounded string") == RantResult.Ok);
             Check("struct array send", pubPts.Send(new[] { new Corner { X = 5, Y = 6 },
-                                                           new Corner { X = 7, Y = 8 } }) == SendStatus.Ok);
+                                                           new Corner { X = 7, Y = 8 } }) == RantResult.Ok);
             deadline = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < deadline && !(gotFlag && gotNote && gotPts))
             {
@@ -1238,7 +1238,7 @@ static class Program
             Check("bool received as a plain value", gotFlag);
             Check("string received as a plain value", gotNote);
             Check("struct array received as a typed array", gotPts);
-            Check("bare variable set accepted", rv.Set(2.5) == SendStatus.Ok);
+            Check("bare variable set accepted", rv.Set(2.5) == RantResult.Ok);
             deadline = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < deadline && !(vd.TryGet(out double g) && g == 2.5))
             {
@@ -1361,9 +1361,9 @@ static class Program
         srv.Close();
         cli.Close();
         Level got;
-        Check("stale variable set refuses", rvar.Set(new Level { Value = 1 }) == SendStatus.NoTopic);
+        Check("stale variable set refuses", rvar.Set(new Level { Value = 1 }) == RantResult.NoTopic);
         Check("stale variable read is empty", !rvar.TryGet(out got));
-        Check("stale publisher send refuses", stalePub.Send(new Level { Value = 1 }) == SendStatus.NoTopic);
+        Check("stale publisher send refuses", stalePub.Send(new Level { Value = 1 }) == RantResult.NoTopic);
         Check("stale remote function is unmatched", matchedBefore && call.MatchCount == 0);
 
         Console.WriteLine(ok ? "dispatch: PASS\n" : "dispatch: FAIL\n");
@@ -1434,9 +1434,9 @@ static class Program
         string clearedKey = null;
         a.OnEvent += e => { if (e.Kind == EventKind.StatusCleared) lock (mu) clearedKey = e.Detail; };
         Check("raised before anyone listens",
-              a.SetStatus("estop", Rant.DiagnosticLevel.Error, "pressed") == SendStatus.Ok
-              && a.SetStatus("hot", Rant.DiagnosticLevel.Warn, "motor hot", clearable: true) == SendStatus.Ok);
-        Check("a long key is refused", a.SetStatus(new string('k', 49), Rant.DiagnosticLevel.Info, "x") == SendStatus.TooBig);
+              a.SetStatus("estop", Rant.DiagnosticLevel.Error, "pressed") == RantResult.Ok
+              && a.SetStatus("hot", Rant.DiagnosticLevel.Warn, "motor hot", clearable: true) == RantResult.Ok);
+        Check("a long key is refused", a.SetStatus(new string('k', 49), Rant.DiagnosticLevel.Info, "x") == RantResult.TooBig);
         b.OnStatus += u => { if (u.Node == "ssrc") lock (mu) { last = u; updates++; } };
         int Count() { lock (mu) return last == null ? -1 : last.Conditions.Count; }
         Check("the late binder gets the whole set", Until(8000, () => Count() == 2));
@@ -1450,10 +1450,10 @@ static class Program
             if (c.Count == 2) hot = c[1];
         }
         uint from; lock (mu) from = last.NodeId;
-        Check("a peer clear is sent", hot != null && b.ClearPeerStatus(from, "hot", hot.SinceUs) == SendStatus.Ok);
+        Check("a peer clear is sent", hot != null && b.ClearPeerStatus(from, "hot", hot.SinceUs) == RantResult.Ok);
         Check("A's app hears which was cleared", Until(8000, () => { lock (mu) return clearedKey == "hot"; }));
         Check("B sees the smaller set", Until(8000, () => Count() == 1));
-        Check("an own clear", a.ClearStatus("estop") == SendStatus.Ok);
+        Check("an own clear", a.ClearStatus("estop") == RantResult.Ok);
         Check("B sees it empty", Until(8000, () => Count() == 0));
         a.SetStatus("estop", Rant.DiagnosticLevel.Error, "pressed again");
         Check("raised again", Until(8000, () => Count() == 1));
@@ -1467,7 +1467,7 @@ static class Program
         bool threw = false;
         try { c2.OnStatus += u => { }; } catch (RantException) { threw = true; }
         Check("OnStatus on a node without status throws", threw);
-        Check("SetStatus on a node without status is NoSys", c2.SetStatus("k", Rant.DiagnosticLevel.Info, "x") == SendStatus.NoSys);
+        Check("SetStatus on a node without status is Disabled", c2.SetStatus("k", Rant.DiagnosticLevel.Info, "x") == RantResult.Disabled);
 
         Console.WriteLine(ok ? "status: PASS\n" : "status: FAIL\n");
         return ok;
@@ -1650,7 +1650,7 @@ static class Program
             catch (RantException) { }
             Check("the last dispose retires the slot, the name retypes", retyped);
             pub.Dispose();
-            Check("a disposed publisher refuses", pub.Send(new Level { Value = 3 }) == SendStatus.NoTopic);
+            Check("a disposed publisher refuses", pub.Send(new Level { Value = 3 }) == RantResult.NoTopic);
             Check("dispose is idempotent", DisposeTwice(s2) && DisposeTwice(pub));
         }
         finally
@@ -1745,10 +1745,10 @@ static class Program
         int idChanges = 0;
         rId.OnChange += (v, u) => Interlocked.Increment(ref idChanges);
         Check("OnChange replays at registration", Volatile.Read(ref idChanges) == 1);
-        Check("a field write is accepted", rId.Set(7) == SendStatus.Ok);
+        Check("a field write is accepted", rId.Set(7) == RantResult.Ok);
         Check("it sets only that field at the owner", Until(3000, () =>
             def.TryGet(out Gauge g) && g.Id == 7 && g.Origin.X == 1 && g.Level == 2));
-        Check("another field write", rAt.Set(new Corner { X = 6, Y = 8 }) == SendStatus.Ok);
+        Check("another field write", rAt.Set(new Corner { X = 6, Y = 8 }) == RantResult.Ok);
         Check("both writes hold", Until(3000, () =>
             def.TryGet(out Gauge g) && g.Id == 7 && g.Origin.X == 6 && g.Origin.Y == 8));
         Check("the whole remote sees both", Until(3000, () =>
@@ -1812,7 +1812,7 @@ static class Program
             foreach (var t in threads) t.Start();
             while (Interlocked.Read(ref calls) < 300) Thread.Yield();
             n.Close();
-            refusedAfter &= pub.Send(new Level()) == SendStatus.NoTopic && v.Set(new Level()) == SendStatus.NoTopic;
+            refusedAfter &= pub.Send(new Level()) == RantResult.NoTopic && v.Set(new Level()) == RantResult.NoTopic;
             Volatile.Write(ref stop, 1);
             foreach (var t in threads) t.Join();
         }
@@ -1832,7 +1832,7 @@ static class Program
             srcPub.Send(new Level { Value = 5 });
             Check("a close inside its own callback is accepted", Until(3000, () => { self.Poll(2); return accepted; }));
             self.Close();   // waits for the close the callback started
-            Check("the node closed once the callback returned", probe.Send(new Level()) == SendStatus.NoTopic);
+            Check("the node closed once the callback returned", probe.Send(new Level()) == RantResult.NoTopic);
         }
         finally
         {
@@ -1998,7 +1998,7 @@ static class Program
             var pubT = new RantNode("pub", Local(0));
             subT.Subscriber<Reading>("pose", p => { ReceivedPose = p; Got.Set(); }, qos);
             var pubchT = pubT.Publisher<Reading>("pose", qos);
-            if (pubT.Poll(0) != (int)SendStatus.State) { Console.WriteLine("FAIL: Poll not refused under the service thread"); ok = false; }
+            if (pubT.Poll(0) != (int)RantResult.State) { Console.WriteLine("FAIL: Poll not refused under the service thread"); ok = false; }
             else
             {
                 Got.Reset();
@@ -2067,7 +2067,7 @@ static class Program
             caller.Join();
             Check("a Dispose waits for the blocking call on another thread", doneFirst);
             Check("which completed", status == CallStatus.Ok);
-            Check("then the remote answers NoTopic", rem.TryCall(new AddReq { A = 1, B = 2 }, 100).SendStatus == SendStatus.NoTopic);
+            Check("then the remote answers NoTopic", rem.TryCall(new AddReq { A = 1, B = 2 }, 100).SendResult == RantResult.NoTopic);
 
             var job = a.TaskDefinition<XferReq, XferPrg, XferRsp>("g/job", async (q, ctx) =>
             {
@@ -2077,18 +2077,18 @@ static class Program
             });
             var jr = b.RemoteTask<XferReq, XferPrg, XferRsp>("g/job");
             Check("task matched", WaitFor(() => jr.MatchCount > 0));
-            SendStatus inside = SendStatus.Ok;
+            RantResult inside = RantResult.Ok;
             bool tried = false;
             var r2 = jr.TryCall(new XferReq { Chunks = 3 }, new InlineProgress<XferPrg>(_ =>
             {
                 tried = true;
                 try { jr.Dispose(); }
-                catch (RantException e) { inside = e.SendStatus; }
+                catch (RantException e) { inside = e.Result; }
             }), 3000);
-            Check("a Dispose inside the call's own callback is refused at once", tried && inside == SendStatus.State);
+            Check("a Dispose inside the call's own callback is refused at once", tried && inside == RantResult.State);
             Check("and the call still completes", r2.Status == CallStatus.Ok);
             jr.Dispose();
-            Check("a Dispose after it retires the remote", jr.TryCall(new XferReq { Chunks = 1 }, null, 100).SendStatus == SendStatus.NoTopic);
+            Check("a Dispose after it retires the remote", jr.TryCall(new XferReq { Chunks = 1 }, null, 100).SendResult == RantResult.NoTopic);
 
             Deferred<AddRsp> parked = null;
             var park = a.FunctionDefinition<AddReq, AddRsp>("g/park", (q, req) => { Volatile.Write(ref parked, req.Defer()); });

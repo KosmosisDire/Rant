@@ -76,14 +76,14 @@ enum class Reliability { BestEffort = 0, Reliable = 1 };
 enum class Role        { PubSub = 0, PubOnly = 1, SubOnly = 2, Inactive = 3 };
 
 /* The outcome of a write or a local refusal. Ok is 0, every other value is a reason. */
-enum class SendStatus {
+enum class RantResult {
     Ok          = 0,
     NoTopic     = -1,   /* no handle, a closed handle, or nobody matched in time */
     TooBig      = -2,   /* over the topic's max_message_bytes */
     BadRole     = -3,   /* the handle or its peer has no such side */
     OutOfMemory = -4,
     State       = -5,   /* refused at this moment, such as a blocking call from an inline callback */
-    NoSys       = -6,   /* switched off on this node, such as logs */
+    Disabled       = -6,   /* switched off on this node, such as logs */
     Schema      = -7    /* the value does not fit the schema */
 };
 
@@ -118,7 +118,7 @@ enum class ErrorKind {
 
 /* Schema field kinds for reflection, the C wire values. Array and String are fixed,
  * VString, VArray and Map ride the message tail and report offset and size 0. */
-enum class FieldType : uint8_t {
+enum class SchemaTypeKind : uint8_t {
     U8 = 0, U16, U32, U64, I8, I16, I32, I64, F32, F64, Bool, Array, Struct, String,
     VString, VArray, Map, Enum, Named
 };
@@ -154,8 +154,8 @@ enum class Origin { App = 0, Rant = 1 };
 
 static_assert((int)Reliability::Reliable == detail::RANT_RELIABLE, "reliability enum drift");
 static_assert((int)Role::Inactive == detail::RANT_INACTIVE, "role enum drift");
-static_assert((int)SendStatus::NoSys == detail::RANT_ERR_NOSYS, "result enum drift");
-static_assert((int)SendStatus::Schema == detail::RANT_ERR_SCHEMA, "result enum drift");
+static_assert((int)RantResult::Disabled == detail::RANT_ERR_DISABLED, "result enum drift");
+static_assert((int)RantResult::Schema == detail::RANT_ERR_SCHEMA, "result enum drift");
 static_assert((int)EventKind::Error == detail::RANT_ERROR, "event enum drift");
 static_assert((int)EventKind::StatusCleared == detail::RANT_STATUS_CLEARED, "event enum drift");
 static_assert((int)ErrorKind::Waker == detail::RANT_E_WAKER, "error enum drift");
@@ -166,11 +166,11 @@ static_assert((int)ErrorKind::BadPrefix == detail::RANT_E_BAD_PREFIX, "error enu
 static_assert((int)ErrorKind::BadRemap == detail::RANT_E_BAD_REMAP, "error enum drift");
 static_assert((int)ErrorKind::BadLogLevel == detail::RANT_E_BAD_LOG_LEVEL, "error enum drift");
 static_assert((int)ErrorKind::Bridge == detail::RANT_E_BRIDGE, "error enum drift");
-static_assert((int)FieldType::Struct == detail::RANT_STRUCT, "field-type enum drift");
-static_assert((int)FieldType::String == detail::RANT_STR, "field-type enum drift");
-static_assert((int)FieldType::Map == detail::RANT_MAP, "field-type enum drift");
-static_assert((int)FieldType::Enum == detail::RANT_ENUM, "field-type enum drift");
-static_assert((int)FieldType::Named == detail::RANT_NAMED, "field-type enum drift");
+static_assert((int)SchemaTypeKind::Struct == detail::RANT_STRUCT, "field-type enum drift");
+static_assert((int)SchemaTypeKind::String == detail::RANT_STR, "field-type enum drift");
+static_assert((int)SchemaTypeKind::Map == detail::RANT_MAP, "field-type enum drift");
+static_assert((int)SchemaTypeKind::Enum == detail::RANT_ENUM, "field-type enum drift");
+static_assert((int)SchemaTypeKind::Named == detail::RANT_NAMED, "field-type enum drift");
 #ifndef RANT_NO_PATTERNS
 static_assert((int)CallStatus::Ok == detail::RANT_CALL_OK, "call-status enum drift");
 static_assert((int)CallStatus::PeerLost == detail::RANT_CALL_PEER_LOST, "call-status enum drift");
@@ -181,8 +181,8 @@ static_assert((int)EntityKind::Topic == detail::RANT_ENTITY_TOPIC, "entity enum 
 static_assert((int)EntityKind::Variable == detail::RANT_ENTITY_VARIABLE, "entity enum drift");
 static_assert((int)EntityKind::Task == detail::RANT_ENTITY_TASK, "entity enum drift");
 #endif
-static_assert((int)DiagnosticLevel::Debug == detail::RANT_LEVEL_DEBUG, "level enum drift");
-static_assert((int)DiagnosticLevel::Error == detail::RANT_LEVEL_ERROR, "level enum drift");
+static_assert((int)DiagnosticLevel::Debug == detail::RANT_DIAGNOSTIC_LEVEL_DEBUG, "level enum drift");
+static_assert((int)DiagnosticLevel::Error == detail::RANT_DIAGNOSTIC_LEVEL_ERROR, "level enum drift");
 static_assert((int)Origin::Rant == detail::RANT_ORIGIN_RANT, "origin enum drift");
 
 /* forward decls. Every handle is a template over the message type, and the type argument
@@ -625,8 +625,8 @@ public:
     struct Field {
         std::string_view name;
         std::string_view type_name;  /* the type's name, empty when anonymous */
-        FieldType kind;          /* the field's type (a named type reports what it wraps) */
-        FieldType backing;       /* an Enum's backing type */
+        SchemaTypeKind kind;          /* the field's type (a named type reports what it wraps) */
+        SchemaTypeKind backing;       /* an Enum's backing type */
         uint16_t  count, depth;  /* a fixed array's count or an enum's option count */
         uint16_t  str_cap;       /* a String's capacity */
         uint16_t  arr_parent;    /* flat index of the nearest enclosing array, 0xFFFF for none */
@@ -640,8 +640,8 @@ public:
         if (!schema_ || !detail::rant_schema_field_at(schema_, i, &f)) return false;
         out.name      = { f.name.data ? f.name.data : "", f.name.len };
         out.type_name = { f.type_name.data ? f.type_name.data : "", f.type_name.len };
-        out.kind    = static_cast<FieldType>(f.kind);
-        out.backing = static_cast<FieldType>(f.backing);
+        out.kind    = static_cast<SchemaTypeKind>(f.kind);
+        out.backing = static_cast<SchemaTypeKind>(f.backing);
         out.count  = f.count; out.depth = f.depth;
         out.str_cap = f.str_cap; out.arr_parent = f.arr_parent; out.arr_depth = f.arr_depth;
         out.offset = f.offset; out.size = f.size; out.min_len = f.min_len;
@@ -717,15 +717,15 @@ private:
 class MapValue {
 public:
     /* Which getter applies: a scalar kind, VString, VArray or Map. */
-    FieldType        kind()      const { return static_cast<FieldType>(v_.kind); }
+    SchemaTypeKind        kind()      const { return static_cast<SchemaTypeKind>(v_.kind); }
     uint64_t         as_uint()   const { return v_.v.u; }
     int64_t          as_int()    const { return v_.v.i; }
     double           as_f64()    const { return v_.v.f; }
     bool             as_bool()   const { return v_.v.u != 0; }
     std::string_view as_string() const { return { reinterpret_cast<const char*>(v_.bytes.data), v_.bytes.len }; }
     Bytes            raw()       const { return { v_.bytes.data, v_.bytes.len }; }
-    MapReader        as_map()    const;   /* kind() == FieldType::Map */
-    /* array value (kind() == FieldType::VArray): element count + element by index */
+    MapReader        as_map()    const;   /* kind() == SchemaTypeKind::Map */
+    /* array value (kind() == SchemaTypeKind::VArray): element count + element by index */
     uint16_t array_count()          const { return detail::rant_map_array_count(v_.bytes); }
     MapValue array_at(uint16_t i)   const { MapValue o; detail::rant_map_array_at(v_.bytes, i, &o.v_); return o; }
 
@@ -815,14 +815,14 @@ public:
     static MapItem from(const MapValue& v) {
         MapItem m;
         switch (v.kind()) {
-        case FieldType::Bool: m.value = v.as_bool(); break;
-        case FieldType::U8: case FieldType::U16: case FieldType::U32: case FieldType::U64:
+        case SchemaTypeKind::Bool: m.value = v.as_bool(); break;
+        case SchemaTypeKind::U8: case SchemaTypeKind::U16: case SchemaTypeKind::U32: case SchemaTypeKind::U64:
             m.value = v.as_uint(); break;
-        case FieldType::I8: case FieldType::I16: case FieldType::I32: case FieldType::I64:
+        case SchemaTypeKind::I8: case SchemaTypeKind::I16: case SchemaTypeKind::I32: case SchemaTypeKind::I64:
             m.value = v.as_int(); break;
-        case FieldType::F32: case FieldType::F64: m.value = v.as_f64(); break;
-        case FieldType::VString: m.value = std::string(v.as_string()); break;
-        case FieldType::VArray: {
+        case SchemaTypeKind::F32: case SchemaTypeKind::F64: m.value = v.as_f64(); break;
+        case SchemaTypeKind::VString: m.value = std::string(v.as_string()); break;
+        case SchemaTypeKind::VArray: {
             MapList list;
             uint16_t n = v.array_count();
             list.reserve(n);
@@ -830,7 +830,7 @@ public:
             m.value = std::move(list);
             break;
         }
-        case FieldType::Map: m.value = v.as_map().to_map(); break;
+        case SchemaTypeKind::Map: m.value = v.as_map().to_map(); break;
         default: break;   /* leaves monostate (null) */
         }
         return m;
@@ -2049,24 +2049,24 @@ private:
  * that callback's caller may hold a pass: it answers State while one is out, as the C
  * refuses a retire there anyway. A handle the node made is never retired, only emptied. */
 template <class C>
-inline SendStatus close_handle(HandleState<C>* st, NodeImpl* impl, bool owned, int (*retire)(C*)) {
-    if (!st || !st->raw.load()) return SendStatus::NoTopic;
+inline RantResult close_handle(HandleState<C>* st, NodeImpl* impl, bool owned, int (*retire)(C*)) {
+    if (!st || !st->raw.load()) return RantResult::NoTopic;
     Pass p(owned ? impl : nullptr);
     if (!p) {   /* the node closed and freed it, or the node owns it */
         st->raw.store(nullptr);
-        return SendStatus::Ok;
+        return RantResult::Ok;
     }
     if (!InCallback::of(impl)) st->gate.close();
-    else if (!st->gate.try_close()) return SendStatus::State;
+    else if (!st->gate.try_close()) return RantResult::State;
     C* raw = st->raw.exchange(nullptr);   /* one close retires */
-    if (!raw) return SendStatus::NoTopic;
+    if (!raw) return RantResult::NoTopic;
     int rc = retire(raw);
     if (rc != 0) {
         st->raw.store(raw);
         st->gate.reopen();
-        return static_cast<SendStatus>(rc);
+        return static_cast<RantResult>(rc);
     }
-    return SendStatus::Ok;
+    return RantResult::Ok;
 }
 #endif
 
@@ -2091,14 +2091,14 @@ public:
     TopicCore(const TopicCore&) = delete;
     TopicCore& operator=(const TopicCore&) = delete;
     ~TopicCore() {
-        if (close() == SendStatus::State && impl_) impl_->report_close_refused(name());
+        if (close() == RantResult::State && impl_) impl_->report_close_refused(name());
     }
 
     /* The oldest waiting message of a pulled topic, or with latest the newest. 1 got one,
      * 0 none, negative the C refusal. The view lives until the next take or the node's close. */
     int take(detail::RantMsg* out, int timeout_ms, bool latest) {
         detail::RantTopic* c = ch_;
-        return wait_sliced(impl_.get(), timeout_ms, static_cast<int>(SendStatus::NoTopic), [&](int ms) {
+        return wait_sliced(impl_.get(), timeout_ms, static_cast<int>(RantResult::NoTopic), [&](int ms) {
             return latest ? detail::rant_topic_take_latest(c, out, ms) : detail::rant_topic_take(c, out, ms);
         });
     }
@@ -2113,21 +2113,21 @@ public:
 
     /* capture is when the data was true, as against when it was sent. The default is
      * unstated, which costs no wire bytes. */
-    SendStatus send(Bytes data, types::Timestamp capture = {}) {
+    RantResult send(Bytes data, types::Timestamp capture = {}) {
         Pass p = pass();
-        return p ? send_held(data, capture) : SendStatus::NoTopic;
+        return p ? send_held(data, capture) : RantResult::NoTopic;
     }
     /* the send itself, under a pass the caller holds */
-    SendStatus send_held(Bytes data, types::Timestamp capture) {
+    RantResult send_held(Bytes data, types::Timestamp capture) {
         detail::RantSendOpts o;
         o.capture_us = static_cast<uint64_t>(capture.us);
-        return static_cast<SendStatus>(
+        return static_cast<RantResult>(
             detail::rant_topic_send(ch_, detail::rant_bytes(data.data(), data.size()), &o));
     }
     /* Retire this handle. The last handle on a name retires the topic, so the name can be
      * created again with another schema. State from the topic's own inline callback, and the
      * handle stays valid then. */
-    SendStatus close();
+    RantResult close();
     /* Run h for every message on this handle until it closes. */
     void set_handler(MessageHandler h);
     /* The schema the topic uses now, empty when untyped. A reflect_from_mesh topic reports
@@ -2296,10 +2296,10 @@ public:
     explicit operator bool() const noexcept { return valid(); }
 
     /* one progress update, broadcast on the progress channel (any observer may watch) */
-    SendStatus progress(Bytes update) {
+    RantResult progress(Bytes update) {
         priv::HandlePass<detail::RantFunction> p(impl_.get(), st_.get());
-        if (!p || !token_) return SendStatus::State;
-        return static_cast<SendStatus>(detail::rant_function_progress(p.raw(), token_, priv::to_c(update)));
+        if (!p || !token_) return RantResult::State;
+        return static_cast<RantResult>(detail::rant_function_progress(p.raw(), token_, priv::to_c(update)));
     }
     /* true the moment a cancel for this call arrived (false on an emptied handle) */
     bool cancelled() const {
@@ -2307,31 +2307,31 @@ public:
         return p && token_ && detail::rant_function_cancelled(p.raw(), token_) == 1;
     }
     /* Answer Ok with rsp. message is optional text the caller reads as message(). */
-    SendStatus complete(Bytes rsp = Bytes(), std::string_view message = {}) {
+    RantResult complete(Bytes rsp = Bytes(), std::string_view message = {}) {
         return finish(detail::RANT_CALL_OK, message, rsp);
     }
     /* Answer AppError with message, and rsp as failure data the caller can read. */
-    SendStatus fail(std::string_view message = {}, Bytes rsp = Bytes()) {
+    RantResult fail(std::string_view message = {}, Bytes rsp = Bytes()) {
         return finish(detail::RANT_CALL_APP_ERROR, message, rsp);
     }
     /* honor a cancel: the caller's terminal status is Cancelled. rsp may carry a partial
      * result, which a function cannot express. */
-    SendStatus complete_cancelled(std::string_view message = {}, Bytes rsp = Bytes()) {
+    RantResult complete_cancelled(std::string_view message = {}, Bytes rsp = Bytes()) {
         return finish(detail::RANT_CALL_CANCELLED, message, rsp);
     }
 
 private:
     PendingTask(std::shared_ptr<priv::FnState> st, uint64_t token, std::shared_ptr<priv::NodeImpl> impl)
         : st_(std::move(st)), token_(token), impl_(std::move(impl)) {}
-    SendStatus finish(int status, std::string_view message, Bytes rsp) {
+    RantResult finish(int status, std::string_view message, Bytes rsp) {
         priv::HandlePass<detail::RantFunction> p(impl_.get(), st_.get());
-        if (!p || !token_) return SendStatus::State;
+        if (!p || !token_) return RantResult::State;
         std::string m(message);   /* the C API takes a NUL-terminated string */
         int r = detail::rant_function_complete(p.raw(), token_,
                     static_cast<detail::RantCallStatus>(status),
                     m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
         token_ = 0;
-        return static_cast<SendStatus>(r);
+        return static_cast<RantResult>(r);
     }
     std::shared_ptr<priv::FnState> st_;
     uint64_t                token_ = 0;
@@ -2360,7 +2360,7 @@ public:
         detail::rant_request_fail(rq_, m.empty() ? nullptr : m.c_str(), priv::to_c(rsp));
     }
     /* send RUNNING to the caller now, idempotent. defer() implies it */
-    SendStatus start() { return static_cast<SendStatus>(detail::rant_request_start(rq_)); }
+    RantResult start() { return static_cast<RantResult>(detail::rant_request_start(rq_)); }
     /* park the call and return now: the returned PendingTask carries it to completion */
     PendingTask<Bytes, Bytes> defer() {
         return PendingTask<Bytes, Bytes>(st_, detail::rant_request_defer(rq_), impl_);
@@ -2376,7 +2376,7 @@ private:
 };
 
 /* A raw call's outcome, owned. if (r) tests for Ok, data() is whatever payload came back.
- * send_status() is not Ok when the request never left this node. */
+ * send_result() is not Ok when the request never left this node. */
 template <> class Response<Bytes> {
 public:
     Response() = default;
@@ -2385,7 +2385,7 @@ public:
     explicit operator bool() const { return ok(); }
     /* The peer that answered, 0 when the outcome was decided here. */
     uint32_t   provider()    const { return provider_; }
-    SendStatus send_status() const { return ss_; }
+    RantResult send_result() const { return ss_; }
     /* The provider's UTC stamp, 0 when decided here. */
     uint64_t   written_us()     const { return written_; }
     /* The payload that came back, empty when none did. */
@@ -2398,7 +2398,7 @@ public:
 
 private:
     CallStatus                st_ = CallStatus::Timeout;
-    SendStatus                ss_ = SendStatus::Ok;
+    RantResult                ss_ = RantResult::Ok;
     uint32_t                  provider_ = 0;
     uint64_t                  written_ = 0;
     std::vector<uint8_t>      data_;
@@ -2623,7 +2623,7 @@ inline int priv::NodeImpl::close_node() {
 inline bool Queue::valid() const noexcept { return q_ && priv::node_open(impl_); }
 inline int Queue::dispatch(int max_callbacks, std::chrono::milliseconds timeout) {
     detail::RantQueue* q = q_;
-    return priv::wait_sliced(impl_.get(), priv::to_ms(timeout), static_cast<int>(SendStatus::State),
+    return priv::wait_sliced(impl_.get(), priv::to_ms(timeout), static_cast<int>(RantResult::State),
                              [&](int ms) { return detail::rant_queue_dispatch(q, max_callbacks, ms); });
 }
 inline Queue::Stats Queue::stats() const {
@@ -2755,7 +2755,7 @@ public:
      * callbacks fire. Blocks up to timeout, 0 = non blocking. State on another threading. */
     int poll(std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
         priv::Pass p = pass();
-        if (!p) return (int)SendStatus::State;
+        if (!p) return (int)RantResult::State;
         return detail::rant_node_poll(impl_->node, priv::to_ms(timeout));
     }
 
@@ -2763,7 +2763,7 @@ public:
      * (0 = all), waiting up to timeout for the first (rant::forever = no end). The count
      * run, or State on another threading. */
     int dispatch(int max_callbacks = 0, std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
-        if (!impl_ || !impl_->queue) return (int)SendStatus::State;
+        if (!impl_ || !impl_->queue) return (int)RantResult::State;
         return Queue(impl_->queue, impl_).dispatch(max_callbacks, timeout);
     }
 
@@ -2841,21 +2841,21 @@ public:
     }
 
     /* Publish an already formatted line on the built in log, truncated at RANT_LOG_MAX. A
-     * level below the node's log_level sends nothing. SendStatus::NoSys when logs are disabled. */
-    SendStatus log(DiagnosticLevel level, std::string_view text) {
+     * level below the node's log_level sends nothing. RantResult::Disabled when logs are disabled. */
+    RantResult log(DiagnosticLevel level, std::string_view text) {
         priv::Pass p = pass();
-        if (!p) return SendStatus::State;
-        return static_cast<SendStatus>(detail::rant_node_log_text(
-            impl_->node, static_cast<detail::RantLevel>(level),
+        if (!p) return RantResult::State;
+        return static_cast<RantResult>(detail::rant_node_log_text(
+            impl_->node, static_cast<detail::RantDiagnosticLevel>(level),
             text.data(), static_cast<int>(text.size())));
     }
 
     /* printf style overloads with the C log API's bounded formatting: truncated at
      * RANT_LOG_MAX, and a formatting failure publishes an empty line. */
     template <class... Args>
-    SendStatus log(DiagnosticLevel level, const char* fmt, Args&&... args) {
-        if (!valid()) return SendStatus::State;
-        if (!fmt) return SendStatus::NoTopic;
+    RantResult log(DiagnosticLevel level, const char* fmt, Args&&... args) {
+        if (!valid()) return RantResult::State;
+        if (!fmt) return RantResult::NoTopic;
         char text[RANT_LOG_MAX];
         int len = std::snprintf(text, sizeof text, fmt, std::forward<Args>(args)...);
         if (len < 0) len = 0;
@@ -2914,33 +2914,33 @@ public:
 
     /* Raise the condition key on this node's status, or update it while it is active: since_us
      * stays from the raise, and the same values again send nothing. Readers see it after the
-     * next loop pass. TooBig for a key over 48 bytes or past 32 conditions, NoSys when status
+     * next loop pass. TooBig for a key over 48 bytes or past 32 conditions, Disabled when status
      * is disabled. clearable lets another node clear it with clear_peer_status. */
-    SendStatus set_status(std::string_view key, DiagnosticLevel level, std::string_view text, bool clearable = false) {
+    RantResult set_status(std::string_view key, DiagnosticLevel level, std::string_view text, bool clearable = false) {
         priv::Pass p = pass();
-        if (!p) return SendStatus::State;
+        if (!p) return RantResult::State;
         std::string k(key), t(text);
         detail::RantStatusOpts so;
         std::memset(&so, 0, sizeof so);
         so.clearable = clearable ? 1 : 0;
-        return static_cast<SendStatus>(detail::rant_node_set_status(
-            impl_->node, k.c_str(), static_cast<detail::RantLevel>(level), t.c_str(), &so));
+        return static_cast<RantResult>(detail::rant_node_set_status(
+            impl_->node, k.c_str(), static_cast<detail::RantDiagnosticLevel>(level), t.c_str(), &so));
     }
     /* Clear the condition key, Ok whether or not it was active. */
-    SendStatus clear_status(std::string_view key) {
+    RantResult clear_status(std::string_view key) {
         priv::Pass p = pass();
-        if (!p) return SendStatus::State;
+        if (!p) return RantResult::State;
         std::string k(key);
-        return static_cast<SendStatus>(detail::rant_node_clear_status(impl_->node, k.c_str()));
+        return static_cast<RantResult>(detail::rant_node_clear_status(impl_->node, k.c_str()));
     }
     /* Ask another node to clear its clearable condition key, the occurrence raised at
      * since_us. Nothing answers: its next StatusUpdate shows it gone, or still there when it
      * refused. BadRole while this node does not read status with on_status. */
-    SendStatus clear_peer_status(uint32_t node_id, std::string_view key, uint64_t since_us) {
+    RantResult clear_peer_status(uint32_t node_id, std::string_view key, uint64_t since_us) {
         priv::Pass p = pass();
-        if (!p) return SendStatus::State;
+        if (!p) return RantResult::State;
         std::string k(key);
-        return static_cast<SendStatus>(detail::rant_node_clear_peer_status(impl_->node, node_id, k.c_str(), since_us));
+        return static_cast<RantResult>(detail::rant_node_clear_peer_status(impl_->node, node_id, k.c_str(), since_us));
     }
     /* Every other node's status, decoded to a StatusUpdate, where the node's callbacks run: on
      * each change, each node's current set when this binds, and an empty set when a node goes
@@ -3296,7 +3296,7 @@ public:
                       std::chrono::milliseconds timeout = std::chrono::milliseconds(1000));
     /* A peer's runtime snapshot, returning at once: cb fires once where the node's callbacks
      * run. sections is a MetaSection mask, 0 = all. */
-    SendStatus meta_async(uint32_t peer, std::function<void(const MetaSnapshot&)> cb,
+    RantResult meta_async(uint32_t peer, std::function<void(const MetaSnapshot&)> cb,
                           uint32_t sections = 0);
 #endif
 
@@ -3357,27 +3357,27 @@ inline void priv::TopicCore::set_handler(MessageHandler h) {
 }
 
 /* The handler goes with the handle, since C may give its index to the next create. */
-inline SendStatus priv::TopicCore::close() {
-    if (!ch_) return SendStatus::NoTopic;
+inline RantResult priv::TopicCore::close() {
+    if (!ch_) return RantResult::NoTopic;
     std::shared_ptr<NodeImpl> keep = impl_;   /* outlives the pass and the lock below */
     Pass p(keep.get());
     if (p) {   /* else the node closed and freed the topic */
         std::lock_guard<std::mutex> g(keep->create_mu);
         uint16_t idx = detail::rant_topic_index(ch_);
         int rc = detail::rant_topic_retire(ch_);
-        if (rc != 0) return static_cast<SendStatus>(rc);
+        if (rc != 0) return static_cast<RantResult>(rc);
         std::lock_guard<std::mutex> g2(keep->reg_mu);
         keep->sub_handlers.erase(idx);
     }
     ch_ = nullptr; impl_.reset();
-    return SendStatus::Ok;
+    return RantResult::Ok;
 }
 
 #ifndef RANT_NO_PATTERNS
 
 namespace priv {
 /* Retire a function or task handle once the calls on it are out, as close_handle does. */
-inline SendStatus close_function(const std::shared_ptr<FnState>& st, const std::shared_ptr<NodeImpl>& impl, bool owned) {
+inline RantResult close_function(const std::shared_ptr<FnState>& st, const std::shared_ptr<NodeImpl>& impl, bool owned) {
     return close_handle<detail::RantFunction>(st.get(), impl.get(), owned, &detail::rant_function_retire);
 }
 }   /* namespace priv */
@@ -3399,7 +3399,7 @@ public:
     FunctionDefinition(const FunctionDefinition&) = delete;
     FunctionDefinition& operator=(const FunctionDefinition&) = delete;
     ~FunctionDefinition() {
-        if (close() == SendStatus::State && impl_) impl_->report_close_refused(name_);
+        if (close() == RantResult::State && impl_) impl_->report_close_refused(name_);
     }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
     bool refresh() { auto p = pass(); return p && detail::rant_function_refresh(p.raw()) == 1; }
@@ -3447,7 +3447,7 @@ public:
     int match_count() const { auto p = pass(); return p ? detail::rant_function_match_count(p.raw()) : 0; }
     /* Retire the definition and release the name for a successor. The handle is empty after. State
      * from its own inline callback, and the handle stays valid then. */
-    SendStatus close() { return priv::close_function(st_, impl_, owned_); }
+    RantResult close() { return priv::close_function(st_, impl_, owned_); }
     const std::string& name() const { return name_; }
     /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
      * it adopted. */
@@ -3497,7 +3497,7 @@ public:
     RemoteFunction(const RemoteFunction&) = delete;
     RemoteFunction& operator=(const RemoteFunction&) = delete;
     ~RemoteFunction() {
-        if (close() == SendStatus::State && impl_) impl_->report_close_refused(name_);
+        if (close() == RantResult::State && impl_) impl_->report_close_refused(name_);
     }
     /* A reflect_from_mesh handle: re type in place when the mesh moved. true = re typed, and
      * outstanding calls are answered Cancelled first. */
@@ -3536,7 +3536,7 @@ public:
     Response<Bytes> call(Bytes req, std::optional<std::chrono::milliseconds> timeout = std::nullopt, const CallOptions& opts = {}) {
         Response<Bytes> r;
         auto p = pass();
-        if (!p) { r.ss_ = SendStatus::NoTopic; return r; }
+        if (!p) { r.ss_ = RantResult::NoTopic; return r; }
         detail::RantResponse out;
         std::memset(&out, 0, sizeof out);
         detail::RantCallOpts co; std::memset(&co, 0, sizeof co);
@@ -3549,8 +3549,8 @@ public:
             r.schema_   = out.schema;
             if (out.data.len) r.data_.assign(out.data.data, out.data.data + out.data.len);
         } else if (rc < 0) {
-            r.ss_ = static_cast<SendStatus>(rc);   /* status() stays Timeout: not answered */
-            if (r.ss_ == SendStatus::State)
+            r.ss_ = static_cast<RantResult>(rc);   /* status() stays Timeout: not answered */
+            if (r.ss_ == RantResult::State)
                 priv::raise_msg("rant: a blocking call from an inline callback, use call_async or put the handle on a queue");
         }
         if (rc >= 0 && out.message.len)   /* answered or timed out: copy the outcome text */
@@ -3559,10 +3559,10 @@ public:
     }
     /* Async form: returns once the request is committed. on_response fires once with the
      * outcome on the polling thread. */
-    SendStatus call_async(Bytes req, std::function<void(const ResponseView<Bytes>&)> on_response,
+    RantResult call_async(Bytes req, std::function<void(const ResponseView<Bytes>&)> on_response,
                           const CallOptions& opts = {}) {
         auto p = pass();
-        if (!p) return SendStatus::NoTopic;
+        if (!p) return RantResult::NoTopic;
         priv::AsyncBox* box = new priv::AsyncBox{ std::move(on_response),
                                                   &impl_->reg_mu, &impl_->async_live, {}, impl_.get() };
         {
@@ -3578,14 +3578,14 @@ public:
             impl_->async_live.erase(box);
             delete box;
         }
-        return static_cast<SendStatus>(rc);
+        return static_cast<RantResult>(rc);
     }
 
     /* definitions currently matched, 0 = nobody provides the name yet */
     int  match_count()    const { auto p = pass(); return p ? detail::rant_function_match_count(p.raw()) : 0; }
     /* Retire the remote and release the name. Every outstanding call completes Cancelled.
      * The handle is empty after. State from its own inline callback, and it stays valid then. */
-    SendStatus close() { return priv::close_function(st_, impl_, owned_); }
+    RantResult close() { return priv::close_function(st_, impl_, owned_); }
     const std::string& name() const { return name_; }
     /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
      * it adopted. */
@@ -3647,10 +3647,10 @@ inline MetaSnapshot Reflection::meta(uint32_t peer, uint32_t sections, std::chro
     uint8_t buf[4];
     return MetaSnapshot::decode(m.call(sections_req(sections, buf), timeout, CallOptions{ peer }));
 }
-inline SendStatus Reflection::meta_async(uint32_t peer,
+inline RantResult Reflection::meta_async(uint32_t peer,
                                          std::function<void(const MetaSnapshot&)> cb, uint32_t sections) {
     RemoteFunction<Bytes, Bytes> m = meta_fn();
-    if (!m.valid()) return SendStatus::NoTopic;
+    if (!m.valid()) return RantResult::NoTopic;
     uint8_t buf[4];   /* the mask lives on the stack: call_async commits it now */
     return m.call_async(sections_req(sections, buf), [cb = std::move(cb)](const ResponseView<Bytes>& r) {
         cb(MetaSnapshot::decode(r));
@@ -3659,12 +3659,12 @@ inline SendStatus Reflection::meta_async(uint32_t peer,
 
 /* ====================== TASKS (untyped cores) =============================== */
 
-/* What RemoteTask::call_async returns: the send status plus the call id, the handle for
+/* What RemoteTask::call_async returns: the send result plus the call id, the handle for
  * cancel(). id is 0 when the request never committed. */
 struct TaskCall {
-    SendStatus status = SendStatus::NoTopic;
+    RantResult status = RantResult::NoTopic;
     uint32_t   id     = 0;
-    bool ok() const { return status == SendStatus::Ok; }
+    bool ok() const { return status == RantResult::Ok; }
 };
 
 /* The raw implementation side of a task. The handler runs where the node's callbacks run
@@ -3682,7 +3682,7 @@ public:
     TaskDefinition(const TaskDefinition&) = delete;
     TaskDefinition& operator=(const TaskDefinition&) = delete;
     ~TaskDefinition() {
-        if (close() == SendStatus::State && impl_) impl_->report_close_refused(name_);
+        if (close() == RantResult::State && impl_) impl_->report_close_refused(name_);
     }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
     bool refresh() { auto p = pass(); return p && detail::rant_function_refresh(p.raw()) == 1; }
@@ -3751,7 +3751,7 @@ public:
 
     /* Retire the definition. Every live deferred call answers Cancelled first, so a RUNNING
      * caller never hangs. The handle is empty after. State from its own inline callback. */
-    SendStatus close() { return priv::close_function(st_, impl_, owned_); }
+    RantResult close() { return priv::close_function(st_, impl_, owned_); }
     const std::string& name() const { return name_; }
     /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
      * it adopted. */
@@ -3817,7 +3817,7 @@ public:
     RemoteTask(const RemoteTask&) = delete;
     RemoteTask& operator=(const RemoteTask&) = delete;
     ~RemoteTask() {
-        if (close() == SendStatus::State && impl_) impl_->report_close_refused(name_);
+        if (close() == RantResult::State && impl_) impl_->report_close_refused(name_);
     }
     /* A reflect_from_mesh handle: re type in place when the mesh moved. true = re typed, and
      * outstanding calls are answered Cancelled first. */
@@ -3860,7 +3860,7 @@ public:
                     const CallOptions& opts = {}) {
         Response<Bytes> r;
         auto p = pass();
-        if (!p) { r.ss_ = SendStatus::NoTopic; return r; }
+        if (!p) { r.ss_ = RantResult::NoTopic; return r; }
         detail::RantResponse out;
         std::memset(&out, 0, sizeof out);
         detail::RantCallOpts co; std::memset(&co, 0, sizeof co);
@@ -3878,8 +3878,8 @@ public:
             r.schema_   = out.schema;
             if (out.data.len) r.data_.assign(out.data.data, out.data.data + out.data.len);
         } else if (rc < 0) {
-            r.ss_ = static_cast<SendStatus>(rc);   /* status() stays Timeout: not answered */
-            if (r.ss_ == SendStatus::State)
+            r.ss_ = static_cast<RantResult>(rc);   /* status() stays Timeout: not answered */
+            if (r.ss_ == RantResult::State)
                 priv::raise_msg("rant: a blocking call from an inline callback, use call_async or put the handle on a queue");
         }
         if (rc >= 0 && out.message.len)   /* answered or timed out: copy the outcome text */
@@ -3916,24 +3916,24 @@ public:
             delete box;
             tc.id = 0;
         }
-        tc.status = static_cast<SendStatus>(rc);
+        tc.status = static_cast<RantResult>(rc);
         if (opts.id_out) *opts.id_out = tc.id;
         return tc;
     }
 
     /* Request cancellation of the call. Cooperative and never acked: the terminal status is
      * the answer. BadRole when the provider declared no_cancel, State when not pending. */
-    SendStatus cancel(uint32_t call_id) {
+    RantResult cancel(uint32_t call_id) {
         auto p = pass();
-        if (!p) return SendStatus::NoTopic;
-        return static_cast<SendStatus>(detail::rant_function_cancel(p.raw(), call_id));
+        if (!p) return RantResult::NoTopic;
+        return static_cast<RantResult>(detail::rant_function_cancel(p.raw(), call_id));
     }
 
     /* definitions currently matched, 0 = nobody provides the name yet */
     int  match_count()    const { auto p = pass(); return p ? detail::rant_function_match_count(p.raw()) : 0; }
     /* Retire the remote. Every outstanding call completes Cancelled. The handle is empty
      * after. State from its own inline callback, and it stays valid then. */
-    SendStatus close() { return priv::close_function(st_, impl_, owned_); }
+    RantResult close() { return priv::close_function(st_, impl_, owned_); }
     const std::string& name() const { return name_; }
     /* The schemas in use now, empty when untyped. A reflect_from_mesh handle reports what
      * it adopted. */
@@ -4044,7 +4044,7 @@ public:
     VariableDefinition(const VariableDefinition&) = delete;
     VariableDefinition& operator=(const VariableDefinition&) = delete;
     ~VariableDefinition() {
-        if (close() == SendStatus::State && impl_) impl_->report_close_refused(name_);
+        if (close() == RantResult::State && impl_) impl_->report_close_refused(name_);
     }
     /* A reflect_from_mesh handle: re-type in place when the mesh moved (true = re-typed). */
     bool refresh() { auto p = pass(); return p && detail::rant_variable_refresh(p.raw()) == 1; }
@@ -4064,23 +4064,23 @@ public:
         detail::rant_node_unlock(node_);
         return out;
     }
-    SendStatus set(Bytes value) {
+    RantResult set(Bytes value) {
         auto p = pass();
-        if (!p) return SendStatus::NoTopic;
-        return static_cast<SendStatus>(detail::rant_variable_set(p.raw(), priv::to_c(value)));
+        if (!p) return RantResult::NoTopic;
+        return static_cast<RantResult>(detail::rant_variable_set(p.raw(), priv::to_c(value)));
     }
     /* Force the value: writes are absorbed into the shadow source until unforce, which
      * restores the latest absorbed set. Requires VariableOptions::allow_force: State on the
      * owner without it, BadRole on a remote whose owner advertises none. */
-    SendStatus force(Bytes value) {
+    RantResult force(Bytes value) {
         auto p = pass();
-        if (!p) return SendStatus::NoTopic;
-        return static_cast<SendStatus>(detail::rant_variable_force(p.raw(), priv::to_c(value)));
+        if (!p) return RantResult::NoTopic;
+        return static_cast<RantResult>(detail::rant_variable_force(p.raw(), priv::to_c(value)));
     }
-    SendStatus unforce() {
+    RantResult unforce() {
         auto p = pass();
-        if (!p) return SendStatus::NoTopic;
-        return static_cast<SendStatus>(detail::rant_variable_unforce(p.raw()));
+        if (!p) return RantResult::NoTopic;
+        return static_cast<RantResult>(detail::rant_variable_unforce(p.raw()));
     }
     bool forced() const { auto p = pass(); return p && detail::rant_variable_forced(p.raw()) == 1; }
     /* the handles matched to this one: remotes at a definition, the definition at a remote */
@@ -4093,7 +4093,7 @@ public:
 
     /* Retire the variable and release the name for a successor. The handle is empty after.
      * State from its own inline callback, and the handle stays valid then. */
-    SendStatus close() {
+    RantResult close() {
         return priv::close_handle<detail::RantVariable>(st_.get(), impl_.get(), true, &detail::rant_variable_retire);
     }
     const std::string& name() const { return name_; }
@@ -4182,7 +4182,7 @@ public:
     bool wait(std::chrono::milliseconds timeout) {
         return priv::wait_sliced(st_ ? impl_.get() : nullptr, priv::to_ms(timeout), 0, [&](int ms) {
             auto p = pass();   /* a pass per slice, so a close waits at most one */
-            return p ? detail::rant_variable_wait(p.raw(), ms) : static_cast<int>(SendStatus::NoTopic);
+            return p ? detail::rant_variable_wait(p.raw(), ms) : static_cast<int>(RantResult::NoTopic);
         }) == 1;
     }
 
@@ -4237,7 +4237,7 @@ public:
     CallObserver(const CallObserver&) = delete;
     CallObserver& operator=(const CallObserver&) = delete;
     ~CallObserver() {
-        if (close() == SendStatus::State && impl_) impl_->report_close_refused(name_);
+        if (close() == RantResult::State && impl_) impl_->report_close_refused(name_);
     }
 
     bool valid() const noexcept { return st_ && st_->raw.load() && priv::node_open(impl_); }
@@ -4249,7 +4249,7 @@ public:
     }
     /* Stop watching and release the name. The handle is empty after. State from its own inline
      * callback, and the handle stays valid then. */
-    SendStatus close() {
+    RantResult close() {
         return priv::close_handle<detail::RantCallObserver>(st_.get(), impl_.get(), true, &detail::rant_call_observer_retire);
     }
     const std::string& name() const { return name_; }
@@ -4321,7 +4321,7 @@ public:
 
     /* Send one message to every matched subscriber. capture is when the data was true, as
      * against when it was sent, and costs no bytes when left out. */
-    SendStatus send(Bytes data, types::Timestamp capture = {}) { return t_.send(data, capture); }
+    RantResult send(Bytes data, types::Timestamp capture = {}) { return t_.send(data, capture); }
     /* The subscribers matched now. */
     int  match_count()      const { return t_.match_count(); }
     /* true when a send would not wait for a match: a subscriber is matched, or matching has
@@ -4332,7 +4332,7 @@ public:
     bool drain(std::chrono::milliseconds timeout) { return t_.drain(timeout); }
     /* Release this handle now rather than at scope end. The last handle on a name retires the
      * topic. State from its own inline callback, and it stays valid then. */
-    SendStatus close()            { return t_.close(); }
+    RantResult close()            { return t_.close(); }
     /* a reflect_from_mesh publisher: re type in place when the mesh moved, true = re typed */
     bool        refresh()         { return t_.refresh(); }
     Schema      schema() const    { return t_.schema(); }
@@ -4372,7 +4372,7 @@ public:
     int  match_count()  const { return t_.match_count(); }
     /* Release this handle now rather than at scope end. The last handle on a name retires the
      * topic. State from its own inline callback, and it stays valid then. */
-    SendStatus close()        { return t_.close(); }
+    RantResult close()        { return t_.close(); }
     /* a reflect_from_mesh subscriber: re type in place when the mesh moved, true = re typed */
     bool        refresh()      { return t_.refresh(); }
     Schema      schema() const { return t_.schema(); }
@@ -4390,7 +4390,7 @@ private:
         : t_(priv::TopicCore::pulled(n, name, schema, qos)) {}
     std::optional<MessageView> pull(std::chrono::milliseconds timeout, bool latest) {
         int r = t_.take(&msg_, priv::to_ms(timeout), latest);
-        if (r == static_cast<int>(SendStatus::State))
+        if (r == static_cast<int>(RantResult::State))
             priv::raise_msg("rant::Subscriber::take: this subscriber has a handler, take needs one made without");
         if (r != 1) return std::nullopt;
         return MessageView(&msg_);
@@ -4480,7 +4480,7 @@ public:
     uint32_t   provider()    const { return provider_; }
     /* Not Ok when the request never left this node: Schema when it did not encode, State
      * from an inline callback. */
-    SendStatus send_status() const { return ss_; }
+    RantResult send_result() const { return ss_; }
     /* The provider's UTC stamp, 0 when decided here. */
     uint64_t   written_us()     const { return written_; }
     /* The text for a person: the provider's message, else the status's own text. Empty
@@ -4491,7 +4491,7 @@ public:
     const std::optional<Rsp>& value() const { return v_; }
 private:
     CallStatus  st_ = CallStatus::Timeout;
-    SendStatus  ss_ = SendStatus::Ok;
+    RantResult  ss_ = RantResult::Ok;
     uint32_t    provider_ = 0;
     uint64_t    written_ = 0;
     std::string message_;
@@ -4540,7 +4540,7 @@ public:
     int match_count() const { return core_.match_count(); }
     /* Retire the definition now rather than at scope end, freeing the name. State from its
      * own inline callback, and it stays valid then. */
-    SendStatus close() { return core_.close(); }
+    RantResult close() { return core_.close(); }
     const std::string& name() const { return core_.name(); }
     /* The schemas it uses, empty while untyped. */
     Schema request_schema() const   { return core_.request_schema(); }
@@ -4602,11 +4602,11 @@ public:
         std::vector<uint8_t> s;
         Response<Rsp> r;
         auto p = core_.pass();   /* through the decode, whose schema lives in the node */
-        if (!p) { r.ss_ = SendStatus::NoTopic; return r; }
+        if (!p) { r.ss_ = RantResult::NoTopic; return r; }
         auto b = priv::encode(*cq_, req, s);
-        if (!b) { r.ss_ = SendStatus::Schema; r.message_ = "the request did not encode"; return r; }
+        if (!b) { r.ss_ = RantResult::Schema; r.message_ = "the request did not encode"; return r; }
         Response<Bytes> ur = core_.call(*b, timeout, opts);
-        r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
+        r.st_ = ur.status(); r.ss_ = ur.send_result(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
         r.message_.assign(ur.message());   /* own it: ur dies with this frame */
         r.v_ = priv::decode_payload<Rsp>(*cr_, ur.data(), ur.raw_schema(), core_.impl_.get(),
@@ -4615,13 +4615,13 @@ public:
     }
     /* Call and return at once. cb fires once with the outcome where the node's callbacks
      * run. Ok when the request left, else the reason it did not. */
-    SendStatus call_async(const Req& req, std::function<void(const ResponseView<Rsp>&)> cb,
+    RantResult call_async(const Req& req, std::function<void(const ResponseView<Rsp>&)> cb,
                           const CallOptions& opts = {}) {
         auto p = core_.pass();
-        if (!p) return SendStatus::NoTopic;
+        if (!p) return RantResult::NoTopic;
         std::vector<uint8_t> s;
         auto b = priv::encode(*cq_, req, s);
-        if (!b) return SendStatus::Schema;
+        if (!b) return RantResult::Schema;
         return core_.call_async(*b,
             [cb = std::move(cb), cr = cr_, impl = core_.impl_.get(), nm = core_.name_](const ResponseView<Bytes>& uv) {
                 ResponseView<Rsp> tv;
@@ -4637,7 +4637,7 @@ public:
     int  match_count()    const { return core_.match_count(); }
     /* Release the remote now rather than at scope end. Every outstanding call completes
      * Cancelled. State from its own inline callback. */
-    SendStatus close() { return core_.close(); }
+    RantResult close() { return core_.close(); }
     const std::string& name() const { return core_.name(); }
     /* The schemas it uses, empty while untyped. */
     Schema request_schema() const   { return core_.request_schema(); }
@@ -4685,7 +4685,7 @@ public:
     /* Answer AppError with message, and raw as failure data the caller can read. */
     void fail(std::string_view message = {}, Bytes raw = {}) { core_.fail(message, raw); }
     /* Tell the caller the work started, before a slow check. defer() implies it. */
-    SendStatus start() { return core_.start(); }
+    RantResult start() { return core_.start(); }
     /* Return now and carry the call to completion from any thread through the PendingTask. */
     PendingTask<Prg, Rsp> defer() { return PendingTask<Prg, Rsp>(core_.defer(), prg_, rsp_); }
 
@@ -4710,36 +4710,36 @@ public:
     explicit operator bool() const noexcept { return valid(); }
 
     /* One progress update to the caller and any observer. Schema when v does not encode. */
-    SendStatus progress(const Prg& v) {
+    RantResult progress(const Prg& v) {
         priv::Pass p(core_.impl_.get());   /* the codec's schema lives in the node */
-        if (!p) return SendStatus::State;
+        if (!p) return RantResult::State;
         std::vector<uint8_t> s;
         auto b = priv::encode(*prg_, v, s);
-        return b ? core_.progress(*b) : SendStatus::Schema;
+        return b ? core_.progress(*b) : RantResult::Schema;
     }
     /* true once the caller asked to cancel. Honor it with complete_cancelled(), or finish. */
     bool cancelled() const { return core_.cancelled(); }
     /* Answer Ok with v. A result that does not encode answers AppError, so the caller is
      * not left waiting, and returns Schema. */
-    SendStatus complete(const Rsp& v, std::string_view message = {}) {
+    RantResult complete(const Rsp& v, std::string_view message = {}) {
         priv::Pass p(core_.impl_.get());
-        if (!p) return SendStatus::State;
+        if (!p) return RantResult::State;
         std::vector<uint8_t> s;
         auto b = priv::encode(*rsp_, v, s);
-        if (!b) { (void)core_.fail("the result did not encode into the response schema"); return SendStatus::Schema; }
+        if (!b) { (void)core_.fail("the result did not encode into the response schema"); return RantResult::Schema; }
         return core_.complete(*b, message);
     }
     /* Answer AppError with message. */
-    SendStatus fail(std::string_view message = {}) { return core_.fail(message); }
+    RantResult fail(std::string_view message = {}) { return core_.fail(message); }
     /* Honor a cancel: the caller's outcome is Cancelled with message. */
-    SendStatus complete_cancelled(std::string_view message = {}) { return core_.complete_cancelled(message); }
+    RantResult complete_cancelled(std::string_view message = {}) { return core_.complete_cancelled(message); }
     /* Honor a cancel and hand the caller what got done, which it reads as value(). */
-    SendStatus complete_cancelled(std::string_view message, const Rsp& partial) {
+    RantResult complete_cancelled(std::string_view message, const Rsp& partial) {
         priv::Pass p(core_.impl_.get());
-        if (!p) return SendStatus::State;
+        if (!p) return RantResult::State;
         std::vector<uint8_t> s;
         auto b = priv::encode(*rsp_, partial, s);
-        if (!b) { (void)core_.complete_cancelled(message); return SendStatus::Schema; }
+        if (!b) { (void)core_.complete_cancelled(message); return RantResult::Schema; }
         return core_.complete_cancelled(message, *b);
     }
 
@@ -4790,7 +4790,7 @@ public:
     void on_cancel(std::function<void(uint64_t token)> h) { core_.on_cancel(std::move(h)); }
     /* Retire the definition now rather than at scope end. Every live deferred call answers
      * Cancelled first. State from its own inline callback. */
-    SendStatus close() { return core_.close(); }
+    RantResult close() { return core_.close(); }
     const std::string& name() const { return core_.name(); }
     /* The schemas it uses, empty while untyped. */
     Schema request_schema() const   { return core_.request_schema(); }
@@ -4842,11 +4842,11 @@ public:
         std::vector<uint8_t> s;
         Response<Rsp> r;
         auto p = core_.pass();   /* through the decode, whose schema lives in the node */
-        if (!p) { r.ss_ = SendStatus::NoTopic; return r; }
+        if (!p) { r.ss_ = RantResult::NoTopic; return r; }
         auto b = priv::encode(*cq_, req, s);
-        if (!b) { r.ss_ = SendStatus::Schema; r.message_ = "the request did not encode"; return r; }
+        if (!b) { r.ss_ = RantResult::Schema; r.message_ = "the request did not encode"; return r; }
         Response<Bytes> ur = core_.call(*b, adapt_progress(std::move(on_progress)), timeout, opts);
-        r.st_ = ur.status(); r.ss_ = ur.send_status(); r.provider_ = ur.provider();
+        r.st_ = ur.status(); r.ss_ = ur.send_result(); r.provider_ = ur.provider();
         r.written_ = ur.written_us();
         r.message_.assign(ur.message());   /* own it: ur dies with this frame */
         r.v_ = priv::decode_payload<Rsp>(*cr_, ur.data(), ur.raw_schema(), core_.impl_.get(),
@@ -4862,7 +4862,7 @@ public:
         if (!p) return TaskCall{};
         std::vector<uint8_t> s;
         auto b = priv::encode(*cq_, req, s);
-        if (!b) return TaskCall{ SendStatus::Schema, 0 };
+        if (!b) return TaskCall{ RantResult::Schema, 0 };
         return core_.call_async(*b, adapt_progress(std::move(on_progress)),
             [cb = std::move(on_response), cr = cr_, impl = core_.impl_.get(), nm = core_.name_](const ResponseView<Bytes>& uv) {
                 if (!cb) return;
@@ -4876,13 +4876,13 @@ public:
     }
     /* Ask the provider to stop the call. Cooperative, and the outcome is the answer:
      * BadRole when the provider declared no_cancel, State when the call is not pending. */
-    SendStatus cancel(uint32_t call_id) { return core_.cancel(call_id); }
+    RantResult cancel(uint32_t call_id) { return core_.cancel(call_id); }
 
     /* The providers matched now, 0 while nobody provides the name. */
     int  match_count()    const { return core_.match_count(); }
     /* Release the remote now rather than at scope end. Every outstanding call completes
      * Cancelled. State from its own inline callback. */
-    SendStatus close() { return core_.close(); }
+    RantResult close() { return core_.close(); }
     const std::string& name() const { return core_.name(); }
     Schema request_schema() const   { return core_.request_schema(); }
     Schema progress_schema() const  { return core_.progress_schema(); }
@@ -4940,23 +4940,23 @@ public:
     /* Write v. */
     /* A write: Ok when applied here or sent to the owner, NoTopic when no owner matched,
      * BadRole when the owner is read only, Schema when v does not encode. */
-    SendStatus set(const T& v) {
+    RantResult set(const T& v) {
         auto p = core_.pass();   /* the codec's schema lives in the node */
-        if (!p) return SendStatus::NoTopic;
+        if (!p) return RantResult::NoTopic;
         thread_local std::vector<uint8_t> s;
         auto b = priv::encode(*c_, v, s);
-        return b ? core_.set(*b) : SendStatus::Schema;
+        return b ? core_.set(*b) : RantResult::Schema;
     }
     /* Override the value until unforce(). Writes meanwhile are held back, and unforce()
      * restores the latest. Needs allow_force on the definition. */
-    SendStatus force(const T& v) {
+    RantResult force(const T& v) {
         auto p = core_.pass();
-        if (!p) return SendStatus::NoTopic;
+        if (!p) return RantResult::NoTopic;
         thread_local std::vector<uint8_t> s;
         auto b = priv::encode(*c_, v, s);
-        return b ? core_.force(*b) : SendStatus::Schema;
+        return b ? core_.force(*b) : RantResult::Schema;
     }
-    SendStatus unforce()         { return core_.unforce(); }
+    RantResult unforce()         { return core_.unforce(); }
     bool forced()          const { return core_.forced(); }
     /* The handles matched now: remotes at a definition, the owner at a remote. */
     int  match_count()     const { return core_.match_count(); }
@@ -4977,7 +4977,7 @@ public:
     void on_write (std::nullptr_t) { core_.on_write({}); }
     /* Retire the handle now rather than at scope end, freeing the name. State from its own
      * inline callback. */
-    SendStatus close() { return core_.close(); }
+    RantResult close() { return core_.close(); }
     const std::string& name() const { return core_.name(); }
     /* The schema it uses, empty while untyped. */
     Schema schema() const { return core_.schema(); }
@@ -5042,23 +5042,23 @@ public:
     /* Write v. */
     /* A write: Ok when applied here or sent to the owner, NoTopic when no owner matched,
      * BadRole when the owner is read only, Schema when v does not encode. */
-    SendStatus set(const T& v) {
+    RantResult set(const T& v) {
         auto p = core_.pass();   /* the codec's schema lives in the node */
-        if (!p) return SendStatus::NoTopic;
+        if (!p) return RantResult::NoTopic;
         thread_local std::vector<uint8_t> s;
         auto b = priv::encode(*c_, v, s);
-        return b ? core_.set(*b) : SendStatus::Schema;
+        return b ? core_.set(*b) : RantResult::Schema;
     }
     /* Override the value until unforce(). Writes meanwhile are held back, and unforce()
      * restores the latest. Needs allow_force on the definition. */
-    SendStatus force(const T& v) {
+    RantResult force(const T& v) {
         auto p = core_.pass();
-        if (!p) return SendStatus::NoTopic;
+        if (!p) return RantResult::NoTopic;
         thread_local std::vector<uint8_t> s;
         auto b = priv::encode(*c_, v, s);
-        return b ? core_.force(*b) : SendStatus::Schema;
+        return b ? core_.force(*b) : RantResult::Schema;
     }
-    SendStatus unforce()         { return core_.unforce(); }
+    RantResult unforce()         { return core_.unforce(); }
     bool forced()          const { return core_.forced(); }
     /* The handles matched now: remotes at a definition, the owner at a remote. */
     int  match_count()     const { return core_.match_count(); }
@@ -5079,7 +5079,7 @@ public:
     void on_write (std::nullptr_t) { core_.on_write({}); }
     /* Retire the handle now rather than at scope end, freeing the name. State from its own
      * inline callback. */
-    SendStatus close() { return core_.close(); }
+    RantResult close() { return core_.close(); }
     const std::string& name() const { return core_.name(); }
     /* The schema it uses, empty while untyped. */
     Schema schema() const { return core_.schema(); }
@@ -5127,12 +5127,12 @@ public:
 
     /* Send v to every matched subscriber. capture is when the data was true, as against
      * when it was sent. Schema when v does not encode, NoTopic when nobody matched in time. */
-    SendStatus send(const T& v, types::Timestamp capture = {}) {
+    RantResult send(const T& v, types::Timestamp capture = {}) {
         priv::Pass p = core_.t_.pass();   /* the codec's schema lives in the node */
-        if (!p) return SendStatus::NoTopic;
+        if (!p) return RantResult::NoTopic;
         thread_local std::vector<uint8_t> s;   /* reused: only the non memcpy path fills it */
         auto b = priv::encode(*c_, v, s);
-        return b ? core_.t_.send_held(*b, capture) : SendStatus::Schema;
+        return b ? core_.t_.send_held(*b, capture) : RantResult::Schema;
     }
     /* The subscribers matched now. */
     int  match_count()   const { return core_.match_count(); }
@@ -5143,7 +5143,7 @@ public:
     bool drain(std::chrono::milliseconds timeout) { return core_.drain(timeout); }
     /* Release this handle now rather than at scope end. The last handle on a name retires the
      * topic. State from its own inline callback. */
-    SendStatus close()        { return core_.close(); }
+    RantResult close()        { return core_.close(); }
     Schema      schema() const { return core_.schema(); }
     std::string name() const   { return core_.name(); }
 
@@ -5184,7 +5184,7 @@ public:
     int  match_count() const { return core_.match_count(); }
     /* Release this handle now rather than at scope end. The last handle on a name retires the
      * topic. State from its own inline callback. */
-    SendStatus close()      { return core_.close(); }
+    RantResult close()      { return core_.close(); }
     /* The schema it uses. */
     Schema      schema() const { return core_.schema(); }
     std::string name() const   { return core_.name(); }
